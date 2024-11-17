@@ -32,8 +32,6 @@ TEAM_COLORS = {
 }
 
 # Any other global settings or variables can be added here
-CURRENT_GAMEWEEK = get_current_gameweek()
-MY_TEAM_NAME = "CHANGE NAME"
 BRANDON_DRAFT_LEAGUE_ID = 49249
 BRANDON_DRAFT_TEAM_ID = 189880
 BRANDON_CLASSICAL_TEAM_ID = 6005298
@@ -44,6 +42,7 @@ team_history_endpoint = f'https://fantasy.premierleague.com/api/entry/{BRANDON_C
 game_status_endpoint = f'https://draft.premierleague.com/api/game'
 
 # Global variables to hold fetched data
+CURRENT_GAMEWEEK = get_current_gameweek()
 PLAYER_DATA = None  # This will store the player data from bootstrap-static API
 LEAGUE_DATA = None  # This will store the league details
 TRANSACTION_DATA = None  # This will store the transaction data
