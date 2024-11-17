@@ -1,12 +1,12 @@
 # main.py
 import streamlit as st
-from home import show_home_page
-from fixture_projections import show_fixtures_page
-from team_analysis import show_team_stats_page
-from waiver_wire import show_waiver_wire_page
-from player_statistics import show_league_stats_page
-from player_projections import show_player_projections_page
-from projected_lineups import show_projected_lineups
+from scripts.home import show_home_page
+from scripts.fixture_projections import show_fixtures_page
+from scripts.team_analysis import show_team_stats_page
+from scripts.waiver_wire import show_waiver_wire_page
+from scripts.player_statistics import show_league_stats_page
+from scripts.player_projections import show_player_projections_page
+from scripts.projected_lineups import show_projected_lineups
 
 def apply_custom_styles():
     st.markdown(

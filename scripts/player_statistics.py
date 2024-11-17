@@ -1,6 +1,6 @@
 from st_aggrid import AgGrid
 import streamlit as st
-from utils import pull_fpl_player_stats, get_rotowire_player_projections
+from scripts.utils import pull_fpl_player_stats, get_rotowire_player_projections
 
 def show_league_stats_page():
     st.title("Detailed Player Statistics")

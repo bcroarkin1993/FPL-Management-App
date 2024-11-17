@@ -1,10 +1,9 @@
 import config
 import pandas as pd
-import plotly.graph_objs as go
 import plotly.express as px
 import requests
 import streamlit as st
-from utils import get_current_gameweek
+from scripts.utils import get_current_gameweek
 
 # Set page config
 st.set_page_config(layout="wide")
@@ -478,21 +477,21 @@ def show_home_page():
     # Toggle to show advanced stats
     show_advanced_stats = st.checkbox("Show Advanced Stats")
     # Fetch the league standings based on the toggle
-    standings_df = get_fpl_draft_league_standings(config.BRANDON_DRAFT_LEAGUE_ID,
+    standings_df = get_fpl_draft_league_standings(config.FPL_DRAFT_LEAGUE_ID,
                                                   show_advanced_stats=show_advanced_stats)
     # Display the standings dataframe
     st.dataframe(standings_df, use_container_width=True)
 
     # Dropdown to select gameweek
     gameweek = st.selectbox("Select Gameweek to view results:", range(1, 39))  # Gameweeks 1 to 38
-    show_fixture_results(config.BRANDON_DRAFT_LEAGUE_ID, gameweek)
+    show_fixture_results(config.FPL_DRAFT_LEAGUE_ID, gameweek)
 
     # Create the table standings plot
-    fig = plot_league_points_over_time(config.BRANDON_DRAFT_LEAGUE_ID)
+    fig = plot_league_points_over_time(config.FPL_DRAFT_LEAGUE_ID)
     # Display the chart
     st.plotly_chart(fig)
 
     # Create the total points plot
-    fig = plot_team_points_over_time(config.BRANDON_DRAFT_LEAGUE_ID)
+    fig = plot_team_points_over_time(config.FPL_DRAFT_LEAGUE_ID)
     # Display the chart
     st.plotly_chart(fig)

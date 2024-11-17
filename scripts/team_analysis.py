@@ -1,11 +1,11 @@
 import config
 import streamlit as st
-from utils import get_league_player_dict_for_gameweek, get_league_teams, get_rotowire_player_projections, \
+from scripts.utils import get_league_player_dict_for_gameweek, get_league_teams, get_rotowire_player_projections, \
     get_team_composition_for_gameweek, merge_fpl_players_and_projections
 
 def show_team_projections(selected_team, fpl_player_projections, gameweek):
     # Get the team composition for the team in the current gameweek
-    team_composition_df = get_team_composition_for_gameweek(config.BRANDON_DRAFT_LEAGUE_ID, selected_team, gameweek)
+    team_composition_df = get_team_composition_for_gameweek(config.FPL_DRAFT_LEAGUE_ID, selected_team, gameweek)
 
     # Merge the FPL team df with the fpl_player_projections
     team_player_projections = merge_fpl_players_and_projections(team_composition_df, fpl_player_projections)
@@ -24,7 +24,7 @@ def show_team_stats_page():
     player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL)
 
     # Pull the FPL team dict
-    team_dict = get_league_player_dict_for_gameweek(config.BRANDON_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
+    team_dict = get_league_player_dict_for_gameweek(config.FPL_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
 
     # Format it as a list
     team_list = list(team_dict.keys())
@@ -41,7 +41,7 @@ def show_team_stats_page():
     st.subheader("Display Team Composition by Gameweek")
 
     # Step 1: Team names
-    team_dict = get_league_teams(config.BRANDON_DRAFT_LEAGUE_ID)
+    team_dict = get_league_teams(config.FPL_DRAFT_LEAGUE_ID)
     teams = list(team_dict.values())
 
     # Step 2: Layout for dropdowns in two columns
@@ -57,7 +57,7 @@ def show_team_stats_page():
     # Step 3: Get and display the team composition for the selected gameweek
     if st.button("Show Team Composition"):
         # Get the team composition
-        team_composition = get_team_composition_for_gameweek(config.BRANDON_DRAFT_LEAGUE_ID, team_name, gameweek)
+        team_composition = get_team_composition_for_gameweek(config.FPL_DRAFT_LEAGUE_ID, team_name, gameweek)
 
         # Display the team's players for selected gameweek
         st.subheader(f"Team Composition for {team_name} in Gameweek {gameweek}")

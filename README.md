@@ -71,13 +71,9 @@ FPL_CLASSICAL_TEAM_ID = 654321
 3. Save the .env file. The app will automatically load these variables during runtime.
 Ensure `.env` is listed in the `.gitignore` file to avoid accidentally pushing sensitive information to GitHub.
 
-```
-
 ### Step 4: Run the App
 
 Launch the Streamlit app:
 ```bash
 streamlit run app.py
 ```
-
->>>>>>> 9c86a7e (Cleaning repo)

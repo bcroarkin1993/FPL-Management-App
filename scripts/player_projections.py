@@ -1,6 +1,6 @@
 import config
 import streamlit as st
-from utils import get_rotowire_player_projections
+from scripts.utils import get_rotowire_player_projections
 
 def show_player_projections_page():
     st.title("FPL Player Projections")

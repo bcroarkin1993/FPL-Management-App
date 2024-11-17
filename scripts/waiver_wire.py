@@ -1,8 +1,9 @@
 import config
 import pandas as pd
 import streamlit as st
-from utils import get_current_gameweek, get_league_player_dict_for_gameweek, get_league_teams, get_fpl_player_data, \
-    get_transaction_data, get_rotowire_player_projections, get_team_projections, merge_fpl_players_and_projections
+from scripts.utils import get_current_gameweek, get_league_player_dict_for_gameweek, get_league_teams, \
+    get_fpl_player_data, get_transaction_data, get_rotowire_player_projections, get_team_projections, \
+    merge_fpl_players_and_projections
 
 def compare_players(my_team_df, top_available_players_df):
     """
@@ -98,8 +99,8 @@ def get_waiver_transactions(gameweek, show_non_approved, selected_team=None):
     - List of filtered transactions for the selected gameweek and team.
     """
     player_dict = get_fpl_player_data()
-    team_dict = get_league_teams(config.BRANDON_DRAFT_LEAGUE_ID)
-    transaction_data = get_transaction_data(config.BRANDON_DRAFT_LEAGUE_ID)
+    team_dict = get_league_teams(config.FPL_DRAFT_LEAGUE_ID)
+    transaction_data = get_transaction_data(config.FPL_DRAFT_LEAGUE_ID)
 
     # List to hold filtered transactions
     filtered_transactions = []
@@ -145,7 +146,7 @@ def get_waiver_transactions_by_team(selected_team, show_non_approved):
     - List of filtered transactions for the selected team across all gameweeks.
     """
     player_dict = get_fpl_player_data()
-    team_dict = get_league_teams(config.BRANDON_DRAFT_LEAGUE_ID)
+    team_dict = get_league_teams(config.FPL_DRAFT_LEAGUE_ID)
     transaction_data = get_transaction_data()
 
     # List to hold filtered transactions
@@ -190,7 +191,7 @@ def show_waiver_wire_page():
                             min_value=5, max_value=50, value=10, step=5)
 
     # Get the league player dict for the current gameweek
-    league_player_dict = get_league_player_dict_for_gameweek(config.BRANDON_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
+    league_player_dict = get_league_player_dict_for_gameweek(config.FPL_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
 
 
     # Pull the top available waivers based on the FPL player rankings and slider value
@@ -226,7 +227,7 @@ def show_waiver_wire_page():
     current_gameweek = get_current_gameweek()
 
     # Fetch league teams for the team selection dropdown
-    league_teams = get_league_teams(config.BRANDON_DRAFT_LEAGUE_ID)
+    league_teams = get_league_teams(config.FPL_DRAFT_LEAGUE_ID)
     team_options = ["All Teams"] + list(league_teams.values())
 
     if view_mode == "Gameweek":

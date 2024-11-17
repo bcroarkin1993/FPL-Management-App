@@ -1,6 +1,7 @@
 from bs4 import BeautifulSoup
 import config
-from fuzzywuzzy import process, fuzz  # For fuzzy string matching
+from fuzzywuzzy import process
+import os
 import pandas as pd
 import re
 import requests

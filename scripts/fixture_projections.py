@@ -1,8 +1,9 @@
 import config
 import pandas as pd
 import streamlit as st
-from utils import find_optimal_lineup, get_current_gameweek, get_gameweek_fixtures, get_rotowire_player_projections, \
-    get_team_composition_for_gameweek, merge_fpl_players_and_projections, normalize_apostrophes
+from scripts.utils import find_optimal_lineup, get_current_gameweek, get_gameweek_fixtures, \
+    get_rotowire_player_projections, get_team_composition_for_gameweek, merge_fpl_players_and_projections, \
+    normalize_apostrophes
 
 def analyze_fixture_projections(fixture, league_id, projections_df):
     """
@@ -75,7 +76,7 @@ def show_fixtures_page():
     st.title("Upcoming Fixtures & Projections")
 
     # Find the fixtures for the current gameweek
-    gameweek_fixtures = get_gameweek_fixtures(config.BRANDON_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
+    gameweek_fixtures = get_gameweek_fixtures(config.FPL_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
 
     # Display each of the current gameweek fixtures
     if gameweek_fixtures:
@@ -95,7 +96,7 @@ def show_fixtures_page():
     # Create the Streamlit visuals
     if fixture_selection:
         team1_df, team2_df, team1_name, team2_name = analyze_fixture_projections(fixture_selection,
-                                                                                 config.BRANDON_DRAFT_LEAGUE_ID,
+                                                                                 config.FPL_DRAFT_LEAGUE_ID,
                                                                                  fpl_player_projections)
 
         # Create columns for side-by-side display
