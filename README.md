@@ -51,21 +51,19 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Step 3: Configure Your `config.py` File
+### Step 3: Configure Your Environment
 
 The app uses sensitive information, such as your FPL league ID and team ID, which must be set up in a `.env` file. Follow the steps below:
 
 1. In the root directory of the project, create a file named `.env` (or rename the included `.env.example` file to `.env`).
 2. Open the `.env` file and update the values with your information:
-   - `FPL_LEAGUE_ID`: The league ID for your draft league. You can find this in the URL when viewing your league on the FPL website (e.g., `https://draft.premierleague.com/league/{FPL_LEAGUE_ID}`).
-   - `FPL_TEAM_ID`: Your team ID, found in the URL when viewing your team (e.g., `https://draft.premierleague.com/team/{FPL_TEAM_ID}`).
-   - `GAMEWEEK`: Optionally set the current gameweek if needed.
+   - `FPL_DRAFT_LEAGUE_ID`: The FPL league ID for your draft league. You can find this in the URL when viewing your league on the FPL website (e.g., `https://draft.premierleague.com/league/{FPL_LEAGUE_ID}`).
+   - `FPL_DRAFT_TEAM_ID`: Your FPL draft team ID, found in the URL when viewing your team (e.g., `https://draft.premierleague.com/team/{FPL_TEAM_ID}`).
 
 Example `.env` file:
 ```bash
 FPL_DRAFT_LEAGUE_ID = 123456
 FPL_DRAFT_TEAM_ID = 123
-FPL_CLASSICAL_TEAM_ID = 654321
 ```
 
 3. Save the .env file. The app will automatically load these variables during runtime.

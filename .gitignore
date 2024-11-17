@@ -3,9 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environment
+# Ignore Python virtual environment folder
 venv/
-.env/
+
+# Ignore .env files containing sensitive data
+.env
 
 # Streamlit-specific
 .streamlit/
