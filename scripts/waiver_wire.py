@@ -1,8 +1,8 @@
 import config
 import pandas as pd
 import streamlit as st
-from scripts.utils import get_current_gameweek, get_league_player_dict_for_gameweek, get_league_teams, \
-    get_fpl_player_data, get_transaction_data, get_rotowire_player_projections, get_team_projections, \
+from scripts.utils import get_current_gameweek, get_league_player_ownership, get_league_teams, \
+    get_fpl_player_mapping, get_transaction_data, get_rotowire_player_projections, get_team_projections, \
     merge_fpl_players_and_projections
 
 def compare_players(my_team_df, top_available_players_df):
@@ -46,8 +46,12 @@ def find_top_waivers(fpl_player_projections, league_team_dict, limit=None):
     Returns:
     - available_players_df: DataFrame containing the top available players.
     """
-    # Step 1: Get FPL player data (player name, team, and position)
-    fpl_player_df = get_fpl_player_data()
+    # Step 1: Get FPL player data (id, player name, team, and position)
+    fpl_players_mapping = get_fpl_player_mapping()
+    # Convert the dictionary to a DataFrame
+    fpl_players_df = pd.DataFrame.from_dict(fpl_players_mapping, orient='index').reset_index()
+    # Rename the index column to 'player_id'
+    fpl_players_df.rename(columns={'index': 'Player_ID'}, inplace=True)
 
     # Step 2: Flatten the team_dict to create a list of all taken players
     all_taken_players = []
@@ -61,7 +65,7 @@ def find_top_waivers(fpl_player_projections, league_team_dict, limit=None):
     taken_players_df = pd.DataFrame({'Player': all_taken_players})
 
     # Step 4: Merge taken_players_df with fpl_player_data on the 'Player' column
-    taken_players_df = pd.merge(taken_players_df, fpl_player_df, on='Player', how='left').set_index('Player_ID')
+    taken_players_df = pd.merge(taken_players_df, fpl_players_df, on='Player', how='left').set_index('Player_ID')
 
     # Step 5: Merge the taken players with projections to resolve name discrepancies
     taken_players_projections = merge_fpl_players_and_projections(taken_players_df, fpl_player_projections)
@@ -86,7 +90,7 @@ def find_top_waivers(fpl_player_projections, league_team_dict, limit=None):
     # Step 10: Return the top available players DataFrame
     return(available_players_df[['Player', 'Team', 'Position', 'Matchup', 'Points']])
 
-def get_waiver_transactions(gameweek, show_non_approved, selected_team=None):
+def get_waiver_transactions_by_gameweek(gameweek, show_non_approved, selected_team=None):
     """
     Fetches waiver transactions and filters by gameweek, approval status, and team (if provided).
 
@@ -98,7 +102,8 @@ def get_waiver_transactions(gameweek, show_non_approved, selected_team=None):
     Returns:
     - List of filtered transactions for the selected gameweek and team.
     """
-    player_dict = get_fpl_player_data()
+    # Fetch FPL player data, league teams, and transaction data
+    player_dict = get_fpl_player_mapping()
     team_dict = get_league_teams(config.FPL_DRAFT_LEAGUE_ID)
     transaction_data = get_transaction_data(config.FPL_DRAFT_LEAGUE_ID)
 
@@ -115,8 +120,8 @@ def get_waiver_transactions(gameweek, show_non_approved, selected_team=None):
                 entry_id = transaction.get('entry')
 
                 # Get player and team names
-                added_player_name = player_dict.get(added_player_id, "Unknown Player")
-                removed_player_name = player_dict.get(removed_player_id, "Unknown Player")
+                added_player_name = player_dict.get(added_player_id, {}).get('Player', "Unknown Player")
+                removed_player_name = player_dict.get(removed_player_id, {}).get('Player', "Unknown Player")
                 team_name = team_dict.get(entry_id, "Unknown Team")
 
                 # If a team is selected, filter by team name
@@ -145,9 +150,10 @@ def get_waiver_transactions_by_team(selected_team, show_non_approved):
     Returns:
     - List of filtered transactions for the selected team across all gameweeks.
     """
-    player_dict = get_fpl_player_data()
+    # Fetch FPL player data, league teams, and transaction data
+    player_dict = get_fpl_player_mapping()
     team_dict = get_league_teams(config.FPL_DRAFT_LEAGUE_ID)
-    transaction_data = get_transaction_data()
+    transaction_data = get_transaction_data(config.FPL_DRAFT_LEAGUE_ID)
 
     # List to hold filtered transactions
     filtered_transactions = []
@@ -160,8 +166,8 @@ def get_waiver_transactions_by_team(selected_team, show_non_approved):
             entry_id = transaction.get('entry')
 
             # Get player and team names
-            added_player_name = player_dict.get(added_player_id, "Unknown Player")
-            removed_player_name = player_dict.get(removed_player_id, "Unknown Player")
+            added_player_name = player_dict.get(added_player_id, {}).get('Player', "Unknown Player")
+            removed_player_name = player_dict.get(removed_player_id, {}).get('Player', "Unknown Player")
             team_name = team_dict.get(entry_id, "Unknown Team")
 
             # Filter by the selected team
@@ -191,8 +197,7 @@ def show_waiver_wire_page():
                             min_value=5, max_value=50, value=10, step=5)
 
     # Get the league player dict for the current gameweek
-    league_player_dict = get_league_player_dict_for_gameweek(config.FPL_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
-
+    league_player_dict = get_league_player_ownership(config.FPL_DRAFT_LEAGUE_ID)
 
     # Pull the top available waivers based on the FPL player rankings and slider value
     top_available_players = find_top_waivers(player_rankings, league_player_dict, num_players)
@@ -202,7 +207,7 @@ def show_waiver_wire_page():
     st.dataframe(top_available_players, use_container_width=True)
 
     # Get my team's projections
-    my_team_df = get_team_projections(player_rankings, config.MY_TEAM_NAME, league_player_dict)
+    my_team_df = get_team_projections(player_rankings, config.FPL_DRAFT_LEAGUE_ID, config.FPL_DRAFT_TEAM_ID)
 
     # Compare the waiver wire players with my team's players
     better_players_df = compare_players(my_team_df, top_available_players)
@@ -239,7 +244,7 @@ def show_waiver_wire_page():
         selected_gameweek = st.selectbox("Select Gameweek", options=gameweek_options, index=selected_gameweek_index)
 
         # Get waiver transactions based on the selected gameweek and approval status
-        transactions = get_waiver_transactions(selected_gameweek, show_non_approved)
+        transactions = get_waiver_transactions_by_gameweek(selected_gameweek, show_non_approved)
 
         # Display transactions in a table
         if transactions:

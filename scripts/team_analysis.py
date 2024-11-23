@@ -1,6 +1,6 @@
 import config
 import streamlit as st
-from scripts.utils import get_league_player_dict_for_gameweek, get_league_teams, get_rotowire_player_projections, \
+from scripts.utils import get_league_player_ownership, get_league_teams, get_rotowire_player_projections, \
     get_team_composition_for_gameweek, merge_fpl_players_and_projections
 
 def show_team_projections(selected_team, fpl_player_projections, gameweek):
@@ -24,7 +24,7 @@ def show_team_stats_page():
     player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL)
 
     # Pull the FPL team dict
-    team_dict = get_league_player_dict_for_gameweek(config.FPL_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
+    team_dict = get_league_player_ownership(config.FPL_DRAFT_LEAGUE_ID)
 
     # Format it as a list
     team_list = list(team_dict.keys())

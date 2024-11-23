@@ -57,24 +57,19 @@ def main():
     apply_custom_styles()
 
     # Create the Sidebar navigation screen
-    app_mode = st.sidebar.radio("Choose Page", ["Home", "EPL Projected Lineups", "Player Projections",
-                                                "FPL Fixture Projections", "Waiver Wire", "Team Analysis",
-                                                "League Statistics"])
+    app_mode = st.sidebar.radio("Choose Page", ["Home", "Projected Lineups", "Player Projections",
+                                                "Fixture Projections", "Waiver Wire"])
 
     if app_mode == "Home":
         show_home_page()
-    elif app_mode == "FPL Fixture Projections":
-        show_fixtures_page()
-    elif app_mode == "EPL Projected Lineups":
+    elif app_mode == "Projected Lineups":
         show_projected_lineups()
     elif app_mode == "Player Projections":
         show_player_projections_page()
+    elif app_mode == "Fixture Projections":
+        show_fixtures_page()
     elif app_mode == "Waiver Wire":
         show_waiver_wire_page()
-    elif app_mode == "League Statistics":
-        show_league_stats_page()
-    elif app_mode == "Team Analysis":
-        show_team_stats_page()
 
 if __name__ == "__main__":
     main()

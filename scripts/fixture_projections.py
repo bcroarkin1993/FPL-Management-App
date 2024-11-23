@@ -1,7 +1,7 @@
 import config
 import pandas as pd
 import streamlit as st
-from scripts.utils import find_optimal_lineup, get_current_gameweek, get_gameweek_fixtures, \
+from scripts.utils import find_optimal_lineup, get_current_gameweek, get_gameweek_fixtures, get_team_id_by_name, \
     get_rotowire_player_projections, get_team_composition_for_gameweek, merge_fpl_players_and_projections, \
     normalize_apostrophes
 
@@ -25,12 +25,16 @@ def analyze_fixture_projections(fixture, league_id, projections_df):
     team1_name = fixture.split(' vs ')[0].split(' (')[0].strip()
     team2_name = fixture.split(' vs ')[1].split(' (')[0].strip()
 
+    # Get the team ids based on the team names
+    team1_id = get_team_id_by_name(league_id, team1_name)
+    team2_id = get_team_id_by_name(league_id, team2_name)
+
     # Get the current gameweek
     gameweek = get_current_gameweek()
 
     # Retrieve team compositions for the current gameweek and convert to dataframes
-    team1_composition = get_team_composition_for_gameweek(league_id, team1_name, gameweek)
-    team2_composition = get_team_composition_for_gameweek(league_id, team2_name, gameweek)
+    team1_composition = get_team_composition_for_gameweek(league_id, team1_id, gameweek)
+    team2_composition = get_team_composition_for_gameweek(league_id, team2_id, gameweek)
 
     # Merge FPL players with projections for both teams
     team1_df = merge_fpl_players_and_projections(

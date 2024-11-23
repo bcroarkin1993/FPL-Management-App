@@ -1,7 +1,7 @@
 from bs4 import BeautifulSoup
+from collections import defaultdict
 import config
 from fuzzywuzzy import process
-import os
 import pandas as pd
 import re
 import requests
@@ -29,15 +29,11 @@ def check_valid_lineup(df):
     - Min of 1 FWD
     - Max of 3 MID
     """
-    print("Lineup: ", df)
-    print(len(df))
-
     # Check the total players count
     players = len(df)
 
     # Count occurrences of each value in the 'Position' column
     position_counts = df['position'].value_counts()
-    print("Position Counts: ", position_counts)
 
     # Perform the checks
     player_check = players == 11
@@ -45,12 +41,6 @@ def check_valid_lineup(df):
     def_check = position_counts['D'] >= 3 and position_counts['D'] <= 5
     mid_check = position_counts['M'] >= 3 and position_counts['M'] <= 5
     fwd_check = position_counts['F'] >= 1 and position_counts['F'] <= 3
-
-    print("Player Check :", player_check)
-    print("GK Check :", gk_check)
-    print("DEF Check :", def_check)
-    print("MID Check :", mid_check)
-    print("FWD Check :", fwd_check)
 
     # Lineup is valid is all checks are true
     return (player_check & gk_check & def_check & mid_check & fwd_check)
@@ -174,56 +164,79 @@ def get_current_gameweek():
 
 def get_draft_picks(league_id):
     """
-    Fetches the draft picks for each team in the league.
+    Fetches the draft picks for each team in the league and returns a dictionary with team_id as the key,
+    including player names instead of player IDs.
 
     Parameters:
-    - league_id: The ID of the league.
+    - league_id: The ID of the FPL Draft league.
 
     Returns:
-    - draft_picks: A dictionary where keys are team names, and values are lists of drafted player IDs.
+    - draft_picks: A dictionary where keys are team IDs, and values are dictionaries with team name and player names.
     """
+    # Endpoints for draft picks and player data
     draft_url = f"https://draft.premierleague.com/api/draft/{league_id}/choices"
-    response = requests.get(draft_url)
-    draft_data = response.json()
+    league_details_url = f"https://draft.premierleague.com/api/league/{league_id}/details"
+    player_data_url = "https://draft.premierleague.com/api/bootstrap-static"
 
+    # Fetch data
+    draft_data = requests.get(draft_url).json()
+    league_details = requests.get(league_details_url).json()
+    player_data = requests.get(player_data_url).json()
+
+    # Create a mapping of player ID to player name
+    player_mapping = {
+        player['id']: f"{player['first_name']} {player['second_name']}"
+        for player in player_data['elements']
+    }
+
+    # Initialize the draft picks dictionary
     draft_picks = {}
 
-    # Parse the draft picks
+    # Populate draft picks
     for choice in draft_data['choices']:
-        team_name = choice['entry_name']
-        player_id = choice['element']
+        team_id = choice['entry']         # Team ID
+        team_name = choice['entry_name']  # Team name
+        player_id = choice['element']     # Player ID
 
-        if team_name not in draft_picks:
-            draft_picks[team_name] = []
+        # Ensure the team_id key exists in the dictionary
+        if team_id not in draft_picks:
+            draft_picks[team_id] = {
+                'team_name': team_name,
+                'players': []  # Initialize player list
+            }
 
-        draft_picks[team_name].append(player_id)
+        # Add the player name to the list
+        player_name = player_mapping.get(player_id, f"Unknown ({player_id})")
+        draft_picks[team_id]['players'].append(player_name)
 
     return draft_picks
 
-def get_fpl_player_data():
+def get_fpl_player_mapping():
     """
-    Fetches FPL player data from the FPL Draft API and returns it as a DataFrame.
+    Fetches FPL player data from the FPL Draft API and returns it as a dictionary to link player ids to player names.
 
     Returns:
-    - fpl_player_data: DataFrame with columns 'Player_ID', 'Player', 'Team', and 'Position'.
+    - fpl_player_mapping (dict): {player_id: {'Player': 'Name', 'Team': 'XYZ', 'Position': 'M'}
     """
     # Fetch data from the FPL Draft API
     player_url = "https://draft.premierleague.com/api/bootstrap-static"
     response = requests.get(player_url)
-    player_data = response.json()
 
     # Extract relevant player information
+    player_data = response.json()
     players = player_data['elements']
 
-    # Create a DataFrame with necessary columns
-    fpl_player_data = pd.DataFrame([{
-        'Player_ID': player['id'],
-        'Player': f"{player['first_name']} {player['second_name']}",
-        'Team': player_data['teams'][player['team'] - 1]['short_name'],  # Map team ID to team short name
-        'Position': ['G', 'D', 'M', 'F'][player['element_type'] - 1]  # Map element type to position
-    } for player in players])
+    # Create a mapping of player IDs to player information
+    fpl_player_map = {
+        player['id']: {
+            'Player': f"{player['first_name']} {player['second_name']}",
+            'Team': player_data['teams'][player['team'] - 1]['short_name'],  # Map team ID to team short name
+            'Position': ['G', 'D', 'M', 'F'][player['element_type'] - 1]  # Map element type to position
+        }
+        for player in players
+    }
 
-    return fpl_player_data
+    return fpl_player_map
 
 def get_league_entries(league_id):
     """
@@ -254,35 +267,6 @@ def get_league_teams(league_id):
         config.LEAGUE_DATA = {entry['entry_id']: entry['entry_name'] for entry in league_data['league_entries']}
 
     return config.LEAGUE_DATA
-
-def get_player_mapping():
-    """
-    Fetches player data from the bootstrap-static endpoint and creates a mapping of player IDs to player details.
-
-    Returns:
-    - player_map: A dictionary where keys are player IDs and values are player details (name, team, position).
-    """
-    url = "https://draft.premierleague.com/api/bootstrap-static"
-    response = requests.get(url).json()
-
-    # Create a mapping of player IDs to player information
-    player_map = {
-        player['id']: {
-            'Player': f"{player['first_name']} {player['second_name']}",
-            'Team': player['team'],  # Use 'team' field to map with team ID
-            'Position': ['G', 'D', 'M', 'F'][player['element_type'] - 1]
-        }
-        for player in response['elements']
-    }
-
-    # Fetch team mapping from the same endpoint
-    team_map = {team['id']: team['short_name'] for team in response['teams']}
-
-    # Update player_map to use the full team name
-    for player_data in player_map.values():
-        player_data['Team'] = team_map.get(player_data['Team'], 'Unknown')
-
-    return player_map
 
 def get_transaction_data(league_id):
     """
@@ -446,189 +430,169 @@ def get_rotowire_player_projections(url, limit=None):
 
     return player_rankings
 
-def get_league_player_dict_for_gameweek(league_id, gameweek):
+def get_league_player_ownership(league_id):
     """
-    Fetches the team compositions for all teams in the specified FPL draft league for a given gameweek.
+    Fetches the player ownership in the league for the current gameweek and groups the players by team and position.
 
     Parameters:
-    - league_id (int): The ID of the FPL draft league.
-    - gameweek (int): The gameweek for which to retrieve team compositions.
+    - league_id: The ID of the FPL Draft league.
 
     Returns:
-    - league_dict (dict): A dictionary where keys are team names, and values are dictionaries of player positions and players.
+    - A dictionary structured as:
+      {'Team Name': {'G': [list of goalkeepers], 'D': [list of defenders], 'M': [list of midfielders], 'F': [list of forwards]}}
     """
-    # Fetch league details to retrieve team names
-    league_url = f"https://draft.premierleague.com/api/league/{league_id}/details"
-    league_response = requests.get(league_url).json()
-
-    # Create a dictionary to map entry IDs to team names
-    team_name_map = {
-        entry['entry_id']: entry['entry_name'] for entry in league_response['league_entries']
-    }
-
-    # Fetch all player data from the FPL API
-    fpl_players_url = "https://draft.premierleague.com/api/bootstrap-static"
-    fpl_data = requests.get(fpl_players_url).json()
-
-    # Create a DataFrame with player information
-    players_df = pd.DataFrame(fpl_data['elements'])
-    players_df['Player'] = players_df['first_name'] + " " + players_df['second_name']
-    players_df['Position'] = players_df['element_type'].map({1: 'G', 2: 'D', 3: 'M', 4: 'F'})
-
-    # Map player IDs to their names and positions
-    player_info = players_df.set_index('id')[['Player', 'Position']].to_dict(orient='index')
-
-    # Fetch waiver transactions up to the given gameweek
-    transactions = get_waiver_transactions_up_to_gameweek(league_id, gameweek)
-
-    # Initialize the league dictionary with team compositions
-    league_dict = {
-        team_name: {'G': [], 'D': [], 'M': [], 'F': []} for team_name in team_name_map.values()
-    }
-
-    # Process draft picks to populate the initial team compositions
-    draft_picks = get_draft_picks(league_id)
-    for team_name, player_ids in draft_picks.items():
-        for player_id in player_ids:
-            player_data = player_info.get(player_id)
-            if player_data:
-                position = player_data['Position']
-                player_name = player_data['Player']
-                league_dict[team_name][position].append(player_name)
-
-    # Apply transactions to update team compositions
-    for tx in transactions:
-        if tx['result'] == 'a':  # Only apply approved transactions
-            team_id = tx['entry']
-            team_name = team_name_map.get(team_id)
-
-            if team_name:
-                player_in = player_info.get(tx['element_in'])
-                player_out = player_info.get(tx['element_out'])
-
-                if player_out:
-                    position_out = player_out['Position']
-                    if player_out['Player'] in league_dict[team_name][position_out]:
-                        league_dict[team_name][position_out].remove(player_out['Player'])
-
-                if player_in:
-                    position_in = player_in['Position']
-                    league_dict[team_name][position_in].append(player_in['Player'])
-
-    return league_dict
-
-def get_team_composition_for_current_gameweek(league_id, team_name):
-    """
-    Retrieves the current composition of a specific FPL team for the current gameweek.
-
-    Parameters:
-    - league_id (int): The ID of the FPL Draft league.
-    - team_name (str): The name of the team to retrieve the composition for.
-
-    Returns:
-    - team_df (DataFrame): DataFrame with the team's players, sorted by position and points.
-    """
-    # URLs for API endpoints
+    # Endpoint URLs
     element_status_url = f"https://draft.premierleague.com/api/league/{league_id}/element-status"
+    league_details_url = f"https://draft.premierleague.com/api/league/{league_id}/details"
+
+    # Fetch the element status and league details
+    element_status = requests.get(element_status_url).json()['element_status']
+    league_details = requests.get(league_details_url).json()
+
+    # Fetch player and owner mappings
+    player_map = get_fpl_player_mapping()  # {player_id: {'Player': 'Name', 'Team': 'XYZ', 'Position': 'M'}, ...}
+    owner_map = {entry['id']: entry['entry_name'] for entry in league_details['league_entries']}  # {owner_id: 'Team Name'}
+
+    # Initialize a dictionary to group players by team and position
+    league_ownership = defaultdict(lambda: {'G': [], 'D': [], 'M': [], 'F': []})
+
+    for status in element_status:
+        player_id = status['element']
+        owner_id = status['owner']
+        if owner_id is None:  # Skip players without an owner
+            continue
+
+        # Convert player ID to name and position
+        player_info = player_map.get(player_id, {'Player': f"Unknown ({player_id})", 'Position': 'Unknown'})
+        player_name = player_info['Player']
+        player_position = player_info['Position']
+
+        # Convert owner ID to team name
+        team_name = owner_map.get(owner_id, f"Unknown Team ({owner_id})")
+
+        # Add the player to the appropriate team and position group
+        if player_position in ['G', 'D', 'M', 'F']:  # Valid positions
+            league_ownership[team_name][player_position].append(player_name)
+
+    return dict(league_ownership)
+
+def get_starting_team_composition(league_id):
+    """
+    Fetches the draft picks for each team in the league and returns a dictionary with team_id as the primary key
+    and the team_name field plus a player field with all the player names.
+
+    Parameters:
+    - league_id: The ID of the FPL Draft league.
+
+    Returns:
+    - draft_picks: A dictionary where keys are team IDs, and values are dictionaries with team name and player names.
+    """
+    # Endpoints for draft picks and player data
+    draft_url = f"https://draft.premierleague.com/api/draft/{league_id}/choices"
     league_details_url = f"https://draft.premierleague.com/api/league/{league_id}/details"
     player_data_url = "https://draft.premierleague.com/api/bootstrap-static"
 
-    # Fetch data from the APIs
-    element_status = requests.get(element_status_url).json()['element_status']
+    # Fetch data
+    draft_data = requests.get(draft_url).json()
     league_details = requests.get(league_details_url).json()
     player_data = requests.get(player_data_url).json()
 
-    # Create a mapping of owner IDs to team names
-    owner_to_team = {entry['id']: entry['entry_name'] for entry in league_details['league_entries']}
+    # Create a mapping of entry ID to team name
+    team_names = {entry['id']: entry['entry_name'] for entry in league_details['league_entries']}
 
-    # Find the owner ID for the given team name
-    team_owner_id = next((owner for owner, name in owner_to_team.items() if name == team_name), None)
+    # Create a mapping of player ID to player name
+    player_mapping = {
+        player['id']: f"{player['first_name']} {player['second_name']}"
+        for player in player_data['elements']
+    }
 
-    if team_owner_id is None:
-        raise ValueError(f"Team '{team_name}' not found in the league.")
+    # Initialize the draft picks dictionary
+    draft_picks = {}
 
-    # Filter players belonging to the selected team and not marked 'out'
-    team_elements = [
-        status['element'] for status in element_status
-        if status['owner'] == team_owner_id and status['status'] != 'o'
-    ]
+    # Populate draft picks
+    for choice in draft_data['choices']:
+        team_id = choice['entry']         # Team ID
+        team_name = choice['entry_name']  # Team name
+        player_id = choice['element']     # Player ID
 
-    # Create a DataFrame of players from the bootstrap-static data
-    players_df = pd.DataFrame(player_data['elements'])
+        # Ensure the team_id key exists in the dictionary
+        if team_id not in draft_picks:
+            draft_picks[team_id] = {
+                'team_name': team_name,
+                'players': []  # Initialize player list
+            }
 
-    # Merge to get player details (name, team, position) for the filtered elements
-    team_df = players_df[players_df['id'].isin(team_elements)].copy()
+        # Add the player name to the list
+        player_name = player_mapping.get(player_id, f"Unknown ({player_id})")
+        draft_picks[team_id]['players'].append(player_name)
 
-    # Create the player name by combining 'first_name' and 'second_name'
-    team_df['Player'] = team_df['first_name'] + ' ' + team_df['second_name']
+    return draft_picks
 
-    # Map position codes to readable names
-    position_map = {1: 'G', 2: 'D', 3: 'M', 4: 'F'}
-    team_df['Position'] = team_df['element_type'].map(position_map)
-
-    # Select relevant columns and sort by position and points
-    team_df = team_df[['Player', 'team', 'Position', 'total_points']]
-    team_df.columns = ['Player', 'Team', 'Position', 'Points']
-
-    # Ensure 'Points' is numeric and fill missing values with 0
-    team_df['Points'] = pd.to_numeric(team_df['Points'], errors='coerce').fillna(0.0)
-
-    # Define position order for sorting
-    position_order = ['G', 'D', 'M', 'F']
-    team_df['Position'] = pd.Categorical(team_df['Position'], categories=position_order, ordered=True)
-
-    # Sort the DataFrame
-    team_df = team_df.sort_values(by=['Position', 'Points'], ascending=[True, False])
-
-    # Reset the index for cleaner display
-    team_df.reset_index(drop=True, inplace=True)
-
-    return team_df
-
-def get_team_composition_for_gameweek(league_id, team_name, gameweek):
+def get_team_composition_for_gameweek(league_id, team_id, gameweek):
     """
     Determines the composition of a given FPL team for a specified gameweek.
 
     Parameters:
-    - league_id: The ID of the league.
-    - team_name: The name of the team to fetch.
+    - league_id (int): The ID of the league.
+    - team_id (int): The team ID of the team to fetch.
     - gameweek: The gameweek for which to determine the team's composition.
 
     Returns:
     - DataFrame containing player name, team, and position for the specified gameweek.
     """
     # Fetch player and team mappings
-    player_map = get_player_mapping()
-    team_map = get_league_entries(league_id)
-
-    # Get the entry ID for the selected team name
-    entry_id = next((k for k, v in team_map.items() if v == team_name), None)
-    if entry_id is None:
-        raise ValueError(f"Team '{team_name}' not found in the league.")
+    player_map = get_fpl_player_mapping()
 
     # Initialize the team composition with the initial draft picks
-    draft_picks = get_draft_picks(league_id)
-    team_composition = set(draft_picks.get(team_name, []))
+    draft_picks = get_starting_team_composition(league_id)
+    team_composition = set(draft_picks.get(team_id, {}).get('players', []))
 
     # Apply relevant transactions to the team composition
     transactions = get_waiver_transactions_up_to_gameweek(league_id, gameweek)
     for tx in transactions:
-        if tx['entry'] == entry_id and tx['result'] == 'a':
-            player_in = tx['element_in']
-            player_out = tx['element_out']
+        if tx['entry'] == team_id and tx['result'] == 'a':
+            # Convert player IDs to names using player_map
+            player_in = player_map.get(tx['element_in'], {}).get('Player', f"Unknown ({tx['element_in']})")
+            player_out = player_map.get(tx['element_out'], {}).get('Player', f"Unknown ({tx['element_out']})")
 
-            if player_out in team_composition:
-                team_composition.remove(player_out)
+            # Update the team composition
+            team_composition.remove(player_out)
             team_composition.add(player_in)
 
     # Convert the team composition to a DataFrame with player details
     player_data = [
-        player_map.get(pid, {'Player': f"Unknown ({pid})", 'Team': 'Unknown', 'Position': 'Unknown'})
-        for pid in team_composition
+        player_map.get(player_id, {'Player': player_name, 'Team': 'Unknown', 'Position': 'Unknown'})
+        for player_name, player_id in [(player, next((k for k, v in player_map.items() if v['Player'] == player), None))
+                                       for player in team_composition]
     ]
 
     fpl_players_df = pd.DataFrame(player_data)
-    return fpl_players_df
+    return(fpl_players_df)
+
+def get_team_id_by_name(league_id, team_name):
+    """
+    Converts a team name to its corresponding team ID in the specified FPL league.
+
+    Parameters:
+    - league_id (int): The ID of the FPL league.
+    - team_name (str): The name of the team to search for.
+
+    Returns:
+    - team_id (int): The ID of the team with the given name.
+
+    Raises:
+    - ValueError: If the team name is not found in the league.
+    """
+    # Fetch league entries to map team names to IDs
+    team_map = get_league_entries(league_id)
+
+    # Search for the team ID by team name
+    team_id = next((id for id, name in team_map.items() if name == team_name), None)
+
+    if team_id is None:
+        raise ValueError(f"Team '{team_name}' not found in the league.")
+
+    return team_id
 
 def get_team_lineup(entry_id, gameweek):
     """
@@ -647,7 +611,7 @@ def get_team_lineup(entry_id, gameweek):
     lineup_data = lineup_response.json()
 
     # Get player data (ID to name mapping)
-    player_dict = get_player_data()
+    player_dict = get_fpl_player_mapping()
 
     # Extract picks (player selections)
     picks = lineup_data['picks']
@@ -674,25 +638,26 @@ def get_team_lineup(entry_id, gameweek):
 
     return lineup
 
-def get_team_projections(player_rankings, team_name, team_dict):
+def get_team_projections(player_rankings, league_id, team_id):
     """
     Fetches projected scores for the specified team from player rankings.
 
     Parameters:
-    - player_rankings: DataFrame containing player rankings and projected points.
-    - team_name: Name of the team (from config.TEAM_LIST).
-    - team_dict: Dictionary of teams and their players.
+    - player_rankings (df): DataFrame containing player rankings and projected points.
+    - league_id (int): The ID of the FPL Draft league.
+    - team_id (int): ID of the team (unique identifier for the FPL team).
 
     Returns:
     - DataFrame of the team's players with their projected points.
     """
-    # Get players from the selected team
-    team_players = [player for position in team_dict[team_name].values() for player in position]
+    # Step 1: Fetch team composition using the team ID
+    team_players_df = get_team_composition_for_gameweek(int(league_id), int(team_id), config.CURRENT_GAMEWEEK)
 
-    # Filter player_rankings for the selected team players
-    team_df = player_rankings[player_rankings['Player'].isin(team_players)]
+    # Step 2: Merge team players with player rankings using fuzzy matching
+    team_projections_df = merge_fpl_players_and_projections(team_players_df, player_rankings)
 
-    return team_df[['Player', 'Position', 'Points']]
+    # Step 3: Return the relevant columns with proper formatting
+    return team_projections_df[['Player', 'Position', 'Points']].sort_values(by='Points', ascending=False)
 
 def get_waiver_transactions_up_to_gameweek(league_id, gameweek):
     """
@@ -762,8 +727,6 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df, fuzzy_thre
                 'Team': matched_row['Team'],
                 'Matchup': matched_row.get('Matchup', ''),
                 'Position': matched_row['Position'],
-                'Price': matched_row.get('Price', float('nan')),
-                'TSB%': matched_row.get('tsb', float('nan')),
                 'Points': matched_row['Points'],
                 'Pos Rank': matched_row.get('Pos Rank', 'NA')
             })
@@ -773,8 +736,6 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df, fuzzy_thre
                 'Team': fpl_team,
                 'Matchup': 'N/A',
                 'Position': fpl_position,
-                'Price': float('nan'),
-                'TSB%': float('nan'),
                 'Points': float('nan'),
                 'Pos Rank': 'NA'
             })
@@ -783,7 +744,7 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df, fuzzy_thre
     merged_df = pd.DataFrame(merged_data)
 
     # Reorder columns
-    merged_df = merged_df[['Player', 'Team', 'Matchup', 'Position', 'Price', 'TSB%', 'Points', 'Pos Rank']]
+    merged_df = merged_df[['Player', 'Team', 'Matchup', 'Position', 'Points', 'Pos Rank']]
 
     # Ensure 'Pos Rank' is integer or 'NA'
     merged_df['Pos Rank'] = pd.to_numeric(merged_df['Pos Rank'], errors='coerce').fillna(-1).astype(int)

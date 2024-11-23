@@ -75,3 +75,45 @@ Launch the Streamlit app:
 ```bash
 streamlit run app.py
 ```
+
+---
+
+## Upcoming Features
+
+We are continually working to enhance the FPL Draft App experience. Below are some exciting features that are planned for future updates:
+
+### 1. **Player Trade Analyzer**
+   - A tool to evaluate potential trades between teams in your league.
+   - Uses advanced projections and team needs to determine trade fairness and impact.
+
+### 2. **Matchup Insights**
+   - Get detailed insights for weekly matchups, including projected points and head-to-head history.
+   - Visualize the strength of each team's optimal lineup.
+
+### 3. **Live Score Integration**
+   - Real-time score tracking for your league players during gameweeks.
+   - Live updates on player points and fixture results.
+
+### 4. **Waiver Recommendation System**
+   - Personalized waiver wire recommendations based on your team's strengths, weaknesses, and available players.
+   - Highlights players most likely to improve your team.
+
+### 5. **Enhanced Lineup Visualizations**
+   - Expanded visualizations to include player form, injury status, and recent performances.
+   - Improved UI for lineup adjustments and analysis.
+
+### 6. **Customizable Notifications**
+   - Set up alerts for waiver deadlines, lineup changes, and injury updates.
+   - Push notifications to stay updated on your league activity.
+
+### 7. **Historical Data Analysis**
+   - Explore past seasons to see trends in player performance, team success, and waiver wire effectiveness.
+   - Learn from historical data to improve your strategies.
+
+### 8. **FPL Classical Compatibility**
+   - Add in the FPL Classical league for league and team analysis
+
+I am  always open to feedback and suggestions. If you have ideas for features you'd like to see in the app, feel free to contribute or open an issue on the GitHub repository!
+
+Stay tuned for more updates as we continue to build the ultimate FPL Draft companion app!
+
