@@ -1,9 +1,9 @@
 import config
 import pandas as pd
 import streamlit as st
-from scripts.utils import find_optimal_lineup, get_current_gameweek, get_gameweek_fixtures, get_team_id_by_name, \
-    get_rotowire_player_projections, get_team_composition_for_gameweek, merge_fpl_players_and_projections, \
-    normalize_apostrophes
+from scripts.utils import find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures, \
+    get_team_id_by_name, get_rotowire_player_projections, get_team_composition_for_gameweek, \
+    merge_fpl_players_and_projections, normalize_apostrophes
 
 def analyze_fixture_projections(fixture, league_id, projections_df):
     """
@@ -107,7 +107,7 @@ def show_fixtures_page():
         col1, col2 = st.columns(2)
 
         with col1:
-            st.write(f"{team1_name} Projections")
+            st.write(f"{format_team_name(team1_name)} Projections")
             st.dataframe(team1_df,
                          use_container_width=True,
                          height=422  # Adjust the height to ensure the entire table shows
@@ -116,7 +116,7 @@ def show_fixtures_page():
             st.markdown(f"**Projected Score: {team1_score:.2f}**")
 
         with col2:
-            st.write(f"{team2_name}")
+            st.write(f"{format_team_name(team2_name)} Projections")
             st.dataframe(team2_df,
                          use_container_width=True,
                          height=422  # Adjust the height to ensure the entire table shows

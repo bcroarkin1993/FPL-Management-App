@@ -5,10 +5,7 @@ from fuzzywuzzy import process
 import pandas as pd
 import re
 import requests
-
-def normalize_apostrophes(text):
-    """ Normalize different types of apostrophes to a standard single quote """
-    return text.replace("’", "'").replace("`", "'")
+import unicodedata
 
 def remove_duplicate_words(name):
     """
@@ -82,6 +79,23 @@ def find_optimal_lineup(df):
 
     # Display the final selection
     return(final_selection)
+
+def format_team_name(name):
+    """
+    Formats a team name by normalizing apostrophes and capitalizing each word.
+
+    Parameters:
+    - name (str): The team name to format.
+
+    Returns:
+    - str: The formatted team name.
+    """
+    if name is None:
+        return None
+    # Normalize Unicode and replace curly apostrophes with straight apostrophes
+    normalized_name = unicodedata.normalize('NFKC', name).replace('’', "'").strip()
+    # Capitalize the first letter of each word
+    return ' '.join(word.capitalize() for word in normalized_name.split())
 
 def pull_fpl_player_stats():
     # Set FPL Draft API endpoint
@@ -584,10 +598,13 @@ def get_team_id_by_name(league_id, team_name):
     - ValueError: If the team name is not found in the league.
     """
     # Fetch league entries to map team names to IDs
-    team_map = get_league_entries(league_id)
+    team_map = dict(get_league_entries(league_id))  # Ensure team_map is a dictionary
 
-    # Search for the team ID by team name
-    team_id = next((id for id, name in team_map.items() if name == team_name), None)
+    # Normalize the input team name
+    normalized_team_name = normalize_apostrophes(team_name)
+
+    # Search for the team ID by normalized team name
+    team_id = next((id for id, name in team_map.items() if normalize_apostrophes(name) == normalized_team_name), None)
 
     if team_id is None:
         raise ValueError(f"Team '{team_name}' not found in the league.")
@@ -754,6 +771,21 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df, fuzzy_thre
     merged_df.index = pd.RangeIndex(start=1, stop=len(merged_df) + 1, step=1)
 
     return merged_df
+
+def normalize_apostrophes(text):
+    """
+    Normalizes text by converting different apostrophe types to a standard straight apostrophe.
+
+    Parameters:
+    - text (str): The text to normalize.
+
+    Returns:
+    - str: The normalized text.
+    """
+    if text is None:
+        return None
+    # Normalize Unicode and replace curly apostrophes with straight apostrophes
+    return unicodedata.normalize('NFKC', text).replace('’', "'").strip().lower()
 
 def position_converter(element_type):
     """Converts element type to position name."""
