@@ -30,6 +30,10 @@ The app integrates data from official FPL APIs and Rotowire projected lineups an
 5. **Team Composition Tracking**  
    - Track the composition of all teams in your FPL draft league.
    - Compare your team's strengths and weaknesses against opponents.
+
+6. **EPL Player Statistics**  
+   - Track the top performers by various statistical categories (goals scored, assists, cleaned sheets).
+   - View advanced data visualization graphs of EPL player statistics.
    
 ---
 
