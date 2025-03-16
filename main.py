@@ -4,7 +4,7 @@ from scripts.home import show_home_page
 from scripts.fixture_projections import show_fixtures_page
 from scripts.team_analysis import show_team_stats_page
 from scripts.waiver_wire import show_waiver_wire_page
-from scripts.player_statistics import show_league_stats_page
+from scripts.player_statistics import show_player_stats_page
 from scripts.player_projections import show_player_projections_page
 from scripts.projected_lineups import show_projected_lineups
 
@@ -58,7 +58,7 @@ def main():
 
     # Create the Sidebar navigation screen
     app_mode = st.sidebar.radio("Choose Page", ["Home", "Projected Lineups", "Player Projections",
-                                                "Fixture Projections", "Waiver Wire"])
+                                                "Fixture Projections", "Waiver Wire", "Player Statistics"])
 
     if app_mode == "Home":
         show_home_page()
@@ -70,6 +70,8 @@ def main():
         show_fixtures_page()
     elif app_mode == "Waiver Wire":
         show_waiver_wire_page()
+    elif app_mode == "Player Statistics":
+        show_player_stats_page()
 
 if __name__ == "__main__":
     main()

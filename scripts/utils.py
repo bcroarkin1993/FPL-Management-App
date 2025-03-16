@@ -97,6 +97,7 @@ def format_team_name(name):
     # Capitalize the first letter of each word
     return ' '.join(word.capitalize() for word in normalized_name.split())
 
+
 def pull_fpl_player_stats():
     # Set FPL Draft API endpoint
     draft_api = 'https://draft.premierleague.com/api/bootstrap-static'
@@ -131,7 +132,7 @@ def pull_fpl_player_stats():
     player_df = pd.DataFrame.from_records(data_json['elements'])
 
     # Create Full Name Column
-    player_df['player'] = player_df['first_name'] + ' ' + player_df['web_name']
+    player_df['player'] = player_df['first_name'] + ' ' + player_df['second_name']
     # Apply the remove_duplicate_words function to the 'Player' column
     player_df['player'] = player_df['player'].apply(remove_duplicate_words)
 
@@ -151,11 +152,21 @@ def pull_fpl_player_stats():
             'chance_of_playing_next_round', 'status', 'added']
     player_df = player_df[cols]
 
+    # Ensure expected_goal_involvements is numeric
+    player_df["expected_goal_involvements"] = pd.to_numeric(
+        player_df["expected_goal_involvements"], errors="coerce"
+    )
+
+    # Create actual goal involvements column and ensure that it is numeric (sum of goals + assists)
+    player_df["actual_goal_involvements"] = pd.to_numeric(
+        player_df["goals_scored"], errors="coerce"
+    ) + pd.to_numeric(player_df["assists"], errors="coerce")
+
     # Sort dataframe by goals_scored
-    player_df = player_df.sort_values(by='total_points', ascending = False)
+    player_df = player_df.sort_values(by='total_points', ascending=False)
 
     # Return df
-    player_df
+    return (player_df)
 
 def get_current_gameweek():
     """
@@ -696,18 +707,18 @@ def get_waiver_transactions_up_to_gameweek(league_id, gameweek):
 
     return filtered_transactions
 
-def merge_fpl_players_and_projections(fpl_players_df, projections_df, fuzzy_threshold=80, lower_fuzzy_threshold=60):
+def clean_fpl_player_names(fpl_players_df, projections_df, fuzzy_threshold=80, lower_fuzzy_threshold=60):
     """
-    Merges the FPL player data with Rotowire projections based on player name, team, and position.
+    Cleans the player names in the FPL DataFrame by replacing them with their best matches from the projections DataFrame.
 
     Parameters:
-    - fpl_players_df: DataFrame with FPL players ['player', 'team', 'position'].
-    - projections_df: DataFrame with Rotowire projections.
+    - fpl_players_df: DataFrame with FPL players ['Player', 'Team', 'Position'].
+    - projections_df: DataFrame with Rotowire projections ['Player', 'Team', 'Position'].
     - fuzzy_threshold: Default fuzzy matching threshold for player names.
     - lower_fuzzy_threshold: Lower threshold if team and position match.
 
     Returns:
-    - merged_df: DataFrame with players, projections, and any missing players shown with NA values.
+    - fpl_players_df: Updated FPL DataFrame with cleaned player names.
     """
 
     def find_best_match(fpl_player, fpl_team, fpl_position, candidates):
@@ -725,7 +736,55 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df, fuzzy_thre
         if score >= fuzzy_threshold:
             return match
 
-        return None
+        return fpl_player  # Return original name if no good match is found
+
+    # Extract candidate names from projections
+    projection_names = projections_df['Player'].tolist()
+
+    # Update FPL DataFrame with cleaned player names
+    fpl_players_df['Player'] = fpl_players_df.apply(
+        lambda row: find_best_match(row['Player'], row['Team'], row['Position'], projection_names), axis=1
+    )
+
+    return fpl_players_df
+
+def find_best_match(fpl_player, fpl_team, fpl_position, candidates, projections_df, fuzzy_threshold=80, lower_fuzzy_threshold=60):
+    """
+    Finds the best match for a player using fuzzy matching.
+
+    Parameters:
+    - projections_df: DataFrame with Rotowire projections.
+    - fuzzy_threshold: Default fuzzy matching threshold for player names.
+    - lower_fuzzy_threshold: Lower threshold if team and position match.
+    """
+    match, score = process.extractOne(fpl_player, candidates)
+
+    matched_row = projections_df[projections_df['Player'] == match]
+    if not matched_row.empty:
+        match_team = matched_row.iloc[0]['Team']
+        match_position = matched_row.iloc[0]['Position']
+
+        if match_team == fpl_team and match_position == fpl_position and score >= lower_fuzzy_threshold:
+            return match
+
+    if score >= fuzzy_threshold:
+        return match
+
+    return None
+
+def merge_fpl_players_and_projections(fpl_players_df, projections_df):
+    """
+    Merges the FPL player data with Rotowire projections based on player name, team, and position.
+
+    Parameters:
+    - fpl_players_df: DataFrame with FPL players ['player', 'team', 'position'].
+    - projections_df: DataFrame with Rotowire projections.
+    - fuzzy_threshold: Default fuzzy matching threshold for player names.
+    - lower_fuzzy_threshold: Lower threshold if team and position match.
+
+    Returns:
+    - merged_df: DataFrame with players, projections, and any missing players shown with NA values.
+    """
 
     merged_data = []
 
@@ -735,7 +794,7 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df, fuzzy_thre
         fpl_position = fpl_row['Position']
 
         candidates = projections_df['Player'].tolist()
-        best_match = find_best_match(fpl_player, fpl_team, fpl_position, candidates)
+        best_match = find_best_match(fpl_player, fpl_team, fpl_position, candidates, projections_df)
 
         if best_match:
             matched_row = projections_df[projections_df['Player'] == best_match].iloc[0]
