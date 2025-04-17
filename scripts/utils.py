@@ -241,7 +241,7 @@ def get_fpl_player_mapping():
     Fetches FPL player data from the FPL Draft API and returns it as a dictionary to link player ids to player names.
 
     Returns:
-    - fpl_player_mapping (dict): {player_id: {'Player': 'Name', 'Team': 'XYZ', 'Position': 'M'}
+    - fpl_player_data: DataFrame with columns 'Player_ID', 'Player', 'Team', and 'Position'.
     """
     # Fetch data from the FPL Draft API
     player_url = "https://draft.premierleague.com/api/bootstrap-static"
@@ -250,16 +250,33 @@ def get_fpl_player_mapping():
     # Extract relevant player information
     player_data = response.json()
     players = player_data['elements']
+    teams = player_data.get('teams', [])
 
     # Create a mapping of player IDs to player information
-    fpl_player_map = {
-        player['id']: {
-            'Player': f"{player['first_name']} {player['second_name']}",
-            'Team': player_data['teams'][player['team'] - 1]['short_name'],  # Map team ID to team short name
-            'Position': ['G', 'D', 'M', 'F'][player['element_type'] - 1]  # Map element type to position
+    fpl_player_map = {}
+
+    for player in players:
+        player_id = player.get('id')
+        first_name = player.get('first_name', '')
+        second_name = player.get('second_name', '')
+        full_name = f"{first_name} {second_name}"
+
+        web_name = player.get('web_name', '').strip()
+        if not web_name or web_name == full_name:
+            web_name = None  # treat as missing if it's the same as full name or blank
+
+        team_index = player.get('team', 0) - 1  # team index is 1-based
+        position_index = player.get('element_type', 1) - 1
+
+        team_short_name = teams[team_index]['short_name'] if 0 <= team_index < len(teams) else 'Unknown'
+        position = ['G', 'D', 'M', 'F'][position_index] if 0 <= position_index < 4 else 'Unknown'
+
+        fpl_player_map[player_id] = {
+            'Player_Name': full_name,
+            'Web_Name': web_name,
+            'Team': team_short_name,
+            'Position': position
         }
-        for player in players
-    }
 
     return fpl_player_map
 
@@ -475,7 +492,7 @@ def get_league_player_ownership(league_id):
     league_details = requests.get(league_details_url).json()
 
     # Fetch player and owner mappings
-    player_map = get_fpl_player_mapping()  # {player_id: {'Player': 'Name', 'Team': 'XYZ', 'Position': 'M'}, ...}
+    player_map = get_fpl_player_mapping()  # {player_id: {'Player_Name': 'Name', 'Team': 'XYZ', 'Position': 'M'}, ...}
     owner_map = {entry['id']: entry['entry_name'] for entry in league_details['league_entries']}  # {owner_id: 'Team Name'}
 
     # Initialize a dictionary to group players by team and position
@@ -489,7 +506,7 @@ def get_league_player_ownership(league_id):
 
         # Convert player ID to name and position
         player_info = player_map.get(player_id, {'Player': f"Unknown ({player_id})", 'Position': 'Unknown'})
-        player_name = player_info['Player']
+        player_name = player_info['Player_Name']
         player_position = player_info['Position']
 
         # Convert owner ID to team name
@@ -586,7 +603,7 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
 
     # Convert the team composition to a DataFrame with player details
     player_data = [
-        player_map.get(player_id, {'Player': player_name, 'Team': 'Unknown', 'Position': 'Unknown'})
+        player_map.get(player_id, {'Player_Name': player_name, 'Team': 'Unknown', 'Position': 'Unknown'})
         for player_name, player_id in [(player, next((k for k, v in player_map.items() if v['Player'] == player), None))
                                        for player in team_composition]
     ]
@@ -743,7 +760,7 @@ def clean_fpl_player_names(fpl_players_df, projections_df, fuzzy_threshold=80, l
 
     # Update FPL DataFrame with cleaned player names
     fpl_players_df['Player'] = fpl_players_df.apply(
-        lambda row: find_best_match(row['Player'], row['Team'], row['Position'], projection_names), axis=1
+        lambda row: find_best_match(row['Player_Name'], row['Team'], row['Position'], projection_names), axis=1
     )
 
     return fpl_players_df

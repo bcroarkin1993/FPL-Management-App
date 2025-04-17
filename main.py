@@ -57,7 +57,7 @@ def main():
     apply_custom_styles()
 
     # Create the Sidebar navigation screen
-    app_mode = st.sidebar.radio("Choose Page", ["Home", "Projected Lineups", "Player Projections",
+    app_mode = st.sidebar.radio("Choose Page", ["Home", "Projected Lineups", "Player Projections", "Team Analysis",
                                                 "Fixture Projections", "Waiver Wire", "Player Statistics"])
 
     if app_mode == "Home":
@@ -72,6 +72,8 @@ def main():
         show_waiver_wire_page()
     elif app_mode == "Player Statistics":
         show_player_stats_page()
+    elif app_mode == "Team Analysis":
+        show_team_stats_page()
 
 if __name__ == "__main__":
     main()

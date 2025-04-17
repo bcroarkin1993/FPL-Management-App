@@ -17,8 +17,8 @@ def show_team_projections(selected_team, fpl_player_projections, gameweek):
     return(team_player_projections)
 
 def show_team_stats_page():
-    st.title("Detailed Team Statistics")
-    st.write("Displaying detailed statistics and projections for all players on a given team.")
+    st.title("Team Analysis")
+    st.write("Displaying detailed statistics and projections for selected team.")
 
     # Pull FPL player projections from Rotowire
     player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL)
@@ -30,7 +30,7 @@ def show_team_stats_page():
     team_list = list(team_dict.keys())
 
     # Dropdown to select the team
-    selected_team = st.selectbox("Select a Team", team_list, index=team_list.index("CHANGE NAME"))
+    selected_team = st.selectbox("Select a Team", team_list)
 
     # Display the team's player projected stats
     st.subheader(f"{selected_team} Projected Player Stats for Gameweek {config.CURRENT_GAMEWEEK}")
