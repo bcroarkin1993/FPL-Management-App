@@ -272,7 +272,7 @@ def get_fpl_player_mapping():
         position = ['G', 'D', 'M', 'F'][position_index] if 0 <= position_index < 4 else 'Unknown'
 
         fpl_player_map[player_id] = {
-            'Player_Name': full_name,
+            'Player': full_name,
             'Web_Name': web_name,
             'Team': team_short_name,
             'Position': position
@@ -492,7 +492,7 @@ def get_league_player_ownership(league_id):
     league_details = requests.get(league_details_url).json()
 
     # Fetch player and owner mappings
-    player_map = get_fpl_player_mapping()  # {player_id: {'Player_Name': 'Name', 'Team': 'XYZ', 'Position': 'M'}, ...}
+    player_map = get_fpl_player_mapping()  # {player_id: {'Player': 'Name', 'Team': 'XYZ', 'Position': 'M'}, ...}
     owner_map = {entry['id']: entry['entry_name'] for entry in league_details['league_entries']}  # {owner_id: 'Team Name'}
 
     # Initialize a dictionary to group players by team and position
@@ -506,7 +506,7 @@ def get_league_player_ownership(league_id):
 
         # Convert player ID to name and position
         player_info = player_map.get(player_id, {'Player': f"Unknown ({player_id})", 'Position': 'Unknown'})
-        player_name = player_info['Player_Name']
+        player_name = player_info['Player']
         player_position = player_info['Position']
 
         # Convert owner ID to team name
@@ -603,7 +603,7 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
 
     # Convert the team composition to a DataFrame with player details
     player_data = [
-        player_map.get(player_id, {'Player_Name': player_name, 'Team': 'Unknown', 'Position': 'Unknown'})
+        player_map.get(player_id, {'Player': player_name, 'Team': 'Unknown', 'Position': 'Unknown'})
         for player_name, player_id in [(player, next((k for k, v in player_map.items() if v['Player'] == player), None))
                                        for player in team_composition]
     ]
@@ -758,10 +758,16 @@ def clean_fpl_player_names(fpl_players_df, projections_df, fuzzy_threshold=80, l
     # Extract candidate names from projections
     projection_names = projections_df['Player'].tolist()
 
-    # Update FPL DataFrame with cleaned player names
-    fpl_players_df['Player'] = fpl_players_df.apply(
-        lambda row: find_best_match(row['Player_Name'], row['Team'], row['Position'], projection_names), axis=1
-    )
+    # Update FPL DataFrame with cleaned player names (handle for different naming formats)
+    try:
+        fpl_players_df['Player'] = fpl_players_df.apply(
+            lambda row: find_best_match(row['Player'], row['Team'], row['Position'], projection_names), axis=1
+        )
+    except KeyError:
+        fpl_players_df['player'] = fpl_players_df.apply(
+            lambda row: find_best_match(row['player'], row['team_name'], row['position_abbrv'], projection_names),
+            axis=1
+        )
 
     return fpl_players_df
 
@@ -802,7 +808,8 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df):
     Returns:
     - merged_df: DataFrame with players, projections, and any missing players shown with NA values.
     """
-
+    print("MERGING FPL PLAYERS AND PROJECTIONS")
+    print(f"FPL Players DF:\n{fpl_players_df}\nProjections DF:\n{projections_df}")
     merged_data = []
 
     for _, fpl_row in fpl_players_df.iterrows():
@@ -835,6 +842,8 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df):
 
     # Create the DataFrame
     merged_df = pd.DataFrame(merged_data)
+
+    print(f"Merged DF:\n{merged_df}")
 
     # Reorder columns
     merged_df = merged_df[['Player', 'Team', 'Matchup', 'Position', 'Points', 'Pos Rank']]

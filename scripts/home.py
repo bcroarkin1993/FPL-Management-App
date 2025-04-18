@@ -81,13 +81,13 @@ def findOptimalLineup(df):
         print("Invalid Lineup")
         return(final_selection)
 
-def get_fpl_draft_league_standings(draft_league_id, show_advanced_stats=False):
+def get_fpl_draft_league_standings(draft_league_id, show_luck_adjusted_stats=False):
     """
     Fetches and displays the current league standings for an FPL Draft league, with an option to show advanced statistics.
 
     Parameters:
     - draft_league_id (int or str): The ID of the FPL Draft league for which to fetch standings data.
-    - show_advanced_stats (bool): If True, the function will include advanced statistics such as luck-adjusted standings.
+    - show_luck_adjusted_stats (bool): If True, the function will luck-adjusted league standings and stats.
 
     Workflow:
     1. The function retrieves league details (standings and league entries) from the FPL Draft API.
@@ -165,21 +165,12 @@ def get_fpl_draft_league_standings(draft_league_id, show_advanced_stats=False):
     # Reorder the columns
     league_standings_df = league_standings_df[['Rank', 'Team', 'Player', 'W', 'D', 'L', 'PF', 'PA', 'Pts']]
 
-    # If show_advanced_stats is true, add the avg_gw_rank and avg_gw_score to the dataframe
-    if show_advanced_stats == True:
+    # If show_luck_adjusted_stats is true
+    if show_luck_adjusted_stats == True:
         # Compute the luck adjusted standings
         luck_adjusted_df = get_luck_adjusted_league_standings(draft_league_id)
-        # Merge with the league_standings
-        advanced_league_standings_df = pd.merge(league_standings_df, luck_adjusted_df, on='Team')
-        # Sort by Fair Rank
-        advanced_league_standings_df = advanced_league_standings_df.sort_values('Fair_Rank')
-        # Format the merged results
-        advanced_league_standings_df = advanced_league_standings_df[['Fair_Rank', 'Team', 'Player', 'W', 'D', 'L',
-                                                                     'PF', 'PA', 'Avg_GW_Rank', 'Avg_Score', 'Pts']]
-        # Set the index
-        advanced_league_standings_df.set_index('Fair_Rank', inplace=True)
         # Return the results
-        return (advanced_league_standings_df)
+        return (luck_adjusted_df)
     else:
         # Set the index
         league_standings_df.set_index('Rank', inplace=True)
@@ -267,6 +258,7 @@ def get_luck_adjusted_league_standings(draft_league_id):
     fixtures_list = []
 
     for fixture in fixtures:
+        gameweek = fixture['event']
         team1_id = fixture['league_entry_1']
         team2_id = fixture['league_entry_2']
         team1_name = team_names.get(team1_id)
@@ -274,70 +266,78 @@ def get_luck_adjusted_league_standings(draft_league_id):
         team1_score = fixture['league_entry_1_points']
         team2_score = fixture['league_entry_2_points']
 
+        # Filter out games that have not been played yet
         if (team1_score != 0) & (team2_score != 0):
-            # Determine match results based on scores
-            if team1_score > team2_score:
-                team1_result = 'W'
-                team2_result = 'L'
-            elif team1_score < team2_score:
-                team1_result = 'L'
-                team2_result = 'W'
-            else:
-                team1_result = team2_result = 'D'
-
             fixtures_list.append({
+                "Gameweek": gameweek,
                 "Team 1": team1_name,
                 "Team 1 Score": team1_score,
-                "Team 1 Result": team1_result,
                 "Team 2": team2_name,
                 "Team 2 Score": team2_score,
-                "Team 2 Result": team2_result,
             })
 
     # Convert fixtures_list to dataframe
     fixtures_df = pd.DataFrame(fixtures_list)
 
-    # Step 1: Calculate the Week_Rank for each team based on scores for each gameweek
-    fixtures_df['Week'] = fixtures_df.index // (len(fixtures_df) // len(fixtures_df['Team 1'].unique())) + 1
-
     # Create a long-format dataframe with each team's score and result for the week
     long_format_df = pd.concat([
-        fixtures_df[['Team 1', 'Team 1 Score', 'Team 1 Result', 'Week']].rename(
-            columns={'Team 1': 'Team', 'Team 1 Score': 'Score', 'Team 1 Result': 'Result'}),
-        fixtures_df[['Team 2', 'Team 2 Score', 'Team 2 Result', 'Week']].rename(
-            columns={'Team 2': 'Team', 'Team 2 Score': 'Score', 'Team 2 Result': 'Result'})
+        fixtures_df[['Team 1', 'Team 1 Score', 'Gameweek']].rename(columns={'Team 1': 'Team', 'Team 1 Score': 'Score'}),
+        fixtures_df[['Team 2', 'Team 2 Score', 'Gameweek']].rename(columns={'Team 2': 'Team', 'Team 2 Score': 'Score'})
     ])
 
-    # Step 2: Calculate the rank for each team in each week based on their score
-    long_format_df['Week_Rank'] = long_format_df.groupby('Week')['Score'].rank(ascending=False, method='min')
+    # Sort by Gameweek for clarity
+    long_format_df = long_format_df.sort_values(by=["Gameweek"]).reset_index(drop=True)
 
-    # Step 3: Calculate the actual results for each team based on their results (W, L, D)
+    # Calculate the average score per gameweek
+    avg_scores = long_format_df.groupby("Gameweek")["Score"].transform("mean")
+
+    # Assign result based on comparison to gameweek average
+    long_format_df["Result"] = long_format_df["Score"].apply(
+        lambda x: 'W' if x > avg_scores[long_format_df["Score"] == x].iloc[0]
+        else 'D' if x == avg_scores[long_format_df["Score"] == x].iloc[0]
+        else 'L')
+
+    # Calculate W/L/T counts per team
+    result_counts = pd.crosstab(long_format_df['Team'], long_format_df['Result']).reset_index()
+
+    # Ensure all result columns are present
+    for col in ['W', 'D', 'L']:
+        if col not in result_counts.columns:
+            result_counts[col] = 0
+
+    # Calculate the rank for each team in each week based on their score
+    long_format_df['GW_Rank'] = long_format_df.groupby("Gameweek")["Score"].rank(ascending=False, method='min').astype(
+        int)
+
+    # Calculate the actual results for each team based on their results (W, L, D)
     long_format_df['Points'] = long_format_df['Result'].apply(lambda x: 3 if x == 'W' else (1 if x == 'D' else 0))
 
-    # Step 4: Calculate the average weekly rank (Fair_Rank) and total points (actual standings) for each team
-    team_stats_df = long_format_df.groupby('Team').agg(
-        Avg_GW_Rank=('Week_Rank', 'mean'),  # The "fair" rank based on average weekly score rank
+    # Calculate the average weekly rank (Fair_Rank) and total points (actual standings) for each team
+    luck_adjusted_df = long_format_df.groupby('Team').agg(
+        Avg_GW_Rank=('GW_Rank', 'mean'),  # The "fair" rank based on average weekly score rank
         Total_Points=('Points', 'sum'),  # The actual points based on match results
         Avg_Score=('Score', 'mean')  # The average score across all weeks
     ).reset_index()
 
-    # Step 5: Create the adjusted standings by ranking teams based on Avg_Week_Rank
-    team_stats_df['Fair_Rank'] = team_stats_df['Avg_GW_Rank'].rank(ascending=True, method='min').astype(int)
+    # Merge luck_adjusted_df with result_counts
+    luck_adjusted_df = luck_adjusted_df.merge(result_counts[['Team', 'W', 'D', 'L']], on='Team', how='left')
 
-    # Rank the teams based on their actual points (Total_Points)
-    team_stats_df['Actual_Rank'] = team_stats_df['Total_Points'].rank(ascending=False, method='min')
+    # Create the adjusted standings by ranking teams based on Avg_Week_Rank
+    luck_adjusted_df['Fair_Rank'] = luck_adjusted_df['Avg_GW_Rank'].rank(ascending=True, method='min').astype(int)
 
-    # Step 6: Add luck index: Difference between actual rank and fair rank
-    team_stats_df['Luck_Index'] = team_stats_df['Fair_Rank'] - team_stats_df['Actual_Rank']
+    # Sort by Fair_Rank to get the adjusted standings
+    luck_adjusted_df = luck_adjusted_df.sort_values(by='Fair_Rank')
 
-    # Step 7: Sort by Fair_Rank to get the adjusted standings
-    team_stats_df = team_stats_df.sort_values(by='Fair_Rank')
+    # Format number values
+    luck_adjusted_df['Avg_GW_Rank'] = round(luck_adjusted_df['Avg_GW_Rank'], 2)
+    luck_adjusted_df['Avg_GW_Score'] = round(luck_adjusted_df['Avg_Score'], 2)
+    # Format final results
+    luck_adjusted_df = luck_adjusted_df[
+        ['Fair_Rank', 'Team', 'W', 'D', 'L', 'Avg_GW_Score', 'Avg_GW_Rank', 'Total_Points']]
+    # Set the index
+    luck_adjusted_df.set_index('Fair_Rank', inplace=True)
 
-    # Step 8: Format number values
-    team_stats_df['Avg_GW_Rank'] = round(team_stats_df['Avg_GW_Rank'], 2)
-    team_stats_df['Avg_Score'] = round(team_stats_df['Avg_Score'], 2)
-
-    return team_stats_df
+    return luck_adjusted_df
 
 def plot_league_points_over_time(draft_league_id):
     """
@@ -474,11 +474,11 @@ def show_home_page():
     st.title("My Fantasy Draft Team & League Standings")
 
     st.subheader("FPL Draft League Table")
-    # Toggle to show advanced stats
-    show_advanced_stats = st.checkbox("Show Advanced Stats")
+    # Toggle to show luck adjusted standing
+    show_luck_adjusted_stats = st.checkbox("Show Luck Adjusted Standings")
     # Fetch the league standings based on the toggle
     standings_df = get_fpl_draft_league_standings(config.FPL_DRAFT_LEAGUE_ID,
-                                                  show_advanced_stats=show_advanced_stats)
+                                                  show_luck_adjusted_stats=show_luck_adjusted_stats)
     # Display the standings dataframe
     st.dataframe(standings_df, use_container_width=True)
 

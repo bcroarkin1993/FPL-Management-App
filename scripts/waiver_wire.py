@@ -63,6 +63,8 @@ def find_top_waivers(fpl_player_projections, league_team_dict, limit=None):
 
     # Step 3: Create a DataFrame of the taken players
     taken_players_df = pd.DataFrame({'Player': all_taken_players})
+    print("Taken Players DF: \n", taken_players_df)
+    print("FPL Players DF: \n", taken_players_df)
 
     # Step 4: Merge taken_players_df with fpl_player_data on the 'Player' column
     taken_players_df = pd.merge(taken_players_df, fpl_players_df, on='Player', how='left').set_index('Player_ID')

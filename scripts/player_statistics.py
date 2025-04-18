@@ -275,7 +275,7 @@ def show_player_stats_page():
         fpl_player_statistics = clean_fpl_player_names(fpl_player_statistics, fpl_player_projections)
 
     # Print out FPL player stats, if desired
-    # print("FPL Player Statistics: \n", fpl_player_statistics)
+    print("FPL Player Statistics: \n", fpl_player_statistics)
 
     # Filters Section
     st.subheader("🔍 Filters")
