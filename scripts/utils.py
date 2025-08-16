@@ -1,11 +1,13 @@
 from bs4 import BeautifulSoup
 from collections import defaultdict
 import config
+from datetime import datetime
 from fuzzywuzzy import process
 import pandas as pd
 import re
 import requests
 import unicodedata
+from urllib.parse import urljoin
 
 def remove_duplicate_words(name):
     """
@@ -352,45 +354,66 @@ def get_gameweek_fixtures(league_id, gameweek):
 
     return gameweek_fixtures
 
-def get_rotowire_rankings_url():
+def get_rotowire_rankings_url(current_gameweek=None, timeout=15):
     """
-    Fetches the full article URL for the latest Fantasy Premier League Player Rankings.
+    Try to locate the Rotowire 'Fantasy Premier League Player Rankings: Gameweek X'
+    article on the /soccer/articles/ index. Handles new slugs with extra words.
 
     Returns:
-    - str: The full URL to the latest Rotowire player rankings article, or None if not found.
+        str | None  -> fully qualified article URL or None if not found.
     """
+    # If you have a helper, use it; otherwise leave current_gameweek optional
+    if current_gameweek is None:
+        try:
+            current_gameweek = get_current_gameweek()  # your existing function
+        except Exception:
+            current_gameweek = None
+
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        # Rotowire soccer homepage
-        base_url = "https://www.rotowire.com"
-        soccer_url = base_url + "/soccer/"
-        response = requests.get(soccer_url)
-        response.raise_for_status()  # Ensure the request was successful
-
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        # Get the current gameweek from your helper function
-        current_gameweek = get_current_gameweek()
-
-        # Article title to search for
-        target_title = f"Fantasy Premier League Player Rankings: Gameweek {current_gameweek}"
-
-        # Find all compact article sections
-        articles = soup.find_all('div', class_='compact-article__main')
-
-        # Iterate through the articles to find the matching one
-        for article in articles:
-            link_tag = article.find('a', class_='compact-article__link')
-            if link_tag and target_title in link_tag.text:
-                # Construct the correct URL without double '/soccer/' issue
-                article_url = base_url + link_tag['href']
-                return article_url
-
-        print(f"No article found for Gameweek {current_gameweek}.")
-        return None  # Explicitly return None if no matching article is found
-
-    except Exception as e:
-        print(f"Error fetching the Rotowire rankings URL: {e}")
+        resp = requests.get(config.ARTICLES_INDEX, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+    except Exception:
         return None
+
+    soup = BeautifulSoup(resp.content, "html.parser")
+
+    # Find any anchors whose href contains our base slug
+    anchors = soup.select('a[href*="fantasy-premier-league-player-rankings-gameweek-"]')
+
+    # Regex: capture GW and the trailing numeric article id
+    # works for both:
+    # ...gameweek-9-86285
+    # ...gameweek-1-fpl-west-ham-jarrod-bowen-95015
+    pat = re.compile(
+        r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?-(\d+)$"
+    )
+
+    candidates = []
+    for a in anchors:
+        href = a.get("href", "").strip()
+        if not href:
+            continue
+        m = pat.search(href)
+        if m:
+            gw = int(m.group(1))
+            art_id = int(m.group(2))
+            candidates.append((gw, art_id, urljoin(config.ARTICLES_INDEX, href)))
+
+    if not candidates:
+        return None
+
+    if current_gameweek is not None:
+        # Prefer exact gameweek; if multiple, highest article id
+        exact = [c for c in candidates if c[0] == current_gameweek]
+        if exact:
+            return max(exact, key=lambda x: x[1])[2]
+
+        # Else pick closest GW; break ties by newest article id
+        return min(candidates, key=lambda x: (abs(x[0] - current_gameweek), -x[1]))[2]
+
+    # If we don't know the GW, return the newest relevant article by id
+    return max(candidates, key=lambda x: x[1])[2]
 
 def get_rotowire_player_projections(url, limit=None):
     """
@@ -577,39 +600,79 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
     Parameters:
     - league_id (int): The ID of the league.
     - team_id (int): The team ID of the team to fetch.
-    - gameweek: The gameweek for which to determine the team's composition.
+    - gameweek (int | None): The gameweek for which to determine the team's composition.
 
     Returns:
-    - DataFrame containing player name, team, and position for the specified gameweek.
+    - DataFrame with columns ['Player', 'Team', 'Position'] for the specified gameweek.
     """
-    # Fetch player and team mappings
+    # Coerce IDs and settle the gameweek
+    try:
+        league_id = int(league_id)
+    except (TypeError, ValueError):
+        raise ValueError("league_id must be an integer")
+
+    try:
+        team_id = int(team_id)
+    except (TypeError, ValueError):
+        raise ValueError("team_id must be an integer")
+
+    if gameweek is None:
+        # Fallback to your helper if you allow None
+        try:
+            gameweek = int(get_current_gameweek())
+        except Exception:
+            # If even that fails, treat as "no cap" on transactions
+            gameweek = None
+    else:
+        try:
+            gameweek = int(gameweek)
+        except (TypeError, ValueError):
+            gameweek = None
+
+    # Player map: {player_id: {'Player', 'Team', 'Position'}}
     player_map = get_fpl_player_mapping()
 
-    # Initialize the team composition with the initial draft picks
-    draft_picks = get_starting_team_composition(league_id)
-    team_composition = set(draft_picks.get(team_id, {}).get('players', []))
+    # Reverse map for fast name->id lookup (built from the same source as starting comp)
+    name_to_id = {v['Player']: k for k, v in player_map.items()}
 
-    # Apply relevant transactions to the team composition
+    # Starting composition (names)
+    starting = get_starting_team_composition(league_id)  # {team_id: {'team_name':..., 'players': [names...]}, ...}
+    team_start = starting.get(int(team_id), {})
+    team_composition = set(team_start.get('players', []))  # set of player NAMES
+
+    # Apply approved transactions up to gameweek (convert IDs -> names using player_map)
     transactions = get_waiver_transactions_up_to_gameweek(league_id, gameweek)
     for tx in transactions:
-        if tx['entry'] == team_id and tx['result'] == 'a':
-            # Convert player IDs to names using player_map
-            player_in = player_map.get(tx['element_in'], {}).get('Player', f"Unknown ({tx['element_in']})")
-            player_out = player_map.get(tx['element_out'], {}).get('Player', f"Unknown ({tx['element_out']})")
+        if tx.get('entry') == int(team_id) and tx.get('result') == 'a':
+            pid_in = tx.get('element_in')
+            pid_out = tx.get('element_out')
 
-            # Update the team composition
-            team_composition.remove(player_out)
-            team_composition.add(player_in)
+            # Map IDs to FPL names; if missing, keep a label that won't break
+            name_in = player_map.get(pid_in, {}).get('Player', f"Unknown ({pid_in})")
+            name_out = player_map.get(pid_out, {}).get('Player', f"Unknown ({pid_out})")
 
-    # Convert the team composition to a DataFrame with player details
-    player_data = [
-        player_map.get(player_id, {'Player': player_name, 'Team': 'Unknown', 'Position': 'Unknown'})
-        for player_name, player_id in [(player, next((k for k, v in player_map.items() if v['Player'] == player), None))
-                                       for player in team_composition]
-    ]
+            # Update the name-based composition defensively
+            team_composition.discard(name_out)   # discard avoids KeyError if not present
+            team_composition.add(name_in)
 
-    fpl_players_df = pd.DataFrame(player_data)
-    return(fpl_players_df)
+    # Build the output rows using the map; if a name can't be mapped back, fill Unknowns
+    rows = []
+    for name in sorted(team_composition):
+        pid = name_to_id.get(name)
+        if pid is not None and pid in player_map:
+            rows.append({
+                'Player': player_map[pid]['Player'],
+                'Team':   player_map[pid]['Team'],
+                'Position': player_map[pid]['Position'],
+            })
+        else:
+            rows.append({
+                'Player': name,
+                'Team':   'Unknown',
+                'Position': 'Unknown',
+            })
+
+    return pd.DataFrame(rows, columns=['Player', 'Team', 'Position'])
 
 def get_team_id_by_name(league_id, team_name):
     """
@@ -706,23 +769,50 @@ def get_team_projections(player_rankings, league_id, team_id):
 
 def get_waiver_transactions_up_to_gameweek(league_id, gameweek):
     """
-    Fetches all transactions (waivers, free agent moves, etc.) up to the selected gameweek.
+    Fetches all transactions (waivers, free agent moves, etc.) up to (and including) the selected gameweek.
+    Safely handles cases where the API returns transactions with a null/absent 'event'.
 
     Parameters:
-    - league_id: The league ID for transactions.
-    - gameweek: The gameweek to fetch transactions up to.
+    - league_id (int|str): The league ID for transactions.
+    - gameweek (int|None): The gameweek to filter transactions up to. If None, returns only transactions
+                           that have a valid integer 'event' (no upper limit).
 
     Returns:
-    - transactions: A list of transactions that occurred up to the given gameweek.
+    - List[dict]: Transactions up to the given gameweek with valid integer 'event' values.
     """
-    transaction_url = f"https://draft.premierleague.com/api/draft/league/{league_id}/transactions"
-    transaction_response = requests.get(transaction_url)
-    transactions = transaction_response.json()['transactions']
+    # Coerce inputs
+    try:
+        league_id = int(league_id)
+    except (TypeError, ValueError):
+        raise ValueError("league_id must be an integer")
 
-    # Filter transactions by gameweek
-    filtered_transactions = [tx for tx in transactions if tx['event'] <= gameweek]
+    # Coerce gameweek if provided; allow None
+    if gameweek is not None:
+        try:
+            gameweek = int(gameweek)
+        except (TypeError, ValueError):
+            # If coercion fails, treat as None (no upper bound)
+            gameweek = None
 
-    return filtered_transactions
+    # Fetch transactions
+    url = f"https://draft.premierleague.com/api/draft/league/{league_id}/transactions"
+    resp = requests.get(url)
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+
+    transactions = data.get('transactions', []) or []
+
+    # Keep only transactions that have a valid integer event
+    tx_with_event = [tx for tx in transactions if isinstance(tx.get('event'), int)]
+
+    # If no upper bound, return all with valid event
+    if gameweek is None:
+        return tx_with_event
+
+    # Otherwise, filter by event <= gameweek
+    return [tx for tx in tx_with_event if tx['event'] <= gameweek]
 
 def clean_fpl_player_names(fpl_players_df, projections_df, fuzzy_threshold=80, lower_fuzzy_threshold=60):
     """

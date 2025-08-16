@@ -1,6 +1,7 @@
 # main.py
 import streamlit as st
 from scripts.home import show_home_page
+from scripts.fixtures import show_club_fixtures_section
 from scripts.fixture_projections import show_fixtures_page
 from scripts.team_analysis import show_team_stats_page
 from scripts.waiver_wire import show_waiver_wire_page
@@ -57,11 +58,14 @@ def main():
     apply_custom_styles()
 
     # Create the Sidebar navigation screen
-    app_mode = st.sidebar.radio("Choose Page", ["Home", "Projected Lineups", "Player Projections", "Team Analysis",
-                                                "Fixture Projections", "Waiver Wire", "Player Statistics"])
+    app_mode = st.sidebar.radio("Choose Page", ["Home", "Gameweek Fixtures", "Projected Lineups", "Player Projections",
+                                                "Team Analysis", "Fixture Projections", "Waiver Wire",
+                                                "Player Statistics"])
 
     if app_mode == "Home":
         show_home_page()
+    elif app_mode == "Gameweek Fixtures":
+        show_club_fixtures_section()
     elif app_mode == "Projected Lineups":
         show_projected_lineups()
     elif app_mode == "Player Projections":

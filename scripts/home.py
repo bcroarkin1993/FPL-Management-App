@@ -83,118 +83,162 @@ def findOptimalLineup(df):
 
 def get_fpl_draft_league_standings(draft_league_id, show_luck_adjusted_stats=False):
     """
-    Fetches and displays the current league standings for an FPL Draft league, with an option to show advanced statistics.
+    Fetches and displays the current league standings for an FPL Draft league,
+    with an option to show advanced statistics like luck-adjusted standings.
 
     Parameters:
-    - draft_league_id (int or str): The ID of the FPL Draft league for which to fetch standings data.
-    - show_luck_adjusted_stats (bool): If True, the function will luck-adjusted league standings and stats.
-
-    Workflow:
-    1. The function retrieves league details (standings and league entries) from the FPL Draft API.
-    2. It extracts the standings and team/player information into separate DataFrames.
-    3. The two DataFrames are merged on the team’s league entry ID to combine the standings with player information.
-    4. The function renames and reformats the DataFrame, calculating the points based on wins (3 points per win) and draws (1 point per draw).
-    5. It ranks teams based on their points, with higher points resulting in a better rank.
-    6. Optionally, if `show_advanced_stats` is set to True, it computes advanced statistics such as the luck-adjusted standings
-       and merges them with the basic standings.
+    - draft_league_id (int or str): The ID of the FPL Draft league.
+    - show_luck_adjusted_stats (bool): If True, returns advanced statistics such as:
+        - Avg_Week_Rank, Avg_Score, Fair_Rank, Luck_Index
 
     Returns:
-    - DataFrame: A pandas DataFrame containing the league standings, including:
-        - Rank: The team's rank based on points.
-        - Team: The name of the team.
-        - Player: The full name of the player managing the team.
-        - W: The number of matches won.
-        - D: The number of matches drawn.
-        - L: The number of matches lost.
-        - PF: The total points scored by the team (points for).
-        - PA: The total points scored against the team (points against).
-        - Pts: The calculated points from wins and draws.
-        - Optionally, if `show_advanced_stats` is True:
-            - Avg_Week_Rank: The average rank based on weekly performance.
-            - Avg_Score: The average score of the team across all gameweeks.
-            - Fair_Rank: The team's fair rank based on weekly performance (luck-adjusted standings).
-            - Luck_Index: The difference between the actual rank and the fair rank.
-
-    Example Usage:
-    standings_df = get_draft_league_standings(49249, show_advanced_stats=True)  # Fetch league standings for league 49249 with advanced stats
-    print(standings_df)
+    - pandas.DataFrame: League standings with columns:
+        Rank, Team, Player, W, D, L, PF, PA, Pts
+      If the season hasn’t started (or data is incomplete), a placeholder table is returned with zero stats.
     """
-    # Draft League API URLs
-    league_url = f"https://draft.premierleague.com/api/league/{draft_league_id}/details"
+    expected_columns = ['Rank', 'Team', 'Player', 'W', 'D', 'L', 'PF', 'PA', 'Pts']
 
-    # Get league details, fixtures, and team details
-    league_response = requests.get(league_url).json()
+    try:
+        # API call
+        league_url = f"https://draft.premierleague.com/api/league/{draft_league_id}/details"
+        league_response = requests.get(league_url).json()
 
-    # Extract the standings and league_entries sections of the JSON
-    standings = league_response['standings']
-    league_entries = league_response['league_entries']
+        standings = league_response.get('standings', [])
+        league_entries = league_response.get('league_entries', [])
+        entries_df = pd.DataFrame(league_entries)
 
-    # Create DataFrame for standings
-    standings_df = pd.DataFrame(standings)
+        # --- Normalize entry ID column: support both 'id' and 'entry_id'
+        id_col = None
+        if 'id' in entries_df.columns:
+            id_col = 'id'
+        elif 'entry_id' in entries_df.columns:
+            id_col = 'entry_id'
 
-    # Create DataFrame for league entries
-    entries_df = pd.DataFrame(league_entries)
+        # Build Team/Player columns (best-effort even if some fields are missing)
+        if not entries_df.empty:
+            first = entries_df['player_first_name'] if 'player_first_name' in entries_df else ''
+            last  = entries_df['player_last_name']  if 'player_last_name'  in entries_df else ''
+            entries_df['Player'] = (first.astype(str) + ' ' + last.astype(str)).str.strip()
+            if 'entry_name' in entries_df:
+                entries_df['Team'] = entries_df['entry_name']
+            else:
+                entries_df['Team'] = ''
+            # Keep only what's needed for placeholder/merge
+            base_entries_df = entries_df[['Team', 'Player']].copy()
+        else:
+            base_entries_df = pd.DataFrame(columns=['Team', 'Player'])
 
-    # Merge standings with league entries on 'league_entry' and 'entry_id'
-    league_standings_df = standings_df.merge(entries_df, left_on='league_entry', right_on='id', how='left')
+        # If standings are missing or incomplete, return placeholder table
+        standings_df = pd.DataFrame(standings)
+        required_stand_cols = {'league_entry', 'matches_won', 'matches_drawn', 'matches_lost', 'points_for', 'points_against'}
+        if standings_df.empty or not required_stand_cols.issubset(standings_df.columns):
+            placeholder_df = base_entries_df.copy()
+            if placeholder_df.empty:
+                # If even entries are missing, return empty shape with correct columns
+                placeholder_df = pd.DataFrame(columns=['Team', 'Player'])
+            placeholder_df['W'] = 0
+            placeholder_df['D'] = 0
+            placeholder_df['L'] = 0
+            placeholder_df['PF'] = 0
+            placeholder_df['PA'] = 0
+            placeholder_df['Pts'] = 0
+            placeholder_df['Rank'] = range(1, len(placeholder_df) + 1)
+            placeholder_df = placeholder_df[expected_columns].set_index('Rank')
+            st.info("⚠️ Season has not started yet (or standings incomplete). Displaying placeholder league table.")
+            return placeholder_df
 
-    # Select and rename the required columns
-    league_standings_df = league_standings_df[['entry_name', 'player_first_name', 'player_last_name', 'matches_won',
-                                               'matches_drawn', 'matches_lost', 'points_for', 'points_against']]
-    league_standings_df.columns = ['Team', 'Player Name', 'Player Last Name', 'W', 'D', 'L', 'PF', 'PA']
+        # We have standings; ensure we have an ID column to merge on. If not, fallback to placeholder rather than error.
+        if id_col is None:
+            st.info("⚠️ League entries missing an ID field; showing placeholder table.")
+            placeholder_df = base_entries_df.copy()
+            placeholder_df['W'] = 0
+            placeholder_df['D'] = 0
+            placeholder_df['L'] = 0
+            placeholder_df['PF'] = 0
+            placeholder_df['PA'] = 0
+            placeholder_df['Pts'] = 0
+            placeholder_df['Rank'] = range(1, len(placeholder_df) + 1)
+            placeholder_df = placeholder_df[expected_columns].set_index('Rank')
+            return placeholder_df
 
-    # Concatenating 'Player Name' and 'Player Last Name' using .loc[] to avoid the warning
-    league_standings_df.loc[:, 'Player'] = league_standings_df['Player Name'] + ' ' + league_standings_df[
-        'Player Last Name']
+        # Merge real standings with entries
+        merged = standings_df.merge(entries_df, left_on='league_entry', right_on=id_col, how='left')
 
-    # Drop the 'Player Last Name' column if no longer needed
-    league_standings_df = league_standings_df.drop(columns=['Player Last Name'])
+        # Validate merged fields exist; otherwise fallback
+        req_merge_cols = {'entry_name', 'player_first_name', 'player_last_name',
+                          'matches_won', 'matches_drawn', 'matches_lost', 'points_for', 'points_against'}
+        if not req_merge_cols.issubset(merged.columns):
+            st.info("⚠️ Merged standings missing fields; showing placeholder table.")
+            placeholder_df = base_entries_df.copy()
+            placeholder_df['W'] = 0
+            placeholder_df['D'] = 0
+            placeholder_df['L'] = 0
+            placeholder_df['PF'] = 0
+            placeholder_df['PA'] = 0
+            placeholder_df['Pts'] = 0
+            placeholder_df['Rank'] = range(1, len(placeholder_df) + 1)
+            placeholder_df = placeholder_df[expected_columns].set_index('Rank')
+            return placeholder_df
 
-    # Calculate the 'Pts' based on wins and draws
-    league_standings_df['Pts'] = league_standings_df['W'] * 3 + league_standings_df['D'] * 1
+        # Build final table
+        out = merged[['entry_name', 'player_first_name', 'player_last_name',
+                      'matches_won', 'matches_drawn', 'matches_lost', 'points_for', 'points_against']].copy()
+        out.columns = ['Team', 'First', 'Last', 'W', 'D', 'L', 'PF', 'PA']
+        out['Player'] = (out['First'].astype(str) + ' ' + out['Last'].astype(str)).str.strip()
+        out.drop(columns=['First', 'Last'], inplace=True)
+        out['Pts'] = out['W'] * 3 + out['D']
+        out['Rank'] = out['Pts'].rank(ascending=False, method='min').astype(int)
+        out = out.sort_values('Rank')
+        out = out[['Rank', 'Team', 'Player', 'W', 'D', 'L', 'PF', 'PA', 'Pts']].set_index('Rank')
 
-    # Convert 'Total Points' to numeric for ranking
-    league_standings_df['PF'] = pd.to_numeric(league_standings_df['PF'], errors='coerce')
+        # Optional: luck-adjusted view
+        if show_luck_adjusted_stats:
+            return get_luck_adjusted_league_standings(draft_league_id)
 
-    # Add a Rank column based on 'Total Points'
-    league_standings_df['Rank'] = league_standings_df['Pts'].rank(ascending=False, method='min').astype(int)
+        return out
 
-    # Sort by Rank
-    league_standings_df = league_standings_df.sort_values('Rank')
-
-    # Reorder the columns
-    league_standings_df = league_standings_df[['Rank', 'Team', 'Player', 'W', 'D', 'L', 'PF', 'PA', 'Pts']]
-
-    # If show_luck_adjusted_stats is true
-    if show_luck_adjusted_stats == True:
-        # Compute the luck adjusted standings
-        luck_adjusted_df = get_luck_adjusted_league_standings(draft_league_id)
-        # Return the results
-        return (luck_adjusted_df)
-    else:
-        # Set the index
-        league_standings_df.set_index('Rank', inplace=True)
-        # Return the results
-        return (league_standings_df)
+    except Exception as e:
+        st.error(f"Error fetching league standings: {e}")
+        return pd.DataFrame(columns=expected_columns).set_index('Rank')
 
 def show_fixture_results(draft_league_id, gameweek):
-    # Draft League API URLs
+    """
+    Display fixture results for a given gameweek in an FPL Draft league.
+    Gracefully handles the case when the season has not started yet
+    (i.e., no 'matches' key or empty fixtures list from the API).
+
+    Parameters:
+    - draft_league_id (int or str): The ID of the FPL Draft league.
+    - gameweek (int): The gameweek number for which to display results.
+
+    Behavior:
+    - If fixture data is available, displays a DataFrame showing:
+        - Team names
+        - Scores
+        - Win/Loss/Draw results
+    - If no fixture data is available yet (season not started), displays an info message in Streamlit.
+    """
+    # Draft League API URL
     league_url = f"https://draft.premierleague.com/api/league/{draft_league_id}/details"
 
-    # Get league details, fixtures, and team details
+    # Fetch the league details
     league_response = requests.get(league_url).json()
 
-    # Extract the standings and league_entries sections of the JSON
+    # Check if the season has started (i.e., 'matches' key exists)
+    if 'matches' not in league_response or not league_response['matches']:
+        st.info("⚠️ No fixture data available yet. The season might not have started.")
+        return
+
     fixtures = league_response['matches']
     league_entries = league_response['league_entries']
-    # Create a dictionary mapping entry_ids to team names
+
+    # Map entry IDs to team names
     team_names = {entry['id']: entry['entry_name'] for entry in league_entries}
 
-    # Create a list to hold fixture details
+    # Collect fixtures for the specified gameweek
     fixtures_list = []
 
     for fixture in fixtures:
-        # Filter to just the gameweek of interest
         if fixture['event'] == gameweek:
             team1_id = fixture['league_entry_1']
             team2_id = fixture['league_entry_2']
@@ -203,8 +247,8 @@ def show_fixture_results(draft_league_id, gameweek):
             team1_score = fixture['league_entry_1_points']
             team2_score = fixture['league_entry_2_points']
 
-            if (team1_score != 0) & (team2_score != 0):
-                # Determine match results based on scores
+            if (team1_score != 0) and (team2_score != 0):
+                # Determine match result
                 if team1_score > team2_score:
                     team1_result = 'W'
                     team2_result = 'L'
@@ -223,13 +267,13 @@ def show_fixture_results(draft_league_id, gameweek):
                     "Team 2 Result": team2_result,
                 })
 
-    # Convert the list into a DataFrame
+    # Show the results or fallback message
     if fixtures_list:
         fixtures_df = pd.DataFrame(fixtures_list)
         st.write(f"Results for Gameweek {gameweek}:")
         st.dataframe(fixtures_df, use_container_width=True)
     else:
-        st.write(f"No results available for Gameweek {gameweek}.")
+        st.warning(f"No results available for Gameweek {gameweek}.")
 
 def get_luck_adjusted_league_standings(draft_league_id):
     """
@@ -353,6 +397,11 @@ def plot_league_points_over_time(draft_league_id):
     # Step 1: Get the current gameweek
     current_gameweek = get_current_gameweek()
 
+    # Prevent failure if the season hasn't started
+    if current_gameweek is None:
+        st.info("⚠️ The season hasn't started yet. Points over time will be shown once games begin.")
+        return None  # Or return an empty figure
+
     # Step 2: Fetch league details
     league_url = f"https://draft.premierleague.com/api/league/{draft_league_id}/details"
     league_response = requests.get(league_url).json()
@@ -364,6 +413,11 @@ def plot_league_points_over_time(draft_league_id):
     # Step 4: Initialize league points for each team and data for plotting
     league_points = {team_id: 0 for team_id in team_names.keys()}  # Holds cumulative league points
     data = []  # To store data for plotting
+
+    # Check if the season has started (i.e., 'matches' key exists)
+    if 'matches' not in league_response or not league_response['matches']:
+        st.info("⚠️ No fixture data available yet. The season might not have started.")
+        return
 
     # Step 5: Process match results and accumulate points by gameweek
     matches = league_response['matches']
@@ -421,6 +475,10 @@ def plot_team_points_over_time(draft_league_id):
     # Step 1: Get the current gameweek
     current_gameweek = get_current_gameweek()
 
+    # Prevent failure if the season hasn't started
+    if current_gameweek is None:
+        return None  # Or return an empty figure
+
     # Step 2: Fetch league details
     league_url = f"https://draft.premierleague.com/api/league/{draft_league_id}/details"
     league_response = requests.get(league_url).json()
@@ -428,6 +486,11 @@ def plot_team_points_over_time(draft_league_id):
     # Step 3: Create a dictionary mapping entry_ids to team names
     league_entries = league_response['league_entries']
     team_names = {entry['id']: entry['entry_name'] for entry in league_entries}
+
+    # Check if the season has started (i.e., 'matches' key exists)
+    if 'matches' not in league_response or not league_response['matches']:
+        st.info("⚠️ No fixture data available yet. The season might not have started.")
+        return
 
     # Step 4: Extract matches data from the response
     matches = league_response['matches']
@@ -488,10 +551,12 @@ def show_home_page():
 
     # Create the table standings plot
     fig = plot_league_points_over_time(config.FPL_DRAFT_LEAGUE_ID)
-    # Display the chart
-    st.plotly_chart(fig)
+    # Display the chart (if season has started)
+    if fig:
+        st.plotly_chart(fig)
 
     # Create the total points plot
     fig = plot_team_points_over_time(config.FPL_DRAFT_LEAGUE_ID)
-    # Display the chart
-    st.plotly_chart(fig)
+    # Display the chart (if season has started)
+    if fig:
+        st.plotly_chart(fig)
