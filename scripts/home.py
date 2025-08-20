@@ -5,9 +5,6 @@ import requests
 import streamlit as st
 from scripts.utils import get_current_gameweek
 
-# Set page config
-st.set_page_config(layout="wide")
-
 def checkValidLineup(df):
     """
     Given a dataframe with a lineup, check to see if it is a valid lineup.

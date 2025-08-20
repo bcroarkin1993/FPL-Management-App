@@ -3,9 +3,11 @@ from collections import defaultdict
 import config
 from datetime import datetime
 from fuzzywuzzy import process
+import numpy as np
 import pandas as pd
 import re
 import requests
+from typing import Optional
 import unicodedata
 from urllib.parse import urljoin
 
@@ -494,6 +496,155 @@ def get_rotowire_player_projections(url, limit=None):
     player_rankings.index = player_rankings.index + 1
 
     return player_rankings
+
+def get_rotowire_season_rankings(url: str, limit: Optional[int] = None) -> pd.DataFrame:
+    """
+    Scrape Rotowire's season-long FPL rankings table.
+
+    Expected columns (12 per row):
+      'Overall Rank', 'FW Rank', 'MID Rank', 'DEF Rank', 'GK Rank',
+      'Player', 'Team', 'Position', 'Price', 'TSB %', 'Points', 'PP/90'
+
+    Enhancements:
+      - Robust parsing of '#N/A', 'N/A', '-', '—' -> treated as missing
+      - Infer Position from which of the rank columns has a valid rank if Position is missing/#N/A
+      - Default Price to 4.5 if missing/nonpositive
+      - Default TSB % to 0.0 if missing
+      - Compute Pos Rank (sum of positional ranks) and Value (Points/Price)
+      - Index starts at 1
+    """
+    # ---- Fetch & parse page ----
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.content, "html.parser")
+
+    table = soup.select_one("table.article-table__tablesorter.article-table__standard.article-table__figure")
+    if table is None:
+        table = soup.select_one("table.article-table__tablesorter") or soup.find("table")
+    if table is None:
+        raise ValueError("Could not locate a rankings table on the page.")
+
+    # ---- Helpers ----
+    def _to_float(x):
+        if x is None:
+            return np.nan
+        s = str(x).strip()
+        if s in {"#N/A", "N/A", "", "-", "—"}:
+            return np.nan
+        s = re.sub(r"[£$,%]", "", s)
+        s = s.replace("\u200b", "").replace("\xa0", "").strip()
+        try:
+            return float(s)
+        except ValueError:
+            return np.nan
+
+    def _to_int(x):
+        val = _to_float(x)
+        if np.isnan(val):
+            return np.nan
+        return int(round(val))
+
+    def _normalize_pos_text(txt):
+        if pd.isna(txt):
+            return np.nan
+        s = str(txt).upper().strip()
+        if s in {"F", "FW", "FWD", "FORWARD"}: return "F"
+        if s in {"M", "MID", "MIDFIELDER"}:    return "M"
+        if s in {"D", "DEF", "DEFENDER"}:      return "D"
+        if s in {"G", "GK", "GKP", "GOALKEEPER"}: return "G"
+        if s in {"#N/A", "N/A", "", "-", "—"}: return np.nan
+        return s
+
+    def _infer_position(row):
+        ranks = {
+            "F": row.get("FW Rank"),
+            "M": row.get("MID Rank"),
+            "D": row.get("DEF Rank"),
+            "G": row.get("GK Rank"),
+        }
+        valid = {k: v for k, v in ranks.items() if pd.notna(v) and v > 0}
+        if not valid:
+            return np.nan
+        return min(valid, key=valid.get)  # best (lowest) rank wins
+
+    # ---- Extract rows ----
+    rows = table.find("tbody").find_all("tr") if table.find("tbody") else table.find_all("tr")
+    data = []
+    for tr in rows:
+        tds = tr.find_all("td")
+        if len(tds) != 12:
+            continue
+        cells = [td.get_text(strip=True) for td in tds]
+        data.append({
+            "Overall Rank": cells[0],
+            "FW Rank":      cells[1],
+            "MID Rank":     cells[2],
+            "DEF Rank":     cells[3],
+            "GK Rank":      cells[4],
+            "Player":       cells[5],
+            "Team":         cells[6],
+            "Position":     cells[7],
+            "Price":        cells[8],
+            "TSB %":        cells[9],
+            "Points":       cells[10],
+            "PP/90":        cells[11],
+        })
+
+    if not data:
+        raise ValueError("No ranking rows found; table structure may have changed.")
+
+    df = pd.DataFrame(data)
+
+    # ---- Type coercion ----
+    for col in ["FW Rank", "MID Rank", "DEF Rank", "GK Rank", "Points", "PP/90", "Price"]:
+        df[col] = df[col].apply(_to_float)
+    df["TSB %"] = df["TSB %"].apply(_to_float)
+    df["Overall Rank"] = df["Overall Rank"].apply(_to_int)
+
+    # Normalize provided Position text (if any)
+    df["Position"] = df["Position"].apply(_normalize_pos_text)
+
+    # ---- Infer Position where missing/#N/A ----
+    missing_pos_mask = df["Position"].isna()
+    if missing_pos_mask.any():
+        df.loc[missing_pos_mask, "Position"] = df[missing_pos_mask].apply(_infer_position, axis=1)
+
+    # ---- Defaults ----
+    df["Price"] = df["Price"].apply(lambda x: 4.5 if (pd.isna(x) or x <= 0) else x)
+    df["TSB %"] = df["TSB %"].fillna(0.0)
+
+    # ---- Derived metrics ----
+    df["Pos Rank"] = (
+        df[["FW Rank", "MID Rank", "DEF Rank", "GK Rank"]]
+        .fillna(0)
+        .sum(axis=1)
+        .round()
+        .astype(int)
+    )
+    df["Value"] = df.apply(
+        lambda r: (r["Points"] / r["Price"]) if (pd.notna(r["Points"]) and r["Price"] > 0) else np.nan,
+        axis=1
+    )
+
+    # ---- Optional limiting ----
+    if limit:
+        if df["Overall Rank"].notna().any():
+            df = df.sort_values(["Overall Rank", "Player"], na_position="last").head(limit)
+        else:
+            df = df.sort_values("Points", ascending=False, na_position="last").head(limit)
+
+    # ---- Final cleanup ----
+    df = df.reset_index(drop=True)
+    df.index = df.index + 1
+
+    desired_cols = [
+        "Overall Rank", "FW Rank", "MID Rank", "DEF Rank", "GK Rank",
+        "Player", "Team", "Position", "Price", "TSB %", "Points", "PP/90",
+        "Pos Rank", "Value"
+    ]
+    df = df[[c for c in desired_cols if c in df.columns]]
+
+    return df
 
 def get_league_player_ownership(league_id):
     """
