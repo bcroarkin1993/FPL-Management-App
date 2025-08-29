@@ -1,10 +1,11 @@
+from datetime import datetime, timedelta
+import pandas as pd
 import random
 import requests
-import pandas as pd
 import streamlit as st
-from datetime import datetime
 from typing import Tuple
 from scripts.utils import get_current_gameweek
+from scripts.discord_alerts import send_transactions_reminder
 
 # ---------- optional local tz (EST) ----------
 try:
@@ -27,7 +28,7 @@ table { font-size: 0.95rem; }
 </style>
 """
 
-# ---------- helpers ----------
+# ---------- FPL helpers ----------
 def _get_teams_reference() -> Tuple[pd.DataFrame, dict, dict]:
     data = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
     teams_df = pd.DataFrame(data.get("teams", []))[["id", "name", "short_name"]].rename(
@@ -59,6 +60,71 @@ def _fetch_fixtures_range(start_gw: int, end_gw: int) -> pd.DataFrame:
         return df
     df["KickoffDT"] = df.get("kickoff_time", pd.Series([None]*len(df))).apply(_to_est_dt)
     return df
+
+def _parse_kickoff_utc(kickoff_str: str) -> datetime:
+    """
+    Parse FPL kickoff_time strings like '2024-12-03T19:30:00Z' to aware UTC datetime.
+    """
+    if not kickoff_str:
+        raise ValueError("Missing kickoff_time")
+    # Handle trailing 'Z'
+    return datetime.fromisoformat(kickoff_str.replace("Z", "+00:00"))
+
+def _next_upcoming_kickoff_utc(fixtures_raw: dict) -> datetime:
+    """
+    Given the raw fixtures dict (event -> list[match]), return the earliest upcoming UTC kickoff.
+    Expects each fixture dict to have 'kickoff_time' and 'finished' keys.
+    """
+    upcoming = []
+    for _, matches in fixtures_raw.items():
+        for m in matches:
+            # Skip finished or missing times
+            if m.get("finished") is True:
+                continue
+            kt = m.get("kickoff_time")
+            if kt:
+                try:
+                    upcoming.append(_parse_kickoff_utc(kt))
+                except Exception:
+                    continue
+    if not upcoming:
+        return None
+    return min(upcoming)
+
+def _compute_deadline_et(kickoff_utc: datetime) -> datetime:
+    """
+    Your rule: deadline is 25h30m before the first match kickoff.
+    Returned in America/New_York (ET).
+    """
+    et = ZoneInfo("America/New_York")
+    deadline_utc = kickoff_utc - timedelta(hours=25, minutes=30)
+    return deadline_utc.astimezone(et)
+
+def _compute_primary_alert_et(deadline_et: datetime, kickoff_et: datetime) -> datetime:
+    """
+    Heuristic to match your examples:
+      - If the first match is on Friday (ET), primary reminder at Thu 10:00 ET.
+      - If the first match is early Saturday (<=09:00 ET), primary reminder at Thu 18:00 ET.
+      - Otherwise: 6 hours before the deadline (rounded to nearest 30m).
+    """
+    # Friday kickoff -> Thursday 10:00 ET
+    if kickoff_et.weekday() == 4:  # Fri
+        return deadline_et.replace(hour=10, minute=0, second=0, microsecond=0)
+
+    # Early Saturday kickoff -> Thursday 18:00 ET
+    if kickoff_et.weekday() == 5 and kickoff_et.hour <= 9:  # Sat <= 09:00
+        # The deadline is Friday morning; "primary" is Thursday evening
+        thursday = (deadline_et - timedelta(days=1)).date()
+        return datetime.combine(thursday, datetime.min.time(), tzinfo=deadline_et.tzinfo).replace(hour=18)
+
+    # Default: 6 hours before deadline (rounded to nearest 30 minutes)
+    cand = deadline_et - timedelta(hours=6)
+    minute = 0 if cand.minute < 30 else 30
+    return cand.replace(minute=minute, second=0, microsecond=0)
+
+def _fmt_et(dt: datetime) -> str:
+    """Nicely format ET timestamps for Discord/UI."""
+    return dt.strftime("%a %b %d, %I:%M %p ET")
 
 def _styler_hide_index(styler):
     """
@@ -227,6 +293,52 @@ def show_club_fixtures_section():
 
     fixtures_raw = _fetch_fixtures_range(start_gw, start_gw + weeks - 1)
     club_long = _make_club_fixtures_long(fixtures_raw)
+
+    # --- Discord Alerts panel ---
+    st.markdown("### 🔔 Discord Alerts")
+
+    # 1) Find next kickoff
+    next_ko_utc = _next_upcoming_kickoff_utc(fixtures_raw)
+    if not next_ko_utc:
+        st.info("No upcoming fixtures found — alerts will show once new fixtures are listed.")
+    else:
+        et = ZoneInfo("America/New_York")
+        kickoff_et = next_ko_utc.astimezone(et)
+
+        # 2) Compute deadline + suggested alert times
+        deadline_et = _compute_deadline_et(next_ko_utc)
+        primary_et = _compute_primary_alert_et(deadline_et, kickoff_et)
+        last30_et = deadline_et - timedelta(minutes=30)
+
+        # 3) Show info
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Next Kickoff (ET)", _fmt_et(kickoff_et))
+        with c2:
+            st.metric("Transaction Deadline (ET)", _fmt_et(deadline_et))
+        with c3:
+            st.metric("Last 30-min Reminder", _fmt_et(last30_et))
+
+        st.caption("Deadline uses kickoff − 25h30m per your rule of thumb.")
+
+        # 4) Buttons to send reminders now
+        col_a, col_b = st.columns(2)
+        if col_a.button("Send Primary Reminder Now"):
+            ok = send_transactions_reminder(
+                league_name="FPL Draft",
+                deadline_str_local=_fmt_et(deadline_et),
+                notes=f"Primary reminder (suggested time: {_fmt_et(primary_et)}).",
+                # webhook_url=...  # optional override; otherwise discord_alerts pulls from config/.env
+            )
+            st.success("Primary reminder sent!") if ok else st.error("Discord rejected the message.")
+
+        if col_b.button("Send 30-Minute Reminder Now"):
+            ok = send_transactions_reminder(
+                league_name="FPL Draft",
+                deadline_str_local=_fmt_et(deadline_et),
+                notes="30 minutes to go!",
+            )
+            st.success("30-minute reminder sent!") if ok else st.error("Discord rejected the message.")
 
     # ---- Upper content (tables) ----
     st.subheader("All Clubs — Sorted Fixture List")

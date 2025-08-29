@@ -10,6 +10,10 @@ import requests
 from typing import Optional
 import unicodedata
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
+
+# Set timezone
+TZ_ET = ZoneInfo("America/New_York")
 
 def remove_duplicate_words(name):
     """
@@ -190,6 +194,29 @@ def get_current_gameweek():
         current_gameweek = game_data['current_event']
 
     return current_gameweek
+
+def get_earliest_kickoff_et(gw: int) -> datetime:
+    """
+    Pull fixtures for the given GW from the classic FPL endpoint and
+    return the earliest kickoff in ET.
+    """
+    r = requests.get(config.FPL_FIXTURES_BY_EVENT.format(gw=gw), timeout=20)
+    r.raise_for_status()
+    fixtures = r.json()
+    # Filter fixtures that actually have a kickoff_time
+    times = []
+    for fx in fixtures:
+        k = fx.get("kickoff_time")
+        if not k:
+            continue
+        # k is ISO string in UTC, e.g., "2024-12-03T19:30:00Z"
+        # Normalize 'Z' to '+00:00' for fromisoformat
+        k2 = k.replace("Z", "+00:00")
+        dt_utc = datetime.fromisoformat(k2)
+        times.append(dt_utc.astimezone(TZ_ET))
+    if not times:
+        raise RuntimeError(f"No kickoff times found for GW {gw}")
+    return min(times)
 
 def get_draft_picks(league_id):
     """
@@ -999,16 +1026,10 @@ def clean_fpl_player_names(fpl_players_df, projections_df, fuzzy_threshold=80, l
     # Extract candidate names from projections
     projection_names = projections_df['Player'].tolist()
 
-    # Update FPL DataFrame with cleaned player names (handle for different naming formats)
-    try:
-        fpl_players_df['Player'] = fpl_players_df.apply(
-            lambda row: find_best_match(row['Player'], row['Team'], row['Position'], projection_names), axis=1
-        )
-    except KeyError:
-        fpl_players_df['player'] = fpl_players_df.apply(
-            lambda row: find_best_match(row['player'], row['team_name'], row['position_abbrv'], projection_names),
-            axis=1
-        )
+    # Update FPL DataFrame with cleaned player names
+    fpl_players_df['Player'] = fpl_players_df.apply(
+        lambda row: find_best_match(row['Player'], row['Team'], row['Position'], projection_names), axis=1
+    )
 
     return fpl_players_df
 
@@ -1049,8 +1070,7 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df):
     Returns:
     - merged_df: DataFrame with players, projections, and any missing players shown with NA values.
     """
-    print("MERGING FPL PLAYERS AND PROJECTIONS")
-    print(f"FPL Players DF:\n{fpl_players_df}\nProjections DF:\n{projections_df}")
+
     merged_data = []
 
     for _, fpl_row in fpl_players_df.iterrows():
@@ -1083,8 +1103,6 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df):
 
     # Create the DataFrame
     merged_df = pd.DataFrame(merged_data)
-
-    print(f"Merged DF:\n{merged_df}")
 
     # Reorder columns
     merged_df = merged_df[['Player', 'Team', 'Matchup', 'Position', 'Points', 'Pos Rank']]
