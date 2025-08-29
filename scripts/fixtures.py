@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import random
 import requests
@@ -70,26 +70,60 @@ def _parse_kickoff_utc(kickoff_str: str) -> datetime:
     # Handle trailing 'Z'
     return datetime.fromisoformat(kickoff_str.replace("Z", "+00:00"))
 
-def _next_upcoming_kickoff_utc(fixtures_raw: dict) -> datetime:
+def _flatten_fixtures(fixtures_raw):
     """
-    Given the raw fixtures dict (event -> list[match]), return the earliest upcoming UTC kickoff.
-    Expects each fixture dict to have 'kickoff_time' and 'finished' keys.
+    Accepts either:
+      - a list of match dicts, or
+      - a dict mapping gameweek -> list of match dicts (as in your example)
+    Returns a flat list of match dicts; adds '_gw' to each when possible.
     """
-    upcoming = []
-    for _, matches in fixtures_raw.items():
-        for m in matches:
-            # Skip finished or missing times
-            if m.get("finished") is True:
+    if isinstance(fixtures_raw, dict):
+        flat = []
+        for gw, matches in fixtures_raw.items():
+            if not isinstance(matches, list):
                 continue
-            kt = m.get("kickoff_time")
-            if kt:
-                try:
-                    upcoming.append(_parse_kickoff_utc(kt))
-                except Exception:
-                    continue
-    if not upcoming:
-        return None
-    return min(upcoming)
+            for m in matches:
+                if isinstance(m, dict):
+                    mm = dict(m)
+                    # Try to carry gameweek as int
+                    try:
+                        mm["_gw"] = int(gw)
+                    except Exception:
+                        mm["_gw"] = m.get("event")
+                    flat.append(mm)
+        return flat
+    elif isinstance(fixtures_raw, list):
+        return [m for m in fixtures_raw if isinstance(m, dict)]
+    return []
+
+def _next_upcoming_kickoff_utc(fixtures_raw):
+    """
+    Return the earliest upcoming kickoff (UTC) as a datetime, or None if none.
+    Works whether fixtures_raw is a list of match dicts or a {gw: [matches]} dict.
+    """
+    matches = _flatten_fixtures(fixtures_raw)
+    now = datetime.now(timezone.utc)
+
+    upcoming_times = []
+    for m in matches:
+        # Skip finished matches
+        if m.get("finished") is True:
+            continue
+
+        ko = m.get("kickoff_time")
+        if not ko:
+            continue
+
+        # Parse ISO Z timestamps like "2024-12-03T19:30:00Z"
+        try:
+            ko_dt = datetime.fromisoformat(ko.replace("Z", "+00:00"))
+        except Exception:
+            continue
+
+        if ko_dt > now:
+            upcoming_times.append(ko_dt)
+
+    return min(upcoming_times) if upcoming_times else None
 
 def _compute_deadline_et(kickoff_utc: datetime) -> datetime:
     """
