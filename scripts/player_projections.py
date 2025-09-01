@@ -1,6 +1,28 @@
 import config
 import streamlit as st
-from scripts.utils import get_rotowire_player_projections
+from scripts.utils import get_rotowire_player_projections, get_rotowire_rankings_url
+
+def rotowire_url_selector():
+    st.subheader("Rotowire Rankings URL")
+    auto_url = get_rotowire_rankings_url()
+
+    if auto_url:
+        st.success(f"Auto-detected article URL:\n{auto_url}")
+    else:
+        st.warning("Could not auto-detect this week’s rankings article from Rotowire.")
+
+    manual_url = st.text_input(
+        "Override URL (optional)",
+        value=auto_url or "",
+        placeholder="https://www.rotowire.com/soccer/article/...",
+        help="Paste the Rotowire rankings article URL here if auto-detect fails."
+    )
+
+    # Always return whichever is non-empty; manual takes precedence if edited
+    final_url = manual_url.strip() or auto_url
+    if not final_url:
+        st.info("No URL selected yet.")
+    return final_url
 
 def show_player_projections_page():
     st.title("FPL Player Projections")
@@ -10,7 +32,12 @@ def show_player_projections_page():
     num_players1 = st.slider("Select the number of players to display:", min_value=5, max_value=250, value=100, step=5)
 
     # Pull FPL player projections from Rotowire
-    player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL, num_players1)
+    if config.ROTOWIRE_URL:
+        player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL, num_players1)
+    # Allow user to add FPL player projection URL if the auto-retrieval fails
+    else:
+        url = rotowire_url_selector()
+        player_projections = get_rotowire_player_projections(url, num_players1)
 
     # Limit columns to show in player_projections
     player_projections = player_projections[['Player', 'Position', 'Team', 'Matchup', 'Points', 'Pos Rank']]

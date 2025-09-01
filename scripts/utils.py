@@ -1,11 +1,19 @@
 from bs4 import BeautifulSoup
 from collections import defaultdict
 import config
+from datetime import datetime
 from fuzzywuzzy import process
+import numpy as np
 import pandas as pd
 import re
 import requests
+from typing import Optional
 import unicodedata
+from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
+
+# Set timezone
+TZ_ET = ZoneInfo("America/New_York")
 
 def remove_duplicate_words(name):
     """
@@ -187,6 +195,29 @@ def get_current_gameweek():
 
     return current_gameweek
 
+def get_earliest_kickoff_et(gw: int) -> datetime:
+    """
+    Pull fixtures for the given GW from the classic FPL endpoint and
+    return the earliest kickoff in ET.
+    """
+    r = requests.get(config.FPL_FIXTURES_BY_EVENT.format(gw=gw), timeout=20)
+    r.raise_for_status()
+    fixtures = r.json()
+    # Filter fixtures that actually have a kickoff_time
+    times = []
+    for fx in fixtures:
+        k = fx.get("kickoff_time")
+        if not k:
+            continue
+        # k is ISO string in UTC, e.g., "2024-12-03T19:30:00Z"
+        # Normalize 'Z' to '+00:00' for fromisoformat
+        k2 = k.replace("Z", "+00:00")
+        dt_utc = datetime.fromisoformat(k2)
+        times.append(dt_utc.astimezone(TZ_ET))
+    if not times:
+        raise RuntimeError(f"No kickoff times found for GW {gw}")
+    return min(times)
+
 def get_draft_picks(league_id):
     """
     Fetches the draft picks for each team in the league and returns a dictionary with team_id as the key,
@@ -241,7 +272,7 @@ def get_fpl_player_mapping():
     Fetches FPL player data from the FPL Draft API and returns it as a dictionary to link player ids to player names.
 
     Returns:
-    - fpl_player_mapping (dict): {player_id: {'Player': 'Name', 'Team': 'XYZ', 'Position': 'M'}
+    - fpl_player_data: DataFrame with columns 'Player_ID', 'Player', 'Team', and 'Position'.
     """
     # Fetch data from the FPL Draft API
     player_url = "https://draft.premierleague.com/api/bootstrap-static"
@@ -250,16 +281,33 @@ def get_fpl_player_mapping():
     # Extract relevant player information
     player_data = response.json()
     players = player_data['elements']
+    teams = player_data.get('teams', [])
 
     # Create a mapping of player IDs to player information
-    fpl_player_map = {
-        player['id']: {
-            'Player': f"{player['first_name']} {player['second_name']}",
-            'Team': player_data['teams'][player['team'] - 1]['short_name'],  # Map team ID to team short name
-            'Position': ['G', 'D', 'M', 'F'][player['element_type'] - 1]  # Map element type to position
+    fpl_player_map = {}
+
+    for player in players:
+        player_id = player.get('id')
+        first_name = player.get('first_name', '')
+        second_name = player.get('second_name', '')
+        full_name = f"{first_name} {second_name}"
+
+        web_name = player.get('web_name', '').strip()
+        if not web_name or web_name == full_name:
+            web_name = None  # treat as missing if it's the same as full name or blank
+
+        team_index = player.get('team', 0) - 1  # team index is 1-based
+        position_index = player.get('element_type', 1) - 1
+
+        team_short_name = teams[team_index]['short_name'] if 0 <= team_index < len(teams) else 'Unknown'
+        position = ['G', 'D', 'M', 'F'][position_index] if 0 <= position_index < 4 else 'Unknown'
+
+        fpl_player_map[player_id] = {
+            'Player': full_name,
+            'Web_Name': web_name,
+            'Team': team_short_name,
+            'Position': position
         }
-        for player in players
-    }
 
     return fpl_player_map
 
@@ -335,45 +383,66 @@ def get_gameweek_fixtures(league_id, gameweek):
 
     return gameweek_fixtures
 
-def get_rotowire_rankings_url():
+def get_rotowire_rankings_url(current_gameweek=None, timeout=15):
     """
-    Fetches the full article URL for the latest Fantasy Premier League Player Rankings.
+    Try to locate the Rotowire 'Fantasy Premier League Player Rankings: Gameweek X'
+    article on the /soccer/articles/ index. Handles new slugs with extra words.
 
     Returns:
-    - str: The full URL to the latest Rotowire player rankings article, or None if not found.
+        str | None  -> fully qualified article URL or None if not found.
     """
+    # If you have a helper, use it; otherwise leave current_gameweek optional
+    if current_gameweek is None:
+        try:
+            current_gameweek = get_current_gameweek()  # your existing function
+        except Exception:
+            current_gameweek = None
+
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        # Rotowire soccer homepage
-        base_url = "https://www.rotowire.com"
-        soccer_url = base_url + "/soccer/"
-        response = requests.get(soccer_url)
-        response.raise_for_status()  # Ensure the request was successful
-
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        # Get the current gameweek from your helper function
-        current_gameweek = get_current_gameweek()
-
-        # Article title to search for
-        target_title = f"Fantasy Premier League Player Rankings: Gameweek {current_gameweek}"
-
-        # Find all compact article sections
-        articles = soup.find_all('div', class_='compact-article__main')
-
-        # Iterate through the articles to find the matching one
-        for article in articles:
-            link_tag = article.find('a', class_='compact-article__link')
-            if link_tag and target_title in link_tag.text:
-                # Construct the correct URL without double '/soccer/' issue
-                article_url = base_url + link_tag['href']
-                return article_url
-
-        print(f"No article found for Gameweek {current_gameweek}.")
-        return None  # Explicitly return None if no matching article is found
-
-    except Exception as e:
-        print(f"Error fetching the Rotowire rankings URL: {e}")
+        resp = requests.get(config.ARTICLES_INDEX, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+    except Exception:
         return None
+
+    soup = BeautifulSoup(resp.content, "html.parser")
+
+    # Find any anchors whose href contains our base slug
+    anchors = soup.select('a[href*="fantasy-premier-league-player-rankings-gameweek-"]')
+
+    # Regex: capture GW and the trailing numeric article id
+    # works for both:
+    # ...gameweek-9-86285
+    # ...gameweek-1-fpl-west-ham-jarrod-bowen-95015
+    pat = re.compile(
+        r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?-(\d+)$"
+    )
+
+    candidates = []
+    for a in anchors:
+        href = a.get("href", "").strip()
+        if not href:
+            continue
+        m = pat.search(href)
+        if m:
+            gw = int(m.group(1))
+            art_id = int(m.group(2))
+            candidates.append((gw, art_id, urljoin(config.ARTICLES_INDEX, href)))
+
+    if not candidates:
+        return None
+
+    if current_gameweek is not None:
+        # Prefer exact gameweek; if multiple, highest article id
+        exact = [c for c in candidates if c[0] == current_gameweek]
+        if exact:
+            return max(exact, key=lambda x: x[1])[2]
+
+        # Else pick closest GW; break ties by newest article id
+        return min(candidates, key=lambda x: (abs(x[0] - current_gameweek), -x[1]))[2]
+
+    # If we don't know the GW, return the newest relevant article by id
+    return max(candidates, key=lambda x: x[1])[2]
 
 def get_rotowire_player_projections(url, limit=None):
     """
@@ -454,6 +523,155 @@ def get_rotowire_player_projections(url, limit=None):
     player_rankings.index = player_rankings.index + 1
 
     return player_rankings
+
+def get_rotowire_season_rankings(url: str, limit: Optional[int] = None) -> pd.DataFrame:
+    """
+    Scrape Rotowire's season-long FPL rankings table.
+
+    Expected columns (12 per row):
+      'Overall Rank', 'FW Rank', 'MID Rank', 'DEF Rank', 'GK Rank',
+      'Player', 'Team', 'Position', 'Price', 'TSB %', 'Points', 'PP/90'
+
+    Enhancements:
+      - Robust parsing of '#N/A', 'N/A', '-', '—' -> treated as missing
+      - Infer Position from which of the rank columns has a valid rank if Position is missing/#N/A
+      - Default Price to 4.5 if missing/nonpositive
+      - Default TSB % to 0.0 if missing
+      - Compute Pos Rank (sum of positional ranks) and Value (Points/Price)
+      - Index starts at 1
+    """
+    # ---- Fetch & parse page ----
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.content, "html.parser")
+
+    table = soup.select_one("table.article-table__tablesorter.article-table__standard.article-table__figure")
+    if table is None:
+        table = soup.select_one("table.article-table__tablesorter") or soup.find("table")
+    if table is None:
+        raise ValueError("Could not locate a rankings table on the page.")
+
+    # ---- Helpers ----
+    def _to_float(x):
+        if x is None:
+            return np.nan
+        s = str(x).strip()
+        if s in {"#N/A", "N/A", "", "-", "—"}:
+            return np.nan
+        s = re.sub(r"[£$,%]", "", s)
+        s = s.replace("\u200b", "").replace("\xa0", "").strip()
+        try:
+            return float(s)
+        except ValueError:
+            return np.nan
+
+    def _to_int(x):
+        val = _to_float(x)
+        if np.isnan(val):
+            return np.nan
+        return int(round(val))
+
+    def _normalize_pos_text(txt):
+        if pd.isna(txt):
+            return np.nan
+        s = str(txt).upper().strip()
+        if s in {"F", "FW", "FWD", "FORWARD"}: return "F"
+        if s in {"M", "MID", "MIDFIELDER"}:    return "M"
+        if s in {"D", "DEF", "DEFENDER"}:      return "D"
+        if s in {"G", "GK", "GKP", "GOALKEEPER"}: return "G"
+        if s in {"#N/A", "N/A", "", "-", "—"}: return np.nan
+        return s
+
+    def _infer_position(row):
+        ranks = {
+            "F": row.get("FW Rank"),
+            "M": row.get("MID Rank"),
+            "D": row.get("DEF Rank"),
+            "G": row.get("GK Rank"),
+        }
+        valid = {k: v for k, v in ranks.items() if pd.notna(v) and v > 0}
+        if not valid:
+            return np.nan
+        return min(valid, key=valid.get)  # best (lowest) rank wins
+
+    # ---- Extract rows ----
+    rows = table.find("tbody").find_all("tr") if table.find("tbody") else table.find_all("tr")
+    data = []
+    for tr in rows:
+        tds = tr.find_all("td")
+        if len(tds) != 12:
+            continue
+        cells = [td.get_text(strip=True) for td in tds]
+        data.append({
+            "Overall Rank": cells[0],
+            "FW Rank":      cells[1],
+            "MID Rank":     cells[2],
+            "DEF Rank":     cells[3],
+            "GK Rank":      cells[4],
+            "Player":       cells[5],
+            "Team":         cells[6],
+            "Position":     cells[7],
+            "Price":        cells[8],
+            "TSB %":        cells[9],
+            "Points":       cells[10],
+            "PP/90":        cells[11],
+        })
+
+    if not data:
+        raise ValueError("No ranking rows found; table structure may have changed.")
+
+    df = pd.DataFrame(data)
+
+    # ---- Type coercion ----
+    for col in ["FW Rank", "MID Rank", "DEF Rank", "GK Rank", "Points", "PP/90", "Price"]:
+        df[col] = df[col].apply(_to_float)
+    df["TSB %"] = df["TSB %"].apply(_to_float)
+    df["Overall Rank"] = df["Overall Rank"].apply(_to_int)
+
+    # Normalize provided Position text (if any)
+    df["Position"] = df["Position"].apply(_normalize_pos_text)
+
+    # ---- Infer Position where missing/#N/A ----
+    missing_pos_mask = df["Position"].isna()
+    if missing_pos_mask.any():
+        df.loc[missing_pos_mask, "Position"] = df[missing_pos_mask].apply(_infer_position, axis=1)
+
+    # ---- Defaults ----
+    df["Price"] = df["Price"].apply(lambda x: 4.5 if (pd.isna(x) or x <= 0) else x)
+    df["TSB %"] = df["TSB %"].fillna(0.0)
+
+    # ---- Derived metrics ----
+    df["Pos Rank"] = (
+        df[["FW Rank", "MID Rank", "DEF Rank", "GK Rank"]]
+        .fillna(0)
+        .sum(axis=1)
+        .round()
+        .astype(int)
+    )
+    df["Value"] = df.apply(
+        lambda r: (r["Points"] / r["Price"]) if (pd.notna(r["Points"]) and r["Price"] > 0) else np.nan,
+        axis=1
+    )
+
+    # ---- Optional limiting ----
+    if limit:
+        if df["Overall Rank"].notna().any():
+            df = df.sort_values(["Overall Rank", "Player"], na_position="last").head(limit)
+        else:
+            df = df.sort_values("Points", ascending=False, na_position="last").head(limit)
+
+    # ---- Final cleanup ----
+    df = df.reset_index(drop=True)
+    df.index = df.index + 1
+
+    desired_cols = [
+        "Overall Rank", "FW Rank", "MID Rank", "DEF Rank", "GK Rank",
+        "Player", "Team", "Position", "Price", "TSB %", "Points", "PP/90",
+        "Pos Rank", "Value"
+    ]
+    df = df[[c for c in desired_cols if c in df.columns]]
+
+    return df
 
 def get_league_player_ownership(league_id):
     """
@@ -560,39 +778,79 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
     Parameters:
     - league_id (int): The ID of the league.
     - team_id (int): The team ID of the team to fetch.
-    - gameweek: The gameweek for which to determine the team's composition.
+    - gameweek (int | None): The gameweek for which to determine the team's composition.
 
     Returns:
-    - DataFrame containing player name, team, and position for the specified gameweek.
+    - DataFrame with columns ['Player', 'Team', 'Position'] for the specified gameweek.
     """
-    # Fetch player and team mappings
+    # Coerce IDs and settle the gameweek
+    try:
+        league_id = int(league_id)
+    except (TypeError, ValueError):
+        raise ValueError("league_id must be an integer")
+
+    try:
+        team_id = int(team_id)
+    except (TypeError, ValueError):
+        raise ValueError("team_id must be an integer")
+
+    if gameweek is None:
+        # Fallback to your helper if you allow None
+        try:
+            gameweek = int(get_current_gameweek())
+        except Exception:
+            # If even that fails, treat as "no cap" on transactions
+            gameweek = None
+    else:
+        try:
+            gameweek = int(gameweek)
+        except (TypeError, ValueError):
+            gameweek = None
+
+    # Player map: {player_id: {'Player', 'Team', 'Position'}}
     player_map = get_fpl_player_mapping()
 
-    # Initialize the team composition with the initial draft picks
-    draft_picks = get_starting_team_composition(league_id)
-    team_composition = set(draft_picks.get(team_id, {}).get('players', []))
+    # Reverse map for fast name->id lookup (built from the same source as starting comp)
+    name_to_id = {v['Player']: k for k, v in player_map.items()}
 
-    # Apply relevant transactions to the team composition
+    # Starting composition (names)
+    starting = get_starting_team_composition(league_id)  # {team_id: {'team_name':..., 'players': [names...]}, ...}
+    team_start = starting.get(int(team_id), {})
+    team_composition = set(team_start.get('players', []))  # set of player NAMES
+
+    # Apply approved transactions up to gameweek (convert IDs -> names using player_map)
     transactions = get_waiver_transactions_up_to_gameweek(league_id, gameweek)
     for tx in transactions:
-        if tx['entry'] == team_id and tx['result'] == 'a':
-            # Convert player IDs to names using player_map
-            player_in = player_map.get(tx['element_in'], {}).get('Player', f"Unknown ({tx['element_in']})")
-            player_out = player_map.get(tx['element_out'], {}).get('Player', f"Unknown ({tx['element_out']})")
+        if tx.get('entry') == int(team_id) and tx.get('result') == 'a':
+            pid_in = tx.get('element_in')
+            pid_out = tx.get('element_out')
 
-            # Update the team composition
-            team_composition.remove(player_out)
-            team_composition.add(player_in)
+            # Map IDs to FPL names; if missing, keep a label that won't break
+            name_in = player_map.get(pid_in, {}).get('Player', f"Unknown ({pid_in})")
+            name_out = player_map.get(pid_out, {}).get('Player', f"Unknown ({pid_out})")
 
-    # Convert the team composition to a DataFrame with player details
-    player_data = [
-        player_map.get(player_id, {'Player': player_name, 'Team': 'Unknown', 'Position': 'Unknown'})
-        for player_name, player_id in [(player, next((k for k, v in player_map.items() if v['Player'] == player), None))
-                                       for player in team_composition]
-    ]
+            # Update the name-based composition defensively
+            team_composition.discard(name_out)   # discard avoids KeyError if not present
+            team_composition.add(name_in)
 
-    fpl_players_df = pd.DataFrame(player_data)
-    return(fpl_players_df)
+    # Build the output rows using the map; if a name can't be mapped back, fill Unknowns
+    rows = []
+    for name in sorted(team_composition):
+        pid = name_to_id.get(name)
+        if pid is not None and pid in player_map:
+            rows.append({
+                'Player': player_map[pid]['Player'],
+                'Team':   player_map[pid]['Team'],
+                'Position': player_map[pid]['Position'],
+            })
+        else:
+            rows.append({
+                'Player': name,
+                'Team':   'Unknown',
+                'Position': 'Unknown',
+            })
+
+    return pd.DataFrame(rows, columns=['Player', 'Team', 'Position'])
 
 def get_team_id_by_name(league_id, team_name):
     """
@@ -689,23 +947,50 @@ def get_team_projections(player_rankings, league_id, team_id):
 
 def get_waiver_transactions_up_to_gameweek(league_id, gameweek):
     """
-    Fetches all transactions (waivers, free agent moves, etc.) up to the selected gameweek.
+    Fetches all transactions (waivers, free agent moves, etc.) up to (and including) the selected gameweek.
+    Safely handles cases where the API returns transactions with a null/absent 'event'.
 
     Parameters:
-    - league_id: The league ID for transactions.
-    - gameweek: The gameweek to fetch transactions up to.
+    - league_id (int|str): The league ID for transactions.
+    - gameweek (int|None): The gameweek to filter transactions up to. If None, returns only transactions
+                           that have a valid integer 'event' (no upper limit).
 
     Returns:
-    - transactions: A list of transactions that occurred up to the given gameweek.
+    - List[dict]: Transactions up to the given gameweek with valid integer 'event' values.
     """
-    transaction_url = f"https://draft.premierleague.com/api/draft/league/{league_id}/transactions"
-    transaction_response = requests.get(transaction_url)
-    transactions = transaction_response.json()['transactions']
+    # Coerce inputs
+    try:
+        league_id = int(league_id)
+    except (TypeError, ValueError):
+        raise ValueError("league_id must be an integer")
 
-    # Filter transactions by gameweek
-    filtered_transactions = [tx for tx in transactions if tx['event'] <= gameweek]
+    # Coerce gameweek if provided; allow None
+    if gameweek is not None:
+        try:
+            gameweek = int(gameweek)
+        except (TypeError, ValueError):
+            # If coercion fails, treat as None (no upper bound)
+            gameweek = None
 
-    return filtered_transactions
+    # Fetch transactions
+    url = f"https://draft.premierleague.com/api/draft/league/{league_id}/transactions"
+    resp = requests.get(url)
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+
+    transactions = data.get('transactions', []) or []
+
+    # Keep only transactions that have a valid integer event
+    tx_with_event = [tx for tx in transactions if isinstance(tx.get('event'), int)]
+
+    # If no upper bound, return all with valid event
+    if gameweek is None:
+        return tx_with_event
+
+    # Otherwise, filter by event <= gameweek
+    return [tx for tx in tx_with_event if tx['event'] <= gameweek]
 
 def clean_fpl_player_names(fpl_players_df, projections_df, fuzzy_threshold=80, lower_fuzzy_threshold=60):
     """
