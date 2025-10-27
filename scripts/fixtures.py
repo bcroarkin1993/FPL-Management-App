@@ -4,7 +4,7 @@ import random
 import requests
 import streamlit as st
 from typing import Tuple
-from scripts.utils import get_current_gameweek
+from scripts.utils import get_current_gameweek, get_fixture_difficulty_grid, style_fixture_difficulty
 from scripts.discord_alerts import send_transactions_reminder
 
 # ---------- optional local tz (EST) ----------
@@ -306,6 +306,15 @@ def _render_text_schedule_two_cols(fixtures_df: pd.DataFrame):
 def show_club_fixtures_section():
     st.markdown(_COMPACT_CSS, unsafe_allow_html=True)
     st.header("📅 Club Fixtures & Difficulty (FDR)")
+
+    # --- NEW: Fixture Difficulty Grid ---
+    with st.expander("Fixture Difficulty Grid (overview)", expanded=True):
+        weeks = st.slider("Horizon (GWs)", 3, 12, 6, 1, key="fdr_horizon")
+        disp, diffs, avg = get_fixture_difficulty_grid(weeks=weeks)
+        st.markdown(style_fixture_difficulty(disp, diffs).to_html(), unsafe_allow_html=True)
+        st.caption(
+            "Rows = Team; cells = that team’s own fixtures (H/A) colored by FPL difficulty (1 easy → 5 hard). Sorted by average difficulty over the horizon.")
+    # ------------------------------------
 
     # ---- Filters (TOP) ----
     try:
