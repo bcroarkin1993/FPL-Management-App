@@ -2,18 +2,188 @@ from bs4 import BeautifulSoup
 from collections import defaultdict
 import config
 from datetime import datetime
-from fuzzywuzzy import process
+from fuzzywuzzy import process, fuzz
 import numpy as np
 import pandas as pd
 import re
 import requests
-from typing import Optional
+from typing import Dict, List, Any, Optional
 import unicodedata
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 # Set timezone
 TZ_ET = ZoneInfo("America/New_York")
+
+def _norm_text(x: str) -> str:
+    """Lowercase, strip accents, collapse spaces for fuzzy matching."""
+    s = str(x).strip()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = " ".join(s.lower().split())
+    return s
+
+def _backfill_player_ids(roster_df: pd.DataFrame, fpl_stats: pd.DataFrame) -> pd.DataFrame:
+    """
+    For rows where Player_ID is NaN, fill via fuzzy match against fpl_stats
+    constrained by Team and Position (prefer exact team+pos matches).
+    Safe if any expected columns are missing.
+    """
+    df = roster_df.copy()
+
+    # Ensure required columns exist
+    for col in ("Player", "Team", "Position"):
+        if col not in df.columns:
+            df[col] = np.nan
+    if "Player_ID" not in df.columns:
+        df["Player_ID"] = np.nan
+
+    # Prepare candidate table safely
+    cand = fpl_stats.copy()
+    for col in ("Player", "Team", "Position", "Player_ID"):
+        if col not in cand.columns:
+            cand[col] = np.nan
+
+    # Normalized names for matching
+    def _norm_text(x: str) -> str:
+        s = str(x or "").strip()
+        s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+        return " ".join(s.lower().split())
+
+    cand["__name_norm"] = cand["Player"].apply(_norm_text)
+    df["__name_norm"]   = df["Player"].apply(_norm_text)
+
+    # Indices to backfill
+    try:
+        missing_idx = df[df["Player_ID"].isna()].index
+    except KeyError:
+        # Safety: create it and mark all as missing
+        df["Player_ID"] = np.nan
+        missing_idx = df.index
+
+    for i in missing_idx:
+        name_norm = df.at[i, "__name_norm"]
+        team = df.at[i, "Team"]
+        pos  = df.at[i, "Position"]
+
+        # Try team+pos scope; then pos; then all
+        scope = cand[(cand["Team"] == team) & (cand["Position"] == pos)]
+        if scope.empty:
+            scope = cand[cand["Position"] == pos]
+        if scope.empty:
+            scope = cand
+
+        if scope.empty or scope["__name_norm"].isna().all():
+            continue
+
+        match = process.extractOne(name_norm, scope["__name_norm"].dropna().tolist(), scorer=fuzz.WRatio)
+        if match:
+            m_name, score = match[0], match[1]
+            if score >= 85:
+                pid = scope.loc[scope["__name_norm"] == m_name, "Player_ID"]
+                if not pid.empty and pd.notna(pid.iloc[0]):
+                    df.at[i, "Player_ID"] = float(pid.iloc[0])
+
+    return df.drop(columns=["__name_norm"], errors="ignore")
+
+def _add_fdr_and_form(
+    df: pd.DataFrame,
+    fpl_player_statistics_df: pd.DataFrame,
+    current_gw: int,
+    weeks: int
+) -> pd.DataFrame:
+    """
+    Join AvgFDRNextN and Form onto df.
+
+    - Requires df to have Player/Team/Position (will create if missing).
+    - Merges in Player_ID, then computes Form via element-summary.
+    - Fallback chain for Form: element-summary -> FPL 'form' -> 'points_per_game' -> 0.
+    """
+    base = df.copy()
+    # Ensure join keys exist
+    for col in ("Player", "Team", "Position"):
+        if col not in base.columns:
+            base[col] = np.nan
+
+    # Safely select merge cols from stats
+    stats = fpl_player_statistics_df.copy()
+    for col in ("Player", "Team", "Position", "Player_ID", "form", "points_per_game"):
+        if col not in stats.columns:
+            stats[col] = np.nan
+
+    # Merge in Player_ID + FPL fallback stats
+    base = base.merge(
+        stats[["Player", "Team", "Position", "Player_ID", "form", "points_per_game"]],
+        on=["Player", "Team", "Position"],
+        how="left"
+    )
+
+    # Ensure Player_ID exists (for downstream)
+    if "Player_ID" not in base.columns:
+        base["Player_ID"] = np.nan
+
+    # Compute Avg FDR next N GWs
+    base["AvgFDRNextN"] = base["Team"].apply(lambda t: _avg_fdr_for_team(str(t), current_gw, weeks))
+    base["AvgFDRNextN"] = pd.to_numeric(base["AvgFDRNextN"], errors="coerce")
+
+    # Robust Form calculation with fallbacks
+    def _safe_form(pid, fallback_form, fallback_ppg):
+        # element-summary average of last N
+        val = None
+        if pd.notna(pid):
+            try:
+                val = _avg_form_last_n(int(pid), config.FORM_LOOKBACK_WEEKS)
+            except Exception:
+                val = None
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            val = pd.to_numeric(fallback_form, errors="coerce")
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            val = pd.to_numeric(fallback_ppg, errors="coerce")
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            val = 0.0
+        return float(val)
+
+    base["Form"] = base.apply(
+        lambda r: _safe_form(r.get("Player_ID"), r.get("form"), r.get("points_per_game")),
+        axis=1
+    )
+    base["Form"] = pd.to_numeric(base["Form"], errors="coerce").fillna(0.0)
+
+    return base
+
+def attach_availability(df: pd.DataFrame, avail_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Left-merge PlayPct/StatusBucket/News onto df using Player+Team first,
+    then try Player_ID if present.
+    """
+    base = df.copy()
+    cols_keep = ["PlayPct","StatusBucket","News"]
+    # Try exact Player+Team first (your normalizers map Team to short codes)
+    base = base.merge(
+        avail_df[["Player","Team","PlayPct","StatusBucket","News"]],
+        on=["Player","Team"], how="left", suffixes=("","")
+    )
+    # If still missing and we have IDs, try by Player_ID
+    if "Player_ID" in base.columns and "Player_ID" in avail_df.columns:
+        mask = base["PlayPct"].isna()
+        if mask.any():
+            left = base.loc[mask, ["Player_ID"]].copy()
+            right = avail_df[["Player_ID"] + cols_keep].copy()
+            joined = left.merge(right, on="Player_ID", how="left")
+            base.loc[mask, cols_keep] = joined[cols_keep].values
+
+    # Fill PlayPct neutral defaults
+    base["PlayPct"] = pd.to_numeric(base["PlayPct"], errors="coerce").fillna(50.0)
+    base["StatusBucket"] = base["StatusBucket"].fillna("Questionable")
+    base["News"] = base["News"].fillna("")
+    return base
+
+def apply_availability_penalty(df: pd.DataFrame, score_col: str, out_col: str) -> pd.DataFrame:
+    """
+    Multiply a score column by (PlayPct/100) so low availability downweights adds/drops.
+    """
+    out = df.copy()
+    out[out_col] = pd.to_numeric(out[score_col], errors="coerce") * (pd.to_numeric(out["PlayPct"], errors="coerce")/100.0)
+    return out
 
 def remove_duplicate_words(name):
     """
@@ -49,6 +219,14 @@ def check_valid_lineup(df):
 
     # Lineup is valid is all checks are true
     return (player_check & gk_check & def_check & mid_check & fwd_check)
+
+def clean_text(s: Any) -> str:
+    if s is None:
+        return ""
+    if not isinstance(s, str):
+        s = str(s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 def find_optimal_lineup(df):
     """
@@ -353,6 +531,66 @@ def get_transaction_data(league_id):
         config.TRANSACTION_DATA = transaction_response.json()['transactions']  # Store transactions in config
 
     return config.TRANSACTION_DATA
+
+def get_historical_team_scores(league_id: int) -> pd.DataFrame:
+    """
+    Pull per-team weekly scores from the Draft league details endpoint.
+
+    Returns a DataFrame with at least:
+      ['event', 'entry_id', 'entry_name', 'points', 'total_points']
+    (future GWs without scores are excluded)
+
+    Notes:
+    - Uses /api/league/{league_id}/details
+    - Reads 'matches' -> league_entry_1/2(_points)
+    """
+    try:
+        league_id = int(league_id)
+    except (TypeError, ValueError):
+        raise ValueError("league_id must be an integer")
+
+    url = f"https://draft.premierleague.com/api/league/{league_id}/details"
+    data = requests.get(url, timeout=30).json()
+
+    entries = {}
+    for e in data.get("league_entries", []) or []:
+        # 'id' is the league-entry id in this payload
+        eid = e.get("entry_id", e.get("id"))
+        name = e.get("entry_name")
+        if eid is not None and name:
+            entries[int(eid)] = str(name)
+
+    rows = []
+    for m in data.get("matches", []) or []:
+        gw = m.get("event")
+        e1  = m.get("league_entry_1")
+        e2  = m.get("league_entry_2")
+        p1  = m.get("league_entry_1_points")
+        p2  = m.get("league_entry_2_points")
+
+        # Only record rows with realized points
+        if isinstance(gw, int) and p1 is not None and e1 is not None:
+            rows.append({
+                "event": int(gw),
+                "entry_id": int(e1),
+                "entry_name": entries.get(int(e1), f"Team {e1}"),
+                "points": float(p1),
+            })
+        if isinstance(gw, int) and p2 is not None and e2 is not None:
+            rows.append({
+                "event": int(gw),
+                "entry_id": int(e2),
+                "entry_name": entries.get(int(e2), f"Team {e2}"),
+                "points": float(p2),
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=["event", "entry_id", "entry_name", "points", "total_points"])
+
+    df = pd.DataFrame(rows)
+    df["total_points"] = df["points"]  # alias used by the win-prob std estimator
+    df = df.sort_values(["event", "entry_id"]).reset_index(drop=True)
+    return df
 
 def get_gameweek_fixtures(league_id, gameweek):
     # Draft League API URLs
@@ -675,49 +913,77 @@ def get_rotowire_season_rankings(url: str, limit: Optional[int] = None) -> pd.Da
 
 def get_league_player_ownership(league_id):
     """
-    Fetches the player ownership in the league for the current gameweek and groups the players by team and position.
-
-    Parameters:
-    - league_id: The ID of the FPL Draft league.
+    Fetch the current gameweek ownership for a Draft league and group by team (ID) and position.
 
     Returns:
-    - A dictionary structured as:
-      {'Team Name': {'G': [list of goalkeepers], 'D': [list of defenders], 'M': [list of midfielders], 'F': [list of forwards]}}
+      {
+        <team_id>: {
+          "team_name": <str>,
+          "players": {"G": [..], "D":[..], "M":[..], "F":[..]}
+        },
+        ...
+      }
     """
-    # Endpoint URLs
+    # Endpoints
     element_status_url = f"https://draft.premierleague.com/api/league/{league_id}/element-status"
     league_details_url = f"https://draft.premierleague.com/api/league/{league_id}/details"
 
-    # Fetch the element status and league details
-    element_status = requests.get(element_status_url).json()['element_status']
-    league_details = requests.get(league_details_url).json()
+    # --- Fetch data
+    element_status = requests.get(element_status_url, timeout=30).json().get("element_status", [])
+    league_details = requests.get(league_details_url, timeout=30).json()
 
-    # Fetch player and owner mappings
-    player_map = get_fpl_player_mapping()  # {player_id: {'Player': 'Name', 'Team': 'XYZ', 'Position': 'M'}, ...}
-    owner_map = {entry['id']: entry['entry_name'] for entry in league_details['league_entries']}  # {owner_id: 'Team Name'}
+    # --- Build owner (entry) map robustly
+    # Try the helper first (preferred)
+    owner_map = {}
+    try:
+        owner_map = get_league_entries(league_id)  # expected {entry_id: entry_name}
+    except Exception:
+        owner_map = {}
 
-    # Initialize a dictionary to group players by team and position
-    league_ownership = defaultdict(lambda: {'G': [], 'D': [], 'M': [], 'F': []})
+    # Fallback/augment from raw payload; handle both 'entry_id' and 'id'
+    for entry in league_details.get("league_entries", []):
+        eid = entry.get("entry_id", entry.get("id"))
+        name = entry.get("entry_name")
+        if eid is not None and name:
+            owner_map.setdefault(eid, name)
+
+    # --- Player mapping (id -> {Player, Team, Position})
+    player_map = get_fpl_player_mapping()
+
+    # --- Build ownership dict keyed by team_id
+    league_ownership = {}  # not defaultdict to keep final structure explicit
 
     for status in element_status:
-        player_id = status['element']
-        owner_id = status['owner']
-        if owner_id is None:  # Skip players without an owner
+        owner_id = status.get("owner")
+        player_id = status.get("element")
+
+        # Skip unowned
+        if owner_id is None:
             continue
 
-        # Convert player ID to name and position
-        player_info = player_map.get(player_id, {'Player': f"Unknown ({player_id})", 'Position': 'Unknown'})
-        player_name = player_info['Player']
-        player_position = player_info['Position']
+        # Ensure container
+        if owner_id not in league_ownership:
+            team_name = owner_map.get(owner_id, f"Unknown Team ({owner_id})")
+            league_ownership[owner_id] = {
+                "team_name": team_name,
+                "players": {"G": [], "D": [], "M": [], "F": []},
+            }
 
-        # Convert owner ID to team name
-        team_name = owner_map.get(owner_id, f"Unknown Team ({owner_id})")
+        # Resolve player info
+        pinfo = player_map.get(player_id, {"Player": f"Unknown ({player_id})", "Position": None})
+        pname = pinfo.get("Player")
+        pos = pinfo.get("Position")
 
-        # Add the player to the appropriate team and position group
-        if player_position in ['G', 'D', 'M', 'F']:  # Valid positions
-            league_ownership[team_name][player_position].append(player_name)
+        # Only add to valid buckets
+        if pos in {"G", "D", "M", "F"}:
+            league_ownership[owner_id]["players"][pos].append(pname)
 
-    return dict(league_ownership)
+    # Sort player names within each position (optional, nicer display)
+    for blob in league_ownership.values():
+        for pos in ("G", "D", "M", "F"):
+            blob["players"][pos].sort()
+
+    return league_ownership
 
 def get_starting_team_composition(league_id):
     """
@@ -1025,10 +1291,9 @@ def clean_fpl_player_names(fpl_players_df, projections_df, fuzzy_threshold=80, l
 
     # Extract candidate names from projections
     projection_names = projections_df['Player'].tolist()
-
     # Update FPL DataFrame with cleaned player names
-    fpl_players_df['Player'] = fpl_players_df.apply(
-        lambda row: find_best_match(row['Player'], row['Team'], row['Position'], projection_names), axis=1
+    fpl_players_df['player'] = fpl_players_df.apply(
+        lambda row: find_best_match(row['player'], row['team_name'], row['position_abbrv'], projection_names), axis=1
     )
 
     return fpl_players_df
@@ -1057,64 +1322,164 @@ def find_best_match(fpl_player, fpl_team, fpl_position, candidates, projections_
 
     return None
 
-def merge_fpl_players_and_projections(fpl_players_df, projections_df):
+def merge_fpl_players_and_projections(fpl_players_df, projections_df,
+                                      fuzzy_threshold=80, lower_fuzzy_threshold=60):
     """
-    Merges the FPL player data with Rotowire projections based on player name, team, and position.
-
-    Parameters:
-    - fpl_players_df: DataFrame with FPL players ['player', 'team', 'position'].
-    - projections_df: DataFrame with Rotowire projections.
-    - fuzzy_threshold: Default fuzzy matching threshold for player names.
-    - lower_fuzzy_threshold: Lower threshold if team and position match.
-
-    Returns:
-    - merged_df: DataFrame with players, projections, and any missing players shown with NA values.
+    Robust merge of FPL players (Player/Team/Position) with projections.
+    - Normalizes projections_df to RotoWire schema inside the function.
+    - Uses fuzzy matching with stricter acceptance when team+position agree.
+    - Returns a table with players that *did* or *did not* match; unmatched get NA fields.
     """
 
-    merged_data = []
+    # -------- normalize projections to RW schema --------
+    def _normalize_proj(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        # case-insensitive rename
+        rename = {}
+        for c in df.columns:
+            lc = c.strip().lower()
+            if lc in ('player', 'name', 'player_name'):                     rename[c] = 'Player'
+            elif lc in ('team', 'team_short', 'teamname', 'team_name'):     rename[c] = 'Team'
+            elif lc in ('matchup', 'fixture', 'opp', 'opponent'):           rename[c] = 'Matchup'
+            elif lc in ('position', 'pos'):                                 rename[c] = 'Position'
+            elif lc in ('points', 'point', 'proj', 'projection'):           rename[c] = 'Points'
+            elif lc in ('pos rank','pos_rank','position rank','position_rank'):
+                rename[c] = 'Pos Rank'
+            elif lc in ('price',):                                          rename[c] = 'Price'
+            elif lc in ('tsb','tsb%','tsb %','ownership'):                  rename[c] = 'TSB %'
+        if rename:
+            df = df.rename(columns=rename)
 
-    for _, fpl_row in fpl_players_df.iterrows():
-        fpl_player = fpl_row['Player']
-        fpl_team = fpl_row['Team']
-        fpl_position = fpl_row['Position']
+        # ensure required columns exist
+        req_defaults = {
+            'Player': None,
+            'Team': None,
+            'Matchup': '',
+            'Position': None,
+            'Points': np.nan,
+            'Pos Rank': 'NA'
+        }
+        for k, v in req_defaults.items():
+            if k not in df.columns:
+                df[k] = v
 
-        candidates = projections_df['Player'].tolist()
-        best_match = find_best_match(fpl_player, fpl_team, fpl_position, candidates, projections_df)
+        # optional (don’t fail if they don’t exist)
+        if 'Price' not in df.columns:
+            df['Price'] = np.nan
+        if 'TSB %' not in df.columns:
+            df['TSB %'] = np.nan
 
-        if best_match:
-            matched_row = projections_df[projections_df['Player'] == best_match].iloc[0]
-            merged_data.append({
-                'Player': matched_row['Player'],
-                'Team': matched_row['Team'],
-                'Matchup': matched_row.get('Matchup', ''),
-                'Position': matched_row['Position'],
-                'Points': matched_row['Points'],
-                'Pos Rank': matched_row.get('Pos Rank', 'NA')
+        # numeric coercions
+        df['Points'] = pd.to_numeric(df['Points'], errors='coerce')
+        # leave Pos Rank as-is; we'll handle at the end
+
+        # return only the columns we use/expect
+        keep = ['Player','Team','Matchup','Position','Points','Pos Rank','Price','TSB %']
+        return df[[c for c in keep if c in df.columns]]
+
+    proj_norm = _normalize_proj(projections_df)
+
+    # guard: candidates for fuzzy
+    if 'Player' not in proj_norm.columns:
+        raise ValueError(f"Normalized projections missing 'Player' column. Have: {list(proj_norm.columns)}")
+
+    candidates = proj_norm['Player'].dropna().astype(str).unique().tolist()
+
+    # -------- matching strategy --------
+    def _best_match(fpl_player, fpl_team, fpl_position):
+        """
+        Prefer matches *with* same team+position (lower threshold). Otherwise use higher fuzzy threshold.
+        """
+        if not candidates:
+            return None
+
+        # Primary: best name match among all candidates
+        res = process.extractOne(str(fpl_player), candidates)
+        if not res:
+            return None
+        match, score = res[0], res[1]
+
+        # Pull the matched row (first hit)
+        matched_rows = proj_norm[proj_norm['Player'] == match]
+        if matched_rows.empty:
+            return None
+
+        row = matched_rows.iloc[0]
+        match_team = row.get('Team')
+        match_pos  = row.get('Position')
+
+        # If team+position agrees, allow lower threshold
+        if (str(match_team) == str(fpl_team)) and (str(match_pos) == str(fpl_position)):
+            if score >= lower_fuzzy_threshold:
+                return match
+            return None
+
+        # If either differs, require the stricter threshold
+        if score >= fuzzy_threshold:
+            return match
+
+        return None
+
+    # -------- iterate FPL rows and assemble output --------
+    out = []
+    # case-insensitive accessors for FPL columns
+    fpl_cols = {c.lower(): c for c in fpl_players_df.columns}
+    need = {'player','team','position'}
+    missing = need - set(fpl_cols.keys())
+    if missing:
+        raise ValueError(
+            "fpl_players_df must include columns ['Player','Team','Position'] "
+            f"(case-insensitive). Missing: {sorted(missing)}. "
+            f"Columns seen: {list(fpl_players_df.columns)}"
+        )
+
+    for _, r in fpl_players_df.iterrows():
+        fpl_player   = r[fpl_cols['player']]
+        fpl_team     = r[fpl_cols['team']]
+        fpl_position = r[fpl_cols['position']]
+
+        match = _best_match(fpl_player, fpl_team, fpl_position)
+
+        if match:
+            mrow = proj_norm.loc[proj_norm['Player'] == match].iloc[0]
+            out.append({
+                'Player'  : mrow.get('Player'),
+                'Team'    : mrow.get('Team'),
+                'Matchup' : mrow.get('Matchup', ''),
+                'Position': mrow.get('Position'),
+                'Price'   : mrow.get('Price', np.nan),
+                'TSB %'   : mrow.get('TSB %', np.nan),
+                'Points'  : mrow.get('Points'),
+                'Pos Rank': mrow.get('Pos Rank', 'NA')
             })
         else:
-            merged_data.append({
-                'Player': fpl_player,
-                'Team': fpl_team,
-                'Matchup': 'N/A',
+            # keep the original FPL row but with NA projections
+            out.append({
+                'Player'  : fpl_player,
+                'Team'    : fpl_team,
+                'Matchup' : 'N/A',
                 'Position': fpl_position,
-                'Points': float('nan'),
+                'Price'   : np.nan,
+                'TSB %'   : np.nan,
+                'Points'  : np.nan,
                 'Pos Rank': 'NA'
             })
 
-    # Create the DataFrame
-    merged_df = pd.DataFrame(merged_data)
+    merged = pd.DataFrame(out)
 
-    # Reorder columns
-    merged_df = merged_df[['Player', 'Team', 'Matchup', 'Position', 'Points', 'Pos Rank']]
+    # clean Pos Rank => ints or 'NA'
+    pr = pd.to_numeric(merged['Pos Rank'], errors='coerce')
+    pr = pr.round().astype('Int64')  # pandas nullable int
+    # convert to object with 'NA' for missing
+    merged['Pos Rank'] = pr.astype(object).where(pr.notna(), 'NA')
 
-    # Ensure 'Pos Rank' is integer or 'NA'
-    merged_df['Pos Rank'] = pd.to_numeric(merged_df['Pos Rank'], errors='coerce').fillna(-1).astype(int)
-    merged_df['Pos Rank'] = merged_df['Pos Rank'].replace(-1, 'NA')
+    # final column order (don’t fail if some are missing)
+    order = ['Player','Team','Matchup','Position','Price','TSB %','Points','Pos Rank']
+    merged = merged[[c for c in order if c in merged.columns]]
 
-    # Set index to represent overall rank, starting at 1
-    merged_df.index = pd.RangeIndex(start=1, stop=len(merged_df) + 1, step=1)
-
-    return merged_df
+    # 1-based index
+    merged.index = pd.RangeIndex(start=1, stop=len(merged) + 1, step=1)
+    return merged
 
 def normalize_apostrophes(text):
     """
@@ -1130,6 +1495,14 @@ def normalize_apostrophes(text):
         return None
     # Normalize Unicode and replace curly apostrophes with straight apostrophes
     return unicodedata.normalize('NFKC', text).replace('’', "'").strip().lower()
+
+def normalize_name(name: str) -> str:
+    # remove diacritics, normalize spacing/case for matching
+    if name is None:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", name)
+    ascii_str = "".join([c for c in nfkd if not unicodedata.combining(c)])
+    return re.sub(r"\s+", " ", ascii_str).strip()
 
 def position_converter(element_type):
     """Converts element type to position name."""
@@ -1161,3 +1534,315 @@ def team_optimizer(player_rankings):
 
         # Return the DataFrame
         return(final_df)
+
+def _strip_accents(s: str) -> str:
+    """Remove diacritics/accents and normalize whitespace."""
+    if pd.isna(s):
+        return ""
+    s = unicodedata.normalize("NFKD", str(s))
+    s = s.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", s).strip()
+
+def _clean_player_name(s: str) -> str:
+    """Lowercase, remove accents and non-alphanumerics for robust matching keys."""
+    s = _strip_accents(s).lower()
+    s = re.sub(r"[^a-z0-9 ]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def _to_short_team_code(team_val, teams_df=None):
+    """
+    Convert a team value to a 3-letter short code.
+    - If `teams_df` (FPL bootstrap teams) is provided, it should contain id + short_name.
+    - If `team_val` already looks like a 3-letter code, keep it.
+    - Else try mapping via TEAM_FULL_TO_SHORT.
+    """
+    if pd.isna(team_val):
+        return ""
+    s = str(team_val).strip()
+
+    # Already like 'MCI'
+    if re.fullmatch(r"[A-Z]{3}", s):
+        return s
+
+    # Try dictionary mapping (RotoWire-style team strings)
+    if s in TEAM_FULL_TO_SHORT:
+        return TEAM_FULL_TO_SHORT[s]
+
+    # If it's a number and we have teams_df (FPL team id path)
+    if teams_df is not None:
+        try:
+            tid = int(s)
+            row = teams_df.loc[teams_df["id"] == tid]
+            if not row.empty and "short_name" in row.columns:
+                return str(row.iloc[0]["short_name"])
+        except Exception:
+            pass
+
+    # Best effort: return uppercase 3-letter heuristic
+    guess = re.sub(r"[^A-Za-z]", "", s).upper()[:3]
+    return guess if len(guess) == 3 else s
+
+def _map_position_to_rw(pos_val):
+    """Map any reasonable position variant to {'G','D','M','F'}."""
+    if pd.isna(pos_val):
+        return ""
+    p = str(pos_val).strip()
+    # direct mapping
+    if p in POS_MAP_TO_RW:
+        return POS_MAP_TO_RW[p]
+
+    # If it's numeric (FPL element_type: 1..4)
+    if p.isdigit():
+        return { "1": "G", "2": "D", "3": "M", "4": "F" }.get(p, "")
+
+    # Heuristics
+    p_up = p.upper()
+    for key, val in POS_MAP_TO_RW.items():
+        if p_up.startswith(key):
+            return val
+    return p_up[:1]  # fallback: first letter
+
+def normalize_rotowire_players(rotowire_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Take your RotoWire projections DataFrame in any reasonable form and return:
+    columns ['Player','Team','Position', ...], plus helper columns:
+    - 'Team_Short' (3-letter code)
+    - 'Player_Clean' (accent- and punctuation-stripped lower key)
+    No columns are dropped; we just add/fix and standardize casing.
+    """
+    df = rotowire_df.copy()
+
+    # Unify column names (case-insensitive)
+    colmap = {c.lower(): c for c in df.columns}
+    def _get(col):
+        for k in colmap:
+            if k == col.lower():
+                return colmap[k]
+        return None
+
+    # Ensure the three core columns exist
+    pcol = _get("player")  or _get("name")
+    tcol = _get("team")
+    ccol = _get("position") or _get("pos")
+
+    if pcol is None or tcol is None or ccol is None:
+        raise ValueError("RotoWire df must contain columns for player, team, and position.")
+
+    # Standardize names
+    if pcol != "Player":
+        df.rename(columns={pcol: "Player"}, inplace=True)
+    if tcol != "Team":
+        df.rename(columns={tcol: "Team"}, inplace=True)
+    if ccol != "Position":
+        df.rename(columns={ccol: "Position"}, inplace=True)
+
+    # Normalize values
+    df["Player"] = df["Player"].astype(str).map(lambda s: s.strip())
+    df["Team_Short"] = df["Team"].apply(_to_short_team_code)
+    df["Position"]  = df["Position"].apply(_map_position_to_rw)
+    df["Player_Clean"] = df["Player"].map(_clean_player_name)
+
+    return df
+
+def normalize_fpl_players_to_rotowire_schema(fpl_df: pd.DataFrame,
+                                             teams_df: pd.DataFrame = None) -> pd.DataFrame:
+    """
+    Convert an FPL players DataFrame (from bootstrap-static or your in-app tables) into
+    the RotoWire-aligned schema.
+
+    Expected columns (we handle flexible inputs):
+      - Player name source: ('Player') OR ('first_name' + 'second_name') OR ('web_name')
+      - Team source: ('Team') OR numeric `team` id (with teams_df) OR already short code
+      - Position source: ('Position') OR numeric `element_type` OR text variants.
+
+    Returns DF with at least: ['Player','Team','Position','Player_ID','Team_Short','Player_Clean']
+    (we keep other columns you had, too).
+    """
+    df = fpl_df.copy()
+
+    # Column finder (case-insensitive)
+    cmap = {c.lower(): c for c in df.columns}
+    def _c(name):
+        return cmap.get(name.lower())
+
+    # --- Player name ---
+    player_col = _c("Player")
+    if player_col is None:
+        fn, sn, wn = _c("first_name"), _c("second_name"), _c("web_name")
+        if fn and sn:
+            df["Player"] = (df[fn].astype(str).str.strip() + " " + df[sn].astype(str).str.strip()).str.strip()
+        elif wn:
+            df["Player"] = df[wn].astype(str).str.strip()
+        else:
+            raise ValueError("FPL df needs 'Player' or ('first_name' and 'second_name') or 'web_name'.")
+
+    # --- Team ---
+    # Prefer short codes; if the frame has numeric 'team' id + teams_df (bootstrap teams), we can map.
+    if _c("Team") is None:
+        if _c("team") is not None:
+            # numeric team id -> short code via teams_df
+            if teams_df is None or not {"id", "short_name"}.issubset(set(teams_df.columns)):
+                # fallback: try to coerce directly
+                df["Team"] = df[_c("team")].apply(lambda v: _to_short_team_code(v, teams_df=None))
+            else:
+                df["Team"] = df[_c("team")].apply(lambda v: _to_short_team_code(v, teams_df=teams_df))
+        else:
+            # If there's no team col at all, create empty; you can fill later
+            df["Team"] = ""
+
+    # --- Position ---
+    if _c("Position") is None:
+        pos_src = _c("element_type") or _c("pos") or _c("position_abbrv") or _c("position")
+        if pos_src is None:
+            raise ValueError("FPL df needs 'Position' or a mappable source like 'element_type' or 'pos'.")
+        df["Position"] = df[pos_src].apply(_map_position_to_rw)
+
+    # --- Player_ID (optional if present) ---
+    pid_col = _c("id") or _c("player_id")
+    if pid_col:
+        df.rename(columns={pid_col: "Player_ID"}, inplace=True)
+
+    # Normalize values / helpers
+    df["Player"] = df["Player"].astype(str).str.strip()
+    df["Team_Short"] = df["Team"].apply(_to_short_team_code)
+    df["Player_Clean"] = df["Player"].map(_clean_player_name)
+
+    # Reorder helpful basics at front if present
+    front = [c for c in ["Player_ID","Player","Team","Position","Team_Short","Player_Clean"] if c in df.columns]
+    rest = [c for c in df.columns if c not in front]
+    df = df[front + rest]
+
+    return df
+
+def normalize_for_merge(fpl_df: pd.DataFrame,
+                        rotowire_df: pd.DataFrame,
+                        teams_df: pd.DataFrame = None):
+    """
+    Convenience wrapper: returns (fpl_norm, rw_norm) aligned to the same
+    schema so downstream code can rely on ['Player','Team','Position'] and helpers.
+    """
+    fpl_norm = normalize_fpl_players_to_rotowire_schema(fpl_df, teams_df=teams_df)
+    rw_norm  = normalize_rotowire_players(rotowire_df)
+
+    # IMPORTANT: align Team to the same representation (short codes).
+    # RotoWire often uses full names; we add Team_Short there too, and then
+    # overwrite 'Team' to be the short code for both dataframes to make
+    # equality checks reliable.
+    fpl_norm["Team"] = fpl_norm["Team_Short"]
+    rw_norm["Team"]  = rw_norm["Team_Short"]
+
+    return fpl_norm, rw_norm
+
+def _bootstrap_teams_df() -> pd.DataFrame:
+    """Return FPL bootstrap teams as a 2-col DF: id, short_name."""
+    try:
+        resp = requests.get("https://draft.premierleague.com/api/bootstrap-static", timeout=20)
+        resp.raise_for_status()
+        teams = resp.json().get("teams", [])
+        return pd.DataFrame(teams)[["id", "short_name"]]
+    except Exception:
+        # Fallback: empty DF (the normalizer will still attempt heuristics)
+        return pd.DataFrame(columns=["id", "short_name"])
+
+def get_fixture_difficulty_grid(weeks: int = 6):
+    """
+    Returns:
+      disp  : display DF with first col 'Team', then GW columns (strings like 'WHU (H)')
+      diffs : numeric DF (index=team short, cols=GW) with difficulty (1..5, avg if DGW)
+      avg   : Series of per-team average difficulty across horizon (NaN->3 neutral)
+    """
+    current_gw = int(get_current_gameweek())
+
+    teams = _bootstrap_teams_df()  # id, short_name
+    id2short = {int(r.id): str(r.short_name) for _, r in teams.iterrows()}
+
+    cols = [f"GW{gw}" for gw in range(current_gw, current_gw + weeks)]
+    idx  = [id2short[i] for i in sorted(id2short)]
+    disp_core = pd.DataFrame("—", index=idx, columns=cols)
+    diffs     = pd.DataFrame(np.nan, index=idx, columns=cols)
+
+    def _fixtures_for_event(gw: int):
+        """
+        Return fixtures for a single gameweek `gw` from the canonical FPL endpoint.
+        Uses explicit query params so the server actually filters by GW.
+        """
+        url = "https://fantasy.premierleague.com/api/fixtures/"
+        headers = {"User-Agent": "Mozilla/5.0", "Cache-Control": "no-cache"}
+        try:
+            r = requests.get(url, params={"event": int(gw)}, headers=headers, timeout=20)
+            r.raise_for_status()
+            js = r.json()
+            # This endpoint returns only the requested GW as a list
+            return js if isinstance(js, list) else []
+        except Exception:
+            return []
+
+    # Fill each team’s own schedule per GW (no carry-over across columns)
+    for gw, col in zip(range(current_gw, current_gw + weeks), cols):
+        fx = _fixtures_for_event(gw)
+        for f in fx:
+            h, a = f.get("team_h"), f.get("team_a")
+            dh, da = f.get("team_h_difficulty"), f.get("team_a_difficulty")
+            if h is None or a is None:
+                continue
+            hs, as_ = id2short.get(int(h), str(h)), id2short.get(int(a), str(a))
+
+            # Home team cell
+            prev_h = disp_core.at[hs, col]
+            disp_core.at[hs, col] = f"{as_} (H)" if prev_h == "—" else f"{prev_h} / {as_} (H)"
+            diffs.at[hs, col] = np.nanmean([diffs.at[hs, col], float(dh) if dh is not None else np.nan])
+
+            # Away team cell
+            prev_a = disp_core.at[as_, col]
+            disp_core.at[as_, col] = f"{hs} (A)" if prev_a == "—" else f"{prev_a} / {hs} (A)"
+            diffs.at[as_, col] = np.nanmean([diffs.at[as_, col], float(da) if da is not None else np.nan])
+
+    # Sort rows by easiest average run (NaN -> neutral 3)
+    avg = diffs.fillna(3).mean(axis=1)
+    order = avg.sort_values().index
+    disp_core = disp_core.loc[order]
+    diffs = diffs.loc[order]
+    avg = avg.loc[order]
+
+    # Add sticky Team column for Y-axis labels
+    disp = disp_core.copy()
+    disp.insert(0, "Team", disp.index)
+    disp["Avg FDR"] = avg.round(2)
+    return disp, diffs, avg
+
+def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame):
+    """
+    Return a Styler with colors per difficulty.
+    'Team' column is left uncolored (acts as row labels).
+    """
+    PALETTE = {1: "#86efac", 2: "#bbf7d0", 3: "#e5e7eb", 4: "#fecaca", 5: "#b91c1c"}
+    gw_cols = [c for c in disp.columns if c not in ("Team", "Avg FDR")]  # only color GW cells
+
+    def _cell_styles(_):
+        S = pd.DataFrame("", index=disp.index, columns=disp.columns)
+        for r in disp.index:
+            for c in gw_cols:
+                d = diffs.at[r, c]
+                k = 3 if pd.isna(d) else max(1, min(5, int(round(float(d)))))
+                color = PALETTE[k]
+                txt = "#ffffff" if k == 5 else "#111111"
+                S.at[r, c] = f"background-color:{color};color:{txt};text-align:center;font-weight:600;"
+        # keep Team column readable
+        S["Team"] = "font-weight:700;text-align:left;"
+        return S
+
+    sty = (
+        disp.style
+            .apply(_cell_styles, axis=None)
+            .set_properties(subset=gw_cols,
+                            **{"border": "1px solid #ddd", "white-space": "nowrap", "font-size": "0.9rem"})
+            .set_properties(subset=["Team"],
+                            **{"border": "1px solid #ddd", "position": "sticky", "left": "0", "background": "#fff",
+                               "font-weight": "700", "text-align": "left"})
+            .set_properties(subset=["Avg FDR"],
+                            **{"border": "1px solid #ddd", "font-weight": "700", "text-align": "right"})
+            .set_table_styles(
+            [{"selector": "th", "props": [("position", "sticky"), ("top", "0"), ("background", "#fff")]}])
+            .set_table_attributes('class="fdr-table" style="width:100%;"')
+    )
+    return sty

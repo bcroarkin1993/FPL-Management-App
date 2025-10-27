@@ -28,26 +28,41 @@ def show_player_projections_page():
     st.title("FPL Player Projections")
     st.write("Displaying GW player projections from Rotowire.")
 
-    # Slider to limit the number of players shown in the rankings
-    num_players1 = st.slider("Select the number of players to display:", min_value=5, max_value=250, value=100, step=5)
-
     # Pull FPL player projections from Rotowire
     if config.ROTOWIRE_URL:
-        player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL, num_players1)
+        player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL)
     # Allow user to add FPL player projection URL if the auto-retrieval fails
     else:
         url = rotowire_url_selector()
-        player_projections = get_rotowire_player_projections(url, num_players1)
+        player_projections = get_rotowire_player_projections(url)
 
     # Limit columns to show in player_projections
-    player_projections = player_projections[['Player', 'Position', 'Team', 'Matchup', 'Points', 'Pos Rank']]
+    player_projections = player_projections[['Player', 'Team', 'Position', 'Pos Rank', 'Matchup', 'TSB %', 'Points', 'Price']]
 
-    # Text input to filter by player name
-    player_filter = st.text_input("Filter by Player Name", value="")
+    # Create a value column
+    player_projections['Value'] = player_projections['Points'] / player_projections['Price']
 
-    # Multiselect to filter by position (allows multiple positions to be selected)
-    all_positions = player_projections['Position'].unique().tolist()
-    position_filter = st.multiselect("Filter by Position", options=all_positions, default=all_positions)
+    # Controls
+    with st.expander("Filters", expanded=True):
+        colA, colB, = st.columns(2)
+        # Slider to limit the number of players shown in the rankings
+        num_players = colA.slider("Select the number of players to display:", min_value=5, max_value=250, value=100, step=5)
+        # Text input to filter by player name
+        player_filter = colB.text_input("Filter by Player Name", value="")
+
+        col1, col2 = st.columns(2)
+        # Multiselect to filter by position (allows multiple positions to be selected)
+        all_positions = player_projections['Position'].unique().tolist()
+        position_filter = col1.multiselect("Filter by Position", options=all_positions, default=all_positions)
+        # Slider to filter the players by price
+        min_price = min(player_projections['Price'])
+        max_price = max(player_projections['Price'])
+        price_filter = col2.slider("Select a price cap (if desired):", min_value=min_price,
+                                 max_value=max_price, value=max_price, step=.1)
+
+    # Apply filtering based on player display number
+    if num_players:
+        player_projections = player_projections.head(num_players)
 
     # Apply filtering based on player name
     if player_filter:
@@ -56,6 +71,10 @@ def show_player_projections_page():
     # Apply filtering based on selected positions
     if position_filter:
         player_projections = player_projections[player_projections['Position'].isin(position_filter)]
+
+    # Apply filtering based on selected positions
+    if price_filter:
+        player_projections = player_projections[player_projections['Price'] <= price_filter]
 
     # Display FPL player rankings
     st.subheader(f"GW {config.CURRENT_GAMEWEEK} Player Rankings")

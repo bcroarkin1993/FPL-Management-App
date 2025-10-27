@@ -12,6 +12,7 @@ from scripts.draft_helper import show_draft_helper_page # Draft - Draft Helper
 from scripts.player_statistics import show_player_stats_page  # Global player stats
 from scripts.player_projections import show_player_projections_page  # Global player projections
 from scripts.projected_lineups import show_projected_lineups  # Global projected lineups
+from scripts.injuries import show_injuries_page  # Global projected lineups
 
 # ------------------------------------------------------------
 # Page config (must be first Streamlit command in the script)
@@ -21,7 +22,6 @@ st.set_page_config(
     page_icon="⚽",
     layout="wide",
 )
-
 
 # ------------------------------------------------------------
 # Optional: light CSS polish (keeps your existing palette)
@@ -116,6 +116,7 @@ def main():
                 "Projected Lineups",
                 "Player Projections",
                 "Player Statistics",
+                "Player Injuries"
             ],
         )
 
@@ -129,6 +130,8 @@ def main():
             show_player_projections_page()
         elif subpage == "Player Statistics":
             show_player_stats_page()
+        elif subpage == "Player Injuries":
+            show_injuries_page()
 
     elif section == "Draft":
         subpage = st.sidebar.radio(
