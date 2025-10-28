@@ -2,18 +2,23 @@ name: FPL Deadline Notifier
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 30 minutes (fine with 60 min tolerance)
+    - cron: "*/15 * * * *"   # every 15 minutes
   workflow_dispatch:
 
 jobs:
   notify:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.9" }
-      - working-directory: ${{ github.workspace }}
-      - run: |
+        with:
+          python-version: "3.9"
+
+      - name: Sanity import config
+        run: |
           python - <<'PY'
           import os, sys
           print("CWD=", os.getcwd())
@@ -21,7 +26,11 @@ jobs:
           import config
           print("config imported OK")
           PY
-      - run: python -m pip install -r requirements.txt || true
-      - run: python scripts/waiver_alerts.py
+
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt || true
+
+      - name: Run waiver alerts
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python -m scripts.waiver_alerts
