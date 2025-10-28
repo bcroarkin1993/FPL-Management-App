@@ -2,7 +2,12 @@
 from datetime import datetime
 import requests
 from zoneinfo import ZoneInfo
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root so 'config.py' is importable
 import config
+
 from scripts.utils import get_next_transaction_deadline
 TZ = ZoneInfo("America/New_York")
 
