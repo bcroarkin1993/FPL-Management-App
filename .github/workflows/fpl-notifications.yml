@@ -12,6 +12,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.9" }
+      - working-directory: ${{ github.workspace }}
+      - run: |
+          python - <<'PY'
+          import os, sys
+          print("CWD=", os.getcwd())
+          print("sys.path[0]=", sys.path[0])
+          import config
+          print("config imported OK")
+          PY
       - run: python -m pip install -r requirements.txt || true
       - run: python scripts/waiver_alerts.py
         env:
