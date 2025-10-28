@@ -1,7 +1,7 @@
 from bs4 import BeautifulSoup
 from collections import defaultdict
 import config
-from datetime import datetime
+from datetime import datetime, timedelta
 from fuzzywuzzy import process, fuzz
 import numpy as np
 import pandas as pd
@@ -1743,6 +1743,18 @@ def _bootstrap_teams_df() -> pd.DataFrame:
     except Exception:
         # Fallback: empty DF (the normalizer will still attempt heuristics)
         return pd.DataFrame(columns=["id", "short_name"])
+
+def get_next_transaction_deadline(offset_hours: int, gw: int):
+    """
+    Returns (deadline_et, gameweek) where deadline = earliest kickoff - offset_hours.
+    Uses ET, leveraging your get_earliest_kickoff_et(gw).
+    """
+    if offset_hours is None:
+        offset_hours = getattr(config, "TRANSACTION_DEADLINE_HOURS_BEFORE_KICKOFF", 24)
+    if gw is None:
+        gw = int(get_current_gameweek())
+    kickoff_et = get_earliest_kickoff_et(gw)
+    return kickoff_et - timedelta(hours=offset_hours), gw
 
 def get_fixture_difficulty_grid(weeks: int = 6):
     """
