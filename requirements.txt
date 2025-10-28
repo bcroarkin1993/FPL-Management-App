@@ -3,7 +3,6 @@ aiohttp==3.12.15
 aiohttp-retry==2.9.1
 aiosignal==1.4.0
 altair==4.2.2
-altgraph @ file:///System/Volumes/Data/SWE/Apps/DT/BuildRoots/BuildRoot2/ActiveBuildRoot/Library/Caches/com.apple.xbs/Sources/python3/python3-124/altgraph-0.17.2-py2.py3-none-any.whl
 annotated-types==0.7.0
 anyio==4.10.0
 appdirs==1.4.4
@@ -26,7 +25,6 @@ exceptiongroup==1.3.0
 fake-useragent==2.2.0
 fonttools==4.59.1
 frozenlist==1.7.0
-future @ file:///System/Volumes/Data/SWE/Apps/DT/BuildRoots/BuildRoot2/ActiveBuildRoot/Library/Caches/com.apple.xbs/Sources/python3/python3-124/future-0.18.2-py3-none-any.whl
 fuzzywuzzy==0.18.0
 gitdb==4.0.11
 GitPython==3.1.43
@@ -46,7 +44,6 @@ kiwisolver==1.4.7
 levenshtein==0.26.1
 lxml==6.0.1
 lxml-html-clean==0.4.2
-macholib @ file:///System/Volumes/Data/SWE/Apps/DT/BuildRoots/BuildRoot2/ActiveBuildRoot/Library/Caches/com.apple.xbs/Sources/python3/python3-124/macholib-1.15.2-py2.py3-none-any.whl
 markdown-it-py==3.0.0
 MarkupSafe==2.1.5
 matplotlib==3.9.4
@@ -60,7 +57,7 @@ packaging==24.1
 pandas==2.2.2
 parse==1.20.2
 pillow==10.4.0
-playwright==1.55.0
+playwright
 plotly==5.24.0
 propcache==0.3.2
 protobuf==5.28.0
@@ -68,11 +65,11 @@ pyarrow==17.0.0
 pydantic==2.11.7
 pydantic-core==2.33.2
 pydeck==0.9.1
-pyee==13.0.0
+pyee
 pygments==2.18.0
 PyJWT==2.10.1
 pyparsing==3.2.3
-pyppeteer==2.0.0
+pyppeteer
 pyquery==2.0.1
 PySocks==1.7.1
 python-dateutil==2.9.0.post0
@@ -87,7 +84,6 @@ requests-html==0.10.0
 rich==13.8.0
 rpds-py==0.20.0
 selenium==4.35.0
-six @ file:///System/Volumes/Data/SWE/Apps/DT/BuildRoots/BuildRoot2/ActiveBuildRoot/Library/Caches/com.apple.xbs/Sources/python3/python3-124/six-1.15.0-py2.py3-none-any.whl
 smmap==5.0.1
 sniffio==1.3.1
 sortedcontainers==2.4.0

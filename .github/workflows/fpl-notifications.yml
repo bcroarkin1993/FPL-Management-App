@@ -2,17 +2,34 @@ name: FPL Deadline Notifier
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 30 minutes (fine with 60 min tolerance)
+    - cron: "*/15 * * * *"   # every 15 minutes
   workflow_dispatch:
 
 jobs:
   notify:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: { python-version: "3.9" }
-      - run: python -m pip install -r requirements.txt || true
-      - run: python scripts/waiver_alerts.py
+        with:
+          python-version: "3.9"
+
+      - name: Create runtime config.py
+        run: |
+          cat > config.py << 'PY'
+          FPL_DRAFT_LEAGUE_ID = int("${{ secrets.FPL_DRAFT_LEAGUE_ID }}")
+          TRANSACTION_DEADLINE_HOURS_BEFORE_KICKOFF = int("${{ secrets.FPL_DEADLINE_OFFSET_HOURS || 24 }}")
+          PY
+
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt || true
+
+      - name: Run waiver alerts
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python -m scripts.waiver_alerts
