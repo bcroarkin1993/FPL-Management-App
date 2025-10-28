@@ -5,7 +5,7 @@ import requests
 import streamlit as st
 from typing import Tuple
 from scripts.utils import get_current_gameweek, get_fixture_difficulty_grid, style_fixture_difficulty
-from scripts.discord_alerts import send_transactions_reminder
+from scripts.waiver_alerts import send_transactions_reminder
 
 # ---------- optional local tz (EST) ----------
 try:
