@@ -1,7 +1,6 @@
 # scripts/waiver_alerts.py
 from datetime import datetime
 import requests
-from discordwebhook import Discord
 from zoneinfo import ZoneInfo
 import config
 from scripts.utils import get_next_transaction_deadline

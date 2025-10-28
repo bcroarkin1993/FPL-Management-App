@@ -1,5 +1,4 @@
 from bs4 import BeautifulSoup
-from collections import defaultdict
 import config
 from datetime import datetime, timedelta
 from fuzzywuzzy import process, fuzz
