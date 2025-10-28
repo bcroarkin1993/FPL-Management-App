@@ -19,35 +19,16 @@ jobs:
         with:
           python-version: "3.9"
 
-      # Diagnose repo layout & ensure config.py is visible at repo root
-      - name: Sanity check repo & config.py
+      - name: Create runtime config.py
         run: |
-          echo "CWD=$(pwd)"
-          echo "Top-level files:"
-          ls -la
-          echo "scripts/ directory:"
-          ls -la scripts || true
-          python - <<'PY'
-          import os, sys
-          from pathlib import Path
-          root = Path(os.getcwd())
-          print("sys.path[0]=", sys.path[0])
-          cfg = root / "config.py"
-          print("config.py exists:", cfg.exists(), "->", cfg)
-          if not cfg.exists():
-              raise SystemExit("ERROR: config.py not found at repo root.")
-          # Try a direct import-by-path to prove readability
-          import importlib.util
-          spec = importlib.util.spec_from_file_location("config", str(cfg))
-          mod = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(mod)
-          print("Loaded config via file OK. Keys:", [k for k in dir(mod) if k.isupper()][:8])
+          cat > config.py << 'PY'
+          FPL_DRAFT_LEAGUE_ID = int("${{ secrets.FPL_DRAFT_LEAGUE_ID }}")
+          TRANSACTION_DEADLINE_HOURS_BEFORE_KICKOFF = int("${{ secrets.FPL_DEADLINE_OFFSET_HOURS || 24 }}")
           PY
 
       - name: Install requirements
         run: python -m pip install -r requirements.txt || true
 
-      # Run as a module so the repo root is on sys.path and `import config` resolves
       - name: Run waiver alerts
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
