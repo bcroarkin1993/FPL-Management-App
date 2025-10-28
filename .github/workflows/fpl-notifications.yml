@@ -13,7 +13,6 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.9" }
       - run: python -m pip install -r requirements.txt || true
-      - run: PYTHONPATH="$GITHUB_WORKSPACE" python scripts/waiver_alerts.py
       - run: python scripts/waiver_alerts.py
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
