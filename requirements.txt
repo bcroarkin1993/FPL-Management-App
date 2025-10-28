@@ -57,7 +57,7 @@ packaging==24.1
 pandas==2.2.2
 parse==1.20.2
 pillow==10.4.0
-playwright==1.55.0
+playwright
 plotly==5.24.0
 propcache==0.3.2
 protobuf==5.28.0
@@ -65,11 +65,11 @@ pyarrow==17.0.0
 pydantic==2.11.7
 pydantic-core==2.33.2
 pydeck==0.9.1
-pyee==13.0.0
+pyee
 pygments==2.18.0
 PyJWT==2.10.1
 pyparsing==3.2.3
-pyppeteer==2.0.0
+pyppeteer
 pyquery==2.0.1
 PySocks==1.7.1
 python-dateutil==2.9.0.post0
