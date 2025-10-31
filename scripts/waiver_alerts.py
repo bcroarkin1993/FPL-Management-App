@@ -34,17 +34,17 @@ def _earliest_kickoff_et(gw: int) -> datetime:
         raise RuntimeError(f"No kickoff times found for GW {gw}")
     return min(times)
 
-def get_next_transaction_deadline(offset_hours: int = 24, gw: int = None):
+def get_next_transaction_deadline(offset_hours: float = 25.5, gw: int = None):
     """Returns (deadline_et, gw). Deadline = earliest kickoff - offset."""
     if gw is None:
         gw = _get_current_gameweek()
     kickoff_et = _earliest_kickoff_et(gw)
-    return kickoff_et - timedelta(hours=int(offset_hours)), gw
+    return kickoff_et - timedelta(hours=offset_hours), gw
 
 def main():
     # ---- Secrets / env (all provided via GitHub Actions) ----
     webhook = os.getenv("DISCORD_WEBHOOK_URL", "")
-    offset_h = int(os.getenv("FPL_DEADLINE_OFFSET_HOURS", "24"))
+    offset_h = os.getenv("FPL_DEADLINE_OFFSET_HOURS", "25")
     gw_env = os.getenv("FPL_CURRENT_GAMEWEEK")
     gw = int(gw_env) if gw_env and gw_env.isdigit() else None
 

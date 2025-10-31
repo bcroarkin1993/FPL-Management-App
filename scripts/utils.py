@@ -282,7 +282,6 @@ def format_team_name(name):
     # Capitalize the first letter of each word
     return ' '.join(word.capitalize() for word in normalized_name.split())
 
-
 def pull_fpl_player_stats():
     # Set FPL Draft API endpoint
     draft_api = 'https://draft.premierleague.com/api/bootstrap-static'
@@ -315,6 +314,7 @@ def pull_fpl_player_stats():
 
     # Create a DataFrame from the Player dictionary ('elements')
     player_df = pd.DataFrame.from_records(data_json['elements'])
+    print(f"Player_DF Columns: {player_df.columns}")
 
     # Create Full Name Column
     player_df['player'] = player_df['first_name'] + ' ' + player_df['second_name']
@@ -328,10 +328,11 @@ def pull_fpl_player_stats():
     player_df = pd.merge(player_df, position_df, left_on='element_type', right_on='position_id')
 
     # Organize columns
-    cols = ['id', 'player', 'position_abbrv', 'team_name', 'clean_sheets', 'goals_scored',
+    cols = ['id', 'player', 'position_abbrv', 'team_name', 'clean_sheets', 'saves', 'goals_scored',
             'assists', 'minutes', 'own_goals', 'penalties_missed', 'penalties_saved', 'red_cards', 'yellow_cards',
             'starts', 'expected_goals', 'expected_assists', 'expected_goal_involvements', 'expected_goals_conceded',
             'creativity', 'influence', 'bonus', 'bps', 'form', 'points_per_game', 'total_points',
+            'clearances_blocks_interceptions', 'recoveries', 'tackles', 'defensive_contribution',
             'corners_and_indirect_freekicks_order', 'corners_and_indirect_freekicks_text', 'direct_freekicks_order',
             'direct_freekicks_text', 'penalties_order', 'penalties_text', 'chance_of_playing_this_round',
             'chance_of_playing_next_round', 'status', 'added']
@@ -1839,21 +1840,27 @@ def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame):
                 txt = "#ffffff" if k == 5 else "#111111"
                 S.at[r, c] = f"background-color:{color};color:{txt};text-align:center;font-weight:600;"
         # keep Team column readable
-        S["Team"] = "font-weight:700;text-align:left;"
+        S["Team"] = "font-weight:700;text-align:center;"
         return S
 
+    # center GW headers (x-axis labels) + ensure Avg FDR shows 2 decimals
     sty = (
         disp.style
             .apply(_cell_styles, axis=None)
             .set_properties(subset=gw_cols,
                             **{"border": "1px solid #ddd", "white-space": "nowrap", "font-size": "0.9rem"})
-            .set_properties(subset=["Team"],
-                            **{"border": "1px solid #ddd", "position": "sticky", "left": "0", "background": "#fff",
-                               "font-weight": "700", "text-align": "left"})
-            .set_properties(subset=["Avg FDR"],
-                            **{"border": "1px solid #ddd", "font-weight": "700", "text-align": "right"})
-            .set_table_styles(
-            [{"selector": "th", "props": [("position", "sticky"), ("top", "0"), ("background", "#fff")]}])
+            .set_properties(subset=["Team"], **{
+                "border": "1px solid #ddd", "position": "sticky", "left": "0", "background": "#fff",
+                "font-weight": "700", "text-align": "center"
+            })
+            .set_properties(subset=["Avg FDR"], **{
+                "border": "1px solid #ddd", "font-weight": "700", "text-align": "center"
+            })
+            .set_table_styles([
+                {"selector": "th",
+                 "props": [("position", "sticky"), ("top", "0"), ("background", "#fff"), ("text-align", "center")]}, # <<< center x-axis labels
+                ])
             .set_table_attributes('class="fdr-table" style="width:100%;"')
+            .format({"Avg FDR": "{:.2f}"})  # <<< force rounding to 2dp in HTML
     )
     return sty

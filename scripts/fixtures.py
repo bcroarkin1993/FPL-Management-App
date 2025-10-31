@@ -1,11 +1,9 @@
 from datetime import datetime, timedelta, timezone
 import pandas as pd
-import random
 import requests
 import streamlit as st
 from typing import Tuple
 from scripts.utils import get_current_gameweek, get_fixture_difficulty_grid, style_fixture_difficulty
-from scripts.waiver_alerts import send_transactions_reminder
 
 # ---------- optional local tz (EST) ----------
 try:
@@ -309,7 +307,7 @@ def show_club_fixtures_section():
 
     # --- NEW: Fixture Difficulty Grid ---
     with st.expander("Fixture Difficulty Grid (overview)", expanded=True):
-        weeks = st.slider("Horizon (GWs)", 3, 12, 6, 1, key="fdr_horizon")
+        weeks = st.slider("Horizon (GWs)", 1, 10, 6, 1, key="fdr_horizon")
         disp, diffs, avg = get_fixture_difficulty_grid(weeks=weeks)
         st.markdown(style_fixture_difficulty(disp, diffs).to_html(), unsafe_allow_html=True)
         st.caption(
@@ -322,6 +320,9 @@ def show_club_fixtures_section():
     except Exception:
         current_gw = None
     current_gw = current_gw or 1
+
+    # ---- Upper content (tables) ----
+    st.subheader("All Clubs — Sorted Fixture List")
 
     f1, f2, f3 = st.columns([1, 1, 1])
     with f1:
@@ -336,55 +337,6 @@ def show_club_fixtures_section():
 
     fixtures_raw = _fetch_fixtures_range(start_gw, start_gw + weeks - 1)
     club_long = _make_club_fixtures_long(fixtures_raw)
-
-    # --- Discord Alerts panel ---
-    st.markdown("### 🔔 Discord Alerts")
-
-    # 1) Find next kickoff
-    next_ko_utc = _next_upcoming_kickoff_utc(fixtures_raw)
-    if not next_ko_utc:
-        st.info("No upcoming fixtures found — alerts will show once new fixtures are listed.")
-    else:
-        et = ZoneInfo("America/New_York")
-        kickoff_et = next_ko_utc.astimezone(et)
-
-        # 2) Compute deadline + suggested alert times
-        deadline_et = _compute_deadline_et(next_ko_utc)
-        primary_et = _compute_primary_alert_et(deadline_et, kickoff_et)
-        last30_et = deadline_et - timedelta(minutes=30)
-
-        # 3) Show info
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric("Next Kickoff (ET)", _fmt_et(kickoff_et))
-        with c2:
-            st.metric("Transaction Deadline (ET)", _fmt_et(deadline_et))
-        with c3:
-            st.metric("Last 30-min Reminder", _fmt_et(last30_et))
-
-        st.caption("Deadline uses kickoff − 25h30m per your rule of thumb.")
-
-        # 4) Buttons to send reminders now
-        col_a, col_b = st.columns(2)
-        if col_a.button("Send Primary Reminder Now"):
-            ok = send_transactions_reminder(
-                league_name="FPL Draft",
-                deadline_str_local=_fmt_et(deadline_et),
-                notes=f"Primary reminder (suggested time: {_fmt_et(primary_et)}).",
-                # webhook_url=...  # optional override; otherwise discord_alerts pulls from config/.env
-            )
-            st.success("Primary reminder sent!") if ok else st.error("Discord rejected the message.")
-
-        if col_b.button("Send 30-Minute Reminder Now"):
-            ok = send_transactions_reminder(
-                league_name="FPL Draft",
-                deadline_str_local=_fmt_et(deadline_et),
-                notes="30 minutes to go!",
-            )
-            st.success("30-minute reminder sent!") if ok else st.error("Discord rejected the message.")
-
-    # ---- Upper content (tables) ----
-    st.subheader("All Clubs — Sorted Fixture List")
 
     match_tbl = _make_match_table(fixtures_raw)
 
@@ -411,55 +363,6 @@ def show_club_fixtures_section():
             ),
         },
     )
-
-    # ---- Text Fixtures Table (MIDDLE) ----
-    left, right = st.columns([1.75, 1])
-
-    # All matches (one row per match), with FDR color for both sides, ascending by kickoff
-    with left:
-        st.subheader("🔎 Team Fixture Table")
-        clubs_available = sorted(club_long["Club"].dropna().unique().tolist())
-        if clubs_available:
-            default_team = random.choice(clubs_available)
-            default_idx = clubs_available.index(default_team)
-            team_pick = st.selectbox("Select a team", options=clubs_available, index=default_idx)
-            team_tbl = (club_long[club_long["Club"] == team_pick]
-                        [["Gameweek", "Date (EST)", "Time (EST)", "Opponent", "Venue", "FDR", "KickoffDT"]]
-                        .sort_values("KickoffDT")
-                        .drop(columns=["KickoffDT"])
-                        .reset_index(drop=True))
-            styled_team_tbl = _styler_hide_index(team_tbl.style.map(_fdr_bg, subset=["FDR"]))
-            st.write(styled_team_tbl, unsafe_allow_html=True)
-        else:
-            st.info("No team fixtures in the selected window.")
-
-    with right:
-        # Average Upcoming FDR (sorted ascending)
-        st.subheader("Average Upcoming FDR")
-        if team_filter:
-            club_long = club_long[club_long["Club"].isin(team_filter)]
-
-        fdr_summary = (
-            club_long.dropna(subset=["FDR"])
-                .groupby("Club", as_index=False)
-                .agg(Avg_FDR=("FDR", "mean"), Matches=("FDR", "count"))
-        )
-
-        # ensure numeric + round values
-        fdr_summary["Avg_FDR"] = pd.to_numeric(fdr_summary["Avg_FDR"], errors="coerce").round(1)
-
-        # sort by the numeric column
-        fdr_summary = fdr_summary.sort_values("Avg_FDR", ascending=True).reset_index(drop=True)
-
-        # style: apply background & enforce 1-decimal display
-        styled_summary = (
-            fdr_summary.style
-                .format({"Avg_FDR": "{:.1f}"})  # <-- enforce display rounding
-                .applymap(_fdr_bg, subset=["Avg_FDR"])  # keep your color gradient
-        )
-        styled_summary = _styler_hide_index(styled_summary)
-
-        st.write(styled_summary, unsafe_allow_html=True)
 
     # ---- Text Fixtures (BOTTOM) ----
     st.subheader("🗓️ Fixtures (Text View)")
