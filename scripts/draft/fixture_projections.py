@@ -2,7 +2,7 @@ import config
 import math
 import pandas as pd
 import streamlit as st
-from scripts.utils import find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures, \
+from scripts.common.utils import find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures, \
     get_team_id_by_name, get_rotowire_player_projections, get_team_composition_for_gameweek, \
     merge_fpl_players_and_projections, normalize_apostrophes, get_historical_team_scores
 

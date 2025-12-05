@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any, List
 import config
 from openai import OpenAI
 
-from scripts.utils import (
+from scripts.common.utils import (
     get_current_gameweek,
     merge_fpl_players_and_projections,
     get_league_player_ownership,
@@ -18,7 +18,6 @@ from scripts.utils import (
     normalize_fpl_players_to_rotowire_schema,
     normalize_rotowire_players,
     _bootstrap_teams_df,
-    _norm_text,
     _backfill_player_ids
 )
 
