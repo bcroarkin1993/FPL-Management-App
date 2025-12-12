@@ -17,27 +17,34 @@ FPL_DRAFT_BASE = "https://draft.premierleague.com/api"
 
 
 # ==============================================================================
-# GENERAL HELPERS
+# 1. CORE FETCHERS & HELPERS (ORIGINAL LOGIC)
 # ==============================================================================
 
 def get_current_gameweek() -> int:
+    """
+    Returns the next relevant gameweek (event).
+    """
     try:
-        url = "https://fantasy.premierleague.com/api/bootstrap-static/"
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
+        # Try 'game' endpoint first
+        r = requests.get(f"{FPL_DRAFT_BASE}/game", timeout=10)
         data = r.json()
-        for event in data.get("events", []):
-            if event.get("finished") is False:
-                return int(event["id"])
-        return 1
-    except Exception as e:
-        print(f"Error fetching current gameweek: {e}")
-        return 1
+        if data.get('current_event_finished'):
+            return int(data['next_event'])
+        return int(data['current_event'])
+    except:
+        # Fallback to bootstrap
+        try:
+            url = "https://fantasy.premierleague.com/api/bootstrap-static/"
+            r = requests.get(url, timeout=10)
+            data = r.json()
+            for event in data.get("events", []):
+                if event.get("finished") is False:
+                    return int(event["id"])
+            return 38
+        except Exception as e:
+            print(f"Error fetching current gameweek: {e}")
+            return 1
 
-
-# ==============================================================================
-# DRAFT ENDPOINTS
-# ==============================================================================
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_bootstrap_static() -> Dict[str, Any]:
@@ -48,6 +55,7 @@ def get_bootstrap_static() -> Dict[str, Any]:
 
 
 def pull_fpl_player_stats() -> pd.DataFrame:
+    """Fetches all player statistics (elements)."""
     data = get_bootstrap_static()
     elements = data.get("elements", [])
     if not elements:
@@ -96,100 +104,68 @@ def get_draft_league_teams(league_id: int) -> dict:
     return {e['id']: e['entry_name'] for e in entries}
 
 
+def get_league_entries(league_id: int) -> Dict[int, str]:
+    """Helper for utils: Entry ID -> Entry Name"""
+    return get_draft_league_teams(league_id)
+
+
+def get_league_teams(league_id):
+    """Wrapper for config caching of league teams."""
+    if config.LEAGUE_DATA is None:
+        config.LEAGUE_DATA = get_draft_league_teams(league_id)
+    return config.LEAGUE_DATA
+
+
 # ==============================================================================
-# PLAYER MAPPING & OWNERSHIP
+# 2. PLAYER MAPPING & TRANSACTION REPLAY LOGIC (CRITICAL RESTORATION)
 # ==============================================================================
 
 def get_fpl_player_mapping() -> Dict[int, Dict[str, Any]]:
-    """Returns mapping of Player ID -> {Player, Position}."""
-    data = get_bootstrap_static()
-    elements = data.get("elements", [])
-    type_map = {1: "G", 2: "D", 3: "M", 4: "F"}
-    mapping = {}
-    for p in elements:
-        full_name = f"{p.get('first_name')} {p.get('second_name')}"
-        mapping[p['id']] = {
-            "Player": full_name,
-            "Position": type_map.get(p['element_type'], "F")
-        }
-    return mapping
-
-
-def get_league_player_ownership(league_id: int) -> Dict[int, Dict[str, Any]]:
     """
-    Fetch current ownership grouped by team (GLOBAL ENTRY ID).
-    Fixes the mismatch between League Entry ID (from status) and Global ID (used by app).
+    Fetches FPL player data and returns dictionary linking player ids to player names.
+    RESTORED: Uses Full Name (First + Second) to ensure Rotowire merge works.
     """
-    element_status = get_element_status(league_id)
-    league_details = get_draft_league_details(league_id)
+    try:
+        player_data = get_bootstrap_static()
+    except:
+        player_data = requests.get(f"{FPL_DRAFT_BASE}/bootstrap-static").json()
 
-    # 1. Build ID Maps
-    # id_to_global: Maps the internal 'id' (used in element_status) to 'entry_id' (Global ID)
-    id_to_global = {}
-    global_to_name = {}
+    players = player_data['elements']
+    teams = player_data.get('teams', [])
 
-    for entry in league_details.get("league_entries", []) or []:
-        league_entry_id = entry.get("id")
-        global_entry_id = entry.get("entry_id")
-        entry_name = entry.get("entry_name")
+    fpl_player_map = {}
 
-        if league_entry_id and global_entry_id:
-            id_to_global[league_entry_id] = global_entry_id
-            global_to_name[global_entry_id] = entry_name
+    for player in players:
+        player_id = player.get('id')
+        full_name = f"{player.get('first_name', '')} {player.get('second_name', '')}"
+        web_name = player.get('web_name', '').strip()
+        if not web_name or web_name == full_name:
+            web_name = None
 
-    # 2. Initialize Ownership Dict (Keyed by Global ID)
-    league_ownership = {}
-    for gid, name in global_to_name.items():
-        league_ownership[gid] = {
-            "team_name": name,
-            "players": {"G": [], "D": [], "M": [], "F": []}
+        team_index = player.get('team', 0) - 1
+        pos_idx = player.get('element_type', 1) - 1
+
+        team_str = teams[team_index]['short_name'] if 0 <= team_index < len(teams) else 'Unknown'
+        pos_str = ['G', 'D', 'M', 'F'][pos_idx] if 0 <= pos_idx < 4 else 'Unknown'
+
+        fpl_player_map[player_id] = {
+            'Player': full_name,
+            'Web_Name': web_name,
+            'Team': team_str,
+            'Position': pos_str
         }
-
-    # 3. Populate from Element Status
-    player_map = get_fpl_player_mapping()
-
-    if element_status:
-        for status in element_status:
-            league_owner_id = status.get("owner")  # This is League Entry ID
-            player_id = status.get("element")
-
-            if not league_owner_id: continue
-
-            # Convert to Global ID
-            global_id = id_to_global.get(league_owner_id)
-
-            if global_id and global_id in league_ownership:
-                pinfo = player_map.get(player_id, {})
-                pos = pinfo.get("Position")
-                pname = pinfo.get("Player", f"Unknown {player_id}")
-
-                if pos in {"G", "D", "M", "F"}:
-                    league_ownership[global_id]["players"][pos].append(pname)
-
-    # 4. Fallback (Strategy B) if status empty
-    else:
-        current_gw = get_current_gameweek()
-        for gid in league_ownership.keys():
-            try:
-                r = requests.get(f"{FPL_DRAFT_BASE}/entry/{gid}/event/{current_gw}", timeout=5)
-                if r.status_code == 200:
-                    picks = r.json().get("picks", [])
-                    for p in picks:
-                        pid = p['element']
-                        pinfo = player_map.get(pid, {})
-                        pos = pinfo.get("Position")
-                        pname = pinfo.get("Player")
-                        if pos: league_ownership[gid]["players"][pos].append(pname)
-            except:
-                pass
-
-    return league_ownership
+    return fpl_player_map
 
 
 def get_transaction_data(league_id: int) -> List[Dict[str, Any]]:
+    """
+    Fetches transactions. Checks global config cache first.
+    RESTORED URL: /api/draft/league/{id}/transactions
+    """
     if getattr(config, "TRANSACTION_DATA", None) is not None:
         return config.TRANSACTION_DATA
-    url = f"{FPL_DRAFT_BASE}/league/{league_id}/transactions"
+
+    url = f"{FPL_DRAFT_BASE}/draft/league/{league_id}/transactions"
     try:
         r = requests.get(url, timeout=10)
         r.raise_for_status()
@@ -200,83 +176,150 @@ def get_transaction_data(league_id: int) -> List[Dict[str, Any]]:
         return []
 
 
-def get_draft_team_composition_for_gameweek(team_id: int, gameweek: int) -> pd.DataFrame:
-    # 1. Try requested gameweek
-    url = f"https://draft.premierleague.com/api/entry/{team_id}/event/{gameweek}"
+def get_waiver_transactions_up_to_gameweek(league_id, gameweek):
+    """
+    Fetches transactions up to a specific gameweek.
+    """
+    transactions = get_transaction_data(league_id)
+    if gameweek is None:
+        return transactions
+
+    # Filter by event
+    return [tx for tx in transactions if tx.get('event') is not None and int(tx.get('event')) <= int(gameweek)]
+
+
+def get_starting_team_composition(league_id):
+    """
+    Fetches the ORIGINAL draft picks for each team.
+    """
+    draft_url = f"{FPL_DRAFT_BASE}/draft/{league_id}/choices"
+    draft_data = requests.get(draft_url).json()
+
+    player_data = get_bootstrap_static()
+    player_mapping = {
+        p['id']: f"{p['first_name']} {p['second_name']}"
+        for p in player_data['elements']
+    }
+
+    draft_picks = {}
+    for choice in draft_data.get('choices', []):
+        team_id = choice['entry']
+        team_name = choice['entry_name']
+        player_id = choice['element']
+
+        if team_id not in draft_picks:
+            draft_picks[team_id] = {'team_name': team_name, 'players': []}
+
+        pname = player_mapping.get(player_id, f"Unknown ({player_id})")
+        draft_picks[team_id]['players'].append(pname)
+
+    return draft_picks
+
+
+def get_team_composition_for_gameweek(league_id, team_id, gameweek):
+    """
+    Determines team composition by replaying transactions over the draft picks.
+    THIS IS THE CRITICAL FUNCTION FOR ROSTERS.
+    """
+    # 1. Setup
     try:
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        picks = data.get('picks', [])
+        league_id = int(league_id); team_id = int(team_id)
     except:
-        picks = []
-
-    # 2. Fallback
-    if not picks and gameweek > 1:
-        try:
-            url_prev = f"https://draft.premierleague.com/api/entry/{team_id}/event/{gameweek - 1}"
-            r = requests.get(url_prev, timeout=10)
-            data = r.json()
-            picks = data.get('picks', [])
-        except:
-            picks = []
-
-    if not picks:
         return pd.DataFrame()
+
+    if gameweek is None: gameweek = get_current_gameweek()
 
     player_map = get_fpl_player_mapping()
-    row_list = []
-    for p in picks:
-        pid = p['element']
-        info = player_map.get(pid, {'Player': f"Unknown {pid}", 'Position': 'F'})
-        row_list.append({
-            'element': pid,
-            'Player': info['Player'],
-            'Position': info['Position'],
-            'pick_position': p['position'],
-            'is_captain': p['is_captain'],
-            'is_vice_captain': p['is_vice_captain']
-        })
-    return pd.DataFrame(row_list)
+    name_to_id = {v['Player']: k for k, v in player_map.items()}
 
+    # 2. Get Starting Squad
+    starting = get_starting_team_composition(league_id)
+    team_start = starting.get(team_id, {})
+    team_composition = set(team_start.get('players', []))  # Set of Names
 
-def get_historical_team_scores(league_id: int) -> pd.DataFrame:
-    try:
-        league_id = int(league_id)
-    except:
-        raise ValueError("league_id must be an integer")
+    # 3. Replay Transactions
+    transactions = get_waiver_transactions_up_to_gameweek(league_id, gameweek)
 
-    url = f"https://draft.premierleague.com/api/league/{league_id}/details"
-    try:
-        data = requests.get(url, timeout=30).json()
-    except:
-        return pd.DataFrame()
+    for tx in transactions:
+        if tx.get('entry') == team_id and tx.get('result') == 'a':
+            pid_in = tx.get('element_in')
+            pid_out = tx.get('element_out')
 
-    entries = {}
-    for e in data.get("league_entries", []) or []:
-        eid = e.get("entry_id", e.get("id"))
-        name = e.get("entry_name")
-        if eid and name: entries[int(eid)] = str(name)
+            name_in = player_map.get(pid_in, {}).get('Player', f"Unknown {pid_in}")
+            name_out = player_map.get(pid_out, {}).get('Player', f"Unknown {pid_out}")
 
+            team_composition.discard(name_out)
+            team_composition.add(name_in)
+
+    # 4. Build DataFrame
     rows = []
-    for m in data.get("matches", []) or []:
-        gw = m.get("event")
-        e1, e2 = m.get("league_entry_1"), m.get("league_entry_2")
-        p1, p2 = m.get("league_entry_1_points"), m.get("league_entry_2_points")
-        if isinstance(gw, int) and p1 is not None and e1:
-            rows.append({"event": int(gw), "entry_id": int(e1), "entry_name": entries.get(int(e1), f"Team {e1}"),
-                         "points": float(p1)})
-        if isinstance(gw, int) and p2 is not None and e2:
-            rows.append({"event": int(gw), "entry_id": int(e2), "entry_name": entries.get(int(e2), f"Team {e2}"),
-                         "points": float(p2)})
+    for name in sorted(team_composition):
+        pid = name_to_id.get(name)
+        if pid and pid in player_map:
+            rows.append({
+                'Player': player_map[pid]['Player'],
+                'Team': player_map[pid]['Team'],
+                'Position': player_map[pid]['Position']
+            })
+        else:
+            rows.append({'Player': name, 'Team': 'Unknown', 'Position': 'Unknown'})
 
-    if not rows: return pd.DataFrame(columns=["event", "entry_id", "entry_name", "points", "total_points"])
-    df = pd.DataFrame(rows)
-    df["total_points"] = df["points"]
-    df = df.sort_values(["event", "entry_id"]).reset_index(drop=True)
-    return df
+    return pd.DataFrame(rows)
 
 
-# ... (Classic/Fixture/Rotowire functions unchanged) ...
+# Alias for compatibility with new scripts
+get_draft_team_composition_for_gameweek = get_team_composition_for_gameweek
+
+
+def get_league_player_ownership(league_id: int) -> Dict[int, Dict[str, Any]]:
+    """
+    Fetch current ownership using element-status (fast) or fallback to roster replay.
+    """
+    element_status = get_element_status(league_id)
+    league_details = get_draft_league_details(league_id)
+
+    # Map League Entry ID -> Global Entry ID
+    id_to_global = {e['id']: e['entry_id'] for e in league_details.get("league_entries", []) if 'id' in e}
+    id_to_name = {e['entry_id']: e['entry_name'] for e in league_details.get("league_entries", []) if 'entry_id' in e}
+
+    league_ownership = {
+        gid: {"team_name": name, "players": {"G": [], "D": [], "M": [], "F": []}}
+        for gid, name in id_to_name.items()
+    }
+
+    player_map = get_fpl_player_mapping()
+
+    if element_status:
+        for status in element_status:
+            lid = status.get("owner")
+            pid = status.get("element")
+            if not lid: continue
+
+            gid = id_to_global.get(lid)
+            if gid and gid in league_ownership:
+                pinfo = player_map.get(pid, {})
+                pos = pinfo.get("Position")
+                name = pinfo.get("Player")
+                if pos in league_ownership[gid]["players"]:
+                    league_ownership[gid]["players"][pos].append(name)
+    else:
+        # Fallback: Loop through every team and use get_team_composition_for_gameweek
+        gw = get_current_gameweek()
+        for gid in league_ownership:
+            df = get_team_composition_for_gameweek(league_id, gid, gw)
+            if not df.empty:
+                for _, row in df.iterrows():
+                    pos = row['Position']
+                    if pos in league_ownership[gid]["players"]:
+                        league_ownership[gid]["players"][pos].append(row['Player'])
+
+    return league_ownership
+
+
+# ==============================================================================
+# 3. CLASSIC & FIXTURE ENDPOINTS (NEWER FEATURES)
+# ==============================================================================
+
 def get_classic_league_standings(league_id: int, page: int = 1) -> pd.DataFrame:
     url = f"{FPL_CLASSIC_BASE}/leagues-classic/{league_id}/standings/?page_new_entries=1&page_standings={page}"
     try:
@@ -302,26 +345,27 @@ def get_entry_details(team_id: int) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_entry_history(team_id: int) -> pd.DataFrame:
+def get_historical_team_scores(league_id: int) -> pd.DataFrame:
+    """Pull per-team weekly scores from details."""
     try:
-        return pd.DataFrame(
-            requests.get(f"{FPL_CLASSIC_BASE}/entry/{team_id}/history/", timeout=10).json().get('current', []))
-    except:
-        return pd.DataFrame()
-
-
-def get_element_history(player_id: int) -> pd.DataFrame:
-    try:
-        return pd.DataFrame(
-            requests.get(f"{FPL_CLASSIC_BASE}/element-summary/{player_id}/", timeout=30).json().get("history", []))
+        url = f"{FPL_DRAFT_BASE}/league/{league_id}/details"
+        data = requests.get(url, timeout=30).json()
+        entries = {e.get('entry_id'): e.get('entry_name') for e in data.get('league_entries', [])}
+        rows = []
+        for m in data.get("matches", []):
+            gw = m.get("event")
+            e1, e2 = m.get("league_entry_1"), m.get("league_entry_2")
+            p1, p2 = m.get("league_entry_1_points"), m.get("league_entry_2_points")
+            if p1 is not None and e1: rows.append({"event": gw, "entry_id": e1, "points": float(p1)})
+            if p2 is not None and e2: rows.append({"event": gw, "entry_id": e2, "points": float(p2)})
+        return pd.DataFrame(rows).sort_values("event")
     except:
         return pd.DataFrame()
 
 
 def get_earliest_kickoff_et(gw: int) -> datetime:
     try:
-        r = requests.get(config.FPL_FIXTURES_BY_EVENT.format(gw=gw), timeout=10);
-        r.raise_for_status()
+        r = requests.get(config.FPL_FIXTURES_BY_EVENT.format(gw=gw), timeout=10)
         times = [datetime.fromisoformat(x["kickoff_time"].replace("Z", "+00:00")).astimezone(TZ_ET) for x in r.json() if
                  x.get("kickoff_time")]
         return min(times) if times else datetime.now(TZ_ET)
@@ -347,6 +391,10 @@ def get_future_fixtures() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+# ==============================================================================
+# 4. ROTOWIRE SCRAPERS
+# ==============================================================================
+
 def get_rotowire_rankings_url(current_gameweek=None) -> Optional[str]:
     if current_gameweek is None: current_gameweek = get_current_gameweek()
     try:
@@ -361,10 +409,7 @@ def get_rotowire_rankings_url(current_gameweek=None) -> Optional[str]:
             m = pat.search(a.get("href", ""))
             if m: candidates.append(
                 (int(m.group(1)), int(m.group(2)), urljoin(config.ARTICLES_INDEX, a.get("href", ""))))
-        if not candidates: return None
-        exact = [c for c in candidates if c[0] == current_gameweek]
-        return max(exact, key=lambda x: x[1])[2] if exact else \
-        min(candidates, key=lambda x: (abs(x[0] - current_gameweek), -x[1]))[2]
+        return max([c for c in candidates if c[0] == current_gameweek], key=lambda x: x[1])[2] if candidates else None
     except:
         return None
 
@@ -384,7 +429,6 @@ def get_rotowire_player_projections(url: str, limit=None) -> pd.DataFrame:
             0)
         df['Pos Rank'] = (df['FW Rank'] + df['MID Rank'] + df['DEF Rank'] + df['GK Rank']).astype(int)
         df.drop(columns=['FW Rank', 'MID Rank', 'DEF Rank', 'GK Rank'], inplace=True)
-        df['Value'] = df.apply(lambda r: r['Points'] / r['Price'] if r['Price'] > 0 else float('nan'), axis=1)
         if limit: df = df.head(limit)
         return df.reset_index(drop=True)
     except:
@@ -396,11 +440,8 @@ def get_rotowire_season_rankings(url: str, limit: Optional[int] = None) -> pd.Da
         soup = BeautifulSoup(requests.get(url, timeout=30).content, "html.parser")
         tbl = soup.select_one("table.article-table__tablesorter")
         if not tbl: return pd.DataFrame()
-        data = []
-        for tr in tbl.find_all("tr"):
-            tds = tr.find_all("td")
-            if len(tds) == 12: data.append([t.get_text(strip=True) for t in tds])
-        if not data: return pd.DataFrame()
+        data = [[t.get_text(strip=True) for t in tr.find_all("td")] for tr in tbl.find_all("tr") if
+                len(tr.find_all("td")) == 12]
         df = pd.DataFrame(data, columns=["Overall Rank", "FW Rank", "MID Rank", "DEF Rank", "GK Rank", "Player", "Team",
                                          "Position", "Price", "TSB %", "Points", "PP/90"])
         for c in ["FW Rank", "MID Rank", "DEF Rank", "GK Rank", "Points", "PP/90", "Price", "TSB %", "Overall Rank"]:
