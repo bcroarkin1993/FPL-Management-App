@@ -4,7 +4,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 
-from scripts.common.utils import get_current_gameweek
+from scripts.common.api import get_current_gameweek
 
 def checkValidLineup(df):
     """

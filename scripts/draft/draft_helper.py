@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import config
-from scripts.common.utils import get_rotowire_season_rankings
+from scripts.common.api import get_rotowire_season_rankings
 
 def _ensure_session():
     if "draft_taken_keys" not in st.session_state:

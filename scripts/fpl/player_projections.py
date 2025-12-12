@@ -1,6 +1,6 @@
 import config
 import streamlit as st
-from scripts.common.utils import get_rotowire_player_projections, get_rotowire_rankings_url
+from scripts.common.api import get_rotowire_player_projections, get_rotowire_rankings_url
 
 def rotowire_url_selector():
     st.subheader("Rotowire Rankings URL")

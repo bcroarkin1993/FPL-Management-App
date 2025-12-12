@@ -5,7 +5,7 @@ import config
 # --- Existing pages you already have ---
 from scripts.draft.home import show_home_page  # Draft home
 from scripts.fpl.fixtures import show_club_fixtures_section  # Global fixtures page
-from scripts.draft.fixture_projections import show_fixtures_page  # Draft fixture projections
+from scripts.draft.fixture_projections import show_fixture_projections_page  # Draft fixture projections
 from scripts.draft.team_analysis import show_team_stats_page  # Draft team analysis
 from scripts.draft.waiver_wire import show_waiver_wire_page  # Draft - waiver wire
 from scripts.draft.draft_helper import show_draft_helper_page # Draft - Draft Helper
@@ -13,6 +13,7 @@ from scripts.fpl.player_statistics import show_player_stats_page  # Global playe
 from scripts.fpl.player_projections import show_player_projections_page  # Global player projections
 from scripts.fpl.projected_lineups import show_projected_lineups  # Global projected lineups
 from scripts.fpl.injuries import show_injuries_page  # Global projected lineups
+from scripts.classic.free_hit import show_free_hit_page # Classic Free Hit page
 
 # ------------------------------------------------------------
 # Page config (must be first Streamlit command in the script)
@@ -150,7 +151,7 @@ def main():
             # Your existing draft home
             show_home_page()
         elif subpage == "Fixture Projections":
-            show_fixtures_page()
+            show_fixture_projections_page()
         elif subpage == "Waiver Wire":
             show_waiver_wire_page()
         elif subpage == "Team Analysis":
@@ -171,6 +172,7 @@ def main():
                 "Waiver Wire",
                 "Team Analysis",
                 "League Analysis",
+                "Free Hit Optimizer"
             ],
         )
 
@@ -188,6 +190,8 @@ def main():
         elif subpage == "League Analysis":
             # Replace with your Classic league analysis when ready
             render_placeholder("Classic — League Analysis")
+        elif subpage == "Free Hit Optimizer":
+            show_free_hit_page()
 
 
 if __name__ == "__main__":

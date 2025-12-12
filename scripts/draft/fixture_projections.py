@@ -1,22 +1,37 @@
+import os
 import config
 import math
 import pandas as pd
 import streamlit as st
-from scripts.common.utils import find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures, \
-    get_team_id_by_name, get_rotowire_player_projections, get_team_composition_for_gameweek, \
-    merge_fpl_players_and_projections, normalize_apostrophes, get_historical_team_scores
 
-def _normal_cdf(x: float) -> float:  # <<< ADD
+# Imports
+from scripts.common.api import (
+    get_draft_league_details,
+    get_rotowire_player_projections,
+    get_current_gameweek,
+    get_draft_league_teams,
+    get_historical_team_scores,
+    get_league_player_ownership
+)
+from scripts.common.utils import (
+    merge_fpl_players_and_projections,
+    select_optimal_lineup as find_optimal_lineup,
+    format_team_name,
+    normalize_apostrophes,
+    clean_fpl_player_names,
+    get_team_id_by_name
+)
+
+
+# ==============================================================================
+# HELPERS
+# ==============================================================================
+
+def _normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
-def _estimate_score_std(league_id: int) -> tuple[float, int]:  # <<< ADD
-    """
-    Returns (std, n) for historical single-team weekly scores if available.
-    Tries: scripts.utils.get_historical_team_scores(league_id) -> DataFrame with 'total_points' or 'score'.
-    Fallback: CSV path in config.HISTORICAL_SCORES_CSV (or 'data/historical_team_scores.csv').
-    Final fallback: (15.0, 0) — a reasonable league-wide prior.
-    """
-    # Try utils function if it exists
+
+def _estimate_score_std(league_id: int) -> tuple[float, int]:
     try:
         hist = get_historical_team_scores(league_id)
     except Exception:
@@ -27,6 +42,7 @@ def _estimate_score_std(league_id: int) -> tuple[float, int]:  # <<< ADD
             s = pd.to_numeric(hist[col], errors='coerce').dropna()
             if len(s) >= 2:
                 return float(s.std(ddof=1)), int(len(s))
+
     # Try CSV from config or default path
     try:
         csv_path = getattr(config, 'HISTORICAL_SCORES_CSV', 'data/historical_team_scores.csv')
@@ -38,184 +54,209 @@ def _estimate_score_std(league_id: int) -> tuple[float, int]:  # <<< ADD
                 return float(s.std(ddof=1)), int(len(s))
     except Exception:
         pass
-    return 15.0, 0  # conservative default if nothing available
+    return 15.0, 0
 
-# --- Win % bar (two-color) ---
+
 def _render_winprob_bar(team1_name: str, team2_name: str, p_team1: float):
     p1 = max(0.0, min(100.0, round(p_team1 * 100, 1)))
     p2 = round(100.0 - p1, 1)
     html = f"""
     <style>
-      .wpb-wrap {{
-        margin-top: 0.25rem;
-        margin-bottom: 0.5rem;
-      }}
-      .wpb-labels, .wpb-bar {{
-        display: grid;
-        grid-template-columns: {p1}% {p2}%;
-        gap: 0;
-        width: 100%;
-      }}
-      .wpb-labels div {{
-        text-align: center;
-        font-weight: 600;
-        font-size: 0.95rem;
-        line-height: 1.2;
-        white-space: nowrap;
-      }}
-      .wpb-bar {{
-        height: 36px;                  /* thicker bar */
-        border-radius: 9999px;
-        overflow: hidden;
-        box-shadow: inset 0 0 0 1px rgba(0,0,0,0.08);
-      }}
-      .wpb-left  {{ background: #2563eb; }}  /* blue  */
-      .wpb-right {{ background: #dc2626; }}  /* red   */
-      .wpb-subtle {{ color: rgba(0,0,0,0.65); }}
+      .wpb-wrap {{ margin-top: 0.25rem; margin-bottom: 0.5rem; }}
+      .wpb-labels, .wpb-bar {{ display: grid; grid-template-columns: {p1}% {p2}%; gap: 0; width: 100%; }}
+      .wpb-labels div {{ text-align: center; font-weight: 600; font-size: 0.95rem; line-height: 1.2; white-space: nowrap; }}
+      .wpb-bar {{ height: 36px; border-radius: 9999px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.08); }}
+      .wpb-left {{ background: #2563eb; }} .wpb-right {{ background: #dc2626; }} .wpb-subtle {{ color: rgba(0,0,0,0.65); }}
     </style>
     <div class="wpb-wrap">
-      <div class="wpb-labels">
-        <div class="wpb-subtle">{team1_name} {p1}%</div>
-        <div class="wpb-subtle">{p2}% {team2_name}</div>
-      </div>
-      <div class="wpb-bar" role="img" aria-label="Win probability: {team1_name} {p1} percent, {team2_name} {p2} percent.">
-        <div class="wpb-left"></div>
-        <div class="wpb-right"></div>
-      </div>
+      <div class="wpb-labels"><div class="wpb-subtle">{team1_name} {p1}%</div><div class="wpb-subtle">{p2}% {team2_name}</div></div>
+      <div class="wpb-bar" role="img"><div class="wpb-left"></div><div class="wpb-right"></div></div>
     </div>
     """
     st.markdown(html, unsafe_allow_html=True)
 
-def analyze_fixture_projections(fixture, league_id, projections_df):
-    """
-    Returns two DataFrames representing optimal projected lineups and points for each team in a fixture,
-    sorted by position (GK, DEF, MID, FWD) and then by descending projected points within each position.
 
-    Parameters:
-    - fixture (str): The selected fixture, formatted as "Team1 (Player1) vs Team2 (Player2)".
-    - league_id (int): The ID of the FPL Draft league.
-    - projections_df (DataFrame): DataFrame containing player projections from Rotowire.
+def get_gameweek_fixtures(league_id, gameweek):
+    details = get_draft_league_details(league_id)
+    matches = details.get("matches", [])
+    entries = details.get("league_entries", [])
+    id_to_name = {e['id']: e['entry_name'] for e in entries}
+    fixtures = []
+    for m in matches:
+        if m.get("event") == gameweek:
+            n1 = id_to_name.get(m.get("league_entry_1"), "Average")
+            n2 = id_to_name.get(m.get("league_entry_2"), "Average")
+            fixtures.append(f"{n1} vs {n2}")
+    return fixtures
 
-    Returns:
-    - Tuple of two DataFrames: (team1_df, team2_df, team1_name, team2_name)
-    """
-    # Normalize the apostrophes in the fixture string
+
+def analyze_fixture_projections(fixture, league_id, projections_df, debug=False):
+    if debug: print(f"\n--- DEBUG: Analyzing fixture: {fixture} ---")
+
     fixture = normalize_apostrophes(fixture)
-
-    # Extract the team names only (ignore player names inside parentheses)
     team1_name = fixture.split(' vs ')[0].split(' (')[0].strip()
     team2_name = fixture.split(' vs ')[1].split(' (')[0].strip()
 
-    # Get the team ids based on the team names
     team1_id = get_team_id_by_name(league_id, team1_name)
     team2_id = get_team_id_by_name(league_id, team2_name)
+    if debug: print(f"DEBUG: IDs found -> Team1: {team1_id}, Team2: {team2_id}")
 
-    # Get the current gameweek
-    gameweek = get_current_gameweek()
+    # Load Ownership
+    ownership = get_league_player_ownership(league_id)
+    if debug:
+        if not ownership:
+            print("DEBUG: Ownership dictionary is EMPTY.")
+        else:
+            print(f"DEBUG: Ownership keys (Global IDs): {list(ownership.keys())}")
 
-    # Retrieve team compositions for the current gameweek and convert to dataframes
-    team1_composition = get_team_composition_for_gameweek(league_id, team1_id, gameweek)
-    team2_composition = get_team_composition_for_gameweek(league_id, team2_id, gameweek)
+    def get_roster_from_ownership(tid):
+        if not tid or tid not in ownership:
+            if debug: print(f"DEBUG: Team ID {tid} not in ownership keys.")
+            return pd.DataFrame(columns=['Player', 'Position'])
 
-    # Merge FPL players with projections for both teams
-    team1_df = merge_fpl_players_and_projections(
-        team1_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
-    )
-    team2_df = merge_fpl_players_and_projections(
-        team2_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
-    )
+        data = ownership[tid]
+        rows = []
+        for pos, players in data.get("players", {}).items():
+            for p in players:
+                rows.append({"Player": p, "Position": pos})
 
-    # Debugging: Check if 'Points' column exists
-    if 'Points' not in team1_df or 'Points' not in team2_df:
-        print("Error: 'Points' column not found in one or both dataframes.")
-        print("Team 1 DataFrame:\n", team1_df.head())
-        print("Team 2 DataFrame:\n", team2_df.head())
-        return None  # Exit the function early if the column is missing
+        df = pd.DataFrame(rows)
+        if debug: print(f"DEBUG: Roster for {tid} created. Shape: {df.shape}. Columns: {df.columns.tolist()}")
+        return df
 
-    # Fill NaN values in 'Points' column with 0.0
-    team1_df['Points'] = pd.to_numeric(team1_df['Points'], errors='coerce').fillna(0.0)
-    team2_df['Points'] = pd.to_numeric(team2_df['Points'], errors='coerce').fillna(0.0)
+    team1_composition = get_roster_from_ownership(team1_id)
+    team2_composition = get_roster_from_ownership(team2_id)
 
-    # Find the optimal lineup (top 11 players) for each team
-    team1_df = find_optimal_lineup(team1_df)
-    team2_df = find_optimal_lineup(team2_df)
+    # Prepare Projections
+    if not projections_df.empty:
+        projections_df['Player'] = projections_df['Player'].apply(clean_fpl_player_names)
 
-    # Define the position order for sorting
-    position_order = ['G', 'D', 'M', 'F']
-    for df in [team1_df, team2_df]:
-        df['Position'] = pd.Categorical(df['Position'], categories=position_order, ordered=True)
-        df.sort_values(by=['Position', 'Points'], ascending=[True, False], inplace=True)
+    # CRITICAL: Exclude 'Position' from projections to avoid collision
+    proj_subset = projections_df[['Player', 'Points', 'Matchup', 'Pos Rank']].copy()
+    if debug: print(f"DEBUG: Projection subset columns: {proj_subset.columns.tolist()}")
 
-    # Select the final columns to use
-    team1_df = team1_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
-    team2_df = team2_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+    # Merge
+    if debug: print("DEBUG: Merging Team 1...")
+    team1_df = merge_fpl_players_and_projections(team1_composition, proj_subset)
+    if debug: print(f"DEBUG: Team 1 Merge Result Columns: {team1_df.columns.tolist()}")
 
-    # Format team DataFrames to use player names as the index
-    team1_df.set_index('Player', inplace=True)
-    team2_df.set_index('Player', inplace=True)
+    if debug: print("DEBUG: Merging Team 2...")
+    team2_df = merge_fpl_players_and_projections(team2_composition, proj_subset)
+    if debug: print(f"DEBUG: Team 2 Merge Result Columns: {team2_df.columns.tolist()}")
 
-    # Return the final DataFrames and team names
+    # Handle missing Position column (Safety Check)
+    for i, df in enumerate([team1_df, team2_df]):
+        team_num = i + 1
+        if 'Position' not in df.columns:
+            if debug: print(f"ERROR: 'Position' column MISSING in Team {team_num} DF.")
+            if 'Position_x' in df.columns:
+                if debug: print(f"DEBUG: Restoring Position from Position_x for Team {team_num}...")
+                df.rename(columns={'Position_x': 'Position'}, inplace=True)
+            elif 'Position_y' in df.columns:
+                if debug: print(f"DEBUG: Restoring Position from Position_y for Team {team_num}...")
+                df.rename(columns={'Position_y': 'Position'}, inplace=True)
+            else:
+                if debug: print(f"CRITICAL: Creating empty DF for Team {team_num} to prevent crash.")
+                if team_num == 1:
+                    team1_df = pd.DataFrame(columns=['Player', 'Position', 'Points', 'Is_Starter'])
+                else:
+                    team2_df = pd.DataFrame(columns=['Player', 'Position', 'Points', 'Is_Starter'])
+
+    # Fill NaNs
+    if 'Points' in team1_df.columns: team1_df['Points'] = team1_df['Points'].fillna(0.0)
+    if 'Points' in team2_df.columns: team2_df['Points'] = team2_df['Points'].fillna(0.0)
+
+    # Optimize
+    if debug: print("DEBUG: Running find_optimal_lineup...")
+    if not team1_df.empty and 'Position' in team1_df.columns:
+        team1_df = find_optimal_lineup(team1_df)
+    else:
+        team1_df['Is_Starter'] = False
+
+    if not team2_df.empty and 'Position' in team2_df.columns:
+        team2_df = find_optimal_lineup(team2_df)
+    else:
+        team2_df['Is_Starter'] = False
+
+    # Filter to starters
+    if 'Is_Starter' in team1_df.columns:
+        team1_df = team1_df[team1_df['Is_Starter']].copy()
+    if 'Is_Starter' in team2_df.columns:
+        team2_df = team2_df[team2_df['Is_Starter']].copy()
+
+    # Sort
+    pos_order = ['G', 'D', 'M', 'F']
+    if not team1_df.empty:
+        team1_df['Position'] = pd.Categorical(team1_df['Position'], categories=pos_order, ordered=True)
+        team1_df = team1_df.sort_values(by=['Position', 'Points'], ascending=[True, False])
+
+    if not team2_df.empty:
+        team2_df['Position'] = pd.Categorical(team2_df['Position'], categories=pos_order, ordered=True)
+        team2_df = team2_df.sort_values(by=['Position', 'Points'], ascending=[True, False])
+
     return team1_df, team2_df, team1_name, team2_name
 
-def show_fixtures_page():
+
+# ==============================================================================
+# MAIN PAGE
+# ==============================================================================
+
+def show_fixture_projections_page():
     st.title("Upcoming Fixtures & Projections")
 
-    # Find the fixtures for the current gameweek
-    gameweek_fixtures = get_gameweek_fixtures(config.FPL_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
+    # READ FROM .ENV VIA OS
+    # Assuming RUN_TYPE is loaded into env variables
+    default_debug = os.getenv("RUN_TYPE", "PRODUCTION") == "DEBUG"
+    debug_mode = st.checkbox("Enable Debug Mode (Console Logs)", value=default_debug)
 
-    # Display each of the current gameweek fixtures
-    if gameweek_fixtures:
-        st.subheader(f"Gameweek {config.CURRENT_GAMEWEEK} Fixtures")
-        for fixture in gameweek_fixtures:
-            st.text(fixture)
+    gw = get_current_gameweek()
+    league_id = config.FPL_DRAFT_LEAGUE_ID
+    fixtures = get_gameweek_fixtures(league_id, gw)
 
-    # Subheader for match projections
+    if fixtures:
+        st.subheader(f"Gameweek {gw} Fixtures")
+        selected_fixture = st.selectbox("Select a fixture to analyze:", fixtures)
+    else:
+        st.warning(f"No fixtures found for Gameweek {gw}")
+        return
+
     st.subheader("Match Projections")
+    with st.spinner("Loading projections..."):
+        projections = get_rotowire_player_projections(config.ROTOWIRE_URL)
 
-    # Pull FPL player projections from Rotowire
-    fpl_player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL)
+    if selected_fixture:
+        res = analyze_fixture_projections(selected_fixture, league_id, projections, debug=debug_mode)
 
-    # Create a dropdown to choose a fixture
-    fixture_selection = st.selectbox("Select a fixture to analyze deeper:", gameweek_fixtures)
+        if res:
+            t1_df, t2_df, t1_name, t2_name = res
 
-    # Create the Streamlit visuals
-    if fixture_selection:
-        # Analyze fixture projections
-        team1_df, team2_df, team1_name, team2_name = analyze_fixture_projections(fixture_selection,
-                                                                                 config.FPL_DRAFT_LEAGUE_ID,
-                                                                                 fpl_player_projections)
+            s1 = t1_df['Points'].sum() if not t1_df.empty else 0.0
+            s2 = t2_df['Points'].sum() if not t2_df.empty else 0.0
 
-        # Extract team scores from df
-        team1_score = team1_df['Points'].sum()
-        team2_score = team2_df['Points'].sum()
+            sigma, n_hist = _estimate_score_std(league_id)
+            denom = math.sqrt(2.0 * (sigma ** 2)) if sigma > 0 else 1.0
+            z = (s1 - s2) / denom
+            p_team1 = _normal_cdf(z)
 
-        # --- Win Probability (Normal model) ---
-        sigma, n_hist = _estimate_score_std(config.FPL_DRAFT_LEAGUE_ID)
-        denom = math.sqrt(2.0 * (sigma ** 2)) if sigma > 0 else 1.0
-        z = (team1_score - team2_score) / denom
-        p_team1 = _normal_cdf(z)
-        p_team2 = 1.0 - p_team1
+            st.subheader("Win Probability")
+            _render_winprob_bar(format_team_name(t1_name), format_team_name(t2_name), p_team1)
+            hist_note = f"σ≈{sigma:.2f} from {n_hist} games" if n_hist > 0 else f"σ≈{sigma:.2f} (default)"
+            st.caption(f"Model: P(A>B) = Φ((μA−μB)/√(σ²+σ²)); assumes independent totals. {hist_note}.")
 
-        st.subheader("Win Probability")
-        _render_winprob_bar(format_team_name(team1_name), format_team_name(team2_name), p_team1)
-        hist_note = f"σ≈{sigma:.2f} from {n_hist} historical team scores" if n_hist > 0 else f"σ≈{sigma:.2f} (default)"
-        st.caption(f"Model: P(A>B) = Φ((μA−μB)/√(σ²+σ²)); assumes independent team totals. {hist_note}.")
-
-        # Create columns for side-by-side detailed display
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.write(f"{format_team_name(team1_name)} Projections")
-            st.dataframe(team1_df,
-                         use_container_width=True,
-                         height=422  # Adjust the height to ensure the entire table shows
-                         )
-            st.markdown(f"**Projected Score: {team1_score:.2f}**")
-
-        with col2:
-            st.write(f"{format_team_name(team2_name)} Projections")
-            st.dataframe(team2_df,
-                         use_container_width=True,
-                         height=422  # Adjust the height to ensure the entire table shows
-                         )
-            st.markdown(f"**Projected Score: {team2_score:.2f}**")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.write(f"**{format_team_name(t1_name)}**")
+                st.markdown(f"Projected: **{s1:.2f}**")
+                if not t1_df.empty:
+                    st.dataframe(t1_df[['Player', 'Position', 'Points', 'Matchup']].style.format({'Points': '{:.2f}'}),
+                                 use_container_width=True, hide_index=True)
+                else:
+                    st.info("No active players.")
+            with c2:
+                st.write(f"**{format_team_name(t2_name)}**")
+                st.markdown(f"Projected: **{s2:.2f}**")
+                if not t2_df.empty:
+                    st.dataframe(t2_df[['Player', 'Position', 'Points', 'Matchup']].style.format({'Points': '{:.2f}'}),
+                                 use_container_width=True, hide_index=True)
+                else:
+                    st.info("No active players.")

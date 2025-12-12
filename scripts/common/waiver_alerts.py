@@ -5,26 +5,14 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
 
+from scripts.common.api import get_current_gameweek, get_fixtures_for_event
+
 TZ = ZoneInfo("America/New_York")
-
-def _get_current_gameweek() -> int:
-    """Fetch current/next GW from the official Draft endpoint."""
-    r = requests.get("https://draft.premierleague.com/api/game", timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    return int(data["next_event"] if data.get("current_event_finished") else data["current_event"])
-
-def _fixtures_for_event(gw: int):
-    """Canonical fixtures endpoint; query by GW via params to avoid caching issues."""
-    r = requests.get("https://fantasy.premierleague.com/api/fixtures/", params={"event": int(gw)}, timeout=20)
-    r.raise_for_status()
-    js = r.json()
-    return js if isinstance(js, list) else []
 
 def _earliest_kickoff_et(gw: int) -> datetime:
     """Earliest kickoff for a GW in ET."""
     times = []
-    for fx in _fixtures_for_event(gw):
+    for fx in get_fixtures_for_event(gw):
         k = fx.get("kickoff_time")
         if not k:
             continue
@@ -37,7 +25,7 @@ def _earliest_kickoff_et(gw: int) -> datetime:
 def get_next_transaction_deadline(offset_hours: float = 25.5, gw: int = None):
     """Returns (deadline_et, gw). Deadline = earliest kickoff - offset."""
     if gw is None:
-        gw = _get_current_gameweek()
+        gw = get_current_gameweek()
     kickoff_et = _earliest_kickoff_et(gw)
     return kickoff_et - timedelta(hours=offset_hours), gw
 

@@ -1,461 +1,497 @@
 # scripts/common/data.py
 
-import config
 import numpy as np
 import pandas as pd
-from fuzzywuzzy import fuzz, process
-from typing import Any, Dict, List, Optional
+from fuzzywuzzy import process, fuzz
+from typing import Any, Dict, List, Optional, Tuple
 
-from scripts.common.utils import (
-    clean_text,
-    normalize_text,
-    remove_duplicate_words
+from scripts.common.utils import normalize_apostrophes
+from scripts.common.api import (
+    get_bootstrap_static, get_draft_league_details, get_element_status,
+    get_draft_picks_raw, get_transaction_data, get_current_gameweek,
+    get_fixtures_for_event, get_future_fixtures, get_entry_details
 )
 
+# ==============================================================================
+# FPL CONSTANTS / MAPS
+# ==============================================================================
+
+TEAM_FULL_TO_SHORT = {
+    "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU", "Brentford": "BRE",
+    "Brighton": "BHA", "Chelsea": "CHE", "Crystal Palace": "CRY", "Everton": "EVE",
+    "Fulham": "FUL", "Ipswich": "IPS", "Leicester": "LEI", "Liverpool": "LIV",
+    "Man City": "MCI", "Man Utd": "MUN", "Newcastle": "NEW", "Nott'm Forest": "NFO",
+    "Southampton": "SOU", "Spurs": "TOT", "Tottenham": "TOT", "West Ham": "WHU",
+    "Wolves": "WOL"
+}
+
+POS_MAP = {"1": "G", "2": "D", "3": "M", "4": "F", "GK": "G", "DEF": "D", "MID": "M", "FWD": "F"}
+
 
 # ==============================================================================
-# FPL DATA PROCESSING (ETL)
+# LEAGUE DATA AGGREGATION
 # ==============================================================================
 
-def process_fpl_static_data(json_data: Dict[str, Any]) -> pd.DataFrame:
-    """
-    Converts the raw JSON from 'bootstrap-static' into the clean, rich DataFrame
-    used throughout the app.
+def get_draft_league_entries(league_id: int) -> Dict[int, str]:
+    """Returns {entry_id: team_name}."""
+    data = get_draft_league_details(league_id)
+    return {e['entry_id']: e['entry_name'] for e in data.get('league_entries', [])}
 
-    Args:
-        json_data: The JSON response from api.pull_fpl_player_stats()
 
-    Returns:
-        pd.DataFrame: A processed dataframe of all players.
-    """
-    # 1. Parse Element Types (Positions)
-    pos_df = pd.DataFrame.from_records(json_data['element_types'])
-    pos_df = pos_df[['id', 'singular_name', 'singular_name_short']]
-    pos_df.columns = ['position_id', 'position_name', 'position_abbrv']
+def get_team_id_by_name(league_id: int, team_name: str) -> int:
+    """Converts a team name to its corresponding ID."""
+    team_map = get_draft_league_entries(league_id)
+    target = normalize_apostrophes(team_name).lower()
 
-    # 2. Parse Teams
-    team_df = pd.DataFrame.from_records(json_data['teams'])
-    team_df = team_df[['id', 'name', 'short_name']]
-    team_df.columns = ['team_id', 'team_name', 'team_name_abbrv']
+    for eid, name in team_map.items():
+        if normalize_apostrophes(name).lower() == target:
+            return eid
+    raise ValueError(f"Team '{team_name}' not found.")
 
-    # 3. Parse Players (Elements)
-    player_df = pd.DataFrame.from_records(json_data['elements'])
 
-    # 4. Create Full Name & Clean
-    player_df['player'] = player_df['first_name'] + ' ' + player_df['second_name']
-    player_df['player'] = player_df['player'].apply(remove_duplicate_words)
+def get_gameweek_fixtures_text(league_id: int, gameweek: int) -> List[str]:
+    """Returns list of formatted strings: 'Team A (Manager) vs Team B (Manager)'."""
+    data = get_draft_league_details(league_id)
+    fixtures = data.get('matches', [])
+    entries = data.get('league_entries', [])
 
-    # 5. Merge Metadata
-    player_df = pd.merge(player_df, team_df, left_on='team', right_on='team_id')
-    player_df = pd.merge(player_df, pos_df, left_on='element_type', right_on='position_id')
-
-    # 6. Select & Rename Columns
-    cols = [
-        'id', 'player', 'position_abbrv', 'team_name_abbrv', 'clean_sheets', 'saves',
-        'goals_scored', 'assists', 'minutes', 'own_goals', 'penalties_missed',
-        'penalties_saved', 'red_cards', 'yellow_cards', 'starts', 'expected_goals',
-        'expected_assists', 'expected_goal_involvements', 'expected_goals_conceded',
-        'creativity', 'influence', 'bonus', 'bps', 'form', 'points_per_game',
-        'total_points', 'clearances_blocks_interceptions', 'recoveries', 'tackles',
-        'defensive_contribution', 'chance_of_playing_this_round',
-        'chance_of_playing_next_round', 'status', 'now_cost', 'added'
-    ]
-    # Filter strictly for columns that exist to prevent crashes if API changes
-    existing_cols = [c for c in cols if c in player_df.columns]
-    player_df = player_df[existing_cols]
-
-    # Standardize key column names
-    rename_map = {
-        'id': 'Player_ID',
-        'player': 'Player',
-        'position_abbrv': 'Position',
-        'team_name_abbrv': 'Team'
+    # Map entry ID -> (Team Name, Manager Name)
+    info = {
+        e['id']: (e['entry_name'], f"{e['player_first_name']} {e['player_last_name']}")
+        for e in entries
     }
-    player_df = player_df.rename(columns=rename_map)
 
-    # 7. Numeric Conversions & Calculated Stats
-    player_df["expected_goal_involvements"] = pd.to_numeric(
-        player_df["expected_goal_involvements"], errors="coerce"
-    )
+    out = []
+    for f in fixtures:
+        if f['event'] == gameweek:
+            t1 = info.get(f['league_entry_1'], ("Unknown", "Unknown"))
+            t2 = info.get(f['league_entry_2'], ("Unknown", "Unknown"))
+            out.append(f"{t1[0]} ({t1[1]}) vs {t2[0]} ({t2[1]})")
+    return out
 
-    player_df["actual_goal_involvements"] = (
-            pd.to_numeric(player_df["goals_scored"], errors="coerce") +
-            pd.to_numeric(player_df["assists"], errors="coerce")
-    )
 
-    # Sort by total points by default
-    player_df = player_df.sort_values(by='total_points', ascending=False)
+def get_draft_picks(league_id: int) -> Dict[int, Dict[str, Any]]:
+    """Returns {team_id: {team_name: str, players: [names]}}."""
+    raw = get_draft_picks_raw(league_id)
+    static = get_bootstrap_static()
 
-    return player_df
+    pmap = {p['id']: f"{p['first_name']} {p['second_name']}" for p in static['elements']}
+
+    picks = {}
+    for c in raw.get('choices', []):
+        tid = c['entry']
+        tname = c['entry_name']
+        pid = c['element']
+
+        if tid not in picks:
+            picks[tid] = {'team_name': tname, 'players': []}
+        picks[tid]['players'].append(pmap.get(pid, f"Unknown ({pid})"))
+
+    return picks
+
+
+def get_league_player_ownership(league_id: int) -> Dict[int, Any]:
+    """Returns {team_id: {team_name: str, players: {G:[], D:[]...}}}."""
+    status = get_element_status(league_id)
+    owner_map = get_draft_league_entries(league_id)
+    static = get_bootstrap_static()
+
+    pmap = {}
+    for p in static['elements']:
+        pos = POS_MAP.get(str(p['element_type']), '?')
+        pmap[p['id']] = {'Name': f"{p['first_name']} {p['second_name']}", 'Pos': pos}
+
+    ownership = {}
+    for s in status:
+        owner = s.get("owner")
+        if not owner: continue
+
+        if owner not in ownership:
+            ownership[owner] = {
+                "team_name": owner_map.get(owner, str(owner)),
+                "players": {"G": [], "D": [], "M": [], "F": []}
+            }
+
+        pinfo = pmap.get(s['element'])
+        if pinfo and pinfo['Pos'] in ownership[owner]['players']:
+            ownership[owner]['players'][pinfo['Pos']].append(pinfo['Name'])
+
+    return ownership
+
+
+def get_historical_team_scores(league_id: int) -> pd.DataFrame:
+    """Returns DataFrame of ['event', 'entry_id', 'entry_name', 'points']."""
+    data = get_draft_league_details(league_id)
+    entries = {e['id']: e['entry_name'] for e in data.get('league_entries', [])}
+
+    rows = []
+    for m in data.get('matches', []):
+        gw = m.get('event')
+        if not gw: continue
+
+        for i in [1, 2]:
+            eid = m.get(f'league_entry_{i}')
+            pts = m.get(f'league_entry_{i}_points')
+            if eid and pts is not None:
+                rows.append({
+                    "event": int(gw),
+                    "entry_id": int(eid),
+                    "entry_name": entries.get(eid, str(eid)),
+                    "points": float(pts),
+                    "total_points": float(pts)
+                })
+
+    return pd.DataFrame(rows).sort_values(['event', 'entry_id']).reset_index(drop=True)
+
+
+def get_classic_leagues_for_team(team_id: int) -> Dict[int, str]:
+    """Returns {league_id: league_name} for a classic team."""
+    data = get_entry_details(team_id)
+    if not data or 'leagues' not in data: return {}
+    return {l['id']: l['name'] for l in data['leagues'].get('classic', [])}
+
+
+# ==============================================================================
+# TEAM COMPOSITION & ROSTERS
+# ==============================================================================
+
+def get_draft_team_composition_for_gameweek(league_id: int, team_id: int, gameweek: int = None) -> pd.DataFrame:
+    """
+    Reconstructs a team's roster for a specific GW by applying transactions
+    to the initial draft.
+    """
+    if not gameweek: gameweek = get_current_gameweek()
+
+    static = get_bootstrap_static()
+    teams = {t['id']: t['short_name'] for t in static['teams']}
+    pmap = {}
+    for p in static['elements']:
+        pmap[p['id']] = {
+            'Player': f"{p['first_name']} {p['second_name']}",
+            'Team': teams.get(p['team']),
+            'Position': POS_MAP.get(str(p['element_type']))
+        }
+
+    picks = get_draft_picks_raw(league_id)
+    roster_ids = set()
+    for c in picks.get('choices', []):
+        if c['entry'] == int(team_id):
+            roster_ids.add(c['element'])
+
+    tx_data = sorted(get_transaction_data(league_id), key=lambda x: x['added'])
+
+    for tx in tx_data:
+        if tx['event'] > int(gameweek): continue
+        if tx['entry'] == int(team_id) and tx['result'] == 'a':
+            roster_ids.discard(tx['element_out'])
+            roster_ids.add(tx['element_in'])
+
+    rows = []
+    for pid in roster_ids:
+        info = pmap.get(pid)
+        if info:
+            rows.append(info)
+        else:
+            rows.append({'Player': f"Unknown ({pid})", 'Team': '?', 'Position': '?'})
+
+    return pd.DataFrame(rows)
+
+
+def get_available_players(projections_df: pd.DataFrame, league_ownership: Dict) -> pd.DataFrame:
+    """Anti-join: Returns rows from projections_df that are NOT in league_ownership."""
+    # Flatten owned players
+    owned_names = []
+    for team_blob in league_ownership.values():
+        for pos_list in team_blob.get('players', {}).values():
+            owned_names.extend(pos_list)
+
+    # Simple exclusion
+    return projections_df[~projections_df['Player'].isin(owned_names)].copy()
 
 
 # ==============================================================================
 # LINEUP OPTIMIZATION & VALIDATION
 # ==============================================================================
 
-def check_valid_lineup(df: pd.DataFrame) -> bool:
+def find_optimal_lineup(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Validates if a lineup meets FPL formation rules.
+    Greedy algorithm to find best XI (1G, 3-5D, 3-5M, 1-3F).
+    Expects columns: ['Position', 'Points', 'Player'].
+    """
+    work = df.copy()
+    work['Position'] = work['Position'].replace({'GK': 'G', 'DEF': 'D', 'MID': 'M', 'FWD': 'F'})
 
-    Requirements:
-    - 11 Players total
-    - 1 GK
-    - 3-5 DEF
-    - 3-5 MID
-    - 1-3 FWD
-    """
-    # Normalize position column casing just in case
+    # Ensure Points are numeric
+    work['Points'] = pd.to_numeric(work['Points'], errors='coerce').fillna(0)
+
+    top_gk = work[work['Position'] == 'G'].nlargest(1, 'Points')
+    top_def = work[work['Position'] == 'D'].nlargest(3, 'Points')
+    top_mid = work[work['Position'] == 'M'].nlargest(3, 'Points')
+    top_fwd = work[work['Position'] == 'F'].nlargest(1, 'Points')
+
+    selected = pd.concat([top_gk, top_def, top_mid, top_fwd])
+
+    remaining = work[~work['Player'].isin(selected['Player'])]
+    top_rem = remaining.nlargest(3, 'Points')
+
+    final = pd.concat([selected, top_rem])
+
+    final['PosVal'] = final['Position'].map({'G': 0, 'D': 1, 'M': 2, 'F': 3})
+    final = final.sort_values(['PosVal', 'Points'], ascending=[True, False]).drop(columns=['PosVal'])
+
+    return final.reset_index(drop=True)
+
+
+def check_valid_lineup(df: pd.DataFrame) -> bool:
+    """Validates formation constraints."""
     if 'Position' in df.columns:
-        pos_col = 'Position'
+        col = 'Position'
     elif 'position' in df.columns:
-        pos_col = 'position'
+        col = 'position'
     else:
         return False
 
-    players = len(df)
-    counts = df[pos_col].value_counts()
+    counts = df[col].replace({'GK': 'G', 'DEF': 'D', 'MID': 'M', 'FWD': 'F'}).value_counts()
 
-    # Safely get counts, defaulting to 0
-    g = counts.get('G', counts.get('GK', 0))
-    d = counts.get('D', counts.get('DEF', 0))
-    m = counts.get('M', counts.get('MID', 0))
-    f = counts.get('F', counts.get('FWD', 0))
-
-    player_check = players == 11
-    gk_check = g == 1
-    def_check = 3 <= d <= 5
-    mid_check = 3 <= m <= 5
-    fwd_check = 1 <= f <= 3
-
-    return bool(player_check & gk_check & def_check & mid_check & fwd_check)
-
-
-def find_optimal_lineup(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Greedy algorithm to find the best XI from a squad based on 'Projected_Points'.
-    Ensures valid formation logic (1 GK, 3-5 DEF, 3-5 MID, 1-3 FWD).
-    """
-    # Ensure we have a standard 'Position' column (G, D, M, F)
-    work_df = df.copy()
-    work_df['Position'] = work_df['Position'].replace({'GK': 'G', 'DEF': 'D', 'MID': 'M', 'FWD': 'F'})
-
-    # 1. Core Requirements (The "spine")
-    top_gk = work_df[work_df['Position'] == 'G'].sort_values(by='Projected_Points', ascending=False).head(1)
-    top_def = work_df[work_df['Position'] == 'D'].sort_values(by='Projected_Points', ascending=False).head(3)
-    top_mid = work_df[work_df['Position'] == 'M'].sort_values(by='Projected_Points', ascending=False).head(3)
-    top_fwd = work_df[work_df['Position'] == 'F'].sort_values(by='Projected_Points', ascending=False).head(1)
-
-    selected_players = pd.concat([top_gk, top_def, top_mid, top_fwd])
-
-    # 2. Fill remaining 3 spots with best available (regardless of pos)
-    remaining_players = work_df[~work_df['Player'].isin(selected_players['Player'])]
-    top_remaining = remaining_players.sort_values(by='Projected_Points', ascending=False).head(3)
-
-    # 3. Combine
-    final_selection = pd.concat([selected_players, top_remaining])
-
-    # 4. Sort for display (G -> D -> M -> F)
-    final_selection = final_selection.sort_values(
-        by=['Position', 'Projected_Points'],
-        key=lambda x: x.map({'G': 0, 'D': 1, 'M': 2, 'F': 3}),
-        ascending=[True, False]
-    ).reset_index(drop=True)
-
-    return final_selection
+    return (
+            len(df) == 11 and
+            counts.get('G', 0) == 1 and
+            3 <= counts.get('D', 0) <= 5 and
+            3 <= counts.get('M', 0) <= 5 and
+            1 <= counts.get('F', 0) <= 3
+    )
 
 
 # ==============================================================================
 # MERGING & NORMALIZATION
 # ==============================================================================
 
-def backfill_player_ids(roster_df: pd.DataFrame, fpl_stats: pd.DataFrame) -> pd.DataFrame:
-    """
-    For rows where Player_ID is NaN, fill via fuzzy match against fpl_stats.
-    Constrained by Team and Position to reduce false positives.
-    """
-    df = roster_df.copy()
+def normalize_rotowire_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardizes Rotowire columns."""
+    df = df.copy()
+    rename = {}
+    for c in df.columns:
+        l = c.lower()
+        if 'player' in l:
+            rename[c] = 'Player'
+        elif 'team' in l:
+            rename[c] = 'Team'
+        elif 'pos' in l and 'rank' not in l:
+            rename[c] = 'Position'
+        elif 'points' in l:
+            rename[c] = 'Points'
+    df.rename(columns=rename, inplace=True)
 
-    # Create temp normalized columns for matching
-    fpl_stats = fpl_stats.copy()
-    fpl_stats["__name_norm"] = fpl_stats["Player"].apply(normalize_text)
-    df["__name_norm"] = df["Player"].apply(normalize_text)
-
-    if "Player_ID" not in df.columns:
-        df["Player_ID"] = np.nan
-
-    missing_idx = df[df["Player_ID"].isna()].index
-
-    for i in missing_idx:
-        name_norm = df.at[i, "__name_norm"]
-        team = df.at[i, "Team"]
-        pos = df.at[i, "Position"]
-
-        # Filter candidates by Team + Position first
-        scope = fpl_stats[(fpl_stats["Team"] == team) & (fpl_stats["Position"] == pos)]
-
-        # Fallback 1: Just Position (if team name mismatch)
-        if scope.empty:
-            scope = fpl_stats[fpl_stats["Position"] == pos]
-
-        # Fallback 2: All players
-        if scope.empty:
-            scope = fpl_stats
-
-        if scope.empty:
-            continue
-
-        match = process.extractOne(name_norm, scope["__name_norm"].dropna().tolist(), scorer=fuzz.WRatio)
-
-        if match:
-            m_name, score = match[0], match[1]
-            if score >= 85:
-                pid = scope.loc[scope["__name_norm"] == m_name, "Player_ID"]
-                if not pid.empty:
-                    df.at[i, "Player_ID"] = float(pid.iloc[0])
-
-    return df.drop(columns=["__name_norm"], errors="ignore")
-
-
-def merge_fpl_players_and_projections(fpl_df: pd.DataFrame, roto_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Merges FPL official data with Rotowire projections.
-    1. Normalizes Rotowire data.
-    2. Exact match on Name + Team.
-    3. Fuzzy match on Name (within Team) for misses.
-    """
-    fpl = fpl_df.copy()
-    roto = normalize_rotowire_data(roto_df)
-
-    if '__name_norm' not in fpl.columns:
-        fpl['__name_norm'] = fpl['Player'].apply(normalize_text)
-
-    # Pass 1: Exact Merge
-    merged = pd.merge(
-        fpl,
-        roto[['__name_norm', 'Rotowire_Team', 'Projected_Points', 'Rotowire_Price']],
-        left_on=['__name_norm', 'Team'],
-        right_on=['__name_norm', 'Rotowire_Team'],
-        how='left'
-    )
-
-    # Pass 2: Fuzzy Match for missing projections
-    missing_mask = merged['Projected_Points'].isna()
-
-    for idx, row in merged[missing_mask].iterrows():
-        fpl_name = row['__name_norm']
-        team = row['Team']
-
-        # Limit scope to team
-        team_roto_subset = roto[roto['Rotowire_Team'] == team]
-
-        if team_roto_subset.empty:
-            continue
-
-        match = process.extractOne(fpl_name, team_roto_subset['__name_norm'].tolist())
-
-        if match and match[1] >= 85:
-            matched_name = match[0]
-            match_row = team_roto_subset[team_roto_subset['__name_norm'] == matched_name].iloc[0]
-
-            merged.at[idx, 'Projected_Points'] = match_row['Projected_Points']
-            merged.at[idx, 'Rotowire_Price'] = match_row['Rotowire_Price']
-
-    # Cleanup
-    merged['Projected_Points'] = pd.to_numeric(merged['Projected_Points'], errors='coerce').fillna(0.0)
-    return merged.drop(columns=['__name_norm', 'Rotowire_Team'], errors='ignore')
-
-
-def normalize_rotowire_data(roto_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Standardizes Rotowire columns to match FPL schema.
-    """
-    df = roto_df.copy()
-
-    # Map Columns
-    # Input expected: 'Player', 'Team', 'Position', 'Points', 'Price'
-    df = df.rename(columns={
-        "Player": "Rotowire_Name",
-        "Team": "Rotowire_Team",
-        "Points": "Projected_Points",
-        "Price": "Rotowire_Price"
-    })
-
-    # Map Positions
-    df['Position'] = df['Position'].replace({'GK': 'G', 'FW': 'F'})
-
-    # Aliases (Hardcoded fixes for known mismatches)
-    aliases = {
-        "Heung-Min Son": "Son Heung-min",
-        "Matty Cash": "Matthew Cash",
-        # Add more as discovered
-    }
-    df['Rotowire_Name'] = df['Rotowire_Name'].replace(aliases)
-
-    # Normalize text
-    df['__name_norm'] = df['Rotowire_Name'].apply(normalize_text)
-
+    # Map Teams and Positions
+    df['Team'] = df['Team'].map(lambda x: TEAM_FULL_TO_SHORT.get(x, str(x).upper()[:3]))
+    df['Position'] = df['Position'].map(lambda x: POS_MAP.get(str(x).upper(), str(x)[0]))
     return df
 
 
-# ==============================================================================
-# STATS & SCORING ENRICHMENT
-# ==============================================================================
-
-def add_fdr_and_form(
-        df: pd.DataFrame,
-        fpl_stats: pd.DataFrame,
-        current_gw: int,
-        weeks_lookahead: int = 3
-) -> pd.DataFrame:
+def merge_fpl_players_and_projections(fpl_df: pd.DataFrame, proj_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Enriches a dataframe with 'AvgFDRNextN' and 'Form'.
-    Requires Player/Team/Position columns.
+    Fuzzy matches FPL roster with Rotowire projections.
+    Prioritizes matches where Team + Position are identical.
     """
-    base = df.copy()
+    proj_norm = normalize_rotowire_data(proj_df)
+    candidates = proj_norm['Player'].dropna().unique().tolist()
 
-    # Merge generic stats first (including Player_ID if missing)
-    cols_to_merge = ["Player", "Team", "Position", "Player_ID", "form", "points_per_game"]
-    # Safety: only merge cols that actually exist in fpl_stats
-    cols_available = [c for c in cols_to_merge if c in fpl_stats.columns]
+    out = []
 
-    base = base.merge(
-        fpl_stats[cols_available],
-        on=["Player", "Team", "Position"],
-        how="left",
-        suffixes=("", "_fpl")
+    for _, row in fpl_df.iterrows():
+        name = row['Player']
+        team = row['Team']
+        pos = row['Position']
+
+        # 1. Fuzzy Match Name
+        best = process.extractOne(name, candidates)
+        matched_row = None
+
+        if best:
+            match_name, score = best
+
+            cand_row = proj_norm[proj_norm['Player'] == match_name].iloc[0]
+
+            # 2. Logic: Lower threshold if Team+Pos match
+            if cand_row['Team'] == team and cand_row['Position'] == pos:
+                if score >= 60: matched_row = cand_row
+            else:
+                if score >= 80: matched_row = cand_row
+
+        # 3. Assemble Result
+        res = row.to_dict()  # Keep original FPL data
+        if matched_row is not None:
+            res['Points'] = matched_row['Points']
+            res['Price'] = matched_row.get('Price', 0)
+            res['TSB %'] = matched_row.get('TSB %', 0)
+        else:
+            res['Points'] = 0.0
+
+        out.append(res)
+
+    return pd.DataFrame(out)
+
+
+# ==============================================================================
+# STATS ENRICHMENT & SCORING
+# ==============================================================================
+
+def _min_max_norm(series: pd.Series) -> pd.Series:
+    s = pd.to_numeric(series, errors='coerce')
+    lo, hi = s.min(), s.max()
+    return (s - lo) / (hi - lo) if hi > lo else pd.Series(0.5, index=s.index)
+
+
+def calculate_waiver_scores(df: pd.DataFrame, w_proj=0.5, w_form=0.3, w_fdr=0.2) -> pd.DataFrame:
+    """Calculates 'Waiver Score' based on weighted factors."""
+    tmp = df.copy()
+    tmp['Proj_norm'] = _min_max_norm(tmp['Points']).fillna(0.5)
+    tmp['Form_norm'] = _min_max_norm(tmp['Form']).fillna(0.5)
+
+    # Invert FDR (Lower is better, so 6 - FDR gives higher score to easy games)
+    tmp['FDREase'] = 6 - pd.to_numeric(tmp['AvgFDRNextN'], errors='coerce')
+    tmp['FDREase_norm'] = _min_max_norm(tmp['FDREase']).fillna(0.5)
+
+    tmp['Waiver Score'] = (
+            w_proj * tmp['Proj_norm'] +
+            w_form * tmp['Form_norm'] +
+            w_fdr * tmp['FDREase_norm']
     )
+    return tmp
 
-    # Coalesce Player_ID if it appeared from merge
-    if "Player_ID_fpl" in base.columns:
-        base["Player_ID"] = base["Player_ID"].fillna(base["Player_ID_fpl"])
-        base.drop(columns=["Player_ID_fpl"], inplace=True)
 
-    # Calculate Avg FDR
-    # Note: Requires a helper or lookup table for fixtures.
-    # Assuming simple calculation logic here or placeholders if specific fixture data isn't passed.
-    base["AvgFDRNextN"] = 0.0  # Placeholder if fixture dict not available in this scope
+def add_enriched_stats(df: pd.DataFrame, fpl_stats: pd.DataFrame, current_gw: int, weeks=3) -> pd.DataFrame:
+    """
+    Adds Form and AvgFDRNextN to the dataframe.
+    Calculates REAL Fixture Difficulty using get_future_fixtures.
+    """
+    # 1. Merge generic stats (Form, PPG)
+    base = df.merge(fpl_stats[['Player', 'Team', 'Position', 'form', 'points_per_game', 'id']],
+                    on=['Player', 'Team', 'Position'], how='left')
 
-    # Calculate Form (Fallback: FPL Form -> PPG -> 0)
-    base["Form"] = pd.to_numeric(base["form"], errors="coerce")
-    base["Form"] = base["Form"].fillna(pd.to_numeric(base["points_per_game"], errors="coerce"))
-    base["Form"] = base["Form"].fillna(0.0)
+    if 'id' in base.columns: base.rename(columns={'id': 'Player_ID'}, inplace=True)
+
+    # 2. Add Form (Fallback chain: form -> ppg -> 0)
+    base['Form'] = pd.to_numeric(base['form'], errors='coerce').fillna(
+        pd.to_numeric(base['points_per_game'], errors='coerce')
+    ).fillna(0.0)
+
+    # 3. Calculate FDR (Fixture Difficulty)
+    # We need to map the 'Team' column (short code like 'ARS') to 'Team ID' to query the fixtures DF
+    # We can get this map from fpl_stats
+    team_map_df = fpl_stats[['team', 'team_name_abbrv']].drop_duplicates()
+    short_to_id = dict(zip(team_map_df['team_name_abbrv'], team_map_df['team']))
+
+    fixtures = get_future_fixtures()
+
+    # Pre-filter fixtures to the relevant window
+    fixtures = fixtures[
+        (fixtures['event'] >= current_gw) &
+        (fixtures['event'] < current_gw + weeks)
+        ]
+
+    def get_avg_fdr(team_short_code):
+        tid = short_to_id.get(team_short_code)
+        if not tid: return 3.0  # Default neutral
+
+        # Find home and away games for this team
+        home_games = fixtures[fixtures['team_h'] == tid]['team_h_difficulty']
+        away_games = fixtures[fixtures['team_a'] == tid]['team_a_difficulty']
+
+        all_diffs = pd.concat([home_games, away_games])
+        if all_diffs.empty: return 3.0
+
+        return float(all_diffs.mean())
+
+    base['AvgFDRNextN'] = base['Team'].apply(get_avg_fdr)
 
     return base
 
 
-def apply_availability_penalty(df: pd.DataFrame, score_col: str, out_col: str) -> pd.DataFrame:
-    """
-    Multiplies a score column by (PlayPct / 100).
-    Used to down-weight injured players in projections.
-    """
-    out = df.copy()
-    pct = pd.to_numeric(out.get("PlayPct", 100), errors="coerce").fillna(100.0)
-    score = pd.to_numeric(out[score_col], errors="coerce").fillna(0.0)
-
-    out[out_col] = score * (pct / 100.0)
-    return out
-
-
-def attach_availability(df: pd.DataFrame, avail_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Merges PlayPct, StatusBucket, and News onto the main dataframe.
-    Tries Player+Team match first, then Player_ID.
-    """
-    base = df.copy()
-    cols_keep = ["PlayPct", "StatusBucket", "News"]
-
-    # 1. Merge on Name + Team
-    base = base.merge(
-        avail_df[["Player", "Team", "PlayPct", "StatusBucket", "News"]],
-        on=["Player", "Team"],
-        how="left",
-        suffixes=("", "_new")
-    )
-
-    # 2. Backfill with ID if needed
-    if "Player_ID" in base.columns and "Player_ID" in avail_df.columns:
-        mask = base["PlayPct"].isna()
-        if mask.any():
-            # distinct dataframe for ID lookup to avoid duplicates
-            id_lookup = avail_df[["Player_ID"] + cols_keep].drop_duplicates(subset=["Player_ID"])
-
-            merged_ids = base.loc[mask, ["Player_ID"]].merge(id_lookup, on="Player_ID", how="left")
-
-            base.loc[mask, "PlayPct"] = merged_ids["PlayPct"].values
-            base.loc[mask, "StatusBucket"] = merged_ids["StatusBucket"].values
-            base.loc[mask, "News"] = merged_ids["News"].values
-
-    # Defaults
-    base["PlayPct"] = pd.to_numeric(base["PlayPct"], errors="coerce").fillna(100.0)
-    base["StatusBucket"] = base["StatusBucket"].fillna("Available")
-    base["News"] = base["News"].fillna("")
-
-    return base
-
-
 # ==============================================================================
-# TRANSFERS (CLASSIC & DRAFT)
+# LUCK ADJUSTED STANDINGS
 # ==============================================================================
 
-def get_transfer_recommendations(
-        current_squad_df: pd.DataFrame,
-        all_players_df: pd.DataFrame,
-        bank_budget: float,
-        sort_metric: str = 'Projected_Points'
-) -> pd.DataFrame:
-    """
-    Generates 'Buy' recommendations for Classic mode.
+def calculate_luck_adjusted_standings(league_id: int) -> pd.DataFrame:
+    """Calculates Fair Rank based on 'All-Play' logic."""
+    data = get_draft_league_details(league_id)
+    fixtures = pd.DataFrame(data.get('matches', []))
+    entries = {e['id']: e['entry_name'] for e in data.get('league_entries', [])}
 
-    Logic:
-    1. Iterates through current squad.
-    2. Simulates selling player -> calculates available budget.
-    3. Finds replacements in same position within budget.
-    4. Returns Top 3 upgrades per position.
-    """
-    recommendations = []
+    # Filter played matches
+    played = fixtures[(fixtures['league_entry_1_points'] > 0) | (fixtures['league_entry_2_points'] > 0)].copy()
 
-    # Ensure we have IDs to prevent buying players we already own
-    if 'Player_ID' in current_squad_df.columns:
-        my_ids = set(current_squad_df['Player_ID'].dropna().tolist())
-    else:
-        my_ids = set()
-
-    for idx, player in current_squad_df.iterrows():
-        current_pos = player['Position']
-        # Classic prices are often 10x in API (e.g. 100 = 10.0). Adjust accordingly if needed.
-        sell_price = player.get('now_cost', 0)
-
-        available_funds = bank_budget + sell_price
-
-        # Candidates: Same Pos, Affordable, Not Owned
-        candidates = all_players_df[
-            (all_players_df['Position'] == current_pos) &
-            (all_players_df['now_cost'] <= available_funds) &
-            (~all_players_df['Player_ID'].isin(my_ids))
-            ].copy()
-
-        if candidates.empty:
-            continue
-
-        # Calculate Gain
-        current_pts = player.get(sort_metric, 0)
-        candidates['Point_Diff'] = candidates[sort_metric] - current_pts
-
-        # Get Top 3 Better Options
-        better_options = candidates[candidates['Point_Diff'] > 0].sort_values(
-            by='Point_Diff', ascending=False
-        ).head(3)
-
-        for _, option in better_options.iterrows():
-            recommendations.append({
-                'Sell': player['Player'],
-                'Buy': option['Player'],
-                'Cost_Diff': option['now_cost'] - sell_price,
-                'Projected_Gain': option['Point_Diff'],
-                'New_Player_FDR': option.get('AvgFDRNextN', 0)
-            })
-
-    if not recommendations:
+    if played.empty:
         return pd.DataFrame()
 
-    return pd.DataFrame(recommendations).sort_values(by='Projected_Gain', ascending=False)
+    home = played[['event', 'league_entry_1', 'league_entry_1_points']].rename(
+        columns={'league_entry_1': 'id', 'league_entry_1_points': 'score'})
+    away = played[['event', 'league_entry_2', 'league_entry_2_points']].rename(
+        columns={'league_entry_2': 'id', 'league_entry_2_points': 'score'})
+
+    long_df = pd.concat([home, away])
+    long_df['Team'] = long_df['id'].map(entries)
+
+    long_df['GW_Rank'] = long_df.groupby('event')['score'].rank(ascending=False, method='min')
+
+    stats = long_df.groupby('Team').agg(
+        Avg_GW_Rank=('GW_Rank', 'mean'),
+        Total_Points=('score', 'sum'),
+        Avg_Score=('score', 'mean')
+    ).reset_index()
+
+    stats['Fair_Rank'] = stats['Avg_GW_Rank'].rank(ascending=True, method='min').astype(int)
+    return stats.sort_values('Fair_Rank').set_index('Fair_Rank')
+
+
+# ==============================================================================
+# FIXTURE DIFFICULTY GRID
+# ==============================================================================
+
+def get_fixture_difficulty_grid(weeks: int = 6):
+    """
+    Generates the FDR grid.
+    Returns: (display_df, diff_numeric_df, avg_series)
+    """
+    current_gw = get_current_gameweek()
+
+    static = get_bootstrap_static()
+    id2short = {t['id']: t['short_name'] for t in static['teams']}
+    team_list = sorted(id2short.values())
+
+    cols = [f"GW{gw}" for gw in range(current_gw, current_gw + weeks)]
+    disp = pd.DataFrame("—", index=team_list, columns=cols)
+    diffs = pd.DataFrame(np.nan, index=team_list, columns=cols)
+
+    for i, gw in enumerate(range(current_gw, current_gw + weeks)):
+        fixtures = get_fixtures_for_event(gw)
+        for fx in fixtures:
+            h_id, a_id = fx['team_h'], fx['team_a']
+            h_diff, a_diff = fx['team_h_difficulty'], fx['team_a_difficulty']
+
+            h_name = id2short.get(h_id)
+            a_name = id2short.get(a_id)
+
+            if not h_name or not a_name: continue
+
+            col_name = cols[i]
+
+            # Update Home
+            prev = disp.at[h_name, col_name]
+            disp.at[h_name, col_name] = f"{a_name} (H)" if prev == "—" else f"{prev}\n{a_name} (H)"
+            diffs.at[h_name, col_name] = np.nanmean([diffs.at[h_name, col_name], float(h_diff)])
+
+            # Update Away
+            prev = disp.at[a_name, col_name]
+            disp.at[a_name, col_name] = f"{h_name} (A)" if prev == "—" else f"{prev}\n{h_name} (A)"
+            diffs.at[a_name, col_name] = np.nanmean([diffs.at[a_name, col_name], float(a_diff)])
+
+    avg = diffs.fillna(3).mean(axis=1)
+
+    order = avg.sort_values().index
+    disp = disp.loc[order]
+    diffs = diffs.loc[order]
+    disp.insert(0, "Team", disp.index)
+    disp["Avg FDR"] = avg.loc[order].round(2)
+
+    return disp, diffs, avg
