@@ -372,6 +372,27 @@ def get_current_gameweek():
 
     return current_gameweek
 
+def get_entry_details(team_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Fetches entry details for a Classic FPL team.
+
+    Parameters:
+    - team_id: The FPL Classic team ID.
+
+    Returns:
+    - Dictionary with team details or None if not found.
+    """
+    if not team_id:
+        return None
+    try:
+        return requests.get(f"https://fantasy.premierleague.com/api/entry/{team_id}/", timeout=10).json()
+    except Exception:
+        return None
+
+def _enforce_rw_schema_fpl(df: pd.DataFrame, teams_df: pd.DataFrame = None) -> pd.DataFrame:
+    """Wrapper to enforce RotoWire schema on FPL data."""
+    return normalize_fpl_players_to_rotowire_schema(df, teams_df)
+
 def get_earliest_kickoff_et(gw: int) -> datetime:
     """
     Pull fixtures for the given GW from the classic FPL endpoint and

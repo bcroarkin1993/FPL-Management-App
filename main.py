@@ -2,17 +2,19 @@
 import streamlit as st
 import config
 
-# --- Existing pages you already have ---
-from scripts.home import show_home_page  # Draft home
-from scripts.fixtures import show_club_fixtures_section  # Global fixtures page
-from scripts.fixture_projections import show_fixtures_page  # Draft fixture projections
-from scripts.team_analysis import show_team_stats_page  # Draft team analysis
-from scripts.waiver_wire import show_waiver_wire_page  # Draft - waiver wire
-from scripts.draft_helper import show_draft_helper_page # Draft - Draft Helper
-from scripts.player_statistics import show_player_stats_page  # Global player stats
-from scripts.player_projections import show_player_projections_page  # Global player projections
-from scripts.projected_lineups import show_projected_lineups  # Global projected lineups
-from scripts.injuries import show_injuries_page  # Global projected lineups
+# --- Draft pages ---
+from scripts.draft.home import show_home_page
+from scripts.draft.fixture_projections import show_fixtures_page
+from scripts.draft.team_analysis import show_team_stats_page
+from scripts.draft.waiver_wire import show_waiver_wire_page
+from scripts.draft.draft_helper import show_draft_helper_page
+
+# --- FPL cross-format pages ---
+from scripts.fpl.fixtures import show_club_fixtures_section
+from scripts.fpl.player_statistics import show_player_stats_page
+from scripts.fpl.player_projections import show_player_projections_page
+from scripts.fpl.projected_lineups import show_projected_lineups
+from scripts.fpl.injuries import show_injuries_page
 
 # ------------------------------------------------------------
 # Page config (must be first Streamlit command in the script)

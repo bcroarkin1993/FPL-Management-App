@@ -4,7 +4,7 @@ import random
 import requests
 import streamlit as st
 from typing import Tuple
-from scripts.utils import get_current_gameweek, get_fixture_difficulty_grid, style_fixture_difficulty
+from scripts.common.utils import get_current_gameweek, get_fixture_difficulty_grid, style_fixture_difficulty
 
 # ---------- optional local tz (EST) ----------
 try:

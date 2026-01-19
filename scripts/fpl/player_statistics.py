@@ -2,7 +2,7 @@ import config
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from scripts.utils import clean_fpl_player_names, get_rotowire_player_projections, pull_fpl_player_stats
+from scripts.common.utils import clean_fpl_player_names, get_rotowire_player_projections, pull_fpl_player_stats
 
 def display_top_goal_scorers(player_statistics, position_filter, top_n=10):
     """

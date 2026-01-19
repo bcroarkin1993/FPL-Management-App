@@ -1,6 +1,6 @@
 import config
 import streamlit as st
-from scripts.utils import get_league_player_ownership, get_league_teams, get_rotowire_player_projections, \
+from scripts.common.utils import get_league_player_ownership, get_league_teams, get_rotowire_player_projections, \
     get_team_composition_for_gameweek, get_team_id_by_name, merge_fpl_players_and_projections
 
 def show_team_projections(team_id, fpl_player_projections, gameweek):
