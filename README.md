@@ -1,40 +1,88 @@
-# Fantasy Premier League (FPL) Draft Team Management App
+# Fantasy Premier League (FPL) Management App
 
-This repository contains a **Fantasy Premier League (FPL) Draft Team Management App** built with **Streamlit**. The app provides a variety of tools to help manage and optimize your FPL Draft team.
-
-The app integrates data from official FPL APIs and Rotowire projected lineups and player projections to provide actionable insights for FPL managers.
+A **Streamlit-based Fantasy Premier League management app** for both **Draft** and **Classic** formats. The app integrates data from official FPL APIs and Rotowire projections to provide actionable insights for FPL managers.
 
 ---
 
 ## Features
 
-1. **League Standings**
-   - View the current standings of your league, including matches won, drawn, and lost, as well as total points scored.
-   - Toggle to an advanced view to see luck-adjusted statistics in the league table, offering insights into which teams have been fortunate or unfortunate based on weekly performances.
-   - Analyze team performance trends with interactive graphs:
-     - **Total Points Over Gameweeks**: Visualize the total points scored by each team across all gameweeks.
-     - **League Points Over Gameweeks**: Track how each team accumulates league points (3 for a win, 1 for a draw) throughout the season.
+### Cross-Format Tools (FPL App Home)
 
-2. **Fixture Analysis**  
-   - View upcoming fixtures for your team and league.
-   - Analyze team compositions and view match projections for all league matchups.
+1. **Gameweek Fixtures**
+   - Browse upcoming Premier League fixtures with fixture difficulty ratings (FDR)
+   - Color-coded difficulty grid showing each team's schedule
 
-3. **Waiver Wire Suggestions**  
-   - Identify the best available players in your league to improve your team.
+2. **Projected EPL Lineups**
+   - Fetch projected lineups from Rotowire for all upcoming fixtures
+   - Visualize lineups on a soccer pitch representation by position
 
-4. **Projected EPL Lineups**  
-   - Automatically fetch projected EPL lineups from Rotowire for all upcoming Premier League fixtures.
-   - Visualize the lineups with a soccer pitch representation, clearly showing players by their positions (e.g., GK, DEF, MID, FWD).
-   - Includes player names and positions, with special adjustments for formations (e.g., multiple central players) for an accurate display.
+3. **Player Projections**
+   - View Rotowire's gameweek player projections and rankings
+   - Compare projected points across positions
 
-5. **Team Composition Tracking**  
-   - Track the composition of all teams in your FPL draft league.
-   - Compare your team's strengths and weaknesses against opponents.
+4. **EPL Player Statistics**
+   - Track top performers by category (goals, assists, clean sheets, xG, xA)
+   - Advanced data visualization graphs
 
-6. **EPL Player Statistics**  
-   - Track the top performers by various statistical categories (goals scored, assists, cleaned sheets).
-   - View advanced data visualization graphs of EPL player statistics.
-   
+5. **Player Injuries**
+   - View current injury news and availability status across all EPL players
+
+### Draft League Tools
+
+6. **League Standings & Trends**
+   - Current standings with wins, draws, losses, and total points
+   - Luck-adjusted statistics showing which teams have been fortunate/unfortunate
+   - Interactive graphs: Total Points and League Points over gameweeks
+
+7. **Fixture Projections**
+   - View upcoming draft league matchups with projected scores
+   - Analyze team compositions for all league fixtures
+
+8. **Waiver Wire**
+   - Identify the best available players in your league
+   - Player rankings with projected points, form, and fixture difficulty
+
+9. **Team Analysis**
+   - Track composition of all teams in your draft league
+   - Compare strengths and weaknesses against opponents
+
+10. **Draft Helper**
+    - Tools to assist during the draft process
+
+### Classic League Tools (Coming Soon)
+
+11. **Free Hit Optimizer**
+    - Linear programming-based squad optimizer for Free Hit chip
+    - Respects budget, squad size, and team limits
+
+12. **Transfer Recommendations**
+    - Suggested transfers based on projected point gains
+
+### Notifications
+
+13. **Discord Waiver Alerts**
+    - Automated reminders for waiver wire deadlines via Discord webhook
+    - Runs on schedule via GitHub Actions
+
+---
+
+## Project Structure
+
+```
+scripts/
+├── common/          # Shared utilities
+│   ├── utils.py     # API calls, data transforms, player matching
+│   └── waiver_alerts.py
+├── draft/           # Draft league features
+│   ├── home.py, waiver_wire.py, fixture_projections.py
+│   ├── team_analysis.py, draft_helper.py
+├── fpl/             # Cross-format features
+│   ├── fixtures.py, injuries.py, player_projections.py
+│   ├── player_statistics.py, projected_lineups.py
+└── classic/         # Classic league features
+    ├── free_hit.py, transfers.py
+```
+
 ---
 
 ## Setup Instructions
@@ -42,8 +90,8 @@ The app integrates data from official FPL APIs and Rotowire projected lineups an
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/your_username/FPL-Draft-App.git
-cd FPL-Draft-App
+git clone https://github.com/bcroarkin1993/FPL-Management-App.git
+cd FPL-Management-App
 ```
 
 ### 2. Install Dependencies
@@ -55,69 +103,65 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Step 3: Configure Your Environment
+### 3. Configure Your Environment
 
-The app uses sensitive information, such as your FPL league ID and team ID, which must be set up in a `.env` file. Follow the steps below:
+The app requires your FPL league and team IDs, which must be set up in a `.env` file:
 
-1. In the root directory of the project, create a file named `.env` (or rename the included `.env.example` file to `.env`).
-2. Open the `.env` file and update the values with your information:
-   - `FPL_DRAFT_LEAGUE_ID`: The FPL league ID for your draft league. You can find this in the URL when viewing your league on the FPL website (e.g., `https://draft.premierleague.com/league/{FPL_LEAGUE_ID}`).
-   - `FPL_DRAFT_TEAM_ID`: Your FPL draft team ID, found in the URL when viewing your team (e.g., `https://draft.premierleague.com/team/{FPL_TEAM_ID}`).
+1. Copy the example file: `cp .env.example .env`
+2. Edit `.env` with your information:
+   - `FPL_DRAFT_LEAGUE_ID`: Found in the URL at `https://draft.premierleague.com/league/{ID}`
+   - `FPL_DRAFT_TEAM_ID`: Found in the URL at `https://draft.premierleague.com/entry/{ID}`
 
 Example `.env` file:
 ```bash
-FPL_DRAFT_LEAGUE_ID = 123456
-FPL_DRAFT_TEAM_ID = 123
+FPL_DRAFT_LEAGUE_ID=123456
+FPL_DRAFT_TEAM_ID=123
 ```
 
-3. Save the .env file. The app will automatically load these variables during runtime.
-Ensure `.env` is listed in the `.gitignore` file to avoid accidentally pushing sensitive information to GitHub.
-
-### Step 4: Run the App
-
-Launch the Streamlit app:
+Optional settings:
 ```bash
-streamlit run app.py
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...  # For waiver alerts
+FPL_DEADLINE_OFFSET_HOURS=25.5  # Hours before kickoff for deadline reminders
+TZ_NAME=America/New_York  # Your timezone
+```
+
+### 4. Run the App
+
+```bash
+streamlit run main.py
 ```
 
 ---
 
-## Upcoming Features
+## App Navigation
 
-We are continually working to enhance the FPL Draft App experience. Below are some exciting features that are planned for future updates:
+The app has three main sections accessible from the sidebar:
 
-### 1. **Player Trade Analyzer**
-   - A tool to evaluate potential trades between teams in your league.
-   - Uses advanced projections and team needs to determine trade fairness and impact.
+- **FPL App Home**: Cross-format tools (fixtures, lineups, projections, stats, injuries)
+- **Draft**: Draft league-specific features (standings, waiver wire, team analysis)
+- **Classic**: FPL Classic league support (in development)
 
-### 2. **Matchup Insights**
-   - Get detailed insights for weekly matchups, including projected points and head-to-head history.
-   - Visualize the strength of each team's optimal lineup.
+---
 
-### 3. **Live Score Integration**
-   - Real-time score tracking for your league players during gameweeks.
-   - Live updates on player points and fixture results.
+## Roadmap
 
-### 4. **Waiver Recommendation System**
-   - Personalized waiver wire recommendations based on your team's strengths, weaknesses, and available players.
-   - Highlights players most likely to improve your team.
+### High Priority
+- **FPL Classic Compatibility** - Complete Classic league support
+- **Waiver Wire Improvements** - Refine recommendation accuracy
 
-### 5. **Enhanced Lineup Visualizations**
-   - Expanded visualizations to include player form, injury status, and recent performances.
-   - Improved UI for lineup adjustments and analysis.
+### Medium Priority
+- **Head-to-Head History** - Add historical matchup data to fixture projections
+- **Improved Player Matching** - Better fuzzy matching between data sources
+- **Error Handling** - Better logging and user-facing error messages
 
-### 6. **Customizable Notifications**
-   - Set up alerts for waiver deadlines, lineup changes, and injury updates.
-   - Push notifications to stay updated on your league activity.
+### Low Priority
+- Player Trade Analyzer
+- Live Score Integration
+- Enhanced Lineup Visualizations
+- Historical Data Analysis
 
-### 7. **Historical Data Analysis**
-   - Explore past seasons to see trends in player performance, team success, and waiver wire effectiveness.
-   - Learn from historical data to improve your strategies.
+---
 
-### 8. **FPL Classical Compatibility**
-   - Add in the FPL Classical league for league and team analysis
+## Contributing
 
-I am  always open to feedback and suggestions. If you have ideas for features you'd like to see in the app, feel free to contribute or open an issue on the GitHub repository!
-
-Stay tuned for more updates as we continue to build the ultimate FPL Draft companion app!
-
+Feedback and suggestions are welcome! Feel free to open an issue on the GitHub repository.
