@@ -32,6 +32,5 @@ Thumbs.db
 *.swo
 *.pid
 
-# Environment configuration
-config.py
+# Environment configuration (sensitive values go in .env, not config.py)
 .env
