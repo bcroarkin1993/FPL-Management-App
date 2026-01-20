@@ -16,6 +16,9 @@ from scripts.fpl.player_projections import show_player_projections_page
 from scripts.fpl.projected_lineups import show_projected_lineups
 from scripts.fpl.injuries import show_injuries_page
 
+# --- Classic pages ---
+from scripts.classic.league_standings import show_classic_league_standings_page
+
 # ------------------------------------------------------------
 # Page config (must be first Streamlit command in the script)
 # ------------------------------------------------------------
@@ -169,6 +172,7 @@ def main():
             "Classic Pages",
             [
                 "Home",
+                "League Standings",
                 "Fixture Projections",
                 "Waiver Wire",
                 "Team Analysis",
@@ -178,6 +182,8 @@ def main():
 
         if subpage == "Home":
             render_classic_home()
+        elif subpage == "League Standings":
+            show_classic_league_standings_page()
         elif subpage == "Fixture Projections":
             # Replace with your Classic fixture projections function when ready
             render_placeholder("Classic — Fixture Projections")
