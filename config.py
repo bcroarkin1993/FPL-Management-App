@@ -14,8 +14,49 @@ except Exception:
 # ----- Core league/app settings (IDs only; no network here) -----
 FPL_DRAFT_LEAGUE_ID   = int(os.getenv("FPL_DRAFT_LEAGUE_ID", "0"))
 FPL_DRAFT_TEAM_ID     = int(os.getenv("FPL_DRAFT_TEAM_ID", "0"))
-FPL_CLASSIC_LEAGUE_ID = int(os.getenv("FPL_CLASSIC_LEAGUE_ID", "0"))
 FPL_CLASSIC_TEAM_ID   = int(os.getenv("FPL_CLASSIC_TEAM_ID", "0"))
+
+def _parse_classic_leagues(env_value: str) -> list:
+    """
+    Parse FPL_CLASSIC_LEAGUE_IDS env var.
+
+    Supports formats:
+      - "123456:My League,789012:Friends" -> [{"id": 123456, "name": "My League"}, ...]
+      - "123456,789012" -> [{"id": 123456, "name": None}, ...] (names fetched from API later)
+
+    Returns list of dicts with 'id' (int) and 'name' (str or None).
+    """
+    if not env_value or not env_value.strip():
+        return []
+
+    leagues = []
+    for entry in env_value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+
+        if ":" in entry:
+            # Format: id:name
+            parts = entry.split(":", 1)
+            try:
+                league_id = int(parts[0].strip())
+                league_name = parts[1].strip() if len(parts) > 1 else None
+                leagues.append({"id": league_id, "name": league_name or None})
+            except ValueError:
+                continue
+        else:
+            # Format: id only
+            try:
+                league_id = int(entry)
+                leagues.append({"id": league_id, "name": None})
+            except ValueError:
+                continue
+
+    return leagues
+
+# Classic FPL leagues - supports multiple leagues
+# Format: "id:name,id:name,..." or "id,id,..."
+FPL_CLASSIC_LEAGUE_IDS = _parse_classic_leagues(os.getenv("FPL_CLASSIC_LEAGUE_IDS", ""))
 
 # Resolved lazily below:
 # CURRENT_GAMEWEEK
