@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import re
 import requests
+import streamlit as st
 from typing import Dict, List, Any, Optional
 import unicodedata
 from urllib.parse import urljoin
@@ -388,6 +389,149 @@ def get_entry_details(team_id: int) -> Optional[Dict[str, Any]]:
         return requests.get(f"https://fantasy.premierleague.com/api/entry/{team_id}/", timeout=10).json()
     except Exception:
         return None
+
+
+# =============================================================================
+# Classic FPL API Functions
+# =============================================================================
+
+@st.cache_data(show_spinner=False, ttl=300)
+def get_classic_bootstrap_static() -> Optional[Dict[str, Any]]:
+    """
+    Fetch Classic FPL bootstrap data (players, teams, events).
+
+    Returns the full player pool with prices, stats, ownership percentages,
+    team info, and gameweek events.
+
+    Endpoint: https://fantasy.premierleague.com/api/bootstrap-static/
+
+    Returns:
+    - Dictionary containing 'elements' (players), 'teams', 'events', etc.
+    - None if the request fails.
+    """
+    try:
+        url = "https://fantasy.premierleague.com/api/bootstrap-static/"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def get_classic_team_picks(team_id: int, gw: int) -> Optional[Dict[str, Any]]:
+    """
+    Fetch a Classic FPL team's picks for a specific gameweek.
+
+    Returns squad picks, captain selection, active chip (if any),
+    and entry history for that gameweek.
+
+    Endpoint: https://fantasy.premierleague.com/api/entry/{team_id}/event/{gw}/picks/
+
+    Parameters:
+    - team_id: The FPL Classic team ID.
+    - gw: The gameweek number.
+
+    Returns:
+    - Dictionary with 'picks', 'active_chip', 'entry_history', etc.
+    - None if the request fails or team/gw not found.
+    """
+    if not team_id or not gw:
+        return None
+    try:
+        url = f"https://fantasy.premierleague.com/api/entry/{team_id}/event/{gw}/picks/"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def get_classic_team_history(team_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Fetch a Classic FPL team's full season history.
+
+    Returns gameweek-by-gameweek results (points, rank, bank, team value),
+    chips used, and past season summaries.
+
+    Endpoint: https://fantasy.premierleague.com/api/entry/{team_id}/history/
+
+    Parameters:
+    - team_id: The FPL Classic team ID.
+
+    Returns:
+    - Dictionary with 'current' (GW history), 'chips', 'past' (past seasons).
+    - None if the request fails or team not found.
+    """
+    if not team_id:
+        return None
+    try:
+        url = f"https://fantasy.premierleague.com/api/entry/{team_id}/history/"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def get_classic_league_standings(league_id: int, page: int = 1) -> Optional[Dict[str, Any]]:
+    """
+    Fetch Classic FPL league standings with pagination.
+
+    Returns league metadata and standings for the specified page
+    (50 entries per page by default).
+
+    Endpoint: https://fantasy.premierleague.com/api/leagues-classic/{league_id}/standings/?page_standings={page}
+
+    Parameters:
+    - league_id: The Classic FPL league ID.
+    - page: Page number for pagination (default: 1).
+
+    Returns:
+    - Dictionary with 'league' (metadata) and 'standings' (results).
+    - None if the request fails or league not found.
+    """
+    if not league_id:
+        return None
+    try:
+        url = f"https://fantasy.premierleague.com/api/leagues-classic/{league_id}/standings/"
+        params = {"page_standings": page}
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def get_classic_transfers(team_id: int) -> Optional[List[Dict[str, Any]]]:
+    """
+    Fetch all transfers made by a Classic FPL team.
+
+    Returns a list of all transfers with element_in, element_out,
+    event (gameweek), and timestamp.
+
+    Endpoint: https://fantasy.premierleague.com/api/entry/{team_id}/transfers/
+
+    Parameters:
+    - team_id: The FPL Classic team ID.
+
+    Returns:
+    - List of transfer dictionaries.
+    - None if the request fails or team not found.
+    """
+    if not team_id:
+        return None
+    try:
+        url = f"https://fantasy.premierleague.com/api/entry/{team_id}/transfers/"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
 
 def _enforce_rw_schema_fpl(df: pd.DataFrame, teams_df: pd.DataFrame = None) -> pd.DataFrame:
     """Wrapper to enforce RotoWire schema on FPL data."""
