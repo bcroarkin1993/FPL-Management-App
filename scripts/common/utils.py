@@ -930,6 +930,59 @@ def get_classic_league_standings(league_id: int, page: int = 1) -> Optional[Dict
 
 
 @st.cache_data(show_spinner=False, ttl=300)
+def get_h2h_league_standings(league_id: int, page: int = 1) -> Optional[Dict[str, Any]]:
+    """
+    Fetch Head-to-Head (H2H) FPL league standings with pagination.
+
+    Returns league metadata and standings for the specified page.
+
+    Endpoint: https://fantasy.premierleague.com/api/leagues-h2h/{league_id}/standings/?page_standings={page}
+
+    Parameters:
+    - league_id: The H2H FPL league ID.
+    - page: Page number for pagination (default: 1).
+
+    Returns:
+    - Dictionary with 'league' (metadata) and 'standings' (results).
+    - None if the request fails or league not found.
+    """
+    if not league_id:
+        return None
+    try:
+        url = f"https://fantasy.premierleague.com/api/leagues-h2h/{league_id}/standings/"
+        params = {"page_standings": page}
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
+def get_league_standings(league_id: int, page: int = 1) -> Optional[Dict[str, Any]]:
+    """
+    Fetch league standings, automatically detecting if it's Classic or H2H.
+
+    Tries the classic endpoint first, then falls back to H2H if that fails.
+
+    Parameters:
+    - league_id: The FPL league ID.
+    - page: Page number for pagination (default: 1).
+
+    Returns:
+    - Dictionary with 'league' (metadata) and 'standings' (results).
+    - None if both endpoints fail.
+    """
+    # Try classic endpoint first
+    data = get_classic_league_standings(league_id, page)
+    if data:
+        return data
+
+    # Fall back to H2H endpoint
+    data = get_h2h_league_standings(league_id, page)
+    return data
+
+
+@st.cache_data(show_spinner=False, ttl=300)
 def get_classic_team_history(team_id: int) -> Optional[Dict[str, Any]]:
     """
     Fetch a Classic FPL team's full season history.
