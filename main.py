@@ -18,6 +18,7 @@ from scripts.fpl.injuries import show_injuries_page
 
 # --- Classic pages ---
 from scripts.classic.league_standings import show_classic_league_standings_page
+from scripts.classic.team_analysis import show_classic_team_analysis_page
 
 # ------------------------------------------------------------
 # Page config (must be first Streamlit command in the script)
@@ -191,8 +192,7 @@ def main():
             # Replace with your Classic waiver/free transfers helper when ready
             render_placeholder("Classic — Waiver/Transfers")
         elif subpage == "Team Analysis":
-            # Replace with your Classic team analysis when ready
-            render_placeholder("Classic — Team Analysis")
+            show_classic_team_analysis_page()
         elif subpage == "League Analysis":
             # Replace with your Classic league analysis when ready
             render_placeholder("Classic — League Analysis")

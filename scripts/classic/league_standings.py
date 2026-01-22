@@ -3,7 +3,7 @@ import pandas as pd
 import random
 import streamlit as st
 from scripts.common.utils import (
-    get_classic_league_standings,
+    get_league_standings,
     get_classic_team_history,
 )
 
@@ -22,8 +22,8 @@ def get_league_display_options() -> list:
         if league["name"]:
             name = league["name"]
         else:
-            # Try to fetch name from API
-            data = get_classic_league_standings(league_id)
+            # Try to fetch name from API (works for both Classic and H2H)
+            data = get_league_standings(league_id)
             if data and "league" in data:
                 name = data["league"].get("name", f"League {league_id}")
             else:
@@ -43,7 +43,7 @@ def fetch_standings_data(league_id: int) -> dict:
     Fetch league standings and metadata.
     Returns dict with 'league_info', 'standings', 'scoring_type'.
     """
-    data = get_classic_league_standings(league_id)
+    data = get_league_standings(league_id)
 
     if not data:
         return None
@@ -191,13 +191,15 @@ def show_classic_league_standings_page():
     league_info = data["league_info"]
     scoring_type = data["scoring_type"]
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
-        st.metric("League", league_info.get("name", "Unknown"))
+        league_name = league_info.get("name", "Unknown")
+        st.markdown(f"### {league_name}")
     with col2:
         st.metric("Format", scoring_type)
     with col3:
-        st.metric("Created", league_info.get("created", "Unknown")[:10] if league_info.get("created") else "Unknown")
+        created = league_info.get("created", "")[:10] if league_info.get("created") else "Unknown"
+        st.metric("Created", created)
 
     st.divider()
 
