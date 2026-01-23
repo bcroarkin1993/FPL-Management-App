@@ -27,7 +27,7 @@ python -m scripts.common.waiver_alerts
 ### Data Flow
 ```
 FPL Draft API  ──┐
-                 ├──> scripts/utils.py (normalize/merge) ──> Page scripts ──> Streamlit UI
+                 ├──> scripts/common/utils.py (normalize/merge) ──> Page scripts ──> Streamlit UI
 Rotowire scrape ─┘
 ```
 
@@ -35,22 +35,20 @@ Rotowire scrape ─┘
 
 **config.py** - Configuration with lazy loading via PEP 562 `__getattr__`. `CURRENT_GAMEWEEK` and `ROTOWIRE_URL` resolve on first access to avoid import-time network calls.
 
-**scripts/utils.py** (~1,800 lines) - Central utility module containing:
-- FPL API fetching (`pull_fpl_player_stats()`, `get_league_entries()`, `get_transaction_data()`)
-- Player name normalization and fuzzy matching (`_backfill_player_ids()`, `merge_fpl_players_and_projections()`)
-- Rotowire scraping (`get_rotowire_player_projections()`, `get_rotowire_season_rankings()`)
-- Fixture analysis (`get_fixture_difficulty_grid()`, `get_earliest_kickoff_et()`)
+**scripts/common/** - Shared utilities:
+- `utils.py` - FPL API fetching, Rotowire scraping, player matching, fixture analysis
+- `player_matching.py` - `canonical_normalize()`, `PlayerRegistry` for centralized player lookups
+- `waiver_alerts.py` - Discord notification system for waiver deadlines
 
 **main.py** - Streamlit entry point with three-section navigation:
 - FPL App Home: Cross-format tools (fixtures, lineups, stats, injuries)
 - Draft: League-specific analysis, waiver wire, team projections
-- Classic: Placeholder structure for future FPL Classic support
+- Classic: League standings and team analysis for Classic FPL leagues
 
-**Page scripts** (scripts/*.py) - Each implements a `show_*_page()` function:
-- `home.py` - Draft league standings and trends
-- `waiver_wire.py` - Available player rankings
-- `fixture_projections.py` - Draft matchup analysis
-- `player_statistics.py` - EPL player stats
+**Page scripts** - Organized by section, each implements a `show_*_page()` function:
+- `scripts/draft/` - home.py, waiver_wire.py, fixture_projections.py, team_analysis.py
+- `scripts/classic/` - league_standings.py, team_analysis.py
+- `scripts/fpl/` - fixtures.py, player_statistics.py, projected_lineups.py, injuries.py
 
 ### External Data Sources
 
@@ -97,7 +95,7 @@ that branch for the remainder of the session.
 
 | Task | Status | Notes |
 |------|--------|-------|
-| FPL Classic Compatibility | Not started | Add Classic league support (navigation structure exists) |
+| FPL Classic Compatibility | Partial | League standings and team analysis pages done; transfers and free hit pages pending |
 
 ### Medium Priority
 
