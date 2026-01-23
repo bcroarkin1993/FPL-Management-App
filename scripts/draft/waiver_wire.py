@@ -21,6 +21,7 @@ from scripts.common.utils import (
     _norm_text,
     _backfill_player_ids
 )
+from scripts.common.player_matching import canonical_normalize, get_player_registry
 
 # ---------------------------
 # FPL API READS
@@ -333,17 +334,36 @@ def _prepare_proj_for_merge(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
 
     # Rename common variants -> canonical
+    # Track which canonical names we've already mapped to avoid duplicates
     rename_map = {}
+    mapped_targets = set()
+
     for c in df.columns:
         lc = c.strip().lower()
-        if lc in ("player", "name", "player_name"):         rename_map[c] = "Player"
-        elif lc in ("team", "team_short", "teamname", "team_name"): rename_map[c] = "Team"
-        elif lc in ("matchup", "fixture", "opp", "opponent"):       rename_map[c] = "Matchup"
-        elif lc in ("position", "pos"):                           rename_map[c] = "Position"
-        elif lc in ("points", "point", "proj", "projection"):       rename_map[c] = "Points"
-        elif lc in ("pos rank", "pos_rank", "position rank", "position_rank"): rename_map[c] = "Pos Rank"
+        target = None
+        if lc in ("player", "name", "player_name"):
+            target = "Player"
+        elif lc in ("team", "team_short", "teamname", "team_name"):
+            target = "Team"
+        elif lc in ("matchup", "fixture", "opp", "opponent"):
+            target = "Matchup"
+        elif lc in ("position", "pos"):
+            target = "Position"
+        elif lc in ("points", "point", "proj", "projection"):
+            target = "Points"
+        elif lc in ("pos rank", "pos_rank", "position rank", "position_rank"):
+            target = "Pos Rank"
+
+        # Only add to rename map if we haven't already mapped something to this target
+        if target and target not in mapped_targets:
+            rename_map[c] = target
+            mapped_targets.add(target)
+
     if rename_map:
         df = df.rename(columns=rename_map)
+
+    # Drop any remaining duplicate columns (keep first occurrence)
+    df = df.loc[:, ~df.columns.duplicated(keep='first')]
 
     # Ensure required columns exist
     required = ["Player", "Team", "Matchup", "Position", "Points", "Pos Rank"]
@@ -381,6 +401,7 @@ def _available_from_projections(
         return proj_for_merge
 
     # 2) Enrich owned with Team/Position (for better fuzzy accuracy)
+    # Use normalized names for the merge to handle accent mismatches
     fpl_cols = {c.lower(): c for c in fpl_player_statistics_df.columns}
     need = {"player", "team", "position"}
     miss = need - set(fpl_cols.keys())
@@ -391,16 +412,43 @@ def _available_from_projections(
             f"Got: {list(fpl_player_statistics_df.columns)}"
         )
 
-    owned_fpl = pd.DataFrame({"Player": owned_names}).merge(
-        fpl_player_statistics_df[
-            [fpl_cols["player"], fpl_cols["team"], fpl_cols["position"]]
-        ].rename(columns={
-            fpl_cols["player"]:   "Player",
-            fpl_cols["team"]:     "Team",
-            fpl_cols["position"]: "Position"
-        }),
-        on="Player", how="left"
+    # Prepare FPL stats with normalized names for matching
+    fpl_stats_for_merge = fpl_player_statistics_df[
+        [fpl_cols["player"], fpl_cols["team"], fpl_cols["position"]]
+    ].rename(columns={
+        fpl_cols["player"]:   "Player",
+        fpl_cols["team"]:     "Team",
+        fpl_cols["position"]: "Position"
+    }).copy()
+    fpl_stats_for_merge["__norm_name"] = fpl_stats_for_merge["Player"].apply(canonical_normalize)
+
+    # Convert full team names to short codes to match Rotowire format
+    # E.g., "Fulham" -> "FUL", "Man City" -> "MCI"
+    team_name_to_short = {
+        "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
+        "Brentford": "BRE", "Brighton": "BHA", "Burnley": "BUR",
+        "Chelsea": "CHE", "Crystal Palace": "CRY", "Everton": "EVE",
+        "Fulham": "FUL", "Leeds": "LEE", "Leicester": "LEI",
+        "Liverpool": "LIV", "Man City": "MCI", "Man Utd": "MUN",
+        "Manchester City": "MCI", "Manchester Utd": "MUN", "Manchester United": "MUN",
+        "Newcastle": "NEW", "Nott'm Forest": "NFO", "Nottingham Forest": "NFO",
+        "Southampton": "SOU", "Spurs": "TOT", "Tottenham": "TOT",
+        "Sunderland": "SUN", "West Ham": "WHU", "Wolves": "WOL",
+        "Ipswich": "IPS", "Luton": "LUT",
+    }
+    fpl_stats_for_merge["Team"] = fpl_stats_for_merge["Team"].replace(team_name_to_short)
+
+    # Add normalized name to owned names for the merge
+    owned_fpl = pd.DataFrame({"Player": owned_names})
+    owned_fpl["__norm_name"] = owned_fpl["Player"].apply(canonical_normalize)
+
+    # Merge on normalized name instead of raw name to handle accents
+    owned_fpl = owned_fpl.merge(
+        fpl_stats_for_merge[["__norm_name", "Team", "Position"]],
+        on="__norm_name", how="left"
     )
+    # Drop the helper column
+    owned_fpl = owned_fpl.drop(columns=["__norm_name"], errors="ignore")
 
     # 3) Fuzzy map FPL -> RotoWire canonical names
     try:
@@ -524,10 +572,25 @@ def _add_fdr_and_form(
     Join AvgFDRNextN and Form onto df.
 
     - Requires df to have Player/Team/Position (will create if missing).
-    - Merges in Player_ID, then computes Form via element-summary.
+    - Uses normalized names for matching to handle accent differences.
+    - Prefers Player_ID join when available, falls back to normalized name merge.
     - Fallback chain for Form: element-summary -> FPL 'form' -> 'points_per_game' -> 0.
     """
     base = df.copy()
+
+    # Clean up any duplicate columns from prior merges (e.g., Team_x, Team_y)
+    for col in ("Team", "Position", "Player"):
+        if f"{col}_x" in base.columns or f"{col}_y" in base.columns:
+            # Coalesce: prefer _x, then _y, then original
+            if col in base.columns:
+                base[col] = base[col].fillna(base.get(f"{col}_x", pd.NA))
+                base[col] = base[col].fillna(base.get(f"{col}_y", pd.NA))
+            elif f"{col}_x" in base.columns:
+                base[col] = base[f"{col}_x"].fillna(base.get(f"{col}_y", pd.NA))
+            elif f"{col}_y" in base.columns:
+                base[col] = base[f"{col}_y"]
+            base.drop(columns=[f"{col}_x", f"{col}_y"], inplace=True, errors="ignore")
+
     # Ensure join keys exist
     for col in ("Player", "Team", "Position"):
         if col not in base.columns:
@@ -539,12 +602,63 @@ def _add_fdr_and_form(
         if col not in stats.columns:
             stats[col] = np.nan
 
-    # Merge in Player_ID + FPL fallback stats
-    base = base.merge(
-        stats[["Player", "Team", "Position", "Player_ID", "form", "points_per_game"]],
-        on=["Player", "Team", "Position"],
-        how="left"
-    )
+    # Check if we can use Player_ID for the join (preferred, more reliable)
+    has_player_id = "Player_ID" in base.columns and base["Player_ID"].notna().any()
+
+    if has_player_id:
+        # Use Player_ID join (most reliable)
+        base = base.merge(
+            stats[["Player_ID", "form", "points_per_game"]].drop_duplicates(subset=["Player_ID"]),
+            on="Player_ID",
+            how="left",
+            suffixes=("", "_stats")
+        )
+        # Coalesce form columns if needed
+        if "form_stats" in base.columns:
+            base["form"] = base.get("form", pd.NA)
+            base["form"] = base["form"].fillna(base["form_stats"])
+            base.drop(columns=["form_stats"], inplace=True, errors="ignore")
+        if "points_per_game_stats" in base.columns:
+            base["points_per_game"] = base.get("points_per_game", pd.NA)
+            base["points_per_game"] = base["points_per_game"].fillna(base["points_per_game_stats"])
+            base.drop(columns=["points_per_game_stats"], inplace=True, errors="ignore")
+    else:
+        # Fallback: Use normalized name + team + position for the merge
+        # Add normalized name columns for matching
+        base["__norm_name"] = base["Player"].apply(canonical_normalize)
+        stats["__norm_name"] = stats["Player"].apply(canonical_normalize)
+
+        # Merge on normalized name + team + position
+        stats_for_merge = stats[["__norm_name", "Team", "Position", "Player_ID", "form", "points_per_game"]].copy()
+        # Drop duplicates to avoid row multiplication
+        stats_for_merge = stats_for_merge.drop_duplicates(subset=["__norm_name", "Team", "Position"])
+
+        base = base.merge(
+            stats_for_merge,
+            on=["__norm_name", "Team", "Position"],
+            how="left",
+            suffixes=("", "_stats")
+        )
+
+        # Coalesce Player_ID if needed
+        if "Player_ID_stats" in base.columns:
+            base["Player_ID"] = base.get("Player_ID", pd.NA)
+            if isinstance(base["Player_ID"], pd.Series):
+                base["Player_ID"] = base["Player_ID"].fillna(base["Player_ID_stats"])
+            base.drop(columns=["Player_ID_stats"], inplace=True, errors="ignore")
+
+        # Coalesce form columns
+        if "form_stats" in base.columns:
+            base["form"] = base.get("form", pd.NA)
+            base["form"] = base["form"].fillna(base["form_stats"])
+            base.drop(columns=["form_stats"], inplace=True, errors="ignore")
+        if "points_per_game_stats" in base.columns:
+            base["points_per_game"] = base.get("points_per_game", pd.NA)
+            base["points_per_game"] = base["points_per_game"].fillna(base["points_per_game_stats"])
+            base.drop(columns=["points_per_game_stats"], inplace=True, errors="ignore")
+
+        # Clean up helper column
+        base.drop(columns=["__norm_name"], inplace=True, errors="ignore")
 
     # Ensure Player_ID exists (for downstream)
     if "Player_ID" not in base.columns:
@@ -846,24 +960,40 @@ def show_waiver_wire_page():
     my_players = []
     for pos, names in my_team.get("players", {}).items():
         for nm in names:
-            my_players.append({"Player": nm, "Team": None, "Position": pos})
+            my_players.append({"Player": nm, "Position": pos})
     my_roster = pd.DataFrame(my_players)
 
-    # Attach Team/Player_ID/Season_Points from FPL master (existing)
+    # Attach Team/Player_ID/Season_Points from FPL master using normalized names
+    # This handles accent differences between ownership API and FPL stats
+    my_roster["__norm_name"] = my_roster["Player"].apply(canonical_normalize)
+    fpl_stats_for_roster = fpl_stats[["Player", "Team", "Position", "Player_ID", "Season_Points"]].copy()
+    fpl_stats_for_roster["__norm_name"] = fpl_stats_for_roster["Player"].apply(canonical_normalize)
+
     my_roster = my_roster.merge(
-        fpl_stats[["Player", "Team", "Position", "Player_ID", "Season_Points"]],
-        on=["Player", "Position"], how="left"
+        fpl_stats_for_roster[["__norm_name", "Team", "Position", "Player_ID", "Season_Points"]],
+        on=["__norm_name", "Position"], how="left"
     )
+    # Drop helper column
+    my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
 
     # Ensure Team present for exact joins and align roster names to RotoWire canonical names
     my_roster = _ensure_team_col(my_roster, fpl_stats)
     my_roster = _align_roster_player_names_to_projections(my_roster, proj)
 
     # Add next-GW projected points (match on canonical Player/Team/Position)
+    # Use normalized names for matching to handle accent differences
     proj_points_df = proj[["Player", "Team", "Position", "Points"]].rename(
         columns={"Points": "Projected_Points"}
+    ).copy()
+    proj_points_df["__norm_name"] = proj_points_df["Player"].apply(canonical_normalize)
+    my_roster["__norm_name"] = my_roster["Player"].apply(canonical_normalize)
+
+    my_roster = my_roster.merge(
+        proj_points_df[["__norm_name", "Team", "Position", "Projected_Points"]],
+        on=["__norm_name", "Team", "Position"],
+        how="left"
     )
-    my_roster = my_roster.merge(proj_points_df, on=["Player", "Team", "Position"], how="left")
+    my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
 
     # Ensure any remaining missing Player_IDs are backfilled one more time
     my_roster = _backfill_player_ids(my_roster, fpl_stats)
