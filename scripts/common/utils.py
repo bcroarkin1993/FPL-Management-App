@@ -28,6 +28,8 @@ import unicodedata
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
+from scripts.common.player_matching import canonical_normalize
+
 
 # =============================================================================
 # 1. CONSTANTS & CONFIGURATION
@@ -1706,7 +1708,8 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
     """
     Robust merge of FPL players (Player/Team/Position) with projections.
     - Normalizes projections_df to RotoWire schema inside the function.
-    - Uses fuzzy matching with stricter acceptance when team+position agree.
+    - Uses canonical name normalization (strips accents) for reliable matching.
+    - Tries exact match on normalized names first, then falls back to fuzzy matching.
     - Returns a table with players that *did* or *did not* match; unmatched get NA fields.
     """
 
@@ -1762,40 +1765,118 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
     if 'Player' not in proj_norm.columns:
         raise ValueError(f"Normalized projections missing 'Player' column. Have: {list(proj_norm.columns)}")
 
-    candidates = proj_norm['Player'].dropna().astype(str).unique().tolist()
+    # Add normalized name column for matching (strips accents, lowercase, etc.)
+    proj_norm['__norm_name'] = proj_norm['Player'].apply(canonical_normalize)
+
+    # Build lookup dict: normalized_name -> list of original Player names
+    norm_to_players = {}
+    for _, row in proj_norm.iterrows():
+        norm = row['__norm_name']
+        player = row['Player']
+        if norm and pd.notna(player):
+            if norm not in norm_to_players:
+                norm_to_players[norm] = []
+            if player not in norm_to_players[norm]:
+                norm_to_players[norm].append(player)
+
+    # Normalized candidates for fuzzy matching fallback
+    normalized_candidates = list(norm_to_players.keys())
+
+    # Build team-filtered lookup for prioritized matching
+    # Maps (norm_name, team) -> list of original Player names
+    norm_team_to_players = {}
+    for _, row in proj_norm.iterrows():
+        norm = row['__norm_name']
+        player = row['Player']
+        team = str(row.get('Team', ''))
+        if norm and pd.notna(player):
+            key = (norm, team)
+            if key not in norm_team_to_players:
+                norm_team_to_players[key] = []
+            if player not in norm_team_to_players[key]:
+                norm_team_to_players[key].append(player)
 
     # -------- matching strategy --------
     def _best_match(fpl_player, fpl_team, fpl_position):
         """
-        Prefer matches *with* same team+position (lower threshold). Otherwise use higher fuzzy threshold.
+        Match strategy:
+        1. Try exact match on canonically normalized name (O(1) lookup)
+        2. Try fuzzy match WITHIN the same team first (prioritize team context)
+        3. Fall back to fuzzy match across all players
+        Uses lower threshold when team+position agree for context-aware matching.
         """
-        if not candidates:
+        if not normalized_candidates:
             return None
 
-        # Primary: best name match among all candidates
-        res = process.extractOne(str(fpl_player), candidates)
+        # Normalize the FPL player name
+        fpl_norm = canonical_normalize(str(fpl_player))
+        if not fpl_norm:
+            return None
+
+        fpl_team_str = str(fpl_team) if fpl_team else ''
+
+        # Step 1: Try exact match on normalized name
+        if fpl_norm in norm_to_players:
+            exact_players = norm_to_players[fpl_norm]
+            # If only one match, use it
+            if len(exact_players) == 1:
+                return exact_players[0]
+            # Multiple matches: prefer one with matching team+position
+            for player in exact_players:
+                rows = proj_norm[proj_norm['Player'] == player]
+                if rows.empty:
+                    continue
+                row = rows.iloc[0]
+                if str(row.get('Team')) == fpl_team_str and str(row.get('Position')) == str(fpl_position):
+                    return player
+            # No team+position match, return first
+            return exact_players[0]
+
+        # Step 2: Try fuzzy match WITHIN the same team first
+        # This ensures "Carlos Henrique Casimiro" (MUN) matches "Casemiro" (MUN) not "Carlos Baleba" (BHA)
+        same_team_candidates = [
+            norm for norm in normalized_candidates
+            if (norm, fpl_team_str) in norm_team_to_players
+        ]
+
+        if same_team_candidates:
+            res = process.extractOne(fpl_norm, same_team_candidates)
+            if res:
+                matched_norm, score = res[0], res[1]
+                if score >= lower_fuzzy_threshold:
+                    # Found a good match within the same team
+                    original_players = norm_team_to_players.get((matched_norm, fpl_team_str), [])
+                    if original_players:
+                        return original_players[0]
+
+        # Step 3: Fall back to fuzzy match across all players
+        res = process.extractOne(fpl_norm, normalized_candidates)
         if not res:
             return None
-        match, score = res[0], res[1]
+        matched_norm, score = res[0], res[1]
 
-        # Pull the matched row (first hit)
-        matched_rows = proj_norm[proj_norm['Player'] == match]
-        if matched_rows.empty:
+        # Get the original player name(s) for this normalized name
+        original_players = norm_to_players.get(matched_norm, [])
+        if not original_players:
             return None
 
-        row = matched_rows.iloc[0]
-        match_team = row.get('Team')
-        match_pos = row.get('Position')
+        # Find best matching player considering team+position
+        for player in original_players:
+            rows = proj_norm[proj_norm['Player'] == player]
+            if rows.empty:
+                continue
+            row = rows.iloc[0]
+            match_team = row.get('Team')
+            match_pos = row.get('Position')
 
-        # If team+position agrees, allow lower threshold
-        if (str(match_team) == str(fpl_team)) and (str(match_pos) == str(fpl_position)):
-            if score >= lower_fuzzy_threshold:
-                return match
-            return None
+            # If team+position agrees, allow lower threshold
+            if (str(match_team) == fpl_team_str) and (str(match_pos) == str(fpl_position)):
+                if score >= lower_fuzzy_threshold:
+                    return player
 
-        # If either differs, require the stricter threshold
+        # No team+position match, use stricter threshold
         if score >= fuzzy_threshold:
-            return match
+            return original_players[0]
 
         return None
 
