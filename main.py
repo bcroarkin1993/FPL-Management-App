@@ -19,6 +19,7 @@ from scripts.fpl.injuries import show_injuries_page
 # --- Classic pages ---
 from scripts.classic.league_standings import show_classic_league_standings_page
 from scripts.classic.team_analysis import show_classic_team_analysis_page
+from scripts.classic.fixture_projections import show_classic_fixture_projections_page
 
 # ------------------------------------------------------------
 # Page config (must be first Streamlit command in the script)
@@ -186,8 +187,7 @@ def main():
         elif subpage == "League Standings":
             show_classic_league_standings_page()
         elif subpage == "Fixture Projections":
-            # Replace with your Classic fixture projections function when ready
-            render_placeholder("Classic — Fixture Projections")
+            show_classic_fixture_projections_page()
         elif subpage == "Waiver Wire":
             # Replace with your Classic waiver/free transfers helper when ready
             render_placeholder("Classic — Waiver/Transfers")
