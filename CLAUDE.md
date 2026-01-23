@@ -19,7 +19,7 @@ cp .env.example .env  # Then edit with your league/team IDs
 streamlit run main.py
 
 # Run Discord waiver alerts (used by GitHub Actions)
-python -m scripts.waiver_alerts
+python -m scripts.common.waiver_alerts
 ```
 
 ## Architecture
@@ -62,7 +62,13 @@ Rotowire scrape ─┘
 
 ### Player Matching
 
-Players are matched across sources using fuzzywuzzy with an 85% threshold (60% if team+position match). Key functions: `_norm_text()`, `_clean_player_name()`, `merge_fpl_players_and_projections()`.
+Players are matched across sources using a two-step approach:
+1. **Canonical normalization** via `canonical_normalize()` strips accents and normalizes names (e.g., "Raúl Jiménez Rodríguez" → "raul jimenez rodriguez")
+2. **Team-prioritized fuzzy matching** tries same-team matches first, then falls back to cross-team matching
+
+Key modules:
+- `scripts/common/player_matching.py` - `canonical_normalize()`, `PlayerRegistry` class for centralized lookups
+- `scripts/common/utils.py` - `merge_fpl_players_and_projections()` with 80% threshold (60% if team+position match)
 
 ### Caching
 
@@ -92,19 +98,15 @@ that branch for the remainder of the session.
 | Task | Status | Notes |
 |------|--------|-------|
 | FPL Classic Compatibility | Not started | Add Classic league support (navigation structure exists) |
-| Waiver Wire Improvements | Needs refinement | Basic system works, needs tuning |
-| ~~Fix README entry point~~ | Done | ~~README says `app.py`, actual entry is `main.py`~~ |
 
 ### Medium Priority
 
 | Task | Status | Notes |
 |------|--------|-------|
 | Matchup Insights - H2H History | Not started | Fixture projections done, head-to-head history pending |
-| Improve player matching accuracy | Not started | 85% fuzzy threshold may miss players; tune or add manual mappings |
 | Rotowire scraping robustness | Not started | URL discovery depends on HTML structure; add fallbacks |
 | Add error logging | Not started | Many silent try/except blocks; harder to debug |
 | Better error messages | Not started | Surface clearer feedback when APIs fail |
-| Notifications improvements | Partial | Discord waiver alerts + injuries page exist; could improve |
 
 ### Low Priority
 
@@ -114,6 +116,6 @@ that branch for the remainder of the session.
 | Live Score Integration | Not started | Real-time score tracking during gameweeks |
 | Enhanced Lineup Visualizations | Not started | Add player form, injury status to lineup views |
 | Historical Data Analysis | Not started | Past season trends and performance analysis |
-| Split utils.py | Not started | ~1,800 lines; could separate into api.py, matching.py, etc. |
+| Split utils.py | In progress | Created `player_matching.py`; more modules could be extracted |
 | Add basic tests | Not started | No test infrastructure currently |
 | Gameweek refresh logic | Not started | Cached at module level, doesn't auto-update during day |

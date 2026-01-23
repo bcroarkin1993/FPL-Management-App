@@ -34,17 +34,17 @@ def _earliest_kickoff_et(gw: int) -> datetime:
         raise RuntimeError(f"No kickoff times found for GW {gw}")
     return min(times)
 
-def get_next_transaction_deadline(offset_hours: int = 24, gw: int = None):
-    """Returns (deadline_et, gw). Deadline = earliest kickoff - offset."""
+def get_next_transaction_deadline(offset_hours: float = 25.5, gw: int = None):
+    """Returns (deadline_et, kickoff_et, gw). Deadline = earliest kickoff - offset."""
     if gw is None:
         gw = _get_current_gameweek()
     kickoff_et = _earliest_kickoff_et(gw)
-    return kickoff_et - timedelta(hours=int(offset_hours)), gw
+    return kickoff_et - timedelta(hours=float(offset_hours)), kickoff_et, gw
 
 def main():
     # ---- Secrets / env (all provided via GitHub Actions) ----
     webhook = os.getenv("DISCORD_WEBHOOK_URL", "")
-    offset_h = int(os.getenv("FPL_DEADLINE_OFFSET_HOURS", "24"))
+    offset_h = float(os.getenv("FPL_DEADLINE_OFFSET_HOURS", "25.5"))
     gw_env = os.getenv("FPL_CURRENT_GAMEWEEK")
     gw = int(gw_env) if gw_env and gw_env.isdigit() else None
 
@@ -62,8 +62,16 @@ def main():
         return
 
     # Compute window
-    deadline_et, gw = get_next_transaction_deadline(offset_hours=offset_h, gw=gw)
-    hours_left = (deadline_et - datetime.now(TZ)).total_seconds() / 3600
+    deadline_et, kickoff_et, gw = get_next_transaction_deadline(offset_hours=offset_h, gw=gw)
+    now_et = datetime.now(TZ)
+    hours_left = (deadline_et - now_et).total_seconds() / 3600
+
+    # Log timing info for debugging
+    print(f"[waiver_alerts] GW={gw}, offset={offset_h}h")
+    print(f"[waiver_alerts] Now: {now_et.strftime('%Y-%m-%d %H:%M %Z')}")
+    print(f"[waiver_alerts] Kickoff: {kickoff_et.strftime('%Y-%m-%d %H:%M %Z')}")
+    print(f"[waiver_alerts] Deadline: {deadline_et.strftime('%Y-%m-%d %H:%M %Z')}")
+    print(f"[waiver_alerts] Hours until deadline: {hours_left:.2f}")
 
     # Fire at ~24h / 6h / 1h (tolerance ±20 min)
     sent = False
@@ -72,11 +80,12 @@ def main():
             ts = deadline_et.strftime("%a %b %d • %I:%M %p %Z")
             msg = f"{mention}🔔 FPL Draft transactions for **GW {gw}** are due in ~**{target}h** (deadline **{ts}**)."
             requests.post(webhook, json={"content": msg}, timeout=10)
+            print(f"[waiver_alerts] Sent {target}h reminder")
             sent = True
             break
 
     if not sent:
-        print("Outside target reminder windows")
+        print(f"[waiver_alerts] Outside target windows (hours_left={hours_left:.2f})")
 
 if __name__ == "__main__":
     main()
