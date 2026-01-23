@@ -960,6 +960,38 @@ def get_h2h_league_standings(league_id: int, page: int = 1) -> Optional[Dict[str
         return None
 
 
+@st.cache_data(ttl=300)
+def get_h2h_league_matches(league_id: int, event: int = None, page: int = 1) -> Optional[Dict[str, Any]]:
+    """
+    Fetch Head-to-Head (H2H) league matches/fixtures.
+
+    Returns matchups for the specified gameweek with team IDs, names, and scores.
+
+    Endpoint: https://fantasy.premierleague.com/api/leagues-h2h-matches/league/{league_id}/
+
+    Parameters:
+    - league_id: The H2H FPL league ID.
+    - event: The gameweek number (optional, defaults to current if not specified).
+    - page: Page number for pagination (default: 1).
+
+    Returns:
+    - Dictionary with 'results' containing match data.
+    - None if the request fails or league not found.
+    """
+    if not league_id:
+        return None
+    try:
+        url = f"https://fantasy.premierleague.com/api/leagues-h2h-matches/league/{league_id}/"
+        params = {"page": page}
+        if event:
+            params["event"] = event
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
 def get_league_standings(league_id: int, page: int = 1) -> Optional[Dict[str, Any]]:
     """
     Fetch league standings, automatically detecting if it's Classic or H2H.

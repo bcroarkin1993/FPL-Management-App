@@ -2,6 +2,7 @@ import config
 import math
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from scripts.common.utils import find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures, \
     get_team_id_by_name, get_rotowire_player_projections, get_team_composition_for_gameweek, \
     merge_fpl_players_and_projections, normalize_apostrophes, get_historical_team_scores
@@ -157,49 +158,296 @@ def analyze_fixture_projections(fixture, league_id, projections_df):
     # Return the final DataFrames and team names
     return team1_df, team2_df, team1_name, team2_name
 
+def _get_win_pct_color(pct: float) -> str:
+    """
+    Returns a color on a red-to-green gradient based on win percentage.
+    Uses a compressed scale so colors diverge more quickly from 50%.
+
+    0-35% = strong red
+    35-45% = red to yellow
+    45-55% = yellow (narrow band)
+    55-65% = yellow to green
+    65-100% = strong green
+    """
+    if pct <= 35:
+        # Strong red
+        return "rgb(220, 53, 69)"  # Bootstrap danger red
+    elif pct <= 45:
+        # Red to Yellow (35-45%)
+        ratio = (pct - 35) / 10
+        r = 220 + int((255 - 220) * ratio)  # 220 to 255
+        g = 53 + int((193 - 53) * ratio)    # 53 to 193
+        b = 69 - int((69 - 7) * ratio)      # 69 to 7
+        return f"rgb({r}, {g}, {b})"
+    elif pct <= 55:
+        # Yellow zone (45-55%) - narrow band
+        ratio = (pct - 45) / 10
+        r = 255 - int((255 - 200) * ratio)  # 255 to 200
+        g = 193 + int((200 - 193) * ratio)  # 193 to 200
+        b = 7 + int((80 - 7) * ratio)       # 7 to 80
+        return f"rgb({r}, {g}, {b})"
+    elif pct <= 65:
+        # Yellow to Green (55-65%)
+        ratio = (pct - 55) / 10
+        r = 200 - int((200 - 40) * ratio)   # 200 to 40
+        g = 200 - int((200 - 167) * ratio)  # 200 to 167
+        b = 80 - int((80 - 69) * ratio)     # 80 to 69
+        return f"rgb({r}, {g}, {b})"
+    else:
+        # Strong green (65%+)
+        return "rgb(40, 167, 69)"  # Bootstrap success green
+
+
+def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd.DataFrame, sigma: float):
+    """
+    Render an overview table showing all fixtures with projected scores and win probabilities.
+    """
+    if not fixtures:
+        return
+
+    overview_data = []
+    denom = math.sqrt(2.0 * (sigma ** 2)) if sigma > 0 else 1.0
+
+    with st.spinner("Calculating projections for all fixtures..."):
+        for fixture in fixtures:
+            try:
+                result = analyze_fixture_projections(fixture, league_id, projections_df)
+                if result is None:
+                    continue
+
+                team1_df, team2_df, team1_name, team2_name = result
+
+                team1_score = team1_df['Points'].sum()
+                team2_score = team2_df['Points'].sum()
+
+                # Calculate win probability
+                z = (team1_score - team2_score) / denom
+                p_team1 = _normal_cdf(z)
+                p_team2 = 1.0 - p_team1
+
+                overview_data.append({
+                    "team1": format_team_name(team1_name),
+                    "proj1": team1_score,
+                    "pct1": p_team1 * 100,
+                    "pct2": p_team2 * 100,
+                    "proj2": team2_score,
+                    "team2": format_team_name(team2_name),
+                })
+            except Exception:
+                continue
+
+    if not overview_data:
+        st.warning("Could not calculate projections for fixtures.")
+        return
+
+    # Build HTML table with fancy styling
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: transparent;
+        }
+        .fixtures-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            margin: 10px 0;
+        }
+        .fixtures-table th {
+            background: linear-gradient(135deg, #37003c 0%, #5a0050 100%);
+            color: white;
+            padding: 14px 12px;
+            text-align: center;
+            font-weight: 600;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .fixtures-table th:first-child {
+            border-radius: 10px 0 0 0;
+        }
+        .fixtures-table th:last-child {
+            border-radius: 0 10px 0 0;
+        }
+        .fixtures-table td {
+            padding: 14px 12px;
+            text-align: center;
+            border-bottom: 1px solid #e0e0e0;
+            font-size: 14px;
+        }
+        .fixtures-table tr:last-child td:first-child {
+            border-radius: 0 0 0 10px;
+        }
+        .fixtures-table tr:last-child td:last-child {
+            border-radius: 0 0 10px 0;
+        }
+        .fixtures-table tr:hover td {
+            background-color: #f8f4f9;
+        }
+        .team-name {
+            font-weight: 600;
+            color: #1a1a2e;
+            min-width: 140px;
+        }
+        .team-left {
+            text-align: right !important;
+            padding-right: 20px !important;
+        }
+        .team-right {
+            text-align: left !important;
+            padding-left: 20px !important;
+        }
+        .proj-score {
+            font-weight: 500;
+            color: #444;
+            min-width: 55px;
+        }
+        .win-pct {
+            font-weight: 700;
+            font-size: 15px;
+            min-width: 65px;
+            padding: 8px 12px !important;
+            border-radius: 6px;
+        }
+        .vs-cell {
+            color: #888;
+            font-weight: 500;
+            font-size: 12px;
+            min-width: 40px;
+        }
+        .prob-bar-container {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            margin-top: 12px;
+            overflow: hidden;
+            display: flex;
+        }
+        .prob-bar-left {
+            height: 100%;
+            transition: width 0.3s ease;
+        }
+        .prob-bar-right {
+            height: 100%;
+            transition: width 0.3s ease;
+        }
+    </style>
+    </head>
+    <body>
+    <table class="fixtures-table">
+    <thead>
+        <tr>
+            <th>Team</th>
+            <th>Proj</th>
+            <th>Win %</th>
+            <th></th>
+            <th>Win %</th>
+            <th>Proj</th>
+            <th>Team</th>
+        </tr>
+    </thead>
+    <tbody>
+    """
+
+    for row in overview_data:
+        color1 = _get_win_pct_color(row["pct1"])
+        color2 = _get_win_pct_color(row["pct2"])
+
+        html += f"""
+        <tr>
+            <td class="team-name team-left">{row["team1"]}</td>
+            <td class="proj-score">{row["proj1"]:.1f}</td>
+            <td class="win-pct" style="background: {color1}; color: white;">{row["pct1"]:.0f}%</td>
+            <td class="vs-cell">vs</td>
+            <td class="win-pct" style="background: {color2}; color: white;">{row["pct2"]:.0f}%</td>
+            <td class="proj-score">{row["proj2"]:.1f}</td>
+            <td class="team-name team-right">{row["team2"]}</td>
+        </tr>
+        """
+
+    html += """
+    </tbody>
+    </table>
+    </body>
+    </html>
+    """
+
+    # Calculate height based on number of fixtures
+    table_height = 60 + (len(overview_data) * 52)
+    components.html(html, height=table_height, scrolling=False)
+
+
 def show_fixtures_page():
     st.title("Upcoming Fixtures & Projections")
 
     # Find the fixtures for the current gameweek
     gameweek_fixtures = get_gameweek_fixtures(config.FPL_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
 
-    # Display each of the current gameweek fixtures
-    if gameweek_fixtures:
-        st.subheader(f"Gameweek {config.CURRENT_GAMEWEEK} Fixtures")
-        for fixture in gameweek_fixtures:
-            st.text(fixture)
+    if not gameweek_fixtures:
+        st.warning("No fixtures found for the current gameweek.")
+        return
 
-    # Subheader for match projections
-    st.subheader("Match Projections")
+    st.subheader(f"Gameweek {config.CURRENT_GAMEWEEK} Fixtures Overview")
 
     # Pull FPL player projections from Rotowire
     fpl_player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL)
 
+    if fpl_player_projections is None or fpl_player_projections.empty:
+        st.warning("Rotowire projections unavailable.")
+        # Still show fixtures list
+        for fixture in gameweek_fixtures:
+            st.text(fixture)
+        return
+
+    # Get sigma for win probability calculations
+    sigma, n_hist = _estimate_score_std(config.FPL_DRAFT_LEAGUE_ID)
+
+    # Render the fixtures overview table
+    _render_fixtures_overview(gameweek_fixtures, config.FPL_DRAFT_LEAGUE_ID, fpl_player_projections, sigma)
+
+    hist_note = f"σ≈{sigma:.2f} from {n_hist} historical scores" if n_hist > 0 else f"σ≈{sigma:.2f} (default)"
+    st.caption(f"Win probability model: P(A>B) = Φ((μA−μB)/√(2σ²)). {hist_note}")
+
+    # Divider before detailed view
+    st.divider()
+
+    # Detailed view section
+    st.subheader("Detailed Match Analysis")
+
     # Create a dropdown to choose a fixture
-    fixture_selection = st.selectbox("Select a fixture to analyze deeper:", gameweek_fixtures)
+    fixture_selection = st.selectbox("Select a fixture to analyze:", gameweek_fixtures)
 
     # Create the Streamlit visuals
     if fixture_selection:
         # Analyze fixture projections
-        team1_df, team2_df, team1_name, team2_name = analyze_fixture_projections(fixture_selection,
-                                                                                 config.FPL_DRAFT_LEAGUE_ID,
-                                                                                 fpl_player_projections)
+        result = analyze_fixture_projections(fixture_selection, config.FPL_DRAFT_LEAGUE_ID, fpl_player_projections)
+
+        if result is None:
+            st.error("Failed to analyze this fixture.")
+            return
+
+        team1_df, team2_df, team1_name, team2_name = result
 
         # Extract team scores from df
         team1_score = team1_df['Points'].sum()
         team2_score = team2_df['Points'].sum()
 
         # --- Win Probability (Normal model) ---
-        sigma, n_hist = _estimate_score_std(config.FPL_DRAFT_LEAGUE_ID)
         denom = math.sqrt(2.0 * (sigma ** 2)) if sigma > 0 else 1.0
         z = (team1_score - team2_score) / denom
         p_team1 = _normal_cdf(z)
-        p_team2 = 1.0 - p_team1
 
         st.subheader("Win Probability")
         _render_winprob_bar(format_team_name(team1_name), format_team_name(team2_name), p_team1)
-        hist_note = f"σ≈{sigma:.2f} from {n_hist} historical team scores" if n_hist > 0 else f"σ≈{sigma:.2f} (default)"
-        st.caption(f"Model: P(A>B) = Φ((μA−μB)/√(σ²+σ²)); assumes independent team totals. {hist_note}.")
 
         # Create columns for side-by-side detailed display
         col1, col2 = st.columns(2)
