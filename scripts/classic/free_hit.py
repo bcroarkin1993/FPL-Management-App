@@ -33,24 +33,37 @@ def _format_money(value: float) -> str:
     return f"£{value:.1f}m"
 
 
-def _get_user_budget(team_id: int) -> float:
+def _get_user_budget(team_id: int) -> Tuple[float, str]:
     """
     Fetch the user's total budget (Squad Value + Bank).
-    Returns default of 100.0 if unable to fetch.
+    Returns (budget, source_description) tuple.
     """
     if not team_id:
-        return 100.0
+        return 100.0, "default (no team configured)"
 
     try:
+        # Try to get from current GW picks (most accurate)
+        current_gw = get_current_gameweek()
+        if current_gw:
+            picks_data = get_classic_team_picks(team_id, current_gw)
+            if picks_data:
+                entry_history = picks_data.get("entry_history", {})
+                value = entry_history.get("value", 0)  # Squad value in 0.1M
+                bank = entry_history.get("bank", 0)    # Bank in 0.1M
+                if value > 0:
+                    total = (value + bank) / 10.0
+                    return total, f"detected (value: £{value/10:.1f}m + bank: £{bank/10:.1f}m)"
+
+        # Fallback to entry details
         details = get_entry_details(team_id)
         if details:
-            # last_deadline_value includes squad value + bank (in 0.1M units)
-            raw_value = details.get('last_deadline_value', 1000)
-            return raw_value / 10.0
+            raw_value = details.get('last_deadline_value', 0)
+            if raw_value > 0:
+                return raw_value / 10.0, "from last deadline value"
     except Exception:
         pass
 
-    return 100.0
+    return 100.0, "default (could not fetch)"
 
 
 @st.cache_data(ttl=300)
@@ -128,8 +141,21 @@ def _lookup_projection(player_name: str, team: str, position: str, projections_d
     return None
 
 
-def _build_player_pool(bootstrap: dict, projections_df: pd.DataFrame) -> pd.DataFrame:
-    """Build a DataFrame of all players with prices and projections."""
+def _build_player_pool(
+    bootstrap: dict,
+    projections_df: pd.DataFrame,
+    exclude_injured: bool = True,
+    min_chance_of_playing: int = 75
+) -> pd.DataFrame:
+    """
+    Build a DataFrame of all players with prices and projections.
+
+    Args:
+        bootstrap: FPL bootstrap data
+        projections_df: Rotowire projections
+        exclude_injured: If True, exclude players with injury news or low chance of playing
+        min_chance_of_playing: Minimum chance of playing % to include (if exclude_injured=True)
+    """
     elements = bootstrap.get("elements", [])
     teams = {t["id"]: t for t in bootstrap.get("teams", [])}
 
@@ -140,6 +166,22 @@ def _build_player_pool(bootstrap: dict, projections_df: pd.DataFrame) -> pd.Data
         team_short = team_info.get("short_name", "???")
         position = position_converter(p.get("element_type"))
 
+        chance_of_playing = p.get("chance_of_playing_next_round")
+        news = p.get("news", "") or ""
+        price = p.get("now_cost", 0) / 10.0
+
+        # Filter out injured/doubtful players for starters
+        # But allow cheap players through for bench fodder
+        is_cheap_fodder = price <= 4.5
+
+        if exclude_injured and not is_cheap_fodder:
+            # Skip if chance of playing is set and below threshold
+            if chance_of_playing is not None and chance_of_playing < min_chance_of_playing:
+                continue
+            # Skip if there's injury/suspension news
+            if news and any(word in news.lower() for word in ['injured', 'illness', 'suspended', 'unavailable', 'out']):
+                continue
+
         # Get projection
         proj_points = _lookup_projection(
             p.get("web_name", ""),
@@ -148,10 +190,9 @@ def _build_player_pool(bootstrap: dict, projections_df: pd.DataFrame) -> pd.Data
             projections_df
         )
 
-        # Skip players without projections (they won't play)
+        # Skip players without projections (they likely won't play)
         # But keep very cheap players as potential bench fodder
-        price = p.get("now_cost", 0) / 10.0
-        if proj_points is None and price > 4.5:
+        if proj_points is None and not is_cheap_fodder:
             continue
 
         rows.append({
@@ -164,8 +205,8 @@ def _build_player_pool(bootstrap: dict, projections_df: pd.DataFrame) -> pd.Data
             "Points": proj_points if proj_points is not None else 0.0,
             "form": float(p.get("form", 0) or 0),
             "total_points": p.get("total_points", 0),
-            "chance_of_playing": p.get("chance_of_playing_next_round"),
-            "news": p.get("news", ""),
+            "chance_of_playing": chance_of_playing,
+            "news": news,
         })
 
     return pd.DataFrame(rows)
@@ -310,11 +351,12 @@ def show_free_hit_page():
 
     # Get user's budget
     team_id = getattr(config, "FPL_CLASSIC_TEAM_ID", None)
-    default_budget = _get_user_budget(team_id)
+    default_budget, budget_source = _get_user_budget(team_id)
     current_gw = get_current_gameweek() or 1
 
     # Controls
     st.markdown("### Settings")
+
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -326,6 +368,7 @@ def show_free_hit_page():
             step=0.1,
             format="%.1f"
         )
+        st.caption(f"Budget {budget_source}")
 
     with col2:
         target_gw = st.number_input(
@@ -342,6 +385,26 @@ def show_free_hit_page():
             index=0,
             help="Auto lets the optimizer choose the best formation"
         )
+
+    # Advanced filters
+    with st.expander("Player Filters", expanded=False):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            exclude_injured = st.checkbox(
+                "Exclude injured/doubtful players",
+                value=True,
+                help="Filter out players with injury news or low chance of playing"
+            )
+        with col_b:
+            min_chance = st.slider(
+                "Min chance of playing (%)",
+                min_value=0,
+                max_value=100,
+                value=75,
+                step=25,
+                disabled=not exclude_injured,
+                help="Only include players with at least this chance of playing"
+            )
 
     st.markdown("---")
 
@@ -368,11 +431,19 @@ def show_free_hit_page():
                 return
 
             # Build player pool
-            player_pool = _build_player_pool(bootstrap, projections_df)
+            player_pool = _build_player_pool(
+                bootstrap,
+                projections_df,
+                exclude_injured=exclude_injured,
+                min_chance_of_playing=min_chance
+            )
 
             if player_pool.empty:
                 st.error("No players with projections found.")
                 return
+
+            # Show how many players are in the pool
+            st.info(f"Player pool: {len(player_pool)} players available after filtering")
 
         with st.spinner("Running optimization..."):
             # Solve
