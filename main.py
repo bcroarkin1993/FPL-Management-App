@@ -17,9 +17,11 @@ from scripts.fpl.projected_lineups import show_projected_lineups
 from scripts.fpl.injuries import show_injuries_page
 
 # --- Classic pages ---
-from scripts.classic.league_standings import show_classic_league_standings_page
+from scripts.classic.home import show_classic_home_page
 from scripts.classic.team_analysis import show_classic_team_analysis_page
 from scripts.classic.fixture_projections import show_classic_fixture_projections_page
+from scripts.classic.transfers import show_classic_transfers_page
+from scripts.classic.free_hit import show_free_hit_page
 
 # ------------------------------------------------------------
 # Page config (must be first Streamlit command in the script)
@@ -174,23 +176,22 @@ def main():
             "Classic Pages",
             [
                 "Home",
-                "League Standings",
                 "Fixture Projections",
-                "Waiver Wire",
+                "Transfer Suggestions",
+                "Free Hit Optimizer",
                 "Team Analysis",
                 "League Analysis",
             ],
         )
 
         if subpage == "Home":
-            render_classic_home()
-        elif subpage == "League Standings":
-            show_classic_league_standings_page()
+            show_classic_home_page()
         elif subpage == "Fixture Projections":
             show_classic_fixture_projections_page()
-        elif subpage == "Waiver Wire":
-            # Replace with your Classic waiver/free transfers helper when ready
-            render_placeholder("Classic — Waiver/Transfers")
+        elif subpage == "Transfer Suggestions":
+            show_classic_transfers_page()
+        elif subpage == "Free Hit Optimizer":
+            show_free_hit_page()
         elif subpage == "Team Analysis":
             show_classic_team_analysis_page()
         elif subpage == "League Analysis":
