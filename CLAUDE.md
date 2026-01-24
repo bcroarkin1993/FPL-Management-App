@@ -101,6 +101,7 @@ that branch for the remainder of the session.
 
 | Task | Status | Notes |
 |------|--------|-------|
+| Team Difficulty Visualizations | Not started | FDR heatmap, defensive stats, attack vs defense ratings (inspired by fpl.page/team-dds) |
 | Matchup Insights - H2H History | Not started | Fixture projections done, head-to-head history pending |
 | Rotowire scraping robustness | Not started | URL discovery depends on HTML structure; add fallbacks |
 | Add error logging | Not started | Many silent try/except blocks; harder to debug |
