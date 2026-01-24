@@ -17,7 +17,7 @@ from scripts.fpl.projected_lineups import show_projected_lineups
 from scripts.fpl.injuries import show_injuries_page
 
 # --- Classic pages ---
-from scripts.classic.league_standings import show_classic_league_standings_page
+from scripts.classic.home import show_classic_home_page
 from scripts.classic.team_analysis import show_classic_team_analysis_page
 from scripts.classic.fixture_projections import show_classic_fixture_projections_page
 from scripts.classic.transfers import show_classic_transfers_page
@@ -176,7 +176,6 @@ def main():
             "Classic Pages",
             [
                 "Home",
-                "League Standings",
                 "Fixture Projections",
                 "Transfer Suggestions",
                 "Free Hit Optimizer",
@@ -186,9 +185,7 @@ def main():
         )
 
         if subpage == "Home":
-            render_classic_home()
-        elif subpage == "League Standings":
-            show_classic_league_standings_page()
+            show_classic_home_page()
         elif subpage == "Fixture Projections":
             show_classic_fixture_projections_page()
         elif subpage == "Transfer Suggestions":

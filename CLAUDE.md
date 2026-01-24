@@ -47,7 +47,7 @@ Rotowire scrape ─┘
 
 **Page scripts** - Organized by section, each implements a `show_*_page()` function:
 - `scripts/draft/` - home.py, waiver_wire.py, fixture_projections.py, team_analysis.py
-- `scripts/classic/` - league_standings.py, team_analysis.py, fixture_projections.py, transfers.py, free_hit.py
+- `scripts/classic/` - home.py, team_analysis.py, fixture_projections.py, transfers.py, free_hit.py
 - `scripts/fpl/` - fixtures.py, player_statistics.py, projected_lineups.py, injuries.py
 
 ### External Data Sources
