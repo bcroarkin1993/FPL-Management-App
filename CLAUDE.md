@@ -47,7 +47,7 @@ Rotowire scrape ─┘
 
 **Page scripts** - Organized by section, each implements a `show_*_page()` function:
 - `scripts/draft/` - home.py, waiver_wire.py, fixture_projections.py, team_analysis.py
-- `scripts/classic/` - league_standings.py, team_analysis.py, fixture_projections.py, transfers.py
+- `scripts/classic/` - league_standings.py, team_analysis.py, fixture_projections.py, transfers.py, free_hit.py
 - `scripts/fpl/` - fixtures.py, player_statistics.py, projected_lineups.py, injuries.py
 
 ### External Data Sources
@@ -95,13 +95,12 @@ that branch for the remainder of the session.
 
 | Task | Status | Notes |
 |------|--------|-------|
-| FPL Classic Compatibility | Nearly complete | League standings, team analysis, fixture projections, transfers done; free hit page pending |
+| FPL Classic Compatibility | **Complete** | League standings, team analysis, fixture projections, transfers, free hit optimizer all done |
 
 ### Medium Priority
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Classic Free Hit Helper | Not started | Tool to help optimize free hit chip usage |
 | Matchup Insights - H2H History | Not started | Fixture projections done, head-to-head history pending |
 | Rotowire scraping robustness | Not started | URL discovery depends on HTML structure; add fallbacks |
 | Add error logging | Not started | Many silent try/except blocks; harder to debug |
