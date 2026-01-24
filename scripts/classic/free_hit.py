@@ -319,12 +319,12 @@ def show_free_hit_page():
 
     with col1:
         budget = st.number_input(
-            "Total Budget",
+            "Total Budget (£m)",
             min_value=80.0,
             max_value=120.0,
             value=default_budget,
             step=0.1,
-            format="£%.1fm"
+            format="%.1f"
         )
 
     with col2:
