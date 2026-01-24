@@ -111,7 +111,10 @@ def _get_fdr_color(fdr: int) -> str:
 
 
 def _lookup_projection(player_name: str, team: str, position: str, projections_df: pd.DataFrame) -> Optional[float]:
-    """Look up projection for a player using fuzzy matching."""
+    """Look up projection for a player using fuzzy matching.
+
+    Requires team to match to avoid false positives (e.g., matching 'Ortega' to wrong player).
+    """
     if projections_df is None or projections_df.empty:
         return None
 
@@ -123,15 +126,18 @@ def _lookup_projection(player_name: str, team: str, position: str, projections_d
         proj_team = str(row.get("Team", ""))
         proj_pos = str(row.get("Position", ""))
 
+        # REQUIRE team to match - this prevents matching players to wrong team's projections
+        if proj_team != team:
+            continue
+
         score = fuzz.ratio(player_name.lower(), proj_name.lower())
 
-        # Boost if team and position match
-        if proj_team == team:
-            score += 10
+        # Boost if position matches
         if proj_pos == position:
-            score += 5
+            score += 10
 
-        if score > best_score and score >= 60:
+        # Higher threshold since we're already requiring team match
+        if score > best_score and score >= 65:
             best_score = score
             best_match = row
 
