@@ -49,36 +49,50 @@ A **Streamlit-based Fantasy Premier League management app** for both **Draft** a
 10. **Draft Helper**
     - Tools to assist during the draft process
 
+11. **League Analysis**
+    - Head-to-head records matrix showing win/draw/loss against each opponent
+    - Scoring distribution and consistency metrics
+    - Strength of schedule analysis
+    - League records (highest/lowest scores, biggest wins, closest matches)
+    - Win/loss streak tracking
+
 ### Classic League Tools
 
-11. **League Home & Standings**
+12. **League Home & Standings**
     - League standings with support for multiple Classic leagues via dropdown
     - Points progression charts (Total Points, GW Points, Rank Progression)
     - Supports both Classic scoring and H2H league formats
 
-12. **Fixture Projections**
+13. **Fixture Projections**
     - View projected scores for all teams in your Classic league
     - H2H mode: Win probability analysis for head-to-head matchups
     - Classic mode: Projected leaderboard with standings movement indicators
 
-13. **Transfer Suggestions**
+14. **Transfer Suggestions**
     - Smart transfer recommendations ranked by projections, form, FDR, and price
     - Position-specific tabs with transfer-in and transfer-out candidates
     - Transfer comparison tool to evaluate swaps
 
-14. **Free Hit Optimizer**
+15. **Free Hit Optimizer**
     - Linear programming-based squad optimizer for Free Hit chip
     - Formation selector, budget controls, and fixture difficulty display
     - Respects budget, squad size (15 players), and max 3 per team limits
     - Filters out injured/doubtful players automatically
 
-15. **Team Analysis**
+16. **Team Analysis**
     - Detailed breakdown of your Classic FPL team performance
     - Season trends, chip usage, and transfer history
 
+17. **League Analysis**
+    - Chip usage analysis across the league (who played what chip when)
+    - Rank movement tracking (biggest risers and fallers)
+    - Points behind leader over time
+    - Team value comparison
+    - Gameweek scoring distribution and consistency metrics
+
 ### Notifications
 
-13. **Discord Waiver Alerts**
+18. **Discord Waiver Alerts**
     - Automated reminders for waiver wire deadlines via Discord webhook
     - Runs on schedule via GitHub Actions
 
@@ -94,7 +108,7 @@ scripts/
 │   └── waiver_alerts.py
 ├── draft/           # Draft league features
 │   ├── home.py, waiver_wire.py, fixture_projections.py
-│   ├── team_analysis.py, draft_helper.py
+│   ├── team_analysis.py, draft_helper.py, league_analysis.py
 ├── fpl/             # Cross-format features
 │   ├── fixtures.py, injuries.py, player_projections.py
 │   ├── player_statistics.py, projected_lineups.py
@@ -103,6 +117,7 @@ scripts/
     ├── fixture_projections.py  # H2H matchups or projected leaderboard
     ├── transfers.py         # Transfer suggestions
     ├── free_hit.py          # Free Hit chip optimizer
+    ├── league_analysis.py   # Chip usage, rank movement, team values
     └── team_analysis.py     # Team performance analysis
 ```
 

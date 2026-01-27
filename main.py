@@ -8,6 +8,7 @@ from scripts.draft.fixture_projections import show_fixtures_page
 from scripts.draft.team_analysis import show_team_stats_page
 from scripts.draft.waiver_wire import show_waiver_wire_page
 from scripts.draft.draft_helper import show_draft_helper_page
+from scripts.draft.league_analysis import show_draft_league_analysis_page
 
 # --- FPL cross-format pages ---
 from scripts.fpl.fixtures import show_club_fixtures_section
@@ -22,6 +23,7 @@ from scripts.classic.team_analysis import show_classic_team_analysis_page
 from scripts.classic.fixture_projections import show_classic_fixture_projections_page
 from scripts.classic.transfers import show_classic_transfers_page
 from scripts.classic.free_hit import show_free_hit_page
+from scripts.classic.league_analysis import show_classic_league_analysis_page
 
 # ------------------------------------------------------------
 # Page config (must be first Streamlit command in the script)
@@ -165,9 +167,7 @@ def main():
         elif subpage == "Team Analysis":
             show_team_stats_page()
         elif subpage == "League Analysis":
-            # If you have a dedicated draft league analysis page, call it here.
-            # Otherwise, show a placeholder:
-            render_placeholder("Draft — League Analysis")
+            show_draft_league_analysis_page()
         elif subpage == "Draft Helper":
             show_draft_helper_page()
 
@@ -195,8 +195,7 @@ def main():
         elif subpage == "Team Analysis":
             show_classic_team_analysis_page()
         elif subpage == "League Analysis":
-            # Replace with your Classic league analysis when ready
-            render_placeholder("Classic — League Analysis")
+            show_classic_league_analysis_page()
 
 
 if __name__ == "__main__":
