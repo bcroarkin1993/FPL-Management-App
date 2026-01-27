@@ -907,8 +907,8 @@ def get_draft_h2h_record(league_id: int, team1_id: int, team2_id: int) -> Dict[s
 
     Parameters:
     - league_id: The ID of the FPL Draft league.
-    - team1_id: The entry ID of team 1.
-    - team2_id: The entry ID of team 2.
+    - team1_id: The entry ID of team 1 (from get_team_id_by_name).
+    - team2_id: The entry ID of team 2 (from get_team_id_by_name).
 
     Returns:
     - Dictionary with 'wins', 'draws', 'losses', 'points_for', 'points_against',
@@ -928,6 +928,15 @@ def get_draft_h2h_record(league_id: int, team1_id: int, team2_id: int) -> Dict[s
     if not league_data:
         return result
 
+    # Build mapping from entry_id to league entry id (used in matches)
+    # The API has two IDs: entry_id (used by get_team_id_by_name) and id (used in matches)
+    entries = league_data.get("league_entries", [])
+    entry_id_to_league_id = {entry["entry_id"]: entry["id"] for entry in entries}
+
+    # Convert input IDs to league entry IDs
+    league_team1_id = entry_id_to_league_id.get(team1_id, team1_id)
+    league_team2_id = entry_id_to_league_id.get(team2_id, team2_id)
+
     matches = league_data.get("matches", [])
     if not matches:
         return result
@@ -944,9 +953,9 @@ def get_draft_h2h_record(league_id: int, team1_id: int, team2_id: int) -> Dict[s
             continue
 
         # Check if this match involves both teams
-        if (entry_1 == team1_id and entry_2 == team2_id):
+        if (entry_1 == league_team1_id and entry_2 == league_team2_id):
             my_pts, opp_pts = pts_1, pts_2
-        elif (entry_1 == team2_id and entry_2 == team1_id):
+        elif (entry_1 == league_team2_id and entry_2 == league_team1_id):
             my_pts, opp_pts = pts_2, pts_1
         else:
             continue
@@ -981,7 +990,7 @@ def get_draft_all_h2h_records(league_id: int, team_id: int) -> List[Dict[str, An
 
     Parameters:
     - league_id: The ID of the FPL Draft league.
-    - team_id: The entry ID of the team to analyze.
+    - team_id: The entry ID of the team to analyze (from get_team_id_by_name).
 
     Returns:
     - List of dictionaries, each containing opponent info and H2H record.
@@ -990,11 +999,17 @@ def get_draft_all_h2h_records(league_id: int, team_id: int) -> List[Dict[str, An
     if not league_data:
         return []
 
-    # Get team names mapping
+    # Build mappings for ID conversion
+    # The API has two IDs: entry_id (used by get_team_id_by_name) and id (used in matches)
     entries = league_data.get("league_entries", [])
+    entry_id_to_league_id = {entry["entry_id"]: entry["id"] for entry in entries}
+    league_id_to_entry_id = {entry["id"]: entry["entry_id"] for entry in entries}
     team_names = {entry["id"]: entry["entry_name"] for entry in entries}
 
-    # Find all opponents
+    # Convert input team_id (entry_id) to league entry id
+    league_team_id = entry_id_to_league_id.get(team_id, team_id)
+
+    # Find all opponents (using league entry IDs from matches)
     matches = league_data.get("matches", [])
     opponents = set()
 
@@ -1002,18 +1017,20 @@ def get_draft_all_h2h_records(league_id: int, team_id: int) -> List[Dict[str, An
         entry_1 = match.get("league_entry_1")
         entry_2 = match.get("league_entry_2")
 
-        if entry_1 == team_id:
+        if entry_1 == league_team_id:
             opponents.add(entry_2)
-        elif entry_2 == team_id:
+        elif entry_2 == league_team_id:
             opponents.add(entry_1)
 
     # Calculate H2H record against each opponent
     records = []
-    for opp_id in opponents:
-        h2h = get_draft_h2h_record(league_id, team_id, opp_id)
+    for opp_league_id in opponents:
+        # Convert opponent's league_id back to entry_id for get_draft_h2h_record
+        opp_entry_id = league_id_to_entry_id.get(opp_league_id, opp_league_id)
+        h2h = get_draft_h2h_record(league_id, team_id, opp_entry_id)
         records.append({
-            "opponent_id": opp_id,
-            "opponent_name": team_names.get(opp_id, f"Team {opp_id}"),
+            "opponent_id": opp_league_id,
+            "opponent_name": team_names.get(opp_league_id, f"Team {opp_league_id}"),
             "wins": h2h["wins"],
             "draws": h2h["draws"],
             "losses": h2h["losses"],
