@@ -17,6 +17,7 @@ from fuzzywuzzy import fuzz
 from scripts.common.utils import (
     find_optimal_lineup,
     get_classic_bootstrap_static,
+    get_classic_h2h_record,
     get_classic_team_picks,
     get_classic_transfers,
     get_current_gameweek,
@@ -816,6 +817,46 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
 
     st.subheader("Win Probability")
     _render_winprob_bar(selected["team1_name"], selected["team2_name"], p_team1)
+
+    # --- Head-to-Head History ---
+    h2h = get_classic_h2h_record(league_id, selected["team1_id"], selected["team2_id"])
+
+    if h2h["wins"] + h2h["draws"] + h2h["losses"] > 0:
+        st.subheader("Head-to-Head History")
+
+        h2h_col1, h2h_col2, h2h_col3 = st.columns(3)
+        with h2h_col1:
+            st.metric(
+                label=f"{selected['team1_name']} Wins",
+                value=h2h["wins"]
+            )
+        with h2h_col2:
+            st.metric(
+                label="Draws",
+                value=h2h["draws"]
+            )
+        with h2h_col3:
+            st.metric(
+                label=f"{selected['team2_name']} Wins",
+                value=h2h["losses"]
+            )
+
+        # Show recent matchups if available
+        if h2h["matches"]:
+            with st.expander("View Past Matchups"):
+                match_data = []
+                for m in reversed(h2h["matches"]):  # Most recent first
+                    match_data.append({
+                        "Gameweek": f"GW{m['gameweek']}",
+                        selected["team1_name"]: m["my_pts"],
+                        selected["team2_name"]: m["opp_pts"],
+                        "Result": m["outcome"]
+                    })
+                st.dataframe(
+                    pd.DataFrame(match_data),
+                    use_container_width=True,
+                    hide_index=True
+                )
 
     # Side-by-side team displays
     col1, col2 = st.columns(2)

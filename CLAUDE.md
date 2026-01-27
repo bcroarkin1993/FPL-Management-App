@@ -92,8 +92,23 @@ Optional (Development):
 
 ## Adding New Features or Fixing Bugs
 
-**IMPORTANT**: When you work on a new feature or bug, create a new git branch first and then work on
-that branch for the remainder of the session.
+**IMPORTANT**: Never commit directly to `main`. All work must follow this branching workflow:
+
+1. **Create a feature branch** from `main` or `dev` (e.g., `feature/h2h-history`, `fix/player-matching`)
+2. **Do all work on the feature branch** - commits, testing, iterations
+3. **Merge to `dev`** when the feature is ready for integration testing
+4. **Test on `dev`** to ensure everything works together
+5. **Merge `dev` to `main`** only after testing passes
+
+```bash
+# Example workflow
+git checkout -b feature/my-feature    # Create feature branch
+# ... do work, commit changes ...
+git checkout dev && git merge feature/my-feature   # Merge to dev
+# ... test on dev ...
+git checkout main && git merge dev    # Merge to main after testing
+git push origin main
+```
 
 ## Roadmap
 
@@ -108,7 +123,7 @@ that branch for the remainder of the session.
 | Task | Status | Notes |
 |------|--------|-------|
 | Team Difficulty Visualizations | Not started | FDR heatmap, defensive stats, attack vs defense ratings (inspired by fpl.page/team-dds) |
-| Matchup Insights - H2H History | Not started | Fixture projections done, head-to-head history pending |
+| Matchup Insights - H2H History | **Complete** | Added to Draft Fixture Projections, Draft Team Analysis, and Classic H2H Fixture Projections |
 | Rotowire scraping robustness | Not started | URL discovery depends on HTML structure; add fallbacks |
 | Add error logging | Not started | Many silent try/except blocks; harder to debug |
 | Better error messages | Not started | Surface clearer feedback when APIs fail |

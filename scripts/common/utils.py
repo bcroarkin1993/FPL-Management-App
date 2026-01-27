@@ -874,6 +874,160 @@ def pull_fpl_player_stats():
     return (player_df)
 
 
+# -----------------------------------------------------------------------------
+# Head-to-Head Record Functions (Draft Leagues)
+# -----------------------------------------------------------------------------
+
+@st.cache_data(ttl=600)
+def get_draft_league_details(league_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Fetch full draft league details including matches, entries, and standings.
+
+    Parameters:
+    - league_id: The ID of the FPL Draft league.
+
+    Returns:
+    - Dictionary with 'matches', 'league_entries', 'standings', etc.
+    - None if the request fails.
+    """
+    if not league_id:
+        return None
+    try:
+        url = f"https://draft.premierleague.com/api/league/{league_id}/details"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
+def get_draft_h2h_record(league_id: int, team1_id: int, team2_id: int) -> Dict[str, Any]:
+    """
+    Calculate head-to-head record between two teams in a Draft league.
+
+    Parameters:
+    - league_id: The ID of the FPL Draft league.
+    - team1_id: The entry ID of team 1.
+    - team2_id: The entry ID of team 2.
+
+    Returns:
+    - Dictionary with 'wins', 'draws', 'losses', 'points_for', 'points_against',
+      'record_str' (e.g., "3-1-2"), and 'matches' (list of individual matchups).
+    """
+    result = {
+        "wins": 0,
+        "draws": 0,
+        "losses": 0,
+        "points_for": 0,
+        "points_against": 0,
+        "record_str": "0-0-0",
+        "matches": []
+    }
+
+    league_data = get_draft_league_details(league_id)
+    if not league_data:
+        return result
+
+    matches = league_data.get("matches", [])
+    if not matches:
+        return result
+
+    for match in matches:
+        entry_1 = match.get("league_entry_1")
+        entry_2 = match.get("league_entry_2")
+        pts_1 = match.get("league_entry_1_points", 0)
+        pts_2 = match.get("league_entry_2_points", 0)
+        gw = match.get("event")
+
+        # Skip unplayed matches
+        if pts_1 == 0 and pts_2 == 0:
+            continue
+
+        # Check if this match involves both teams
+        if (entry_1 == team1_id and entry_2 == team2_id):
+            my_pts, opp_pts = pts_1, pts_2
+        elif (entry_1 == team2_id and entry_2 == team1_id):
+            my_pts, opp_pts = pts_2, pts_1
+        else:
+            continue
+
+        result["points_for"] += my_pts
+        result["points_against"] += opp_pts
+
+        if my_pts > opp_pts:
+            result["wins"] += 1
+            outcome = "W"
+        elif my_pts < opp_pts:
+            result["losses"] += 1
+            outcome = "L"
+        else:
+            result["draws"] += 1
+            outcome = "D"
+
+        result["matches"].append({
+            "gameweek": gw,
+            "my_pts": my_pts,
+            "opp_pts": opp_pts,
+            "outcome": outcome
+        })
+
+    result["record_str"] = f"{result['wins']}-{result['draws']}-{result['losses']}"
+    return result
+
+
+def get_draft_all_h2h_records(league_id: int, team_id: int) -> List[Dict[str, Any]]:
+    """
+    Calculate head-to-head records for a team against all opponents in a Draft league.
+
+    Parameters:
+    - league_id: The ID of the FPL Draft league.
+    - team_id: The entry ID of the team to analyze.
+
+    Returns:
+    - List of dictionaries, each containing opponent info and H2H record.
+    """
+    league_data = get_draft_league_details(league_id)
+    if not league_data:
+        return []
+
+    # Get team names mapping
+    entries = league_data.get("league_entries", [])
+    team_names = {entry["id"]: entry["entry_name"] for entry in entries}
+
+    # Find all opponents
+    matches = league_data.get("matches", [])
+    opponents = set()
+
+    for match in matches:
+        entry_1 = match.get("league_entry_1")
+        entry_2 = match.get("league_entry_2")
+
+        if entry_1 == team_id:
+            opponents.add(entry_2)
+        elif entry_2 == team_id:
+            opponents.add(entry_1)
+
+    # Calculate H2H record against each opponent
+    records = []
+    for opp_id in opponents:
+        h2h = get_draft_h2h_record(league_id, team_id, opp_id)
+        records.append({
+            "opponent_id": opp_id,
+            "opponent_name": team_names.get(opp_id, f"Team {opp_id}"),
+            "wins": h2h["wins"],
+            "draws": h2h["draws"],
+            "losses": h2h["losses"],
+            "record_str": h2h["record_str"],
+            "points_for": h2h["points_for"],
+            "points_against": h2h["points_against"],
+            "matches": h2h["matches"]
+        })
+
+    # Sort by wins descending, then by points_for descending
+    records.sort(key=lambda x: (-x["wins"], -x["points_for"]))
+    return records
+
+
 # =============================================================================
 # 5. FPL API - CLASSIC MODE
 # =============================================================================
@@ -990,6 +1144,109 @@ def get_h2h_league_matches(league_id: int, event: int = None, page: int = 1) -> 
         return resp.json()
     except Exception:
         return None
+
+
+@st.cache_data(ttl=600)
+def get_all_h2h_league_matches(league_id: int) -> List[Dict[str, Any]]:
+    """
+    Fetch all matches from an H2H league (all gameweeks, all pages).
+
+    Parameters:
+    - league_id: The H2H FPL league ID.
+
+    Returns:
+    - List of all match dictionaries.
+    """
+    all_matches = []
+    page = 1
+
+    while True:
+        data = get_h2h_league_matches(league_id, page=page)
+        if not data or not data.get("results"):
+            break
+
+        all_matches.extend(data["results"])
+
+        if not data.get("has_next", False):
+            break
+
+        page += 1
+        if page > 50:  # Safety limit
+            break
+
+    return all_matches
+
+
+def get_classic_h2h_record(league_id: int, team1_id: int, team2_id: int) -> Dict[str, Any]:
+    """
+    Calculate head-to-head record between two teams in a Classic H2H league.
+
+    Parameters:
+    - league_id: The H2H FPL league ID.
+    - team1_id: The entry ID of team 1.
+    - team2_id: The entry ID of team 2.
+
+    Returns:
+    - Dictionary with 'wins', 'draws', 'losses', 'points_for', 'points_against',
+      'record_str' (e.g., "3-1-2"), and 'matches' (list of individual matchups).
+    """
+    result = {
+        "wins": 0,
+        "draws": 0,
+        "losses": 0,
+        "points_for": 0,
+        "points_against": 0,
+        "record_str": "0-0-0",
+        "matches": []
+    }
+
+    all_matches = get_all_h2h_league_matches(league_id)
+    if not all_matches:
+        return result
+
+    for match in all_matches:
+        entry_1 = match.get("entry_1_entry")
+        entry_2 = match.get("entry_2_entry")
+        pts_1 = match.get("entry_1_points", 0)
+        pts_2 = match.get("entry_2_points", 0)
+        gw = match.get("event")
+
+        # Skip unplayed matches
+        if pts_1 is None or pts_2 is None:
+            continue
+        if pts_1 == 0 and pts_2 == 0 and not match.get("finished"):
+            continue
+
+        # Check if this match involves both teams
+        if (entry_1 == team1_id and entry_2 == team2_id):
+            my_pts, opp_pts = pts_1, pts_2
+        elif (entry_1 == team2_id and entry_2 == team1_id):
+            my_pts, opp_pts = pts_2, pts_1
+        else:
+            continue
+
+        result["points_for"] += my_pts
+        result["points_against"] += opp_pts
+
+        if my_pts > opp_pts:
+            result["wins"] += 1
+            outcome = "W"
+        elif my_pts < opp_pts:
+            result["losses"] += 1
+            outcome = "L"
+        else:
+            result["draws"] += 1
+            outcome = "D"
+
+        result["matches"].append({
+            "gameweek": gw,
+            "my_pts": my_pts,
+            "opp_pts": opp_pts,
+            "outcome": outcome
+        })
+
+    result["record_str"] = f"{result['wins']}-{result['draws']}-{result['losses']}"
+    return result
 
 
 def get_league_standings(league_id: int, page: int = 1) -> Optional[Dict[str, Any]]:
