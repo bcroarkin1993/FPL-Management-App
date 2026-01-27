@@ -94,21 +94,21 @@ Optional (Development):
 
 **IMPORTANT**: Never commit directly to `main`. All work must follow this branching workflow:
 
-1. **Create a feature branch** from `main` or `dev` (e.g., `feature/h2h-history`, `fix/player-matching`)
+1. **Create a feature branch** from `main` (e.g., `feature/h2h-history`, `fix/player-matching`)
 2. **Do all work on the feature branch** - commits, testing, iterations
-3. **Merge to `dev`** when the feature is ready for integration testing
-4. **Test on `dev`** to ensure everything works together
-5. **Merge `dev` to `main`** only after testing passes
+3. **Test on the feature branch** before merging
+4. **Merge to `main`** when the feature is complete and tested
 
 ```bash
 # Example workflow
+git checkout main
 git checkout -b feature/my-feature    # Create feature branch
-# ... do work, commit changes ...
-git checkout dev && git merge feature/my-feature   # Merge to dev
-# ... test on dev ...
-git checkout main && git merge dev    # Merge to main after testing
+# ... do work, commit changes, test ...
+git checkout main && git merge feature/my-feature   # Merge to main
 git push origin main
 ```
+
+Note: The `dev` branch exists but is optional for integration testing when working on multiple features simultaneously.
 
 ## Roadmap
 
