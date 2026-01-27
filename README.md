@@ -49,14 +49,32 @@ A **Streamlit-based Fantasy Premier League management app** for both **Draft** a
 10. **Draft Helper**
     - Tools to assist during the draft process
 
-### Classic League Tools (Coming Soon)
+### Classic League Tools
 
-11. **Free Hit Optimizer**
+11. **League Home & Standings**
+    - League standings with support for multiple Classic leagues via dropdown
+    - Points progression charts (Total Points, GW Points, Rank Progression)
+    - Supports both Classic scoring and H2H league formats
+
+12. **Fixture Projections**
+    - View projected scores for all teams in your Classic league
+    - H2H mode: Win probability analysis for head-to-head matchups
+    - Classic mode: Projected leaderboard with standings movement indicators
+
+13. **Transfer Suggestions**
+    - Smart transfer recommendations ranked by projections, form, FDR, and price
+    - Position-specific tabs with transfer-in and transfer-out candidates
+    - Transfer comparison tool to evaluate swaps
+
+14. **Free Hit Optimizer**
     - Linear programming-based squad optimizer for Free Hit chip
-    - Respects budget, squad size, and team limits
+    - Formation selector, budget controls, and fixture difficulty display
+    - Respects budget, squad size (15 players), and max 3 per team limits
+    - Filters out injured/doubtful players automatically
 
-12. **Transfer Recommendations**
-    - Suggested transfers based on projected point gains
+15. **Team Analysis**
+    - Detailed breakdown of your Classic FPL team performance
+    - Season trends, chip usage, and transfer history
 
 ### Notifications
 
@@ -72,6 +90,7 @@ A **Streamlit-based Fantasy Premier League management app** for both **Draft** a
 scripts/
 ├── common/          # Shared utilities
 │   ├── utils.py     # API calls, data transforms, player matching
+│   ├── player_matching.py  # Canonical normalization, PlayerRegistry
 │   └── waiver_alerts.py
 ├── draft/           # Draft league features
 │   ├── home.py, waiver_wire.py, fixture_projections.py
@@ -80,7 +99,11 @@ scripts/
 │   ├── fixtures.py, injuries.py, player_projections.py
 │   ├── player_statistics.py, projected_lineups.py
 └── classic/         # Classic league features
-    ├── free_hit.py, transfers.py
+    ├── home.py              # League standings + progression charts
+    ├── fixture_projections.py  # H2H matchups or projected leaderboard
+    ├── transfers.py         # Transfer suggestions
+    ├── free_hit.py          # Free Hit chip optimizer
+    └── team_analysis.py     # Team performance analysis
 ```
 
 ---
@@ -120,9 +143,14 @@ FPL_DRAFT_TEAM_ID=123
 
 Optional settings:
 ```bash
+# Draft notifications
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...  # For waiver alerts
 FPL_DEADLINE_OFFSET_HOURS=25.5  # Hours before kickoff for deadline reminders
 TZ_NAME=America/New_York  # Your timezone
+
+# Classic FPL (optional)
+FPL_CLASSIC_LEAGUE_IDS=123456:My League,789012:Friends League  # Multiple leagues supported
+FPL_CLASSIC_TEAM_ID=456789  # Your Classic team ID
 ```
 
 ### 4. Run the App
@@ -139,23 +167,22 @@ The app has three main sections accessible from the sidebar:
 
 - **FPL App Home**: Cross-format tools (fixtures, lineups, projections, stats, injuries)
 - **Draft**: Draft league-specific features (standings, waiver wire, team analysis)
-- **Classic**: FPL Classic league support (in development)
+- **Classic**: Full Classic FPL support (standings, fixture projections, transfers, free hit optimizer)
 
 ---
 
 ## Roadmap
 
-### High Priority
-- **FPL Classic Compatibility** - Complete Classic league support
-- **Waiver Wire Improvements** - Refine recommendation accuracy
+### Completed
+- **FPL Classic Compatibility** - Full Classic league support with standings, fixture projections, transfers, and free hit optimizer
 
 ### Medium Priority
+- **Team Difficulty Visualizations** - FDR heatmap, defensive stats, attack vs defense ratings
 - **Head-to-Head History** - Add historical matchup data to fixture projections
-- **Improved Player Matching** - Better fuzzy matching between data sources
 - **Error Handling** - Better logging and user-facing error messages
 
 ### Low Priority
-- Player Trade Analyzer
+- Player Trade Analyzer (Draft mode)
 - Live Score Integration
 - Enhanced Lineup Visualizations
 - Historical Data Analysis

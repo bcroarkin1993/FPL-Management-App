@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Streamlit-based Fantasy Premier League (FPL) Draft management app that integrates FPL APIs with Rotowire projections to provide analytics for draft league managers.
+A Streamlit-based Fantasy Premier League (FPL) management app supporting both **Draft** and **Classic** formats. Integrates FPL APIs with Rotowire projections to provide analytics, transfer suggestions, and optimization tools for FPL managers.
 
 ## Commands
 
@@ -43,7 +43,7 @@ Rotowire scrape ─┘
 **main.py** - Streamlit entry point with three-section navigation:
 - FPL App Home: Cross-format tools (fixtures, lineups, stats, injuries)
 - Draft: League-specific analysis, waiver wire, team projections
-- Classic: League standings and team analysis for Classic FPL leagues
+- Classic: Full Classic FPL support (home with standings/charts, fixture projections, transfers, free hit optimizer, team analysis)
 
 **Page scripts** - Organized by section, each implements a `show_*_page()` function:
 - `scripts/draft/` - home.py, waiver_wire.py, fixture_projections.py, team_analysis.py
@@ -78,9 +78,15 @@ Required in `.env`:
 - `FPL_DRAFT_LEAGUE_ID` - Your draft league ID (from URL)
 - `FPL_DRAFT_TEAM_ID` - Your team ID (from URL)
 
-Optional:
+Optional (Draft):
 - `DISCORD_WEBHOOK_URL` - For waiver deadline notifications
 - `FPL_DEADLINE_OFFSET_HOURS` - Hours before kickoff for deadline (default: 25.5)
+
+Optional (Classic):
+- `FPL_CLASSIC_LEAGUE_IDS` - Comma-separated list of `league_id:League Name` pairs (e.g., `123456:My League,789012:Friends`)
+- `FPL_CLASSIC_TEAM_ID` - Your Classic FPL team ID
+
+Optional (Development):
 - `FPL_CURRENT_GAMEWEEK` - Override for offline development
 - `ROTOWIRE_URL` - Pin specific Rotowire article URL
 
