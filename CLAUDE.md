@@ -112,18 +112,11 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 ## Roadmap
 
-### High Priority
-
-| Task | Status | Notes |
-|------|--------|-------|
-| FPL Classic Compatibility | **Complete** | League standings, team analysis, fixture projections, transfers, free hit optimizer all done |
-
 ### Medium Priority
 
 | Task | Status | Notes |
 |------|--------|-------|
 | Team Difficulty Visualizations | Not started | FDR heatmap, defensive stats, attack vs defense ratings (inspired by fpl.page/team-dds) |
-| Matchup Insights - H2H History | **Complete** | Added to Draft Fixture Projections, Draft Team Analysis, and Classic H2H Fixture Projections |
 | Rotowire scraping robustness | Not started | URL discovery depends on HTML structure; add fallbacks |
 | Add error logging | Not started | Many silent try/except blocks; harder to debug |
 | Better error messages | Not started | Surface clearer feedback when APIs fail |
