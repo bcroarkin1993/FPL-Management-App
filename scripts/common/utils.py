@@ -2299,27 +2299,40 @@ def normalize_fpl_players_to_rotowire_schema(fpl_df: pd.DataFrame,
             df["Player"] = df[wn].astype(str).str.strip()
         else:
             raise ValueError("FPL df needs 'Player' or ('first_name' and 'second_name') or 'web_name'.")
+    elif player_col != "Player":
+        # Rename to canonical 'Player' column
+        df.rename(columns={player_col: "Player"}, inplace=True)
 
     # --- Team ---
     # Prefer short codes; if the frame has numeric 'team' id + teams_df (bootstrap teams), we can map.
-    if _c("Team") is None:
-        if _c("team") is not None:
-            # numeric team id -> short code via teams_df
+    team_col = _c("Team")
+    if team_col is None:
+        # Check for various team column names: 'team' (numeric ID) or 'team_name' (full name)
+        team_src = _c("team") or _c("team_name") or _c("team_short")
+        if team_src is not None:
+            # Convert to short code format
             if teams_df is None or not {"id", "short_name"}.issubset(set(teams_df.columns)):
-                # fallback: try to coerce directly
-                df["Team"] = df[_c("team")].apply(lambda v: _to_short_team_code(v, teams_df=None))
+                df["Team"] = df[team_src].apply(lambda v: _to_short_team_code(v, teams_df=None))
             else:
-                df["Team"] = df[_c("team")].apply(lambda v: _to_short_team_code(v, teams_df=teams_df))
+                df["Team"] = df[team_src].apply(lambda v: _to_short_team_code(v, teams_df=teams_df))
         else:
             # If there's no team col at all, create empty; you can fill later
             df["Team"] = ""
+    elif team_col != "Team":
+        # Rename to canonical 'Team' column and ensure it's converted to short codes
+        df.rename(columns={team_col: "Team"}, inplace=True)
+        df["Team"] = df["Team"].apply(lambda v: _to_short_team_code(v, teams_df=teams_df))
 
     # --- Position ---
-    if _c("Position") is None:
+    pos_col = _c("Position")
+    if pos_col is None:
         pos_src = _c("element_type") or _c("pos") or _c("position_abbrv") or _c("position")
         if pos_src is None:
             raise ValueError("FPL df needs 'Position' or a mappable source like 'element_type' or 'pos'.")
         df["Position"] = df[pos_src].apply(_map_position_to_rw)
+    elif pos_col != "Position":
+        # Rename to canonical 'Position' column
+        df.rename(columns={pos_col: "Position"}, inplace=True)
 
     # --- Player_ID (optional if present) ---
     pid_col = _c("id") or _c("player_id")

@@ -19,7 +19,8 @@ from scripts.common.utils import (
     normalize_rotowire_players,
     _bootstrap_teams_df,
     _norm_text,
-    _backfill_player_ids
+    _backfill_player_ids,
+    TEAM_FULL_TO_SHORT
 )
 from scripts.common.player_matching import canonical_normalize, get_player_registry
 
@@ -102,9 +103,9 @@ def _series_to_short_team(s: pd.Series, teams_df: pd.DataFrame) -> pd.Series:
     s = s.astype(str)
     mask_short = s.str.len() == 3
     out = s.where(mask_short)
-    team_map = getattr(config, "TEAM_FULL_TO_SHORT", None)
-    if isinstance(team_map, dict):
-        out = out.fillna(s.map(team_map))
+    # Use TEAM_FULL_TO_SHORT from utils.py for team name mapping
+    if TEAM_FULL_TO_SHORT:
+        out = out.fillna(s.map(TEAM_FULL_TO_SHORT))
     return out.fillna(s)
 
 def _enforce_rw_schema_fpl(fpl_df: pd.DataFrame, teams_df: pd.DataFrame) -> pd.DataFrame:
@@ -424,19 +425,7 @@ def _available_from_projections(
 
     # Convert full team names to short codes to match Rotowire format
     # E.g., "Fulham" -> "FUL", "Man City" -> "MCI"
-    team_name_to_short = {
-        "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
-        "Brentford": "BRE", "Brighton": "BHA", "Burnley": "BUR",
-        "Chelsea": "CHE", "Crystal Palace": "CRY", "Everton": "EVE",
-        "Fulham": "FUL", "Leeds": "LEE", "Leicester": "LEI",
-        "Liverpool": "LIV", "Man City": "MCI", "Man Utd": "MUN",
-        "Manchester City": "MCI", "Manchester Utd": "MUN", "Manchester United": "MUN",
-        "Newcastle": "NEW", "Nott'm Forest": "NFO", "Nottingham Forest": "NFO",
-        "Southampton": "SOU", "Spurs": "TOT", "Tottenham": "TOT",
-        "Sunderland": "SUN", "West Ham": "WHU", "Wolves": "WOL",
-        "Ipswich": "IPS", "Luton": "LUT",
-    }
-    fpl_stats_for_merge["Team"] = fpl_stats_for_merge["Team"].replace(team_name_to_short)
+    fpl_stats_for_merge["Team"] = fpl_stats_for_merge["Team"].replace(TEAM_FULL_TO_SHORT)
 
     # Add normalized name to owned names for the merge
     owned_fpl = pd.DataFrame({"Player": owned_names})
@@ -628,17 +617,61 @@ def _add_fdr_and_form(
         base["__norm_name"] = base["Player"].apply(canonical_normalize)
         stats["__norm_name"] = stats["Player"].apply(canonical_normalize)
 
-        # Merge on normalized name + team + position
+        # Ensure both Team columns use short codes for matching
+        base["Team"] = base["Team"].replace(TEAM_FULL_TO_SHORT)
+        stats["Team"] = stats["Team"].replace(TEAM_FULL_TO_SHORT)
+
+        # Prepare stats for merge
         stats_for_merge = stats[["__norm_name", "Team", "Position", "Player_ID", "form", "points_per_game"]].copy()
         # Drop duplicates to avoid row multiplication
         stats_for_merge = stats_for_merge.drop_duplicates(subset=["__norm_name", "Team", "Position"])
 
+        # First try: merge on normalized name + team + position (most precise)
         base = base.merge(
             stats_for_merge,
             on=["__norm_name", "Team", "Position"],
             how="left",
             suffixes=("", "_stats")
         )
+
+        # For rows that didn't match, try a less strict merge (just name + team)
+        # Determine which rows didn't get form data from the first merge
+        check_col = "form_stats" if "form_stats" in base.columns else "form"
+        if check_col not in base.columns:
+            base[check_col] = np.nan
+        unmatched_mask = base[check_col].isna()
+
+        if unmatched_mask.any():
+            stats_name_team = stats[["__norm_name", "Team", "Player_ID", "form", "points_per_game"]].copy()
+            stats_name_team = stats_name_team.drop_duplicates(subset=["__norm_name", "Team"])
+            stats_name_team = stats_name_team.rename(columns={
+                "Player_ID": "Player_ID_fb",
+                "form": "form_fb",
+                "points_per_game": "ppg_fb"
+            })
+
+            # Merge unmatched rows on name + team only, preserving index
+            unmatched_idx = base.loc[unmatched_mask].index
+            unmatched = base.loc[unmatched_mask, ["__norm_name", "Team"]].copy()
+            unmatched = unmatched.reset_index(drop=False)  # Keep original index as column
+            fallback = unmatched.merge(
+                stats_name_team,
+                on=["__norm_name", "Team"],
+                how="left"
+            )
+            fallback = fallback.set_index("index")  # Restore original index
+
+            # Fill in the missing values from fallback for matching rows
+            for orig_col, fb_col in [("Player_ID", "Player_ID_fb"), ("form", "form_fb"), ("points_per_game", "ppg_fb")]:
+                stats_col = f"{orig_col}_stats" if f"{orig_col}_stats" in base.columns else orig_col
+                if fb_col in fallback.columns:
+                    # Update only rows that got a match in fallback
+                    matched_in_fallback = fallback[fb_col].notna()
+                    if matched_in_fallback.any():
+                        update_idx = fallback.loc[matched_in_fallback].index
+                        if stats_col not in base.columns:
+                            base[stats_col] = np.nan
+                        base.loc[update_idx, stats_col] = fallback.loc[update_idx, fb_col]
 
         # Coalesce Player_ID if needed
         if "Player_ID_stats" in base.columns:
@@ -979,6 +1012,9 @@ def show_waiver_wire_page():
     # Ensure Team present for exact joins and align roster names to RotoWire canonical names
     my_roster = _ensure_team_col(my_roster, fpl_stats)
     my_roster = _align_roster_player_names_to_projections(my_roster, proj)
+
+    # Convert Team to short codes to match projections format (e.g., "Man City" -> "MCI")
+    my_roster["Team"] = my_roster["Team"].replace(TEAM_FULL_TO_SHORT)
 
     # Add next-GW projected points (match on canonical Player/Team/Position)
     # Use normalized names for matching to handle accent differences
