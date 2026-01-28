@@ -61,6 +61,15 @@ POS_MAP_TO_RW = {
     "FWD": "F", "FW": "F", "F": "F", "Forward": "F",
 }
 
+# Player name aliases for difficult matches (FPL full name -> Rotowire display name)
+# Brazilian players often have long full names but short display names
+# Add new mappings here when you encounter incorrectly matched players
+PLAYER_ALIASES = {
+    "Carlos Henrique Casimiro": "Casemiro",
+    "João Pedro Junqueira de Jesus": "Joao Pedro",
+    "Pedro Porro Sauceda": "Pedro Porro",
+}
+
 
 # =============================================================================
 # 2. TEXT & STRING NORMALIZATION
@@ -2022,19 +2031,25 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
     # -------- normalize projections to RW schema --------
     def _normalize_proj(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
-        # case-insensitive rename
+        # case-insensitive rename - avoid duplicates by tracking which targets are used
         rename = {}
+        targets_used = set()
         for c in df.columns:
             lc = c.strip().lower()
-            if lc in ('player', 'name', 'player_name'):                     rename[c] = 'Player'
-            elif lc in ('team', 'team_short', 'teamname', 'team_name'):     rename[c] = 'Team'
-            elif lc in ('matchup', 'fixture', 'opp', 'opponent'):           rename[c] = 'Matchup'
-            elif lc in ('position', 'pos'):                                 rename[c] = 'Position'
-            elif lc in ('points', 'point', 'proj', 'projection'):           rename[c] = 'Points'
+            target = None
+            if lc in ('player', 'name', 'player_name'):                     target = 'Player'
+            elif lc in ('team', 'team_short', 'teamname', 'team_name'):     target = 'Team'
+            elif lc in ('matchup', 'fixture', 'opp', 'opponent'):           target = 'Matchup'
+            elif lc in ('position', 'pos'):                                 target = 'Position'
+            elif lc in ('points', 'point', 'proj', 'projection'):           target = 'Points'
             elif lc in ('pos rank','pos_rank','position rank','position_rank'):
-                rename[c] = 'Pos Rank'
-            elif lc in ('price',):                                          rename[c] = 'Price'
-            elif lc in ('tsb','tsb%','tsb %','ownership'):                  rename[c] = 'TSB %'
+                target = 'Pos Rank'
+            elif lc in ('price',):                                          target = 'Price'
+            elif lc in ('tsb','tsb%','tsb %','ownership'):                  target = 'TSB %'
+            # Only rename if target not already used (avoid duplicate columns)
+            if target and target not in targets_used:
+                rename[c] = target
+                targets_used.add(target)
         if rename:
             df = df.rename(columns=rename)
 
@@ -2103,23 +2118,92 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
                 norm_team_to_players[key].append(player)
 
     # -------- matching strategy --------
+    def _has_significant_token_overlap(fpl_name: str, proj_name: str) -> bool:
+        """
+        Check if the projection name is a valid match for the FPL name.
+        Prevents false matches like "Pedro Porro Sauceda" -> "Joao Pedro"
+        where only one common token "Pedro" causes high fuzzy scores.
+
+        Valid matches:
+        - "João Pedro Junqueira de Jesus" -> "Joao Pedro" (proj tokens subset of fpl)
+        - "Carlos Henrique Casimiro" -> "Casemiro" (proj is single token ~= casimiro)
+        - "Pedro Lomba Neto" -> "Pedro Neto" (proj tokens subset of fpl)
+
+        Invalid matches:
+        - "Pedro Porro Sauceda" -> "Joao Pedro" (proj has "joao" not in fpl)
+        """
+        fpl_tokens = set(fpl_name.lower().split())
+        proj_tokens = set(proj_name.lower().split())
+        if not fpl_tokens or not proj_tokens:
+            return False
+
+        def token_matches_any(token: str, token_set: set) -> bool:
+            """Check if token matches any token in the set (exact or fuzzy)."""
+            if token in token_set:
+                return True
+            # Allow fuzzy match for similar tokens (e.g., "casemiro" vs "casimiro")
+            for t in token_set:
+                # Use ratio for single token comparison - require 85%+ similarity
+                if fuzz.ratio(token, t) >= 85:
+                    return True
+            return False
+
+        def all_tokens_match(source_tokens: set, target_tokens: set) -> bool:
+            """Check if all source tokens have a match in target tokens."""
+            return all(token_matches_any(t, target_tokens) for t in source_tokens)
+
+        # For a valid match, all tokens in the projection name should be in the FPL name
+        # This handles: "Joao Pedro" in "João Pedro Junqueira de Jesus" ✓
+        # But rejects: "Joao Pedro" from "Pedro Porro Sauceda" ✗ (no "joao" in fpl)
+        # Also handles: "Casemiro" matching "Casimiro" with fuzzy matching
+        if all_tokens_match(proj_tokens, fpl_tokens):
+            return True
+
+        # Also allow if FPL tokens are subset of proj (shorter FPL name)
+        # E.g., "Pedro Neto" matching "Pedro Lomba Neto"
+        if all_tokens_match(fpl_tokens, proj_tokens):
+            return True
+
+        # Allow if there's significant overlap (both share most tokens)
+        # Require at least 2 common tokens or >66% of smaller set
+        # Use fuzzy matching for overlap count
+        fuzzy_overlap = sum(1 for t in fpl_tokens if token_matches_any(t, proj_tokens))
+        smaller_len = min(len(fpl_tokens), len(proj_tokens))
+        return fuzzy_overlap >= 2 and fuzzy_overlap >= smaller_len * 0.66
+
     def _best_match(fpl_player, fpl_team, fpl_position):
         """
         Match strategy:
+        0. Check PLAYER_ALIASES for known difficult matches (Brazilian players, etc.)
         1. Try exact match on canonically normalized name (O(1) lookup)
         2. Try fuzzy match WITHIN the same team first (prioritize team context)
         3. Fall back to fuzzy match across all players
         Uses lower threshold when team+position agree for context-aware matching.
+        Cross-team matches also require significant token overlap to prevent false matches.
         """
         if not normalized_candidates:
             return None
 
+        fpl_player_str = str(fpl_player)
+        fpl_team_str = str(fpl_team) if fpl_team else ''
+
+        # Step 0: Check manual alias mapping for known difficult matches
+        # Try exact match first, then normalized match
+        alias_name = PLAYER_ALIASES.get(fpl_player_str)
+        if not alias_name:
+            # Try with stripped accents
+            fpl_stripped = _strip_accents(fpl_player_str)
+            alias_name = PLAYER_ALIASES.get(fpl_stripped)
+        if alias_name:
+            # Look up the alias in projections
+            alias_norm = canonical_normalize(alias_name)
+            if alias_norm in norm_to_players:
+                return norm_to_players[alias_norm][0]
+
         # Normalize the FPL player name
-        fpl_norm = canonical_normalize(str(fpl_player))
+        fpl_norm = canonical_normalize(fpl_player_str)
         if not fpl_norm:
             return None
-
-        fpl_team_str = str(fpl_team) if fpl_team else ''
 
         # Step 1: Try exact match on normalized name
         if fpl_norm in norm_to_players:
@@ -2140,20 +2224,23 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
 
         # Step 2: Try fuzzy match WITHIN the same team first
         # This ensures "Carlos Henrique Casimiro" (MUN) matches "Casemiro" (MUN) not "Carlos Baleba" (BHA)
+        # Also validate token overlap to prevent "Pedro Lomba Neto" matching "Joao Pedro"
         same_team_candidates = [
             norm for norm in normalized_candidates
             if (norm, fpl_team_str) in norm_team_to_players
         ]
 
         if same_team_candidates:
-            res = process.extractOne(fpl_norm, same_team_candidates)
-            if res:
-                matched_norm, score = res[0], res[1]
+            # Get multiple matches to evaluate token overlap
+            matches = process.extract(fpl_norm, same_team_candidates, limit=5)
+            for match_result in matches:
+                matched_norm, score = match_result[0], match_result[1]
                 if score >= lower_fuzzy_threshold:
-                    # Found a good match within the same team
-                    original_players = norm_team_to_players.get((matched_norm, fpl_team_str), [])
-                    if original_players:
-                        return original_players[0]
+                    # Validate token overlap before accepting
+                    if _has_significant_token_overlap(fpl_norm, matched_norm):
+                        original_players = norm_team_to_players.get((matched_norm, fpl_team_str), [])
+                        if original_players:
+                            return original_players[0]
 
         # Step 3: Fall back to fuzzy match across all players
         res = process.extractOne(fpl_norm, normalized_candidates)
@@ -2180,9 +2267,12 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
                 if score >= lower_fuzzy_threshold:
                     return player
 
-        # No team+position match, use stricter threshold
+        # No team+position match - use stricter threshold AND require token overlap
+        # This prevents "Pedro Porro Sauceda" from matching "Joao Pedro" where
+        # the only common token is "Pedro"
         if score >= fuzzy_threshold:
-            return original_players[0]
+            if _has_significant_token_overlap(fpl_norm, matched_norm):
+                return original_players[0]
 
         return None
 
