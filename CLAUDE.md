@@ -132,6 +132,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
+| Improve H2H Visuals | Not started | Better styling for H2H history sections (match history cards, icons, etc.) |
 | Player Trade Analyzer | Not started | Evaluate potential trades between teams (Draft mode) |
 | Live Score Integration | Not started | Real-time score tracking during gameweeks |
 | Enhanced Lineup Visualizations | Not started | Add player form, injury status to lineup views |
