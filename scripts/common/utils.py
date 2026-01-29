@@ -498,6 +498,107 @@ def get_league_player_ownership(league_id):
     return league_ownership
 
 
+@st.cache_data(ttl=600)
+def _fetch_draft_position_data(league_id: int) -> dict:
+    """
+    Shared data fetcher for draft position breakdown functions.
+
+    Returns dict with:
+    - 'team_data': {team_name: {'GK': pts, 'DEF': pts, 'MID': pts, 'FWD': pts}}
+    - 'player_data': {team_name: [{'player': str, 'position': str, 'total_points': int, 'team': str}, ...]}
+    """
+    POS_DISPLAY = {"G": "GK", "D": "DEF", "M": "MID", "F": "FWD"}
+
+    # Fetch element-status (ownership)
+    element_status_url = f"https://draft.premierleague.com/api/league/{league_id}/element-status"
+    element_status = requests.get(element_status_url, timeout=30).json().get("element_status", [])
+
+    # Fetch bootstrap-static (player data)
+    bootstrap_url = "https://draft.premierleague.com/api/bootstrap-static"
+    bootstrap_data = requests.get(bootstrap_url, timeout=30).json()
+    elements = {p["id"]: p for p in bootstrap_data.get("elements", [])}
+    teams_list = bootstrap_data.get("teams", [])
+    teams_map = {t["id"]: t["short_name"] for t in teams_list}
+
+    # Fetch league entries (owner_id -> team_name)
+    owner_map = get_league_entries(league_id)
+
+    # Build per-team position totals and player lists
+    team_data = {}   # {team_name: {GK: pts, DEF: pts, MID: pts, FWD: pts}}
+    player_data = {}  # {team_name: [{player, position, total_points, team}, ...]}
+
+    for status in element_status:
+        owner_id = status.get("owner")
+        player_id = status.get("element")
+        if owner_id is None:
+            continue
+
+        team_name = owner_map.get(owner_id, f"Unknown Team ({owner_id})")
+        player = elements.get(player_id)
+        if not player:
+            continue
+
+        element_type = player.get("element_type", 0)
+        total_points = player.get("total_points", 0)
+        pos_short = position_converter(element_type)
+        pos_display = POS_DISPLAY.get(pos_short, "Unknown")
+        web_name = player.get("web_name", "Unknown")
+        player_team = teams_map.get(player.get("team"), "???")
+
+        # Accumulate team position totals
+        if team_name not in team_data:
+            team_data[team_name] = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
+        if pos_display in team_data[team_name]:
+            team_data[team_name][pos_display] += total_points
+
+        # Accumulate player lists
+        if team_name not in player_data:
+            player_data[team_name] = []
+        player_data[team_name].append({
+            "player": web_name,
+            "position": pos_display,
+            "total_points": total_points,
+            "team": player_team,
+        })
+
+    return {"team_data": team_data, "player_data": player_data}
+
+
+def get_draft_points_by_position(league_id: int) -> pd.DataFrame:
+    """
+    Returns DataFrame with columns [Team, GK, DEF, MID, FWD, Total]
+    showing season-to-date points by position for each team in the draft league.
+    """
+    data = _fetch_draft_position_data(league_id)
+    team_data = data["team_data"]
+
+    rows = []
+    for team_name, positions in team_data.items():
+        total = sum(positions.values())
+        rows.append({
+            "Team": team_name,
+            "GK": positions["GK"],
+            "DEF": positions["DEF"],
+            "MID": positions["MID"],
+            "FWD": positions["FWD"],
+            "Total": total,
+        })
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("Total", ascending=False).reset_index(drop=True)
+    return df
+
+
+def get_draft_team_players_with_points(league_id: int) -> dict:
+    """
+    Returns {team_name: [{'player': str, 'position': str, 'total_points': int, 'team': str}, ...]}
+    with per-player detail for each team in the draft league.
+    """
+    data = _fetch_draft_position_data(league_id)
+    return data["player_data"]
+
+
 def get_league_teams(league_id):
     """
     Fetches league entries from the FPL Draft API and stores them in config.LEAGUE_DATA if not already fetched.

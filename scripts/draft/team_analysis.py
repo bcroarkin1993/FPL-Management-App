@@ -1,9 +1,10 @@
 import config
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 from scripts.common.utils import get_league_player_ownership, get_league_teams, get_rotowire_player_projections, \
     get_team_composition_for_gameweek, get_team_id_by_name, merge_fpl_players_and_projections, \
-    get_draft_all_h2h_records
+    get_draft_all_h2h_records, get_draft_points_by_position, get_draft_team_players_with_points
 
 def show_team_projections(team_id, fpl_player_projections, gameweek):
     # Get the team composition for the team in the current gameweek
@@ -106,6 +107,87 @@ def show_team_stats_page():
         )
     else:
         st.info("No head-to-head data available yet. The season may not have started.")
+
+    st.divider()
+
+    # ---------------------------
+    # POINTS BY POSITION
+    # ---------------------------
+    st.subheader("Points by Position")
+
+    POSITION_COLORS = {
+        "GK": "#f39c12",
+        "DEF": "#3498db",
+        "MID": "#2ecc71",
+        "FWD": "#e74c3c",
+    }
+
+    pos_df = get_draft_points_by_position(config.FPL_DRAFT_LEAGUE_ID)
+    player_data = get_draft_team_players_with_points(config.FPL_DRAFT_LEAGUE_ID)
+
+    team_row = pos_df[pos_df["Team"] == selected_team] if not pos_df.empty else pd.DataFrame()
+
+    if not team_row.empty:
+        row = team_row.iloc[0]
+        pos_cols = ["GK", "DEF", "MID", "FWD"]
+        total = row["Total"]
+
+        # Pie chart + metrics side by side
+        col_pie, col_metrics = st.columns([1, 1])
+
+        with col_pie:
+            pie_data = pd.DataFrame({
+                "Position": pos_cols,
+                "Points": [row[c] for c in pos_cols]
+            })
+            fig = px.pie(
+                pie_data,
+                values="Points",
+                names="Position",
+                color="Position",
+                color_discrete_map=POSITION_COLORS,
+            )
+            fig.update_traces(textinfo="percent+label")
+            fig.update_layout(
+                showlegend=False,
+                margin=dict(t=10, b=10, l=10, r=10),
+                height=300,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col_metrics:
+            for pos in pos_cols:
+                pts = int(row[pos])
+                pct = f"{pts / total * 100:.1f}%" if total > 0 else "0%"
+                st.metric(pos, f"{pts} pts ({pct})")
+
+        # Player detail table
+        team_players = player_data.get(selected_team, [])
+        if team_players:
+            st.markdown("**Player Breakdown**")
+            players_df = pd.DataFrame(team_players)
+            players_df.columns = ["Player", "Position", "Total Points", "Team"]
+
+            # Sort by position order then points desc
+            pos_order = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
+            players_df["_pos_order"] = players_df["Position"].map(pos_order)
+            players_df = players_df.sort_values(
+                ["_pos_order", "Total Points"], ascending=[True, False]
+            ).drop(columns=["_pos_order"])
+
+            st.dataframe(
+                players_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Player": st.column_config.TextColumn("Player"),
+                    "Position": st.column_config.TextColumn("Pos"),
+                    "Total Points": st.column_config.NumberColumn("Points"),
+                    "Team": st.column_config.TextColumn("Team"),
+                }
+            )
+    else:
+        st.info("No position data available for this team.")
 
     st.divider()
 

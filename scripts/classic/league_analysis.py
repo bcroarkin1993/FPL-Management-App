@@ -20,6 +20,8 @@ from scripts.common.utils import (
     get_classic_team_history,
     get_current_gameweek,
     get_classic_bootstrap_static,
+    get_classic_team_picks,
+    position_converter,
 )
 
 
@@ -535,12 +537,13 @@ def show_classic_league_analysis_page():
     st.divider()
 
     # Create tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "Chip Usage",
         "Rank Movement",
         "Points Analysis",
         "Team Values",
-        "Performance Stats"
+        "Performance Stats",
+        "Points by Position"
     ])
 
     # ---------------------------
@@ -720,3 +723,194 @@ def show_classic_league_analysis_page():
                 st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No performance data available.")
+
+    # ---------------------------
+    # TAB 6: POINTS BY POSITION
+    # ---------------------------
+    with tab6:
+        st.subheader("Points by Position")
+
+        POSITION_COLORS = {
+            "GK": "#f39c12",
+            "DEF": "#3498db",
+            "MID": "#2ecc71",
+            "FWD": "#e74c3c",
+        }
+        POS_DISPLAY = {"G": "GK", "D": "DEF", "M": "MID", "F": "FWD"}
+
+        # Get bootstrap data for player info
+        bootstrap = get_classic_bootstrap_static()
+        if not bootstrap:
+            st.error("Failed to load player data.")
+        else:
+            elements = {p["id"]: p for p in bootstrap.get("elements", [])}
+
+            # Determine latest completed gameweek
+            latest_gw = current_gw
+            if latest_gw is None:
+                st.info("Could not determine current gameweek.")
+            else:
+                with st.spinner(f"Loading squad data for {len(team_ids)} teams..."):
+                    pos_rows = []
+                    player_details = {}  # {team_name: [{player, position, total_points, team}]}
+
+                    teams_lookup = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
+
+                    for tid in team_ids:
+                        tname = team_names.get(tid, f"Team {tid}")
+                        picks_data = get_classic_team_picks(tid, latest_gw)
+                        if not picks_data:
+                            continue
+
+                        picks = picks_data.get("picks", [])
+                        team_pos = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
+                        team_players = []
+
+                        for pick in picks:
+                            eid = pick["element"]
+                            player = elements.get(eid, {})
+                            total_points = player.get("total_points", 0)
+                            element_type = player.get("element_type", 0)
+                            pos_short = position_converter(element_type)
+                            pos_display = POS_DISPLAY.get(pos_short, "Unknown")
+                            web_name = player.get("web_name", "Unknown")
+                            player_team = teams_lookup.get(player.get("team"), "???")
+
+                            if pos_display in team_pos:
+                                team_pos[pos_display] += total_points
+
+                            team_players.append({
+                                "player": web_name,
+                                "position": pos_display,
+                                "total_points": total_points,
+                                "team": player_team,
+                            })
+
+                        total = sum(team_pos.values())
+                        pos_rows.append({
+                            "Team": tname,
+                            "GK": team_pos["GK"],
+                            "DEF": team_pos["DEF"],
+                            "MID": team_pos["MID"],
+                            "FWD": team_pos["FWD"],
+                            "Total": total,
+                        })
+                        player_details[tname] = team_players
+
+                pos_df = pd.DataFrame(pos_rows)
+
+                if pos_df.empty:
+                    st.info("No position data available yet.")
+                else:
+                    pos_df = pos_df.sort_values("Total", ascending=False).reset_index(drop=True)
+
+                    # Toggle between raw points and percentage
+                    view_mode = st.radio(
+                        "View",
+                        ["Raw Points", "Percentage"],
+                        horizontal=True,
+                        key="classic_league_pos_view"
+                    )
+
+                    pos_cols = ["GK", "DEF", "MID", "FWD"]
+
+                    # Calculate league averages
+                    avg_row = {"Team": "League Average"}
+                    for col in pos_cols:
+                        avg_row[col] = round(pos_df[col].mean(), 1)
+                    avg_row["Total"] = round(pos_df["Total"].mean(), 1)
+
+                    display_df = pos_df.copy()
+
+                    if view_mode == "Percentage":
+                        for _, row in display_df.iterrows():
+                            total = row["Total"]
+                            if total > 0:
+                                for col in pos_cols:
+                                    display_df.at[_, col] = round(row[col] / total * 100, 1)
+                            else:
+                                for col in pos_cols:
+                                    display_df.at[_, col] = 0.0
+                        display_df["Total"] = 100.0
+
+                        # Recalculate avg for percentage view
+                        avg_total = avg_row["Total"]
+                        if avg_total > 0:
+                            for col in pos_cols:
+                                avg_row[col] = round(avg_row[col] / avg_total * 100, 1)
+                        avg_row["Total"] = 100.0
+
+                    # Append league average row
+                    avg_df_row = pd.DataFrame([avg_row])
+                    table_df = pd.concat([display_df, avg_df_row], ignore_index=True)
+
+                    # Style: highlight cells above/below average
+                    def highlight_vs_avg(row):
+                        styles = [""] * len(row)
+                        if row["Team"] == "League Average":
+                            styles = ["font-weight: bold; background-color: #f0f0f0"] * len(row)
+                        else:
+                            for i, col in enumerate(row.index):
+                                if col in pos_cols:
+                                    avg_val = avg_row[col]
+                                    if row[col] > avg_val:
+                                        styles[i] = "background-color: #d4edda"
+                                    elif row[col] < avg_val:
+                                        styles[i] = "background-color: #f8d7da"
+                        return styles
+
+                    styled = table_df.style.apply(highlight_vs_avg, axis=1)
+
+                    suffix = "%" if view_mode == "Percentage" else " pts"
+                    styled = styled.format(
+                        {col: f"{{:.1f}}{suffix}" for col in pos_cols + ["Total"]},
+                        subset=pos_cols + ["Total"]
+                    )
+
+                    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+                    st.divider()
+
+                    # Stacked bar chart
+                    bar_df = pos_df.melt(
+                        id_vars=["Team"],
+                        value_vars=pos_cols,
+                        var_name="Position",
+                        value_name="Points"
+                    )
+
+                    fig_bar = px.bar(
+                        bar_df,
+                        x="Team",
+                        y="Points",
+                        color="Position",
+                        title="Points Distribution by Position",
+                        barmode="stack",
+                        color_discrete_map=POSITION_COLORS,
+                        category_orders={"Position": pos_cols}
+                    )
+                    fig_bar.update_layout(
+                        xaxis_title="",
+                        yaxis_title="Total Points",
+                        xaxis_tickangle=-45,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True)
+
+                    # League-wide pie chart
+                    league_totals = {col: pos_df[col].sum() for col in pos_cols}
+                    pie_df = pd.DataFrame({
+                        "Position": list(league_totals.keys()),
+                        "Points": list(league_totals.values())
+                    })
+
+                    fig_pie = px.pie(
+                        pie_df,
+                        values="Points",
+                        names="Position",
+                        title="League-Wide Points Distribution",
+                        color="Position",
+                        color_discrete_map=POSITION_COLORS,
+                    )
+                    fig_pie.update_traces(textinfo="percent+label")
+                    st.plotly_chart(fig_pie, use_container_width=True)

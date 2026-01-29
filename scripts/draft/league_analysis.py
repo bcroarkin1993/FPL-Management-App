@@ -16,7 +16,7 @@ import streamlit as st
 from typing import Optional, Dict, List, Tuple
 
 import config
-from scripts.common.utils import get_current_gameweek
+from scripts.common.utils import get_current_gameweek, get_draft_points_by_position
 
 
 # ---------------------------
@@ -556,12 +556,13 @@ def show_draft_league_analysis_page():
     st.divider()
 
     # Create tabs for different analyses
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "Head-to-Head",
         "Scoring Analysis",
         "Weekly Trends",
         "Strength of Schedule",
-        "Records & Streaks"
+        "Records & Streaks",
+        "Points by Position"
     ])
 
     # ---------------------------
@@ -750,3 +751,133 @@ def show_draft_league_analysis_page():
             )
         else:
             st.info("Not enough data for streak analysis.")
+
+    # ---------------------------
+    # TAB 6: POINTS BY POSITION
+    # ---------------------------
+    with tab6:
+        st.subheader("Points by Position")
+
+        POSITION_COLORS = {
+            "GK": "#f39c12",
+            "DEF": "#3498db",
+            "MID": "#2ecc71",
+            "FWD": "#e74c3c",
+        }
+
+        with st.spinner("Loading position data..."):
+            pos_df = get_draft_points_by_position(league_id)
+
+        if pos_df.empty:
+            st.info("No position data available yet.")
+        else:
+            # Toggle between raw points and percentage
+            view_mode = st.radio(
+                "View",
+                ["Raw Points", "Percentage"],
+                horizontal=True,
+                key="draft_league_pos_view"
+            )
+
+            pos_cols = ["GK", "DEF", "MID", "FWD"]
+
+            # Calculate league averages
+            avg_row = {"Team": "League Average"}
+            for col in pos_cols:
+                avg_row[col] = round(pos_df[col].mean(), 1)
+            avg_row["Total"] = round(pos_df["Total"].mean(), 1)
+
+            display_df = pos_df.copy()
+
+            if view_mode == "Percentage":
+                for _, row in display_df.iterrows():
+                    total = row["Total"]
+                    if total > 0:
+                        for col in pos_cols:
+                            display_df.at[_, col] = round(row[col] / total * 100, 1)
+                    else:
+                        for col in pos_cols:
+                            display_df.at[_, col] = 0.0
+                display_df["Total"] = 100.0
+
+                # Recalculate avg for percentage view
+                avg_total = avg_row["Total"]
+                if avg_total > 0:
+                    for col in pos_cols:
+                        avg_row[col] = round(avg_row[col] / avg_total * 100, 1)
+                avg_row["Total"] = 100.0
+
+            # Append league average row
+            avg_df = pd.DataFrame([avg_row])
+            table_df = pd.concat([display_df, avg_df], ignore_index=True)
+
+            # Style: highlight cells above/below average
+            def highlight_vs_avg(row):
+                styles = [""] * len(row)
+                if row["Team"] == "League Average":
+                    styles = ["font-weight: bold; background-color: #f0f0f0"] * len(row)
+                else:
+                    for i, col in enumerate(row.index):
+                        if col in pos_cols:
+                            avg_val = avg_row[col]
+                            if row[col] > avg_val:
+                                styles[i] = "background-color: #d4edda"
+                            elif row[col] < avg_val:
+                                styles[i] = "background-color: #f8d7da"
+                return styles
+
+            styled = table_df.style.apply(highlight_vs_avg, axis=1)
+
+            suffix = "%" if view_mode == "Percentage" else " pts"
+            styled = styled.format(
+                {col: f"{{:.1f}}{suffix}" for col in pos_cols + ["Total"]},
+                subset=pos_cols + ["Total"]
+            )
+
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # Stacked bar chart
+            bar_df = pos_df.melt(
+                id_vars=["Team"],
+                value_vars=pos_cols,
+                var_name="Position",
+                value_name="Points"
+            )
+
+            fig_bar = px.bar(
+                bar_df,
+                x="Team",
+                y="Points",
+                color="Position",
+                title="Points Distribution by Position",
+                barmode="stack",
+                color_discrete_map=POSITION_COLORS,
+                category_orders={"Position": pos_cols}
+            )
+            fig_bar.update_layout(
+                xaxis_title="",
+                yaxis_title="Total Points",
+                xaxis_tickangle=-45,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+            # League-wide pie chart
+            league_totals = {col: pos_df[col].sum() for col in pos_cols}
+            pie_df = pd.DataFrame({
+                "Position": list(league_totals.keys()),
+                "Points": list(league_totals.values())
+            })
+
+            fig_pie = px.pie(
+                pie_df,
+                values="Points",
+                names="Position",
+                title="League-Wide Points Distribution",
+                color="Position",
+                color_discrete_map=POSITION_COLORS,
+            )
+            fig_pie.update_traces(textinfo="percent+label")
+            st.plotly_chart(fig_pie, use_container_width=True)
