@@ -498,10 +498,65 @@ def get_league_player_ownership(league_id):
     return league_ownership
 
 
+@st.cache_data(ttl=3600)
+def _get_draft_gw_live_points(gw: int) -> dict:
+    """Returns {element_id: gw_points} from the Draft live endpoint for a single GW."""
+    try:
+        url = f"https://draft.premierleague.com/api/event/{gw}/live"
+        resp = requests.get(url, timeout=30)
+        data = resp.json()
+        return {
+            elem["id"]: elem.get("stats", {}).get("total_points", 0)
+            for elem in data.get("elements", [])
+        }
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=3600)
+def _get_draft_entry_picks_for_gw(entry_id: int, gw: int) -> list:
+    """Returns list of element IDs for a Draft entry's picks in a single GW."""
+    try:
+        url = f"https://draft.premierleague.com/api/entry/{entry_id}/event/{gw}"
+        resp = requests.get(url, timeout=30)
+        data = resp.json()
+        return [p["element"] for p in data.get("picks", [])]
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=3600)
+def _get_classic_gw_live_points(gw: int) -> dict:
+    """Returns {element_id: gw_points} from the Classic live endpoint for a single GW."""
+    try:
+        url = f"https://fantasy.premierleague.com/api/event/{gw}/live/"
+        resp = requests.get(url, timeout=30)
+        data = resp.json()
+        return {
+            elem["id"]: elem.get("stats", {}).get("total_points", 0)
+            for elem in data.get("elements", [])
+        }
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=3600)
+def _get_classic_team_picks_for_gw(team_id: int, gw: int) -> list:
+    """Returns list of element IDs for a Classic team's picks in a single GW."""
+    picks_data = get_classic_team_picks(team_id, gw)
+    if not picks_data:
+        return []
+    return [p["element"] for p in picks_data.get("picks", [])]
+
+
 @st.cache_data(ttl=600)
 def _fetch_draft_position_data(league_id: int) -> dict:
     """
-    Shared data fetcher for draft position breakdown functions.
+    GW-by-GW position point accumulation for all teams in a Draft league.
+
+    Iterates over every completed gameweek, fetching each team's actual roster
+    and the points each player scored that week, so traded players are only
+    counted for the weeks they were on a given team.
 
     Returns dict with:
     - 'team_data': {team_name: {'GK': pts, 'DEF': pts, 'MID': pts, 'FWD': pts}}
@@ -509,59 +564,104 @@ def _fetch_draft_position_data(league_id: int) -> dict:
     """
     POS_DISPLAY = {"G": "GK", "D": "DEF", "M": "MID", "F": "FWD"}
 
-    # Fetch element-status (ownership)
-    element_status_url = f"https://draft.premierleague.com/api/league/{league_id}/element-status"
-    element_status = requests.get(element_status_url, timeout=30).json().get("element_status", [])
-
-    # Fetch bootstrap-static (player data)
+    # Fetch bootstrap-static for element_type / name mapping
     bootstrap_url = "https://draft.premierleague.com/api/bootstrap-static"
     bootstrap_data = requests.get(bootstrap_url, timeout=30).json()
     elements = {p["id"]: p for p in bootstrap_data.get("elements", [])}
     teams_list = bootstrap_data.get("teams", [])
     teams_map = {t["id"]: t["short_name"] for t in teams_list}
 
-    # Fetch league entries (owner_id -> team_name)
+    # League entries: {entry_id: team_name}
     owner_map = get_league_entries(league_id)
 
-    # Build per-team position totals and player lists
-    team_data = {}   # {team_name: {GK: pts, DEF: pts, MID: pts, FWD: pts}}
-    player_data = {}  # {team_name: [{player, position, total_points, team}, ...]}
+    # Determine range of completed GWs
+    current_gw = get_current_gameweek()  # next GW if current finished, else current
 
-    for status in element_status:
-        owner_id = status.get("owner")
-        player_id = status.get("element")
-        if owner_id is None:
-            continue
+    # Initialise accumulators
+    team_data = {}
+    player_accum = {}  # {team_name: {element_id: {...}}}
+    for team_name in owner_map.values():
+        team_data[team_name] = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
+        player_accum[team_name] = {}
 
-        team_name = owner_map.get(owner_id, f"Unknown Team ({owner_id})")
-        player = elements.get(player_id)
-        if not player:
-            continue
+    # Iterate over completed gameweeks
+    for gw in range(1, current_gw):
+        live_points = _get_draft_gw_live_points(gw)
 
-        element_type = player.get("element_type", 0)
-        total_points = player.get("total_points", 0)
-        pos_short = position_converter(element_type)
-        pos_display = POS_DISPLAY.get(pos_short, "Unknown")
-        web_name = player.get("web_name", "Unknown")
-        player_team = teams_map.get(player.get("team"), "???")
+        for entry_id, team_name in owner_map.items():
+            pick_ids = _get_draft_entry_picks_for_gw(entry_id, gw)
 
-        # Accumulate team position totals
-        if team_name not in team_data:
-            team_data[team_name] = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
-        if pos_display in team_data[team_name]:
-            team_data[team_name][pos_display] += total_points
+            for eid in pick_ids:
+                elem = elements.get(eid, {})
+                pos_short = position_converter(elem.get("element_type", 0))
+                pos_display = POS_DISPLAY.get(pos_short, "Unknown")
+                gw_pts = live_points.get(eid, 0)
 
-        # Accumulate player lists
-        if team_name not in player_data:
-            player_data[team_name] = []
-        player_data[team_name].append({
-            "player": web_name,
-            "position": pos_display,
-            "total_points": total_points,
-            "team": player_team,
-        })
+                if pos_display in team_data[team_name]:
+                    team_data[team_name][pos_display] += gw_pts
+
+                if eid not in player_accum[team_name]:
+                    player_accum[team_name][eid] = {
+                        "player": elem.get("web_name", "Unknown"),
+                        "position": pos_display,
+                        "total_points": 0,
+                        "team": teams_map.get(elem.get("team"), "???"),
+                    }
+                player_accum[team_name][eid]["total_points"] += gw_pts
+
+    # Convert player accumulators to list format
+    player_data = {
+        team_name: list(players.values())
+        for team_name, players in player_accum.items()
+    }
 
     return {"team_data": team_data, "player_data": player_data}
+
+
+@st.cache_data(ttl=600)
+def get_classic_team_position_data(team_id: int, max_gw: int) -> dict:
+    """
+    GW-by-GW position point accumulation for a single Classic FPL team.
+
+    Returns:
+    - {"positions": {"GK": pts, "DEF": pts, "MID": pts, "FWD": pts},
+       "players": [{"player": str, "position": str, "total_points": int, "team": str}, ...]}
+    """
+    POS_DISPLAY = {"G": "GK", "D": "DEF", "M": "MID", "F": "FWD"}
+
+    bootstrap = get_classic_bootstrap_static()
+    if not bootstrap:
+        return {"positions": {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}, "players": []}
+
+    elements = {p["id"]: p for p in bootstrap.get("elements", [])}
+    teams_map = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
+
+    positions = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
+    player_accum = {}  # {element_id: {player, position, total_points, team}}
+
+    for gw in range(1, max_gw + 1):
+        live_points = _get_classic_gw_live_points(gw)
+        pick_ids = _get_classic_team_picks_for_gw(team_id, gw)
+
+        for eid in pick_ids:
+            elem = elements.get(eid, {})
+            pos_short = position_converter(elem.get("element_type", 0))
+            pos_display = POS_DISPLAY.get(pos_short, "Unknown")
+            gw_pts = live_points.get(eid, 0)
+
+            if pos_display in positions:
+                positions[pos_display] += gw_pts
+
+            if eid not in player_accum:
+                player_accum[eid] = {
+                    "player": elem.get("web_name", "Unknown"),
+                    "position": pos_display,
+                    "total_points": 0,
+                    "team": teams_map.get(elem.get("team"), "???"),
+                }
+            player_accum[eid]["total_points"] += gw_pts
+
+    return {"positions": positions, "players": list(player_accum.values())}
 
 
 def get_draft_points_by_position(league_id: int) -> pd.DataFrame:

@@ -13,6 +13,7 @@ from scripts.common.utils import (
     get_classic_bootstrap_static,
     get_classic_team_picks,
     get_classic_team_history,
+    get_classic_team_position_data,
     get_entry_details,
     get_current_gameweek,
     get_rotowire_player_projections,
@@ -544,90 +545,74 @@ def show_classic_team_analysis_page():
         "MID": "#2ecc71",
         "FWD": "#e74c3c",
     }
-    POS_DISPLAY = {"G": "GK", "D": "DEF", "M": "MID", "F": "FWD"}
 
-    # Build position breakdown from current squad's season total_points
-    elements_lookup = {p["id"]: p for p in bootstrap.get("elements", [])}
-    teams_lookup = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
+    # Determine latest played GW from history
+    latest_played_gw = max((gw["event"] for gw in gw_history), default=None)
 
-    team_pos = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
-    player_rows = []
+    if latest_played_gw:
+        with st.spinner("Loading position data..."):
+            pos_result = get_classic_team_position_data(team_id, latest_played_gw)
 
-    for pick in picks:
-        eid = pick["element"]
-        player = elements_lookup.get(eid, {})
-        total_points = player.get("total_points", 0)
-        element_type = player.get("element_type", 0)
-        pos_short = position_converter(element_type)
-        pos_display = POS_DISPLAY.get(pos_short, "Unknown")
-        web_name = player.get("web_name", "Unknown")
-        player_team = teams_lookup.get(player.get("team"), "???")
+        team_pos = pos_result["positions"]
+        total = sum(team_pos.values())
 
-        if pos_display in team_pos:
-            team_pos[pos_display] += total_points
+        if total > 0:
+            pos_cols = ["GK", "DEF", "MID", "FWD"]
 
-        player_rows.append({
-            "Player": web_name,
-            "Position": pos_display,
-            "Total Points": total_points,
-            "Team": player_team,
-        })
+            col_pie, col_metrics = st.columns([1, 1])
 
-    total = sum(team_pos.values())
+            with col_pie:
+                pie_data = pd.DataFrame({
+                    "Position": pos_cols,
+                    "Points": [team_pos[c] for c in pos_cols]
+                })
+                fig = px.pie(
+                    pie_data,
+                    values="Points",
+                    names="Position",
+                    color="Position",
+                    color_discrete_map=POSITION_COLORS,
+                )
+                fig.update_traces(textinfo="percent+label")
+                fig.update_layout(
+                    showlegend=False,
+                    margin=dict(t=10, b=10, l=10, r=10),
+                    height=300,
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
-    if total > 0:
-        pos_cols = ["GK", "DEF", "MID", "FWD"]
+            with col_metrics:
+                for pos in pos_cols:
+                    pts = team_pos[pos]
+                    pct = f"{pts / total * 100:.1f}%" if total > 0 else "0%"
+                    st.metric(pos, f"{pts} pts ({pct})")
 
-        col_pie, col_metrics = st.columns([1, 1])
+            # Player detail table
+            player_list = pos_result["players"]
+            if player_list:
+                st.markdown("**Player Breakdown**")
+                players_df = pd.DataFrame(player_list)
+                players_df.columns = ["Player", "Position", "Total Points", "Team"]
 
-        with col_pie:
-            pie_data = pd.DataFrame({
-                "Position": pos_cols,
-                "Points": [team_pos[c] for c in pos_cols]
-            })
-            fig = px.pie(
-                pie_data,
-                values="Points",
-                names="Position",
-                color="Position",
-                color_discrete_map=POSITION_COLORS,
-            )
-            fig.update_traces(textinfo="percent+label")
-            fig.update_layout(
-                showlegend=False,
-                margin=dict(t=10, b=10, l=10, r=10),
-                height=300,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+                pos_order = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
+                players_df["_pos_order"] = players_df["Position"].map(pos_order)
+                players_df = players_df.sort_values(
+                    ["_pos_order", "Total Points"], ascending=[True, False]
+                ).drop(columns=["_pos_order"])
 
-        with col_metrics:
-            for pos in pos_cols:
-                pts = team_pos[pos]
-                pct = f"{pts / total * 100:.1f}%" if total > 0 else "0%"
-                st.metric(pos, f"{pts} pts ({pct})")
-
-        # Player detail table
-        if player_rows:
-            st.markdown("**Player Breakdown**")
-            players_df = pd.DataFrame(player_rows)
-
-            pos_order = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
-            players_df["_pos_order"] = players_df["Position"].map(pos_order)
-            players_df = players_df.sort_values(
-                ["_pos_order", "Total Points"], ascending=[True, False]
-            ).drop(columns=["_pos_order"])
-
-            st.dataframe(
-                players_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Player": st.column_config.TextColumn("Player"),
-                    "Position": st.column_config.TextColumn("Pos"),
-                    "Total Points": st.column_config.NumberColumn("Points"),
-                    "Team": st.column_config.TextColumn("Team"),
-                }
-            )
+                st.dataframe(
+                    players_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Player": st.column_config.TextColumn("Player"),
+                        "Position": st.column_config.TextColumn("Pos"),
+                        "Total Points": st.column_config.NumberColumn("Points"),
+                        "Team": st.column_config.TextColumn("Team"),
+                    }
+                )
+        else:
+            st.info("No position data available yet (season may not have started).")
     else:
         st.info("No position data available yet (season may not have started).")
 
