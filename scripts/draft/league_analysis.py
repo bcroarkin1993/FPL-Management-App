@@ -811,8 +811,8 @@ def show_draft_league_analysis_page():
             avg_df = pd.DataFrame([avg_row])
             table_df = pd.concat([display_df, avg_df], ignore_index=True)
 
-            # Style: highlight cells above/below average
-            def highlight_vs_avg(row):
+            # Style: gradient red-white-green based on distance from average
+            def gradient_vs_avg(row):
                 styles = [""] * len(row)
                 if row["Team"] == "League Average":
                     styles = ["font-weight: bold; background-color: #f0f0f0"] * len(row)
@@ -820,13 +820,29 @@ def show_draft_league_analysis_page():
                     for i, col in enumerate(row.index):
                         if col in pos_cols:
                             avg_val = avg_row[col]
-                            if row[col] > avg_val:
-                                styles[i] = "background-color: #d4edda"
-                            elif row[col] < avg_val:
-                                styles[i] = "background-color: #f8d7da"
+                            # Compute column range for scaling
+                            col_vals = table_df[table_df["Team"] != "League Average"][col]
+                            col_min = col_vals.min()
+                            col_max = col_vals.max()
+                            val = row[col]
+
+                            if val > avg_val and col_max > avg_val:
+                                # Scale 0..1 from avg to max (white to green)
+                                t = min((val - avg_val) / (col_max - avg_val), 1.0)
+                                r = int(255 - t * (255 - 72))   # 255 -> 72
+                                g = int(255 - t * (255 - 199))  # 255 -> 199
+                                b = int(255 - t * (255 - 142))  # 255 -> 142
+                                styles[i] = f"background-color: rgb({r},{g},{b})"
+                            elif val < avg_val and col_min < avg_val:
+                                # Scale 0..1 from avg to min (white to red)
+                                t = min((avg_val - val) / (avg_val - col_min), 1.0)
+                                r = int(255 - t * (255 - 248))  # 255 -> 248
+                                g = int(255 - t * (255 - 105))  # 255 -> 105
+                                b = int(255 - t * (255 - 107))  # 255 -> 107
+                                styles[i] = f"background-color: rgb({r},{g},{b})"
                 return styles
 
-            styled = table_df.style.apply(highlight_vs_avg, axis=1)
+            styled = table_df.style.apply(gradient_vs_avg, axis=1)
 
             suffix = "%" if view_mode == "Percentage" else " pts"
             styled = styled.format(
