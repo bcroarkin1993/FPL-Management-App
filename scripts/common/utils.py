@@ -500,14 +500,20 @@ def get_league_player_ownership(league_id):
 
 @st.cache_data(ttl=3600)
 def _get_draft_gw_live_points(gw: int) -> dict:
-    """Returns {element_id: gw_points} from the Draft live endpoint for a single GW."""
+    """Returns {element_id (int): gw_points} from the Draft live endpoint for a single GW.
+
+    The Draft live endpoint returns elements as a dict keyed by string IDs:
+    {"1": {"stats": {"total_points": 10, ...}}, "2": {...}, ...}
+    We normalise keys to int so they match the int element IDs from picks.
+    """
     try:
         url = f"https://draft.premierleague.com/api/event/{gw}/live"
         resp = requests.get(url, timeout=30)
         data = resp.json()
+        elements = data.get("elements", {})
         return {
-            elem["id"]: elem.get("stats", {}).get("total_points", 0)
-            for elem in data.get("elements", [])
+            int(eid): edata.get("stats", {}).get("total_points", 0)
+            for eid, edata in elements.items()
         }
     except Exception:
         return {}
