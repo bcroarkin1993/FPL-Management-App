@@ -73,10 +73,11 @@ def main():
     print(f"[waiver_alerts] Deadline: {deadline_et.strftime('%Y-%m-%d %H:%M %Z')}")
     print(f"[waiver_alerts] Hours until deadline: {hours_left:.2f}")
 
-    # Fire at ~24h / 6h / 1h (tolerance ±20 min)
+    # Fire at ~24h / 6h / 1h (tolerance ±30 min to accommodate GitHub Actions
+    # scheduling delays and fractional offset hours like 25.5)
     sent = False
     for target in (24, 6, 1):
-        if abs(hours_left - target) <= 20/60:
+        if abs(hours_left - target) <= 30/60:
             ts = deadline_et.strftime("%a %b %d • %I:%M %p %Z")
             msg = f"{mention}🔔 FPL Draft transactions for **GW {gw}** are due in ~**{target}h** (deadline **{ts}**)."
             requests.post(webhook, json={"content": msg}, timeout=10)
