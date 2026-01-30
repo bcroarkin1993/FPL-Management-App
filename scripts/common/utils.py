@@ -1070,7 +1070,7 @@ def pull_fpl_player_stats():
             'creativity', 'influence', 'bonus', 'bps', 'form', 'points_per_game', 'total_points',
             'corners_and_indirect_freekicks_order', 'corners_and_indirect_freekicks_text', 'direct_freekicks_order',
             'direct_freekicks_text', 'penalties_order', 'penalties_text', 'chance_of_playing_this_round',
-            'chance_of_playing_next_round', 'status', 'added']
+            'chance_of_playing_next_round', 'status', 'news', 'added']
     player_df = player_df[cols]
 
     # Ensure expected_goal_involvements is numeric
