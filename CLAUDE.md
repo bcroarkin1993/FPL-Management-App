@@ -133,3 +133,9 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Split utils.py | In progress | Created `player_matching.py`; more modules could be extracted |
 | Add basic tests | Not started | No test infrastructure currently |
 | Gameweek refresh logic | Not started | Cached at module level, doesn't auto-update during day |
+
+### Completed
+
+| Task | Notes |
+|------|-------|
+| Waiver Wire Transfer Suggestions | Top-3 position-locked swap suggestions with unified Player Value scoring, injury-aware hold logic, asymmetric add/drop weights, and styled suggestion cards |
