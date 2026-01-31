@@ -28,7 +28,10 @@ import unicodedata
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
+from scripts.common.error_helpers import get_logger
 from scripts.common.player_matching import canonical_normalize
+
+_logger = get_logger("fpl_app.utils")
 
 
 # =============================================================================
@@ -233,16 +236,20 @@ def get_current_gameweek():
     - current_gameweek: An integer representing the current gameweek.
     """
     game_url = "https://draft.premierleague.com/api/game"
-    response = requests.get(game_url)
-    game_data = response.json()
+    try:
+        response = requests.get(game_url, timeout=20)
+        game_data = response.json()
 
-    # Check if the current event is finished
-    if game_data['current_event_finished']:
-        current_gameweek = game_data['next_event']
-    else:
-        current_gameweek = game_data['current_event']
+        # Check if the current event is finished
+        if game_data['current_event_finished']:
+            current_gameweek = game_data['next_event']
+        else:
+            current_gameweek = game_data['current_event']
 
-    return current_gameweek
+        return current_gameweek
+    except Exception as e:
+        _logger.warning("Failed to fetch current gameweek: %s", e)
+        return config.CURRENT_GAMEWEEK
 
 
 def get_draft_picks(league_id):
@@ -270,10 +277,14 @@ def get_fpl_player_mapping():
     """
     # Fetch data from the FPL Draft API
     player_url = "https://draft.premierleague.com/api/bootstrap-static"
-    response = requests.get(player_url)
+    try:
+        response = requests.get(player_url, timeout=30)
+        player_data = response.json()
+    except Exception as e:
+        _logger.warning("Failed to fetch FPL player mapping: %s", e)
+        return {}
 
     # Extract relevant player information
-    player_data = response.json()
     players = player_data['elements']
     teams = player_data.get('teams', [])
 
@@ -321,7 +332,11 @@ def get_gameweek_fixtures(league_id, gameweek):
     league_url = f"https://draft.premierleague.com/api/league/{league_id}/details"
 
     # Get league details, fixtures, and team details
-    league_response = requests.get(league_url).json()
+    try:
+        league_response = requests.get(league_url, timeout=30).json()
+    except Exception as e:
+        _logger.warning("Failed to fetch gameweek fixtures for league %s: %s", league_id, e)
+        return []
 
     # Extract the standings and league_entries sections of the JSON
     fixtures = league_response['matches']
@@ -418,7 +433,11 @@ def get_league_entries(league_id):
     - A dictionary where keys are entry IDs, and values are team names.
     """
     url = f"https://draft.premierleague.com/api/league/{league_id}/details"
-    response = requests.get(url).json()
+    try:
+        response = requests.get(url, timeout=30).json()
+    except Exception as e:
+        _logger.warning("Failed to fetch league entries for league %s: %s", league_id, e)
+        return {}
 
     return {entry['entry_id']: entry['entry_name'] for entry in response['league_entries']}
 
@@ -450,6 +469,7 @@ def get_league_player_ownership(league_id):
     try:
         owner_map = get_league_entries(league_id)  # expected {entry_id: entry_name}
     except Exception:
+        _logger.warning("Failed to fetch league ownership for league %s", league_id, exc_info=True)
         owner_map = {}
 
     # Fallback/augment from raw payload; handle both 'entry_id' and 'id'
@@ -516,6 +536,7 @@ def _get_draft_gw_live_points(gw: int) -> dict:
             for eid, edata in elements.items()
         }
     except Exception:
+        _logger.warning("Failed to fetch draft GW %s live points", gw, exc_info=True)
         return {}
 
 
@@ -528,6 +549,7 @@ def _get_draft_entry_picks_for_gw(entry_id: int, gw: int) -> list:
         data = resp.json()
         return [p["element"] for p in data.get("picks", [])]
     except Exception:
+        _logger.warning("Failed to fetch draft entry %s picks for GW %s", entry_id, gw, exc_info=True)
         return []
 
 
@@ -543,6 +565,7 @@ def _get_classic_gw_live_points(gw: int) -> dict:
             for elem in data.get("elements", [])
         }
     except Exception:
+        _logger.warning("Failed to fetch classic GW %s live points", gw, exc_info=True)
         return {}
 
 
@@ -737,9 +760,13 @@ def get_starting_team_composition(league_id):
     player_data_url = "https://draft.premierleague.com/api/bootstrap-static"
 
     # Fetch data
-    draft_data = requests.get(draft_url).json()
-    league_details = requests.get(league_details_url).json()
-    player_data = requests.get(player_data_url).json()
+    try:
+        draft_data = requests.get(draft_url, timeout=30).json()
+        league_details = requests.get(league_details_url, timeout=30).json()
+        player_data = requests.get(player_data_url, timeout=30).json()
+    except Exception as e:
+        _logger.warning("Failed to fetch team composition for league %s: %s", league_id, e)
+        return {}
 
     # Create a mapping of entry ID to team name
     team_names = {entry['id']: entry['entry_name'] for entry in league_details['league_entries']}
@@ -897,8 +924,12 @@ def get_team_lineup(entry_id, gameweek):
     """
     # Fetch the team lineup from the API
     lineup_url = f"https://draft.premierleague.com/api/entry/{entry_id}/event/{gameweek}"
-    lineup_response = requests.get(lineup_url)
-    lineup_data = lineup_response.json()
+    try:
+        lineup_response = requests.get(lineup_url, timeout=30)
+        lineup_data = lineup_response.json()
+    except Exception as e:
+        _logger.warning("Failed to fetch team lineup for entry %s GW %s: %s", entry_id, gameweek, e)
+        return {}
 
     # Get player data (ID to name mapping)
     player_dict = get_fpl_player_mapping()
@@ -959,8 +990,12 @@ def get_transaction_data(league_id):
     """
     if config.TRANSACTION_DATA is None:  # Fetch only if not already fetched
         transaction_url = f"https://draft.premierleague.com/api/draft/league/{league_id}/transactions"
-        transaction_response = requests.get(transaction_url)
-        config.TRANSACTION_DATA = transaction_response.json()['transactions']  # Store transactions in config
+        try:
+            transaction_response = requests.get(transaction_url, timeout=30)
+            config.TRANSACTION_DATA = transaction_response.json()['transactions']  # Store transactions in config
+        except Exception as e:
+            _logger.warning("Failed to fetch transaction data for league %s: %s", league_id, e)
+            return []
 
     return config.TRANSACTION_DATA
 
@@ -994,7 +1029,7 @@ def get_waiver_transactions_up_to_gameweek(league_id, gameweek):
 
     # Fetch transactions
     url = f"https://draft.premierleague.com/api/draft/league/{league_id}/transactions"
-    resp = requests.get(url)
+    resp = requests.get(url, timeout=30)
     try:
         data = resp.json()
     except Exception:
@@ -1023,11 +1058,15 @@ def pull_fpl_player_stats():
     # Set FPL Draft API endpoint
     draft_api = 'https://draft.premierleague.com/api/bootstrap-static'
 
-    # Test the endpoint
-    data = requests.get(draft_api)
+    # Fetch from the endpoint
+    try:
+        data = requests.get(draft_api, timeout=30)
+        data_json = data.json()
+    except Exception as e:
+        _logger.warning("Failed to fetch FPL player stats: %s", e)
+        return pd.DataFrame()
 
     # extracting data in json format
-    data_json = data.json()
 
     # Create a dataframe for the positions ('element_types')
     position_df = pd.DataFrame.from_records(data_json['element_types'])
@@ -1114,6 +1153,7 @@ def get_draft_league_details(league_id: int) -> Optional[Dict[str, Any]]:
         resp.raise_for_status()
         return resp.json()
     except Exception:
+        _logger.warning("Failed to fetch draft league details for league %s", league_id, exc_info=True)
         return None
 
 
@@ -1285,6 +1325,7 @@ def get_classic_bootstrap_static() -> Optional[Dict[str, Any]]:
         resp.raise_for_status()
         return resp.json()
     except Exception:
+        _logger.warning("Failed to fetch classic bootstrap-static data", exc_info=True)
         return None
 
 
@@ -1315,6 +1356,7 @@ def get_classic_league_standings(league_id: int, page: int = 1) -> Optional[Dict
         resp.raise_for_status()
         return resp.json()
     except Exception:
+        _logger.warning("Failed to fetch classic league standings for league %s", league_id, exc_info=True)
         return None
 
 
@@ -1344,6 +1386,7 @@ def get_h2h_league_standings(league_id: int, page: int = 1) -> Optional[Dict[str
         resp.raise_for_status()
         return resp.json()
     except Exception:
+        _logger.warning("Failed to fetch H2H league standings for league %s", league_id, exc_info=True)
         return None
 
 
@@ -1376,6 +1419,7 @@ def get_h2h_league_matches(league_id: int, event: int = None, page: int = 1) -> 
         resp.raise_for_status()
         return resp.json()
     except Exception:
+        _logger.warning("Failed to fetch H2H league matches for league %s", league_id, exc_info=True)
         return None
 
 
@@ -1531,6 +1575,7 @@ def get_classic_team_history(team_id: int) -> Optional[Dict[str, Any]]:
         resp.raise_for_status()
         return resp.json()
     except Exception:
+        _logger.warning("Failed to fetch classic team history for team %s", team_id, exc_info=True)
         return None
 
 
@@ -1560,6 +1605,7 @@ def get_classic_team_picks(team_id: int, gw: int) -> Optional[Dict[str, Any]]:
         resp.raise_for_status()
         return resp.json()
     except Exception:
+        _logger.warning("Failed to fetch classic team picks for team %s GW %s", team_id, gw, exc_info=True)
         return None
 
 
@@ -1588,6 +1634,7 @@ def get_classic_transfers(team_id: int) -> Optional[List[Dict[str, Any]]]:
         resp.raise_for_status()
         return resp.json()
     except Exception:
+        _logger.warning("Failed to fetch classic transfers for team %s", team_id, exc_info=True)
         return None
 
 
@@ -1606,6 +1653,7 @@ def get_entry_details(team_id: int) -> Optional[Dict[str, Any]]:
     try:
         return requests.get(f"https://fantasy.premierleague.com/api/entry/{team_id}/", timeout=10).json()
     except Exception:
+        _logger.warning("Failed to fetch entry details for team %s", team_id, exc_info=True)
         return None
 
 
@@ -1625,7 +1673,11 @@ def get_rotowire_player_projections(url, limit=None):
     - DataFrame: A DataFrame containing player rankings, projected points, and calculated value.
     """
     # Download the page using the requests library
-    website = requests.get(url)
+    try:
+        website = requests.get(url, timeout=30)
+    except Exception as e:
+        _logger.warning("Failed to fetch Rotowire projections from %s: %s", url, e)
+        return pd.DataFrame()
     soup = BeautifulSoup(website.content, 'html.parser')
 
     # Isolate BeautifulSoup output to the table of interest
@@ -1918,6 +1970,7 @@ def _bootstrap_teams_df() -> pd.DataFrame:
         teams = resp.json().get("teams", [])
         return pd.DataFrame(teams)[["id", "short_name"]]
     except Exception:
+        _logger.warning("Failed to fetch bootstrap teams data", exc_info=True)
         # Fallback: empty DF (the normalizer will still attempt heuristics)
         return pd.DataFrame(columns=["id", "short_name"])
 

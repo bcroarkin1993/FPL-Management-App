@@ -10,6 +10,9 @@ from datetime import datetime
 
 import config
 from openai import OpenAI
+from scripts.common.error_helpers import get_logger
+
+_logger = get_logger("fpl_app.draft.waiver_wire")
 
 from scripts.common.utils import (
     get_current_gameweek,
@@ -1343,11 +1346,13 @@ def show_waiver_wire_page():
     teams_df = _bootstrap_teams_df()
     try:
         fpl_stats_norm = normalize_fpl_players_to_rotowire_schema(fpl_stats_raw, teams_df=teams_df)
-    except Exception:
+    except Exception as e:
+        _logger.warning("FPL stats normalization failed, using raw data: %s", e)
         fpl_stats_norm = fpl_stats_raw
     try:
         projections_norm = normalize_rotowire_players(projections_raw)
-    except Exception:
+    except Exception as e:
+        _logger.warning("Projections normalization failed, using raw data: %s", e)
         projections_norm = projections_raw
 
     fpl_stats = _enforce_rw_schema_fpl(fpl_stats_norm, teams_df)

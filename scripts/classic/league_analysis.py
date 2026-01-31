@@ -15,6 +15,7 @@ import streamlit as st
 from typing import Optional, Dict, List
 
 import config
+from scripts.common.error_helpers import show_api_error
 from scripts.common.utils import (
     get_league_standings,
     get_classic_team_history,
@@ -489,7 +490,7 @@ def show_classic_league_analysis_page():
         standings_data = get_league_standings(league_id)
 
     if not standings_data:
-        st.error(f"Failed to load data for league {league_id}.")
+        show_api_error(f"loading data for league {league_id}", hint_key="league_id")
         return
 
     league_info = standings_data.get("league", {})

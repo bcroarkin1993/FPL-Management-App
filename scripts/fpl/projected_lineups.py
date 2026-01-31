@@ -5,6 +5,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+from scripts.common.error_helpers import get_logger
+
+_logger = get_logger("fpl_app.projected_lineups")
 
 def extract_players(section, team_type, team_name):
     """
@@ -53,7 +56,11 @@ def scrape_rotowire_lineups(url):
     - DataFrame containing the team names, player names, and positions.
     """
     # Send a request to the Rotowire lineups page
-    page = requests.get(url)
+    try:
+        page = requests.get(url, timeout=30)
+    except Exception as e:
+        _logger.warning("Failed to fetch Rotowire lineups from %s: %s", url, e)
+        return pd.DataFrame(columns=['Team', 'Position', 'Player'])
     soup = BeautifulSoup(page.content, 'html.parser')
 
     # Initialize an empty list to store match data
@@ -86,7 +93,11 @@ def scrape_rotowire_lineups(url):
 
 def scrape_matchups(url):
     """Scrapes the matchups from the Rotowire page."""
-    page = requests.get(url)
+    try:
+        page = requests.get(url, timeout=30)
+    except Exception as e:
+        _logger.warning("Failed to fetch Rotowire matchups from %s: %s", url, e)
+        return []
     soup = BeautifulSoup(page.content, 'html.parser')
     matchups_section = soup.find_all('div', class_='lineup__matchup')
 

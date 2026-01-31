@@ -9,6 +9,7 @@ import config
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from scripts.common.error_helpers import show_api_error
 from scripts.common.utils import (
     get_classic_bootstrap_static,
     get_classic_team_picks,
@@ -221,7 +222,7 @@ def show_classic_team_analysis_page():
         entry = get_entry_details(team_id)
 
     if not entry:
-        st.error(f"Failed to load team details for team ID {team_id}. Please check your configuration.")
+        show_api_error(f"loading details for team ID {team_id}", hint_key="team_id")
         return
 
     # Team Header Section
@@ -273,7 +274,7 @@ def show_classic_team_analysis_page():
     # Fetch picks for selected gameweek
     picks_data = get_classic_team_picks(team_id, selected_gw)
     if not picks_data:
-        st.error(f"Failed to load squad for Gameweek {selected_gw}.")
+        show_api_error(f"loading squad for Gameweek {selected_gw}")
         return
 
     picks = picks_data.get("picks", [])
@@ -429,7 +430,7 @@ def show_classic_team_analysis_page():
     # Fetch bootstrap data for player info
     bootstrap = get_classic_bootstrap_static()
     if not bootstrap:
-        st.error("Failed to load player data. Please try again later.")
+        show_api_error("loading player data")
         return
 
     # Build squad dataframe

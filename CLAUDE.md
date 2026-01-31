@@ -118,8 +118,6 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 |------|--------|-------|
 | Team Difficulty Visualizations | Not started | FDR heatmap, defensive stats, attack vs defense ratings (inspired by fpl.page/team-dds) |
 | Rotowire scraping robustness | Not started | URL discovery depends on HTML structure; add fallbacks |
-| Add error logging | Not started | Many silent try/except blocks; harder to debug |
-| Better error messages | Not started | Surface clearer feedback when APIs fail |
 
 ### Low Priority
 
@@ -139,3 +137,4 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Task | Notes |
 |------|-------|
 | Waiver Wire Transfer Suggestions | Top-3 position-locked swap suggestions with unified Player Value scoring, injury-aware hold logic, asymmetric add/drop weights, and styled suggestion cards |
+| Error logging & better error messages | Added `error_helpers.py` module with structured logging and user-facing error display; added `timeout=30` to ~12 unprotected `requests.get()` calls; added `_logger.warning()` to ~15 silent `except` blocks; replaced ~13 generic error messages with actionable hints |

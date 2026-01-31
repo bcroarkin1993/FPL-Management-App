@@ -16,7 +16,10 @@ import streamlit as st
 from typing import Optional, Dict, List, Tuple
 
 import config
+from scripts.common.error_helpers import get_logger, show_api_error
 from scripts.common.utils import get_current_gameweek, get_draft_points_by_position
+
+_logger = get_logger("fpl_app.draft.league_analysis")
 
 
 # ---------------------------
@@ -28,11 +31,11 @@ def fetch_league_data(league_id: int) -> Optional[dict]:
     """Fetch full league details including matches and entries."""
     try:
         url = f"https://draft.premierleague.com/api/league/{league_id}/details"
-        response = requests.get(url)
+        response = requests.get(url, timeout=30)
         if response.status_code == 200:
             return response.json()
     except Exception:
-        pass
+        _logger.warning("Failed to fetch league data for league %s", league_id, exc_info=True)
     return None
 
 
@@ -532,7 +535,7 @@ def show_draft_league_analysis_page():
         league_data = fetch_league_data(league_id)
 
     if not league_data:
-        st.error("Failed to load league data. Please check your league ID.")
+        show_api_error("loading league data", hint_key="league_id")
         return
 
     team_names = get_team_names(league_data)

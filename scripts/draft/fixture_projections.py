@@ -432,7 +432,10 @@ def show_fixtures_page():
         result = analyze_fixture_projections(fixture_selection, config.FPL_DRAFT_LEAGUE_ID, fpl_player_projections)
 
         if result is None:
-            st.error("Failed to analyze this fixture.")
+            st.error(
+                "**Could not analyze this fixture.** Player projections may be unavailable "
+                "or team rosters could not be resolved. Try selecting a different fixture."
+            )
             return
 
         team1_df, team2_df, team1_name, team2_name = result

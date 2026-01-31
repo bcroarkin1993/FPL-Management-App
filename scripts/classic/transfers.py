@@ -12,6 +12,7 @@ import streamlit as st
 from typing import Optional, Dict, Any, List
 from fuzzywuzzy import fuzz
 
+from scripts.common.error_helpers import show_api_error
 from scripts.common.utils import (
     get_classic_bootstrap_static,
     get_classic_team_picks,
@@ -390,11 +391,11 @@ def show_classic_transfers_page():
         history = get_classic_team_history(team_id)
 
     if not bootstrap:
-        st.error("Failed to load player data. Please try again later.")
+        show_api_error("loading player data for transfer analysis")
         return
 
     if not entry:
-        st.error(f"Failed to load team details for team ID {team_id}.")
+        show_api_error(f"loading team details for team ID {team_id}", hint_key="team_id")
         return
 
     # Team header info
@@ -408,7 +409,7 @@ def show_classic_transfers_page():
         picks_data = get_classic_team_picks(team_id, current_gw - 1)
 
     if not picks_data:
-        st.error("Failed to load current squad. Please try again later.")
+        show_api_error("loading your current squad")
         return
 
     picks = picks_data.get("picks", [])

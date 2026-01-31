@@ -2,6 +2,7 @@
 # Loads env (if python-dotenv is installed), defines app constants,
 # and lazily resolves CURRENT_GAMEWEEK and ROTOWIRE_URL on first access (cached).
 
+import logging
 import os
 
 # ----- .env loader (optional) -----
@@ -159,6 +160,9 @@ def _resolve_current_gameweek():
         return int(gw or 1)
     except Exception:
         # Offline or error
+        logging.getLogger("fpl_app.config").warning(
+            "Failed to resolve gameweek from API, defaulting to GW 1", exc_info=True
+        )
         return 1
 
 def _discover_rotowire_article(gw: int):
@@ -205,6 +209,9 @@ def _discover_rotowire_article(gw: int):
         # nearest GW, tie-break by newest article id
         return min(candidates, key=lambda x: (abs(x[0] - int(gw)), -x[1]))[2]
     except Exception:
+        logging.getLogger("fpl_app.config").warning(
+            "Failed to discover Rotowire article for GW %s, returning empty URL", gw, exc_info=True
+        )
         return ""
 
 def __getattr__(name):  # PEP 562: module-level getattr

@@ -14,6 +14,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from datetime import datetime, timezone
 from fuzzywuzzy import fuzz
+from scripts.common.error_helpers import show_api_error
 from scripts.common.utils import (
     find_optimal_lineup,
     get_classic_bootstrap_static,
@@ -706,7 +707,7 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
     # Load bootstrap data first (needed for deadline check)
     bootstrap = get_classic_bootstrap_static()
     if not bootstrap:
-        st.error("Failed to load player data.")
+        show_api_error("loading player data for fixture projections")
         return
 
     # Check if GW has started
@@ -803,7 +804,7 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
         )
 
         if squad_1.empty or squad_2.empty:
-            st.error("Failed to load team data. Please try again later.")
+            show_api_error("loading team data")
             return
 
         # Calculate projected scores
@@ -960,7 +961,7 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
     with st.spinner("Loading player data and projections..."):
         bootstrap = get_classic_bootstrap_static()
         if not bootstrap:
-            st.error("Failed to load player data.")
+            show_api_error("loading player data")
             return
 
         # Check if GW has started
@@ -1152,7 +1153,7 @@ def show_classic_fixture_projections_page():
         data = get_league_standings(league_id)
 
     if not data:
-        st.error(f"Failed to load league data for league {league_id}. Please check the league ID.")
+        show_api_error(f"loading league data for league {league_id}", hint_key="league_id")
         return
 
     league_info = data.get("league", {})

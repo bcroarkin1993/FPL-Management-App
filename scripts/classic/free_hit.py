@@ -13,6 +13,7 @@ import streamlit as st
 from typing import Optional, Dict, List, Tuple
 import config
 
+from scripts.common.error_helpers import show_api_error
 from scripts.common.utils import (
     get_rotowire_player_projections,
     get_classic_bootstrap_static,
@@ -420,7 +421,7 @@ def show_free_hit_page():
             # Load data
             bootstrap = get_classic_bootstrap_static()
             if not bootstrap:
-                st.error("Failed to load player data. Please try again later.")
+                show_api_error("loading player data for Free Hit optimizer")
                 return
 
             # Load projections
@@ -433,7 +434,10 @@ def show_free_hit_page():
                 st.warning(f"Could not load projections: {e}")
 
             if projections_df is None or projections_df.empty:
-                st.error("No projections available. Cannot optimize without projected points.")
+                st.error(
+                    "**No projections available.** Cannot optimize without projected points.\n\n"
+                    "Check if Rotowire has published projections for the upcoming gameweek."
+                )
                 return
 
             # Build player pool

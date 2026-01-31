@@ -29,7 +29,7 @@ table { font-size: 0.95rem; }
 
 # ---------- FPL helpers ----------
 def _get_teams_reference() -> Tuple[pd.DataFrame, dict, dict]:
-    data = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
+    data = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/", timeout=30).json()
     teams_df = pd.DataFrame(data.get("teams", []))[["id", "name", "short_name"]].rename(
         columns={"name": "Team", "short_name": "Short"}
     )
@@ -50,7 +50,7 @@ def _fetch_fixtures_range(start_gw: int, end_gw: int) -> pd.DataFrame:
     all_rows = []
     for gw in range(start_gw, end_gw + 1):
         url = f"https://fantasy.premierleague.com/api/fixtures/?event={gw}"
-        rows = requests.get(url).json()
+        rows = requests.get(url, timeout=30).json()
         for r in rows:
             r["event"] = r.get("event", gw)
         all_rows.extend(rows)
