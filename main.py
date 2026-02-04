@@ -23,6 +23,7 @@ from scripts.classic.team_analysis import show_classic_team_analysis_page
 from scripts.classic.fixture_projections import show_classic_fixture_projections_page
 from scripts.classic.transfers import show_classic_transfers_page
 from scripts.classic.free_hit import show_free_hit_page
+from scripts.classic.wildcard import show_wildcard_page
 from scripts.classic.league_analysis import show_classic_league_analysis_page
 
 # ------------------------------------------------------------
@@ -179,6 +180,7 @@ def main():
                 "Fixture Projections",
                 "Transfer Suggestions",
                 "Free Hit Optimizer",
+                "Wildcard Optimizer",
                 "Team Analysis",
                 "League Analysis",
             ],
@@ -192,6 +194,8 @@ def main():
             show_classic_transfers_page()
         elif subpage == "Free Hit Optimizer":
             show_free_hit_page()
+        elif subpage == "Wildcard Optimizer":
+            show_wildcard_page()
         elif subpage == "Team Analysis":
             show_classic_team_analysis_page()
         elif subpage == "League Analysis":
