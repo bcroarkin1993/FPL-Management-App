@@ -38,7 +38,7 @@ Rotowire scrape ─┘
 **scripts/common/** - Shared utilities:
 - `utils.py` - FPL API fetching, Rotowire scraping, player matching, fixture analysis
 - `player_matching.py` - `canonical_normalize()`, `PlayerRegistry` for centralized player lookups
-- `waiver_alerts.py` - Discord notification system for waiver deadlines
+- `waiver_alerts.py` - Discord notification system for Draft waiver and Classic transfer deadlines
 
 **main.py** - Streamlit entry point with three-section navigation:
 - FPL App Home: Cross-format tools (fixtures, lineups, stats, injuries)
@@ -78,9 +78,14 @@ Required in `.env`:
 - `FPL_DRAFT_LEAGUE_ID` - Your draft league ID (from URL)
 - `FPL_DRAFT_TEAM_ID` - Your team ID (from URL)
 
-Optional (Draft):
-- `DISCORD_WEBHOOK_URL` - For waiver deadline notifications
-- `FPL_DEADLINE_OFFSET_HOURS` - Hours before kickoff for deadline (default: 25.5)
+Optional (Notifications):
+- `DISCORD_WEBHOOK_URL` - For deadline notifications
+- `DISCORD_MENTION_USER_ID` - Discord user ID to mention in alerts
+- `DISCORD_MENTION_ROLE_ID` - Discord role ID to mention in alerts
+- `FPL_DRAFT_ALERTS_ENABLED` - Enable Draft waiver alerts (default: true)
+- `FPL_DEADLINE_OFFSET_HOURS` - Hours before kickoff for Draft deadline (default: 25.5)
+- `FPL_CLASSIC_ALERTS_ENABLED` - Enable Classic transfer alerts (default: false)
+- `FPL_CLASSIC_DEADLINE_OFFSET_HOURS` - Hours before kickoff for Classic deadline (default: 1.5)
 
 Optional (Classic):
 - `FPL_CLASSIC_LEAGUE_IDS` - Comma-separated list of `league_id:League Name` pairs (e.g., `123456:My League,789012:Friends`)
@@ -92,20 +97,31 @@ Optional (Development):
 
 ## Adding New Features or Fixing Bugs
 
-**IMPORTANT**: Never commit directly to `main`. All work must follow this branching workflow:
+### Git Workflow (CRITICAL)
 
-1. **Create a feature branch** from `main` (e.g., `feature/h2h-history`, `fix/player-matching`)
-2. **Do all work on the feature branch** - commits, testing, iterations
-3. **Test on the feature branch** before merging
-4. **Merge to `main`** when the feature is complete and tested
+**NEVER commit directly to `main`.** This is a strict requirement. All work must follow this branching workflow:
+
+1. **Create a feature branch FIRST** - Before writing any code, create a branch from `main`
+   - Use naming convention: `feature/description` or `fix/description`
+   - Examples: `feature/h2h-history`, `fix/player-matching`
+2. **Do ALL work on the feature branch** - All commits, testing, and iterations happen here
+3. **Test thoroughly on the feature branch** before merging
+4. **Merge to `main` only when complete** - Feature must be tested and working
 
 ```bash
-# Example workflow
+# CORRECT workflow - always start with a branch
 git checkout main
-git checkout -b feature/my-feature    # Create feature branch
+git pull origin main                     # Get latest changes
+git checkout -b feature/my-feature       # Create feature branch BEFORE any work
 # ... do work, commit changes, test ...
-git checkout main && git merge feature/my-feature   # Merge to main
+git checkout main && git merge feature/my-feature   # Merge when complete
 git push origin main
+```
+
+```bash
+# WRONG - never do this
+git checkout main
+# ... make changes and commit directly to main ...  # DON'T DO THIS
 ```
 
 Note: The `dev` branch exists but is optional for integration testing when working on multiple features simultaneously.
@@ -136,5 +152,6 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Notes |
 |------|-------|
+| Advanced Player Statistics Table | 40+ columns with 8 presets (Essential, Attacking, Defensive, Per 90, ICT Focus, Fixture Focus, GK Stats, Regression); green-white-red color gradients; regression metrics (G-xG, A-xA, GI-xGI) to identify over/under performers; switched to Classic FPL API for price/ownership data |
 | Waiver Wire Transfer Suggestions | Top-3 position-locked swap suggestions with unified Player Value scoring, injury-aware hold logic, asymmetric add/drop weights, and styled suggestion cards |
 | Error logging & better error messages | Added `error_helpers.py` module with structured logging and user-facing error display; added `timeout=30` to ~12 unprotected `requests.get()` calls; added `_logger.warning()` to ~15 silent `except` blocks; replaced ~13 generic error messages with actionable hints |

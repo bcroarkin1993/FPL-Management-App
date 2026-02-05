@@ -25,7 +25,12 @@ jobs:
       - name: Run waiver alerts
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          FPL_DEADLINE_OFFSET_HOURS: ${{ secrets.FPL_DEADLINE_OFFSET_HOURS || '25.5' }}
           DISCORD_MENTION_USER_ID: ${{ secrets.DISCORD_MENTION_USER_ID }}
           DISCORD_MENTION_ROLE_ID: ${{ secrets.DISCORD_MENTION_ROLE_ID }}
+          # Draft alerts (enabled by default)
+          FPL_DRAFT_ALERTS_ENABLED: ${{ secrets.FPL_DRAFT_ALERTS_ENABLED || 'true' }}
+          FPL_DEADLINE_OFFSET_HOURS: ${{ secrets.FPL_DEADLINE_OFFSET_HOURS || '25.5' }}
+          # Classic alerts (disabled by default - set secret to 'true' to enable)
+          FPL_CLASSIC_ALERTS_ENABLED: ${{ secrets.FPL_CLASSIC_ALERTS_ENABLED || 'false' }}
+          FPL_CLASSIC_DEADLINE_OFFSET_HOURS: ${{ secrets.FPL_CLASSIC_DEADLINE_OFFSET_HOURS || '1.5' }}
         run: python -m scripts.common.waiver_alerts
