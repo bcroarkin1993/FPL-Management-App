@@ -82,7 +82,7 @@ Optional (Notifications):
 - `DISCORD_WEBHOOK_URL` - For deadline notifications
 - `DISCORD_MENTION_USER_ID` - Discord user ID to mention in alerts
 - `DISCORD_MENTION_ROLE_ID` - Discord role ID to mention in alerts
-- `FPL_DRAFT_ALERTS_ENABLED` - Enable Draft waiver alerts (default: true)
+- `FPL_DRAFT_ALERTS_ENABLED` - Enable Draft waiver alerts (default: false)
 - `FPL_DEADLINE_OFFSET_HOURS` - Hours before kickoff for Draft deadline (default: 25.5)
 - `FPL_CLASSIC_ALERTS_ENABLED` - Enable Classic transfer alerts (default: false)
 - `FPL_CLASSIC_DEADLINE_OFFSET_HOURS` - Hours before kickoff for Classic deadline (default: 1.5)

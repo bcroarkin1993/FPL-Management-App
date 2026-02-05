@@ -113,11 +113,11 @@ def main():
     # ---- Secrets / env (all provided via GitHub Actions) ----
     webhook = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-    # Draft settings
-    draft_enabled = os.getenv("FPL_DRAFT_ALERTS_ENABLED", "true").lower() in ("true", "1", "yes")
+    # Draft settings (disabled by default - opt-in via secrets)
+    draft_enabled = os.getenv("FPL_DRAFT_ALERTS_ENABLED", "false").lower() in ("true", "1", "yes")
     draft_offset = float(os.getenv("FPL_DEADLINE_OFFSET_HOURS", str(DRAFT_OFFSET_HOURS)))
 
-    # Classic settings
+    # Classic settings (disabled by default - opt-in via secrets)
     classic_enabled = os.getenv("FPL_CLASSIC_ALERTS_ENABLED", "false").lower() in ("true", "1", "yes")
     classic_offset = float(os.getenv("FPL_CLASSIC_DEADLINE_OFFSET_HOURS", str(CLASSIC_OFFSET_HOURS)))
 
