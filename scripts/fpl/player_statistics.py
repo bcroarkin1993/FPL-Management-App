@@ -1,8 +1,394 @@
 import config
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from scripts.common.utils import clean_fpl_player_names, get_rotowire_player_projections, pull_fpl_player_stats
+from scripts.common.utils import (
+    clean_fpl_player_names,
+    get_fixture_difficulty_grid,
+    get_rotowire_player_projections,
+    pull_fpl_player_stats,
+)
+
+# -----------------------------------------------------------------------------
+# Column Configuration for Advanced Stats Table
+# -----------------------------------------------------------------------------
+
+# key: (display_name, high_is_good, format_type, category)
+# high_is_good: True = green for high, False = green for low, None = no coloring
+STAT_COLUMNS = {
+    # Info columns (no coloring)
+    "player": ("Player", None, "text", "info"),
+    "team_name": ("Team", None, "text", "info"),
+    "position_abbrv": ("Pos", None, "text", "info"),
+    "fdr_avg_3": ("FDR 3GW", False, ".2f", "info"),  # Low is good
+    "price": ("Price", None, "price", "info"),
+    "ownership": ("Own%", None, ".1f", "info"),
+
+    # Playing Time
+    "minutes": ("Mins", True, ",d", "playing"),
+    "starts": ("Starts", True, ",d", "playing"),
+    "avg_mins_game": ("Avg Min/Gm", True, ".1f", "playing"),
+    "avg_mins_start": ("Avg Min/St", True, ".1f", "playing"),
+    "start_pct": ("Start%", True, ".1f", "playing"),
+
+    # Points
+    "total_points": ("Pts", True, ",d", "points"),
+    "points_per_game": ("PPG", True, ".2f", "points"),
+    "bonus": ("Bonus", True, ",d", "points"),
+    "bps": ("BPS", True, ",d", "points"),
+
+    # Attacking - Goals
+    "goals_scored": ("Goals", True, ",d", "attacking"),
+    "goals_per_90": ("G/90", True, ".2f", "attacking"),
+    "expected_goals": ("xG", True, ".2f", "attacking"),
+    "xg_per_90": ("xG/90", True, ".2f", "attacking"),
+
+    # Attacking - Assists
+    "assists": ("Ast", True, ",d", "attacking"),
+    "assists_per_90": ("A/90", True, ".2f", "attacking"),
+    "expected_assists": ("xA", True, ".2f", "attacking"),
+    "xa_per_90": ("xA/90", True, ".2f", "attacking"),
+
+    # Attacking - Goal Involvements
+    "goal_involvements": ("GI", True, ",d", "attacking"),
+    "gi_per_90": ("GI/90", True, ".2f", "attacking"),
+    "expected_goal_involvements": ("xGI", True, ".2f", "attacking"),
+    "xgi_per_90": ("xGI/90", True, ".2f", "attacking"),
+
+    # Regression/Over-Under Performance (positive = over-performing, may regress down)
+    "g_minus_xg": ("G-xG", None, "+.2f", "regression"),
+    "a_minus_xa": ("A-xA", None, "+.2f", "regression"),
+    "gi_minus_xgi": ("GI-xGI", None, "+.2f", "regression"),
+
+    # Defensive
+    "clean_sheets": ("CS", True, ",d", "defensive"),
+    "goals_conceded": ("GC", False, ",d", "defensive"),  # Low is good
+    "expected_goals_conceded": ("xGC", False, ".2f", "defensive"),  # Low is good
+    "saves": ("Saves", True, ",d", "defensive"),
+
+    # ICT
+    "ict_index": ("ICT", True, ".1f", "ict"),
+    "influence": ("Infl", True, ".1f", "ict"),
+    "creativity": ("Crea", True, ".1f", "ict"),
+    "threat": ("Threat", True, ".1f", "ict"),
+
+    # Misc
+    "own_goals": ("OG", False, ",d", "misc"),  # Low is good
+    "penalties_saved": ("PS", True, ",d", "misc"),
+    "penalties_missed": ("PM", False, ",d", "misc"),  # Low is good
+    "form": ("Form", True, ".1f", "misc"),
+}
+
+COLUMN_PRESETS = {
+    "Essential": ["player", "team_name", "position_abbrv", "total_points", "minutes", "goals_scored", "assists", "clean_sheets"],
+    "Attacking": ["player", "team_name", "position_abbrv", "goals_scored", "goals_per_90", "expected_goals", "xg_per_90", "assists", "assists_per_90", "expected_assists", "xa_per_90"],
+    "Defensive": ["player", "team_name", "position_abbrv", "clean_sheets", "goals_conceded", "expected_goals_conceded", "saves"],
+    "Per 90": ["player", "team_name", "position_abbrv", "goals_per_90", "xg_per_90", "assists_per_90", "xa_per_90", "gi_per_90", "xgi_per_90"],
+    "ICT Focus": ["player", "team_name", "position_abbrv", "ict_index", "influence", "creativity", "threat", "total_points"],
+    "Fixture Focus": ["player", "team_name", "position_abbrv", "fdr_avg_3", "form", "total_points", "expected_goal_involvements"],
+    "GK Stats": ["player", "team_name", "clean_sheets", "saves", "goals_conceded", "expected_goals_conceded", "penalties_saved", "bonus"],
+    "Regression": ["player", "team_name", "position_abbrv", "goals_scored", "expected_goals", "g_minus_xg", "assists", "expected_assists", "a_minus_xa", "gi_minus_xgi"],
+}
+
+
+# -----------------------------------------------------------------------------
+# Helper Functions for Advanced Stats
+# -----------------------------------------------------------------------------
+
+def calculate_per_90(value, minutes, min_minutes=90):
+    """Calculate per-90 statistic."""
+    if pd.isna(value) or pd.isna(minutes) or minutes < min_minutes:
+        return np.nan
+    return (value / minutes) * 90
+
+
+def get_team_fdr_avg(team_short: str, fdr_avg_dict: dict) -> float:
+    """Get average FDR for next 3 gameweeks for a team."""
+    return fdr_avg_dict.get(team_short, 3.0)  # 3.0 = neutral default
+
+
+def get_gradient_color(value, col_min, col_max, high_is_good):
+    """Return RGB color on green-white-red scale."""
+    if pd.isna(value) or col_max == col_min:
+        return "#f5f5f5"  # neutral gray
+
+    # Normalize to 0-1
+    normalized = (value - col_min) / (col_max - col_min)
+
+    # Invert if low is good
+    if not high_is_good:
+        normalized = 1 - normalized
+
+    # Red (#f8696b) -> White (#ffffff) -> Green (#63be7b)
+    if normalized >= 0.5:
+        t = (normalized - 0.5) * 2
+        r = int(255 - t * (255 - 99))
+        g = int(255 - t * (255 - 190))
+        b = int(255 - t * (255 - 123))
+    else:
+        t = normalized * 2
+        r = int(248 - t * (248 - 255))
+        g = int(105 + t * (255 - 105))
+        b = int(107 + t * (255 - 107))
+
+    return f"rgb({r},{g},{b})"
+
+
+def prepare_advanced_stats_df(player_df: pd.DataFrame, min_minutes: int = 90) -> pd.DataFrame:
+    """
+    Prepare the advanced stats DataFrame with all calculated columns.
+    """
+    df = player_df.copy()
+
+    # Convert numeric columns
+    numeric_cols = ['minutes', 'starts', 'goals_scored', 'assists', 'expected_goals',
+                    'expected_assists', 'expected_goal_involvements', 'expected_goals_conceded',
+                    'goals_conceded', 'saves', 'clean_sheets', 'total_points', 'points_per_game',
+                    'bonus', 'bps', 'creativity', 'influence', 'threat', 'ict_index',
+                    'own_goals', 'penalties_saved', 'penalties_missed', 'form',
+                    'now_cost', 'selected_by_percent']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Calculate price from now_cost (in tenths)
+    if 'now_cost' in df.columns:
+        df['price'] = df['now_cost'] / 10
+    else:
+        df['price'] = np.nan
+
+    # Calculate ownership from selected_by_percent
+    if 'selected_by_percent' in df.columns:
+        df['ownership'] = df['selected_by_percent']
+    else:
+        df['ownership'] = np.nan
+
+    # Calculate goal involvements
+    df['goal_involvements'] = df['goals_scored'].fillna(0) + df['assists'].fillna(0)
+
+    # Calculate average minutes per game (using current gameweek as games played proxy)
+    try:
+        from config import CURRENT_GAMEWEEK
+        games_played = int(CURRENT_GAMEWEEK)
+    except Exception:
+        games_played = 1
+
+    # Safer calculation: use starts to estimate games
+    df['avg_mins_game'] = df.apply(
+        lambda row: row['minutes'] / games_played if games_played > 0 and pd.notna(row['minutes']) else np.nan,
+        axis=1
+    )
+
+    # Average minutes per start
+    df['avg_mins_start'] = df.apply(
+        lambda row: row['minutes'] / row['starts'] if pd.notna(row['starts']) and row['starts'] > 0 else np.nan,
+        axis=1
+    )
+
+    # Start percentage
+    df['start_pct'] = df.apply(
+        lambda row: (row['starts'] / games_played * 100) if games_played > 0 and pd.notna(row['starts']) else np.nan,
+        axis=1
+    )
+
+    # Per-90 calculations
+    df['goals_per_90'] = df.apply(lambda row: calculate_per_90(row['goals_scored'], row['minutes'], min_minutes), axis=1)
+    df['xg_per_90'] = df.apply(lambda row: calculate_per_90(row['expected_goals'], row['minutes'], min_minutes), axis=1)
+    df['assists_per_90'] = df.apply(lambda row: calculate_per_90(row['assists'], row['minutes'], min_minutes), axis=1)
+    df['xa_per_90'] = df.apply(lambda row: calculate_per_90(row['expected_assists'], row['minutes'], min_minutes), axis=1)
+    df['gi_per_90'] = df.apply(lambda row: calculate_per_90(row['goal_involvements'], row['minutes'], min_minutes), axis=1)
+    df['xgi_per_90'] = df.apply(lambda row: calculate_per_90(row['expected_goal_involvements'], row['minutes'], min_minutes), axis=1)
+
+    # Regression metrics (actual - expected): positive = over-performing, negative = under-performing
+    df['g_minus_xg'] = df['goals_scored'] - df['expected_goals']
+    df['a_minus_xa'] = df['assists'] - df['expected_assists']
+    df['gi_minus_xgi'] = df['goal_involvements'] - df['expected_goal_involvements']
+
+    # Get FDR averages for each team
+    try:
+        _, _, fdr_avg = get_fixture_difficulty_grid(weeks=3)
+        fdr_avg_dict = fdr_avg.to_dict()
+    except Exception:
+        fdr_avg_dict = {}
+
+    # Add FDR average for next 3 GWs
+    df['fdr_avg_3'] = df['team_name_abbrv'].apply(lambda x: get_team_fdr_avg(x, fdr_avg_dict))
+
+    return df
+
+
+def style_stats_table(df: pd.DataFrame, selected_columns: list):
+    """
+    Apply color gradient styling to the stats table.
+    """
+    # Create a copy for display with renamed columns
+    display_df = df[selected_columns].copy()
+
+    # Rename columns to display names
+    rename_map = {col: STAT_COLUMNS[col][0] for col in selected_columns if col in STAT_COLUMNS}
+    display_df = display_df.rename(columns=rename_map)
+
+    def apply_gradient(col):
+        """Apply gradient coloring to a column."""
+        # Get the original column name
+        original_col = None
+        for k, v in rename_map.items():
+            if v == col.name:
+                original_col = k
+                break
+
+        if original_col is None or original_col not in STAT_COLUMNS:
+            return [''] * len(col)
+
+        _, high_is_good, _, _ = STAT_COLUMNS[original_col]
+
+        # No coloring for info columns
+        if high_is_good is None:
+            return [''] * len(col)
+
+        # Get min/max for normalization
+        numeric_col = pd.to_numeric(col, errors='coerce')
+        col_min = numeric_col.min()
+        col_max = numeric_col.max()
+
+        styles = []
+        for val in col:
+            try:
+                num_val = float(val) if not pd.isna(val) else np.nan
+            except (ValueError, TypeError):
+                num_val = np.nan
+
+            color = get_gradient_color(num_val, col_min, col_max, high_is_good)
+            styles.append(f'background-color: {color}')
+
+        return styles
+
+    # Apply styling
+    styled = display_df.style.apply(apply_gradient, axis=0)
+
+    # Format numeric columns
+    format_dict = {}
+    for col in selected_columns:
+        if col in STAT_COLUMNS:
+            display_name = STAT_COLUMNS[col][0]
+            fmt = STAT_COLUMNS[col][2]
+            if fmt == "text":
+                continue
+            elif fmt == "price":
+                format_dict[display_name] = "£{:.1f}m"
+            elif fmt == ",d":
+                format_dict[display_name] = "{:,.0f}"
+            elif fmt.startswith("+"):
+                # Signed format (e.g., "+.2f" shows +1.23 or -1.23)
+                format_dict[display_name] = "{:" + fmt + "}"
+            elif fmt.startswith("."):
+                format_dict[display_name] = "{:" + fmt + "}"
+
+    styled = styled.format(format_dict, na_rep="-")
+
+    return styled
+
+
+PRESET_DESCRIPTIONS = {
+    "Essential": "Core stats: Points, Minutes, Goals, Assists, Clean Sheets",
+    "Attacking": "Offensive output: Goals, Assists, xG, xA with per-90 rates",
+    "Defensive": "Defensive stats: Clean Sheets, Goals Conceded, xGC, Saves",
+    "Per 90": "Rate stats normalized to per-90 minutes for fair comparison",
+    "ICT Focus": "FPL's Influence, Creativity, Threat index breakdown",
+    "Fixture Focus": "Form + upcoming Fixture Difficulty Rating (lower = easier)",
+    "GK Stats": "Goalkeeper-specific: Saves, Clean Sheets, Penalties Saved",
+    "Regression": "G-xG, A-xA, GI-xGI: positive = over-performing (may regress), negative = under-performing (may improve)",
+}
+
+
+def display_advanced_stats_table(player_df: pd.DataFrame):
+    """
+    Display the advanced statistics table with filters and column selection.
+    """
+    st.subheader("Advanced Statistics Table")
+
+    # Filters row
+    col1, col2, col3 = st.columns([2, 1, 2])
+
+    with col1:
+        preset_options = ["Custom"] + list(COLUMN_PRESETS.keys())
+        selected_preset = st.selectbox("Column Preset", preset_options, index=1)
+        # Show preset description
+        if selected_preset in PRESET_DESCRIPTIONS:
+            st.caption(PRESET_DESCRIPTIONS[selected_preset])
+
+    with col2:
+        min_minutes = st.number_input("Min Minutes", min_value=0, max_value=3000, value=90, step=90)
+
+    with col3:
+        available_positions = player_df['position_abbrv'].unique().tolist()
+        position_filter = st.multiselect(
+            "Position Filter",
+            options=available_positions,
+            default=available_positions,
+            key="adv_position_filter"
+        )
+
+    # Team filter in expander to keep UI clean
+    available_teams = sorted(player_df['team_name'].unique().tolist())
+    with st.expander("Filter by Team", expanded=False):
+        team_filter = st.multiselect(
+            "Select Teams",
+            options=available_teams,
+            default=available_teams,
+            key="adv_team_filter",
+            label_visibility="collapsed"
+        )
+
+    # Get default columns based on preset
+    if selected_preset != "Custom":
+        default_columns = COLUMN_PRESETS[selected_preset]
+    else:
+        default_columns = COLUMN_PRESETS["Essential"]
+
+    # Column selection
+    all_columns = list(STAT_COLUMNS.keys())
+    selected_columns = st.multiselect(
+        "Select Columns",
+        options=all_columns,
+        default=default_columns,
+        format_func=lambda x: STAT_COLUMNS[x][0],
+        key="adv_columns"
+    )
+
+    if not selected_columns:
+        st.warning("Please select at least one column to display.")
+        return
+
+    # Prepare the data
+    stats_df = prepare_advanced_stats_df(player_df, min_minutes)
+
+    # Apply filters
+    filtered_df = stats_df[
+        (stats_df['position_abbrv'].isin(position_filter)) &
+        (stats_df['team_name'].isin(team_filter))
+    ]
+
+    # Filter by minimum minutes
+    filtered_df = filtered_df[filtered_df['minutes'] >= min_minutes]
+
+    # Sort by total points by default
+    filtered_df = filtered_df.sort_values('total_points', ascending=False)
+
+    if filtered_df.empty:
+        st.info("No players match the current filters.")
+        return
+
+    # Style and display the table
+    styled_df = style_stats_table(filtered_df, selected_columns)
+
+    st.dataframe(
+        styled_df,
+        use_container_width=True,
+        height=600,
+        hide_index=True
+    )
 
 def display_top_goal_scorers(player_statistics, position_filter, top_n=10):
     """
@@ -260,8 +646,8 @@ def show_player_stats_page():
     # Page Title and Description with Emojis and Image
     st.title("📊 FPL Player Statistics Dashboard ⚽")
     st.markdown("""
-    #### Track key performance metrics for Fantasy Premier League players!  
-    Use the filters to explore **top goal scorers, assist providers, clean sheet leaders, and advanced stats.**  
+    #### Track key performance metrics for Fantasy Premier League players!
+    Use the filters to explore **top goal scorers, assist providers, clean sheet leaders, and advanced stats.**
     """)
 
     # Pull FPL player stats
@@ -274,56 +660,65 @@ def show_player_stats_page():
         # Clean FPL player names
         fpl_player_statistics = clean_fpl_player_names(fpl_player_statistics, fpl_player_projections)
 
-    # Print out FPL player stats, if desired
-    print("FPL Player Statistics: \n", fpl_player_statistics)
+    # Create tabs for different views
+    tab_advanced, tab_charts = st.tabs(["Advanced Stats Table", "Visual Charts"])
 
-    # Filters Section
-    st.subheader("🔍 Filters")
+    # Tab 1: Advanced Stats Table (main view)
+    with tab_advanced:
+        if not fpl_player_statistics.empty:
+            display_advanced_stats_table(fpl_player_statistics)
+        else:
+            st.error("No data available at the URL provided.")
 
-    col_filter_1, col_filter_2, col_filter_3 = st.columns(3)
+    # Tab 2: Visual Charts
+    with tab_charts:
+        # Filters Section
+        st.subheader("🔍 Filters")
 
-    # Number of players to display
-    top_n = col_filter_1.slider("Select Number of Players", min_value=5, max_value=20, value=10)
+        col_filter_1, col_filter_2, col_filter_3 = st.columns(3)
 
-    # Position filter (For Goals & Assists)
-    available_positions = fpl_player_statistics['position_abbrv'].unique().tolist()
-    position_filter = col_filter_2.multiselect(
-        "Filter by Position", options=available_positions, default=available_positions,
-        placeholder="Select Positions"
-    )
+        # Number of players to display
+        top_n = col_filter_1.slider("Select Number of Players", min_value=5, max_value=20, value=10)
 
-    # Clean sheets filter (GK + DEF only)
-    clean_sheets_filter = col_filter_3.multiselect(
-        "Filter Clean Sheets by Position", options=['GK', 'DEF'], default=['GK', 'DEF'],
-        placeholder="Select GK or DEF"
-    )
+        # Position filter (For Goals & Assists)
+        available_positions = fpl_player_statistics['position_abbrv'].unique().tolist()
+        position_filter = col_filter_2.multiselect(
+            "Filter by Position", options=available_positions, default=available_positions,
+            placeholder="Select Positions"
+        )
 
-    # Team filter for Expected vs Actual Goal Involvement (Dropdown stays collapsed until clicked)
-    team_options = sorted(fpl_player_statistics['team_name'].unique().tolist())
-    team_filter = st.multiselect(
-        "Filter by Team (For Expected Goals Chart)", options=team_options, default=team_options,
-        placeholder="Select Teams"
-    )
+        # Clean sheets filter (GK + DEF only)
+        clean_sheets_filter = col_filter_3.multiselect(
+            "Filter Clean Sheets by Position", options=['GK', 'DEF'], default=['GK', 'DEF'],
+            placeholder="Select GK or DEF"
+        )
 
-    # Create Streamlit visuals
-    if not fpl_player_statistics.empty:
+        # Team filter for Expected vs Actual Goal Involvement (Dropdown stays collapsed until clicked)
+        team_options = sorted(fpl_player_statistics['team_name'].unique().tolist())
+        team_filter = st.multiselect(
+            "Filter by Team (For Expected Goals Chart)", options=team_options, default=team_options,
+            placeholder="Select Teams"
+        )
 
-        ### --- Layout of Visuals ---
-        # Top row: Goal Scorers, Assist Leaders, Clean Sheets
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            display_top_goal_scorers(fpl_player_statistics, position_filter, top_n)
-        with col2:
-            display_top_assisters(fpl_player_statistics, position_filter, top_n)
-        with col3:
-            display_top_clean_sheets(fpl_player_statistics, clean_sheets_filter, top_n)
+        # Create Streamlit visuals
+        if not fpl_player_statistics.empty:
 
-        # Bottom row: Expected vs. Actual Goals and Box Plot
-        col4, col5 = st.columns(2)
-        with col4:
-            display_expected_vs_actual_goals(fpl_player_statistics, position_filter, team_filter, top_n)
-        with col5:
-            display_boxplot_point_distribution(fpl_player_statistics, position_filter, team_filter)
+            ### --- Layout of Visuals ---
+            # Top row: Goal Scorers, Assist Leaders, Clean Sheets
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                display_top_goal_scorers(fpl_player_statistics, position_filter, top_n)
+            with col2:
+                display_top_assisters(fpl_player_statistics, position_filter, top_n)
+            with col3:
+                display_top_clean_sheets(fpl_player_statistics, clean_sheets_filter, top_n)
 
-    else:
-        st.error("No data available at the URL provided.")
+            # Bottom row: Expected vs. Actual Goals and Box Plot
+            col4, col5 = st.columns(2)
+            with col4:
+                display_expected_vs_actual_goals(fpl_player_statistics, position_filter, team_filter, top_n)
+            with col5:
+                display_boxplot_point_distribution(fpl_player_statistics, position_filter, team_filter)
+
+        else:
+            st.error("No data available at the URL provided.")

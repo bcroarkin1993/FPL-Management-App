@@ -1050,17 +1050,17 @@ def get_waiver_transactions_up_to_gameweek(league_id, gameweek):
 
 def pull_fpl_player_stats():
     """
-    Fetches FPL player statistics from the FPL Draft API.
+    Fetches FPL player statistics from the Classic FPL API.
 
     Returns:
     - player_df: DataFrame with player statistics sorted by total_points.
     """
-    # Set FPL Draft API endpoint
-    draft_api = 'https://draft.premierleague.com/api/bootstrap-static'
+    # Set Classic FPL API endpoint (has more comprehensive data than Draft API)
+    fpl_api = 'https://fantasy.premierleague.com/api/bootstrap-static/'
 
     # Fetch from the endpoint
     try:
-        data = requests.get(draft_api, timeout=30)
+        data = requests.get(fpl_api, timeout=30)
         data_json = data.json()
     except Exception as e:
         _logger.warning("Failed to fetch FPL player stats: %s", e)
@@ -1103,13 +1103,14 @@ def pull_fpl_player_stats():
     player_df = pd.merge(player_df, position_df, left_on='element_type', right_on='position_id')
 
     # Organize columns
-    cols = ['id', 'player', 'position_abbrv', 'team_name', 'clean_sheets', 'goals_scored',
+    cols = ['id', 'player', 'position_abbrv', 'team_name', 'team_name_abbrv', 'clean_sheets', 'goals_scored',
             'assists', 'minutes', 'own_goals', 'penalties_missed', 'penalties_saved', 'red_cards', 'yellow_cards',
             'starts', 'expected_goals', 'expected_assists', 'expected_goal_involvements', 'expected_goals_conceded',
-            'creativity', 'influence', 'bonus', 'bps', 'form', 'points_per_game', 'total_points',
+            'creativity', 'influence', 'threat', 'ict_index', 'bonus', 'bps', 'form', 'points_per_game', 'total_points',
+            'goals_conceded', 'saves', 'now_cost', 'selected_by_percent',
             'corners_and_indirect_freekicks_order', 'corners_and_indirect_freekicks_text', 'direct_freekicks_order',
             'direct_freekicks_text', 'penalties_order', 'penalties_text', 'chance_of_playing_this_round',
-            'chance_of_playing_next_round', 'status', 'news', 'added']
+            'chance_of_playing_next_round', 'status', 'news', 'news_added']
     player_df = player_df[cols]
 
     # Ensure expected_goal_involvements is numeric
