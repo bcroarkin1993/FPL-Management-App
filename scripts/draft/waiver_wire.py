@@ -18,6 +18,8 @@ from scripts.common.utils import (
     get_current_gameweek,
     merge_fpl_players_and_projections,
     get_league_player_ownership,
+    get_league_entries,
+    get_fpl_player_mapping,
     get_rotowire_player_projections,
     pull_fpl_player_stats,
     normalize_fpl_players_to_rotowire_schema,
@@ -1264,6 +1266,212 @@ def _azure_suggest_moves(available_df: pd.DataFrame,
         return f"(Azure suggestion unavailable: {e})"
 
 # ---------------------------
+# TRANSFER ACTIVITY
+# ---------------------------
+
+@st.cache_data(show_spinner=False)
+def _fetch_all_transactions(league_id: int) -> pd.DataFrame:
+    """
+    Fetch all transactions for a league and return as a DataFrame.
+
+    Transaction kinds:
+        'f' = Free transfer (free agent pickup)
+        'w' = Waiver claim
+
+    Result values:
+        'a' = Approved/Accepted
+        'di' = Denied (waiver priority)
+        'do' = Unknown (possibly dropped/cancelled)
+    """
+    url = f"https://draft.premierleague.com/api/draft/league/{league_id}/transactions"
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        _logger.warning("Failed to fetch transactions for league %s: %s", league_id, e)
+        return pd.DataFrame()
+
+    transactions = data.get('transactions', [])
+    if not transactions:
+        return pd.DataFrame()
+
+    return pd.DataFrame(transactions)
+
+
+def _build_transfer_activity_summary(
+    transactions_df: pd.DataFrame,
+    team_names: Dict[int, str],
+    player_map: Dict[int, Dict]
+) -> pd.DataFrame:
+    """
+    Build a summary of transfer activity by team.
+
+    Returns DataFrame with columns:
+        Team, Free Transfers, Accepted Waivers, Failed Waivers, Total
+    """
+    if transactions_df.empty:
+        return pd.DataFrame(columns=['Team', 'Free Transfers', 'Accepted Waivers', 'Failed Waivers', 'Total'])
+
+    # Initialize counters for all teams
+    summary = {tid: {
+        'Team': tname,
+        'Free Transfers': 0,
+        'Accepted Waivers': 0,
+        'Failed Waivers': 0,
+    } for tid, tname in team_names.items()}
+
+    for _, tx in transactions_df.iterrows():
+        team_id = tx.get('entry')
+        kind = tx.get('kind')
+        result = tx.get('result')
+
+        if team_id not in summary:
+            continue
+
+        if kind == 'f' and result == 'a':
+            summary[team_id]['Free Transfers'] += 1
+        elif kind == 'w':
+            if result == 'a':
+                summary[team_id]['Accepted Waivers'] += 1
+            else:
+                summary[team_id]['Failed Waivers'] += 1
+
+    # Convert to DataFrame
+    rows = list(summary.values())
+    df = pd.DataFrame(rows)
+    df['Total'] = df['Free Transfers'] + df['Accepted Waivers']
+
+    # Sort by total transfers descending
+    df = df.sort_values('Total', ascending=False).reset_index(drop=True)
+
+    return df
+
+
+def _build_transfer_history_table(
+    transactions_df: pd.DataFrame,
+    team_names: Dict[int, str],
+    player_map: Dict[int, Dict]
+) -> pd.DataFrame:
+    """
+    Build a detailed history of all transfers.
+
+    Returns DataFrame with columns:
+        GW, Team, Type, Result, Player In, Player Out, Date
+    """
+    if transactions_df.empty:
+        return pd.DataFrame(columns=['GW', 'Team', 'Type', 'Result', 'Player In', 'Player Out', 'Date'])
+
+    rows = []
+    for _, tx in transactions_df.iterrows():
+        team_id = tx.get('entry')
+        team_name = team_names.get(team_id, f"Team {team_id}")
+
+        kind = tx.get('kind')
+        kind_label = 'Waiver' if kind == 'w' else 'Free Transfer' if kind == 'f' else kind
+
+        result = tx.get('result')
+        result_map = {'a': 'Accepted', 'di': 'Denied', 'do': 'Dropped'}
+        result_label = result_map.get(result, result)
+
+        element_in = tx.get('element_in')
+        element_out = tx.get('element_out')
+
+        player_in_info = player_map.get(element_in, {})
+        player_out_info = player_map.get(element_out, {})
+
+        player_in = player_in_info.get('Player', f"Unknown ({element_in})")
+        player_in_team = player_in_info.get('Team', '')
+        player_out = player_out_info.get('Player', f"Unknown ({element_out})")
+        player_out_team = player_out_info.get('Team', '')
+
+        # Format player names with their team
+        player_in_display = f"{player_in} ({player_in_team})" if player_in_team else player_in
+        player_out_display = f"{player_out} ({player_out_team})" if player_out_team else player_out
+
+        # Parse date
+        added = tx.get('added', '')
+        if added:
+            try:
+                dt = datetime.fromisoformat(added.replace('Z', '+00:00'))
+                date_str = dt.strftime('%Y-%m-%d %H:%M')
+            except Exception:
+                date_str = added[:10] if len(added) >= 10 else added
+        else:
+            date_str = ''
+
+        rows.append({
+            'GW': tx.get('event', ''),
+            'Team': team_name,
+            'Type': kind_label,
+            'Result': result_label,
+            'Player In': player_in_display,
+            'Player Out': player_out_display,
+            'Date': date_str,
+        })
+
+    df = pd.DataFrame(rows)
+
+    # Sort by GW descending, then date descending
+    df = df.sort_values(['GW', 'Date'], ascending=[False, False]).reset_index(drop=True)
+
+    return df
+
+
+def _render_transfer_activity_chart(summary_df: pd.DataFrame):
+    """Render a stacked bar chart of transfer activity by team."""
+    import plotly.graph_objects as go
+
+    if summary_df.empty:
+        st.info("No transfer activity data available.")
+        return
+
+    fig = go.Figure()
+
+    # Add Free Transfers bar
+    fig.add_trace(go.Bar(
+        name='Free Transfers',
+        x=summary_df['Team'],
+        y=summary_df['Free Transfers'],
+        marker_color='#4ecca3',
+        text=summary_df['Free Transfers'],
+        textposition='inside',
+    ))
+
+    # Add Accepted Waivers bar
+    fig.add_trace(go.Bar(
+        name='Accepted Waivers',
+        x=summary_df['Team'],
+        y=summary_df['Accepted Waivers'],
+        marker_color='#0f3460',
+        text=summary_df['Accepted Waivers'],
+        textposition='inside',
+    ))
+
+    fig.update_layout(
+        barmode='stack',
+        title='Transfer Activity by Team',
+        xaxis_title='Team',
+        yaxis_title='Number of Transfers',
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=1.02,
+            xanchor='right',
+            x=1
+        ),
+        height=400,
+        margin=dict(t=80, b=80),
+    )
+
+    # Rotate x-axis labels if many teams
+    if len(summary_df) > 6:
+        fig.update_xaxes(tickangle=45)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ---------------------------
 # PAGE
 # ---------------------------
 
@@ -1503,3 +1711,67 @@ def show_waiver_wire_page():
     else:
         st.subheader(f"My Roster — {my_team.get('team_name', '(unknown)')}")
         st.info("No roster data available for this team.")
+
+    # ---------------------------
+    # TRANSFER ACTIVITY SECTION
+    # ---------------------------
+    st.divider()
+    st.header("📊 League Transfer Activity")
+
+    # Fetch transaction data
+    transactions_df = _fetch_all_transactions(config.FPL_DRAFT_LEAGUE_ID)
+
+    if transactions_df.empty:
+        st.info("No transaction data available for this league.")
+    else:
+        # Get team names and player mapping
+        team_names = get_league_entries(config.FPL_DRAFT_LEAGUE_ID)
+        player_map = get_fpl_player_mapping()
+
+        # Build summary for chart
+        summary_df = _build_transfer_activity_summary(transactions_df, team_names, player_map)
+
+        # Render the stacked bar chart
+        _render_transfer_activity_chart(summary_df)
+
+        # Summary stats
+        total_free = summary_df['Free Transfers'].sum()
+        total_waivers = summary_df['Accepted Waivers'].sum()
+        total_failed = summary_df['Failed Waivers'].sum()
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Free Transfers", total_free)
+        col2.metric("Accepted Waivers", total_waivers)
+        col3.metric("Failed Waivers", total_failed)
+
+        # Build and display transfer history table
+        st.subheader("Transfer History")
+
+        history_df = _build_transfer_history_table(transactions_df, team_names, player_map)
+
+        # Filters for the history table
+        with st.expander("Filter History", expanded=False):
+            filter_col1, filter_col2, filter_col3 = st.columns(3)
+
+            # Team filter
+            all_teams = ['All'] + sorted(history_df['Team'].unique().tolist())
+            selected_team = filter_col1.selectbox("Team", all_teams, key="history_team_filter")
+
+            # Type filter
+            all_types = ['All'] + sorted(history_df['Type'].unique().tolist())
+            selected_type = filter_col2.selectbox("Type", all_types, key="history_type_filter")
+
+            # Result filter
+            all_results = ['All'] + sorted(history_df['Result'].unique().tolist())
+            selected_result = filter_col3.selectbox("Result", all_results, key="history_result_filter")
+
+        # Apply filters
+        filtered_history = history_df.copy()
+        if selected_team != 'All':
+            filtered_history = filtered_history[filtered_history['Team'] == selected_team]
+        if selected_type != 'All':
+            filtered_history = filtered_history[filtered_history['Type'] == selected_type]
+        if selected_result != 'All':
+            filtered_history = filtered_history[filtered_history['Result'] == selected_result]
+
+        st.dataframe(filtered_history, use_container_width=True, height=400)
