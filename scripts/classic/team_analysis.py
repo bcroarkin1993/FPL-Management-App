@@ -20,6 +20,7 @@ from scripts.common.utils import (
     get_rotowire_player_projections,
     position_converter,
 )
+from scripts.common.team_analysis_helpers import render_season_highlights
 from fuzzywuzzy import fuzz
 
 
@@ -433,6 +434,25 @@ def show_classic_team_analysis_page():
         show_api_error("loading player data")
         return
 
+    # ---------------------------
+    # SEASON HIGHLIGHTS
+    # ---------------------------
+    st.markdown("### Season Highlights")
+
+    # Get position data for highlights (needed for MVP, Best 11, Best Clubs, and Points by Position)
+    latest_played_gw = max((gw["event"] for gw in gw_history), default=None)
+    pos_result = None
+    player_list = []
+
+    if latest_played_gw:
+        with st.spinner("Loading season data..."):
+            pos_result = get_classic_team_position_data(team_id, latest_played_gw)
+            player_list = pos_result.get("players", [])
+
+    render_season_highlights(player_list, bootstrap_data=bootstrap, team_id=team_id, is_classic=True)
+
+    st.markdown("---")
+
     # Build squad dataframe
     squad_df = _build_squad_dataframe(picks, bootstrap)
 
@@ -547,13 +567,8 @@ def show_classic_team_analysis_page():
         "FWD": "#e74c3c",
     }
 
-    # Determine latest played GW from history
-    latest_played_gw = max((gw["event"] for gw in gw_history), default=None)
-
-    if latest_played_gw:
-        with st.spinner("Loading position data..."):
-            pos_result = get_classic_team_position_data(team_id, latest_played_gw)
-
+    # Use pos_result from Season Highlights section (already fetched above)
+    if pos_result:
         team_pos = pos_result["positions"]
         total = sum(team_pos.values())
 
@@ -589,7 +604,6 @@ def show_classic_team_analysis_page():
                     st.metric(pos, f"{pts} pts ({pct})")
 
             # Player detail table
-            player_list = pos_result["players"]
             if player_list:
                 st.markdown("**Player Breakdown**")
                 players_df = pd.DataFrame(player_list)
