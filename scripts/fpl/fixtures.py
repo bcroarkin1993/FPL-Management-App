@@ -1,3 +1,4 @@
+import config
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 import random
@@ -304,7 +305,15 @@ def _render_text_schedule_two_cols(fixtures_df: pd.DataFrame):
 # ============== MAIN SECTION (filters at top, text fixtures at bottom) ==============
 def show_club_fixtures_section():
     st.markdown(_COMPACT_CSS, unsafe_allow_html=True)
-    st.header("📅 Club Fixtures & Difficulty (FDR)")
+
+    # Header with refresh button
+    col1, col2 = st.columns([6, 1])
+    with col1:
+        st.header("📅 Club Fixtures & Difficulty (FDR)")
+    with col2:
+        if st.button("🔄 Refresh", help="Refresh gameweek data", key="fpl_fixtures_refresh"):
+            config.refresh_gameweek()
+            st.rerun()
 
     # --- NEW: Fixture Difficulty Grid ---
     with st.expander("Fixture Difficulty Grid (overview)", expanded=True):
@@ -312,7 +321,7 @@ def show_club_fixtures_section():
         disp, diffs, avg = get_fixture_difficulty_grid(weeks=weeks)
         st.markdown(style_fixture_difficulty(disp, diffs).to_html(), unsafe_allow_html=True)
         st.caption(
-            "Rows = Team; cells = that team’s own fixtures (H/A) colored by FPL difficulty (1 easy → 5 hard). Sorted by average difficulty over the horizon.")
+            "Rows = Team; cells = that team's own fixtures (H/A) colored by FPL difficulty (1 easy → 5 hard). Sorted by average difficulty over the horizon.")
     # ------------------------------------
 
     # ---- Filters (TOP) ----

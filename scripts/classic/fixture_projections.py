@@ -1115,7 +1115,14 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
 def show_classic_fixture_projections_page():
     """Display Classic FPL fixture projections page with league selector."""
 
-    st.title("Classic League Fixture Projections")
+    # Title with refresh button
+    col1, col2 = st.columns([6, 1])
+    with col1:
+        st.title("Classic League Fixture Projections")
+    with col2:
+        if st.button("🔄 Refresh", help="Refresh gameweek data", key="classic_gw_refresh"):
+            config.refresh_gameweek()
+            st.rerun()
 
     # Get configured leagues
     league_options = _get_league_display_options()

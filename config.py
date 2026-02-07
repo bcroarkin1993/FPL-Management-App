@@ -1,9 +1,10 @@
 # config.py — Python 3.9 safe
 # Loads env (if python-dotenv is installed), defines app constants,
-# and lazily resolves CURRENT_GAMEWEEK and ROTOWIRE_URL on first access (cached).
+# and lazily resolves CURRENT_GAMEWEEK and ROTOWIRE_URL on first access (cached with TTL).
 
 import logging
 import os
+import time
 
 # ----- .env loader (optional) -----
 try:
@@ -138,8 +139,12 @@ TEAM_COLORS = {
 #   - ROTOWIRE_URL     (env override or discovered from ARTICLES_INDEX using CURRENT_GAMEWEEK)
 # =============================================================================
 
-_GW_CACHE = None        # type: ignore
-_RW_URL_CACHE = None    # type: ignore
+# Cache TTL in seconds (5 minutes for gameweek, allows refresh during gameweek transitions)
+_GW_CACHE_TTL = 300
+
+# Cache storage: (value, timestamp) tuples for TTL-based expiration
+_GW_CACHE = None        # type: ignore  # (gameweek: int, cached_at: float)
+_RW_URL_CACHE = None    # type: ignore  # (url: str, for_gw: int)
 
 def _resolve_current_gameweek():
     """Resolve the current gameweek with env override, else FPL Draft API, else fallback to 1."""
@@ -241,19 +246,43 @@ def _discover_rotowire_article(gw: int):
         )
         return ""
 
+def _is_gw_cache_stale():
+    """Check if gameweek cache is stale (older than TTL)."""
+    if _GW_CACHE is None:
+        return True
+    _, cached_at = _GW_CACHE
+    return (time.time() - cached_at) > _GW_CACHE_TTL
+
+
+def refresh_gameweek():
+    """
+    Force refresh the gameweek cache.
+    Call this when you need to ensure fresh gameweek data.
+    Returns the new gameweek value.
+    """
+    global _GW_CACHE, _RW_URL_CACHE
+    _GW_CACHE = (_resolve_current_gameweek(), time.time())
+    # Also clear Rotowire URL cache since it depends on gameweek
+    _RW_URL_CACHE = None
+    return _GW_CACHE[0]
+
+
 def __getattr__(name):  # PEP 562: module-level getattr
     global _GW_CACHE, _RW_URL_CACHE
 
     if name == "CURRENT_GAMEWEEK":
-        if _GW_CACHE is None:
-            _GW_CACHE = _resolve_current_gameweek()
-        return _GW_CACHE
+        if _is_gw_cache_stale():
+            _GW_CACHE = (_resolve_current_gameweek(), time.time())
+        return _GW_CACHE[0]
 
     if name == "ROTOWIRE_URL":
-        if _RW_URL_CACHE is None:
-            # ensure we have GW without importing utils to avoid circular import
-            gw = _GW_CACHE if _GW_CACHE is not None else _resolve_current_gameweek()
-            _RW_URL_CACHE = _discover_rotowire_article(gw)
-        return _RW_URL_CACHE
+        # Get current gameweek (may refresh if stale)
+        current_gw = __getattr__("CURRENT_GAMEWEEK")
+
+        # Check if we have a cached URL for the current gameweek
+        if _RW_URL_CACHE is None or _RW_URL_CACHE[1] != current_gw:
+            url = _discover_rotowire_article(current_gw)
+            _RW_URL_CACHE = (url, current_gw)
+        return _RW_URL_CACHE[0]
 
     raise AttributeError(name)

@@ -389,14 +389,21 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
 def show_fixtures_page():
     st.title("Upcoming Fixtures & Projections")
 
+    # Header with refresh button
+    col1, col2 = st.columns([6, 1])
+    with col1:
+        st.subheader(f"Gameweek {config.CURRENT_GAMEWEEK} Fixtures Overview")
+    with col2:
+        if st.button("🔄 Refresh", help="Refresh gameweek data"):
+            config.refresh_gameweek()
+            st.rerun()
+
     # Find the fixtures for the current gameweek
     gameweek_fixtures = get_gameweek_fixtures(config.FPL_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
 
     if not gameweek_fixtures:
         st.warning("No fixtures found for the current gameweek.")
         return
-
-    st.subheader(f"Gameweek {config.CURRENT_GAMEWEEK} Fixtures Overview")
 
     # Pull FPL player projections from Rotowire
     fpl_player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL)
