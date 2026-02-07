@@ -1680,52 +1680,100 @@ def get_rotowire_player_projections(url, limit=None):
 
     Returns:
     - DataFrame: A DataFrame containing player rankings, projected points, and calculated value.
+                 Returns empty DataFrame on error.
     """
-    # Download the page using the requests library
+    EXPECTED_COLUMNS = 12  # Number of columns expected per row
+
+    # Helper to safely convert to numeric
+    def _safe_numeric(val, default=0):
+        if val is None:
+            return default
+        s = str(val).strip()
+        if s in {"#N/A", "N/A", "", "-", "—"}:
+            return default
+        s = re.sub(r"[£$,%]", "", s)  # Strip currency/formatting
+        s = s.replace("\u200b", "").replace("\xa0", "").strip()
+        try:
+            return float(s)
+        except ValueError:
+            return default
+
+    # Download the page
     try:
-        website = requests.get(url, timeout=30)
-    except Exception as e:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as e:
         _logger.warning("Failed to fetch Rotowire projections from %s: %s", url, e)
         return pd.DataFrame()
-    soup = BeautifulSoup(website.content, 'html.parser')
 
-    # Isolate BeautifulSoup output to the table of interest
-    my_classes = soup.find(class_='article-table__tablesorter article-table__standard article-table__figure')
-    players = my_classes.find_all("td")
+    soup = BeautifulSoup(response.content, 'html.parser')
 
-    # Create lists for each field to collect
-    overall_rank, fw_rank, mid_rank, def_rank, gk_rank = [], [], [], [], []
-    player, team, matchup, position, price, tsb, points = [], [], [], [], [], [], []
+    # Find table with fallback selectors (most specific to least specific)
+    table = soup.select_one("table.article-table__tablesorter.article-table__standard.article-table__figure")
+    if table is None:
+        table = soup.select_one("table.article-table__tablesorter")
+        if table:
+            _logger.info("Rotowire: Using fallback table selector (article-table__tablesorter)")
+    if table is None:
+        table = soup.find("table")
+        if table:
+            _logger.info("Rotowire: Using generic table selector")
+    if table is None:
+        _logger.warning("Rotowire: Could not locate any table on page %s", url)
+        return pd.DataFrame()
 
-    # Loop through the list of players in batches of 12
-    batch_size = 12
-    for i in range(0, len(players), batch_size):
-        overall_rank.append(players[i].text)
-        fw_rank.append(players[i + 1].text)
-        mid_rank.append(players[i + 2].text)
-        def_rank.append(players[i + 3].text)
-        gk_rank.append(players[i + 4].text)
-        player.append(players[i + 5].text)
-        team.append(players[i + 6].text)
-        matchup.append(players[i + 7].text)
-        position.append(players[i + 8].text)
-        price.append(players[i + 9].text)
-        tsb.append(players[i + 10].text)
-        points.append(players[i + 11].text)
+    # Extract rows from table body or table directly
+    try:
+        tbody = table.find("tbody")
+        rows = tbody.find_all("tr") if tbody else table.find_all("tr")
+    except AttributeError as e:
+        _logger.warning("Rotowire: Error extracting table rows: %s", e)
+        return pd.DataFrame()
 
-    # Create a DataFrame with formatted column names
-    player_rankings = pd.DataFrame(
-        list(zip(overall_rank, fw_rank, mid_rank, def_rank, gk_rank, player, team,
-                 matchup, position, price, tsb, points)),
-        columns=[
-            'Overall Rank', 'FW Rank', 'MID Rank', 'DEF Rank', 'GK Rank',
-            'Player', 'Team', 'Matchup', 'Position', 'Price', 'TSB %', 'Points'
-        ]
-    )
+    # Parse each row
+    data = []
+    skipped_rows = 0
+    for tr in rows:
+        tds = tr.find_all("td")
 
-    # Replace empty strings with 0 and convert columns to numeric where appropriate
-    for col in ['FW Rank', 'MID Rank', 'DEF Rank', 'GK Rank', 'Points', 'Price']:
-        player_rankings[col] = pd.to_numeric(player_rankings[col], errors='coerce').fillna(0)
+        # Skip rows that don't have expected column count (likely headers or malformed)
+        if len(tds) < EXPECTED_COLUMNS:
+            skipped_rows += 1
+            continue
+
+        # Extract cell text (handle extra columns gracefully by only taking first 12)
+        cells = [td.get_text(strip=True) for td in tds[:EXPECTED_COLUMNS]]
+
+        try:
+            row_data = {
+                'Overall Rank': cells[0],
+                'FW Rank': _safe_numeric(cells[1]),
+                'MID Rank': _safe_numeric(cells[2]),
+                'DEF Rank': _safe_numeric(cells[3]),
+                'GK Rank': _safe_numeric(cells[4]),
+                'Player': cells[5],
+                'Team': cells[6],
+                'Matchup': cells[7],
+                'Position': cells[8],
+                'Price': _safe_numeric(cells[9]),
+                'TSB %': cells[10],
+                'Points': _safe_numeric(cells[11]),
+            }
+            data.append(row_data)
+        except IndexError as e:
+            _logger.warning("Rotowire: Error parsing row, skipping: %s", e)
+            skipped_rows += 1
+            continue
+
+    if skipped_rows > 0:
+        _logger.debug("Rotowire: Skipped %d rows with unexpected structure", skipped_rows)
+
+    if not data:
+        _logger.warning("Rotowire: No valid player data extracted from %s", url)
+        return pd.DataFrame()
+
+    # Create DataFrame
+    player_rankings = pd.DataFrame(data)
 
     # Create 'Pos Rank' by summing the four position ranks
     player_rankings['Pos Rank'] = (
@@ -1735,9 +1783,6 @@ def get_rotowire_player_projections(url, limit=None):
 
     # Drop individual position rank columns
     player_rankings.drop(columns=['FW Rank', 'MID Rank', 'DEF Rank', 'GK Rank'], inplace=True)
-
-    # Ensure 'Price' is numeric
-    player_rankings['Price'] = pd.to_numeric(player_rankings['Price'], errors='coerce').fillna(0)
 
     # Create the 'Value' column by dividing 'Points' by 'Price'
     player_rankings['Value'] = player_rankings.apply(
@@ -1752,6 +1797,7 @@ def get_rotowire_player_projections(url, limit=None):
     player_rankings.reset_index(drop=True, inplace=True)
     player_rankings.index = player_rankings.index + 1
 
+    _logger.debug("Rotowire: Successfully parsed %d players from %s", len(player_rankings), url)
     return player_rankings
 
 
@@ -1766,7 +1812,7 @@ def get_rotowire_rankings_url(current_gameweek=None, timeout=15):
     # If you have a helper, use it; otherwise leave current_gameweek optional
     if current_gameweek is None:
         try:
-            current_gameweek = get_current_gameweek()  # your existing function
+            current_gameweek = get_current_gameweek()
         except Exception:
             current_gameweek = None
 
@@ -1774,7 +1820,8 @@ def get_rotowire_rankings_url(current_gameweek=None, timeout=15):
     try:
         resp = requests.get(config.ARTICLES_INDEX, headers=headers, timeout=timeout)
         resp.raise_for_status()
-    except Exception:
+    except requests.RequestException as e:
+        _logger.warning("Rotowire URL discovery failed - could not fetch articles index: %s", e)
         return None
 
     soup = BeautifulSoup(resp.content, "html.parser")
@@ -1782,39 +1829,60 @@ def get_rotowire_rankings_url(current_gameweek=None, timeout=15):
     # Find any anchors whose href contains our base slug
     anchors = soup.select('a[href*="fantasy-premier-league-player-rankings-gameweek-"]')
 
-    # Regex: capture GW and the trailing numeric article id
-    # works for both:
-    # ...gameweek-9-86285
-    # ...gameweek-1-fpl-west-ham-jarrod-bowen-95015
-    pat = re.compile(
-        r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?-(\d+)$"
-    )
+    # Regex patterns to try (most specific to least specific)
+    # Pattern 1: Standard format with optional slug words
+    patterns = [
+        re.compile(r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?-(\d+)$"),
+        # Pattern 2: Alternate format without trailing article ID
+        re.compile(r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?$"),
+    ]
 
     candidates = []
     for a in anchors:
         href = a.get("href", "").strip()
         if not href:
             continue
-        m = pat.search(href)
-        if m:
-            gw = int(m.group(1))
-            art_id = int(m.group(2))
-            candidates.append((gw, art_id, urljoin(config.ARTICLES_INDEX, href)))
+
+        for pat in patterns:
+            m = pat.search(href)
+            if m:
+                gw = int(m.group(1))
+                # Article ID may not exist in alternate pattern
+                art_id = int(m.group(2)) if len(m.groups()) > 1 and m.group(2) else 0
+                candidates.append((gw, art_id, urljoin(config.ARTICLES_INDEX, href)))
+                break  # Don't try other patterns if one matched
 
     if not candidates:
+        _logger.warning(
+            "Rotowire URL discovery failed - no matching articles found. "
+            "HTML structure may have changed. Found %d anchors on page.",
+            len(anchors)
+        )
         return None
+
+    _logger.debug("Rotowire: Found %d candidate articles for GW %s", len(candidates), current_gameweek)
 
     if current_gameweek is not None:
         # Prefer exact gameweek; if multiple, highest article id
         exact = [c for c in candidates if c[0] == current_gameweek]
         if exact:
-            return max(exact, key=lambda x: x[1])[2]
+            result = max(exact, key=lambda x: x[1])[2]
+            _logger.debug("Rotowire: Exact GW match found: %s", result)
+            return result
 
         # Else pick closest GW; break ties by newest article id
-        return min(candidates, key=lambda x: (abs(x[0] - current_gameweek), -x[1]))[2]
+        result = min(candidates, key=lambda x: (abs(x[0] - current_gameweek), -x[1]))[2]
+        closest_gw = min(candidates, key=lambda x: abs(x[0] - current_gameweek))[0]
+        _logger.info(
+            "Rotowire: No exact match for GW %d, using closest GW %d: %s",
+            current_gameweek, closest_gw, result
+        )
+        return result
 
     # If we don't know the GW, return the newest relevant article by id
-    return max(candidates, key=lambda x: x[1])[2]
+    result = max(candidates, key=lambda x: x[1])[2]
+    _logger.debug("Rotowire: Using newest article (no GW specified): %s", result)
+    return result
 
 
 @st.cache_data(ttl=7200)

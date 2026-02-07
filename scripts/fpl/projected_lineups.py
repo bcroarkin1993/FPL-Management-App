@@ -84,7 +84,7 @@ def scrape_rotowire_lineups(url):
             matchups.extend(home_players + away_players)
 
         except AttributeError as e:
-            print(f"Error parsing section: {e}")
+            _logger.warning("Error parsing lineup section (HTML structure may have changed): %s", e)
 
     # Convert the data to a pandas DataFrame
     lineups_df = pd.DataFrame(matchups, columns=['Team', 'Position', 'Player'])
@@ -107,8 +107,12 @@ def scrape_matchups(url):
             home_team = matchup.find('div', class_='lineup__mteam is-home').text.strip()
             away_team = matchup.find('div', class_='lineup__mteam is-visit').text.strip()
             matchups.append((home_team, away_team))
-        except:
+        except AttributeError as e:
+            _logger.warning("Error parsing matchup (HTML structure may have changed): %s", e)
             continue
+
+    if not matchups and matchups_section:
+        _logger.warning("Rotowire: Found %d matchup sections but failed to parse any", len(matchups_section))
 
     return matchups
 

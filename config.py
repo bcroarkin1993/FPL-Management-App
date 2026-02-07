@@ -167,9 +167,12 @@ def _resolve_current_gameweek():
 
 def _discover_rotowire_article(gw: int):
     """Find the best Rotowire rankings article for the given GW from ARTICLES_INDEX."""
+    _logger = logging.getLogger("fpl_app.config")
+
     # If explicitly pinned in env, use that
     pinned = os.getenv("ROTOWIRE_URL", "").strip()
     if pinned:
+        _logger.debug("Using pinned ROTOWIRE_URL from environment: %s", pinned)
         return pinned
 
     import re
@@ -177,7 +180,8 @@ def _discover_rotowire_article(gw: int):
     import requests
     try:
         from bs4 import BeautifulSoup  # type: ignore
-    except Exception:
+    except ImportError:
+        _logger.warning("BeautifulSoup not available, cannot discover Rotowire URL")
         return ""
 
     index_url = ARTICLES_INDEX or "https://www.rotowire.com/soccer/column/fantasy-premier-league-rankings-188"
@@ -187,29 +191,52 @@ def _discover_rotowire_article(gw: int):
         soup = BeautifulSoup(resp.content, "html.parser")
         anchors = soup.select('a[href*="fantasy-premier-league-player-rankings-gameweek-"]')
 
-        pat = re.compile(
-            r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?-(\d+)$"
-        )
+        # Multiple regex patterns for robustness (most specific to least)
+        patterns = [
+            # Standard format: gameweek-N-articleID
+            re.compile(r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?-(\d+)$"),
+            # Alternate format without trailing article ID
+            re.compile(r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?$"),
+        ]
+
         candidates = []
         for a in anchors:
             href = (a.get("href") or "").strip()
-            m = pat.search(href)
-            if not m:
-                continue
-            gw_found = int(m.group(1))
-            art_id = int(m.group(2))
-            candidates.append((gw_found, art_id, urljoin(index_url, href)))
+            for pat in patterns:
+                m = pat.search(href)
+                if m:
+                    gw_found = int(m.group(1))
+                    # Article ID may not exist in alternate pattern
+                    art_id = int(m.group(2)) if len(m.groups()) > 1 and m.group(2) else 0
+                    candidates.append((gw_found, art_id, urljoin(index_url, href)))
+                    break
 
         if not candidates:
+            _logger.warning(
+                "Rotowire URL discovery: No matching articles found. Found %d anchors on page. "
+                "HTML structure may have changed.",
+                len(anchors)
+            )
             return ""
+
+        _logger.debug("Rotowire: Found %d candidate articles for GW %s", len(candidates), gw)
 
         exact = [c for c in candidates if c[0] == int(gw)]
         if exact:
-            return max(exact, key=lambda x: x[1])[2]
+            result = max(exact, key=lambda x: x[1])[2]
+            _logger.debug("Rotowire: Exact GW match found: %s", result)
+            return result
+
         # nearest GW, tie-break by newest article id
-        return min(candidates, key=lambda x: (abs(x[0] - int(gw)), -x[1]))[2]
+        result = min(candidates, key=lambda x: (abs(x[0] - int(gw)), -x[1]))[2]
+        closest_gw = min(candidates, key=lambda x: abs(x[0] - int(gw)))[0]
+        _logger.info(
+            "Rotowire: No exact match for GW %d, using closest GW %d: %s",
+            gw, closest_gw, result
+        )
+        return result
     except Exception:
-        logging.getLogger("fpl_app.config").warning(
+        _logger.warning(
             "Failed to discover Rotowire article for GW %s, returning empty URL", gw, exc_info=True
         )
         return ""
