@@ -288,6 +288,22 @@ def plot_soccer_field(player_df, team_name, player_data_map=None):
     if player_data_map is None:
         player_data_map = {}
 
+    # Map Rotowire team names to TEAM_COLORS keys
+    team_name_map = {
+        'Manchester United': 'Man Utd',
+        'Manchester City': 'Man City',
+        'Tottenham Hotspur': 'Spurs',
+        'Nottingham Forest': "Nott'm Forest",
+        'Wolverhampton': 'Wolves',
+        'West Ham United': 'West Ham',
+        'Leicester City': 'Leicester',
+        'Ipswich Town': 'Ipswich',
+        'AFC Bournemouth': 'Bournemouth',
+        'Brighton and Hove Albion': 'Brighton',
+        'Newcastle United': 'Newcastle',
+    }
+    mapped_team_name = team_name_map.get(team_name, team_name)
+
     # Define positions with (x, y) coordinates
     position_mapping = {
         'GK': (5, 0.3),  # Goalkeeper
@@ -298,8 +314,8 @@ def plot_soccer_field(player_df, team_name, player_data_map=None):
         'FL': (2, 4.4), 'FWL': (2, 4.4), 'FC': (5, 4.6), 'FW': (5, 4.4), 'FWR': (8, 4.4), 'FR': (8, 4.4)  # Forwards
     }
 
-    # Get the team's primary and secondary colors or use default values
-    colors = config.TEAM_COLORS.get(team_name, {"primary": "#1a1a2e", "secondary": "#FFFFFF"})
+    # Get the team's primary and secondary colors (fallback to visible colors, not background color)
+    colors = config.TEAM_COLORS.get(mapped_team_name, {"primary": "#3498db", "secondary": "#FFFFFF"})
     primary_color = colors["primary"]
     secondary_color = colors["secondary"]
 
@@ -463,12 +479,12 @@ def render_player_cards_html(player_df, player_data_map):
 
         # Stats display - show N/A if no data found
         if pdata:
-            stats_html = f'<span style="color:{form_color};font-size:0.85em;">Form: {form:.1f}</span><span style="color:#4ecca3;font-size:0.85em;margin-left:12px;">Pts: {total_points}</span><span style="color:#bbb;font-size:0.85em;margin-left:12px;">G:{goals} A:{assists}</span>'
+            stats_html = f'<span style="color:{form_color};font-weight:600;">Form: {form:.1f}</span><span style="color:#2ecc71;margin-left:15px;">Pts: {total_points}</span><span style="color:#fff;margin-left:15px;">G:{goals} A:{assists}</span>'
         else:
-            stats_html = '<span style="color:#888;font-size:0.85em;">Stats unavailable</span>'
+            stats_html = '<span style="color:#999;">Stats unavailable</span>'
 
-        # Build card with better contrast colors
-        card = f'<div style="display:flex;align-items:center;padding:10px 12px;margin-bottom:6px;background:rgba(0,0,0,0.3);border-radius:6px;border-left:4px solid {form_color};"><div style="min-width:36px;text-align:center;background:#444;padding:4px 8px;border-radius:4px;margin-right:10px;"><span style="color:#fff;font-weight:bold;font-size:0.85em;">{position}</span></div><div style="flex:1;"><div style="color:#fff;font-weight:bold;font-size:1em;">{player_name}{status_badge}</div><div style="margin-top:4px;">{stats_html}</div>{news_line}</div></div>'
+        # Build card with solid background for better readability
+        card = f'<div style="display:flex;align-items:center;padding:12px 14px;margin-bottom:8px;background:#2c3e50;border-radius:8px;border-left:4px solid {form_color};box-shadow:0 2px 4px rgba(0,0,0,0.2);"><div style="min-width:40px;text-align:center;background:#34495e;padding:6px 10px;border-radius:4px;margin-right:12px;"><span style="color:#fff;font-weight:bold;">{position}</span></div><div style="flex:1;"><div style="color:#fff;font-weight:bold;font-size:1.05em;">{player_name}{status_badge}</div><div style="margin-top:6px;font-size:0.9em;">{stats_html}</div>{news_line}</div></div>'
         cards.append(card)
 
     return ''.join(cards)
