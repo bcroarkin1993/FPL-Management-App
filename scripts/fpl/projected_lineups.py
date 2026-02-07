@@ -268,15 +268,28 @@ def lookup_player_data(player_name, player_data_map):
                 if key_parts[0] == first_word and last_word in key_parts:
                     return value
 
-    # Single word name matching (e.g., "Alisson" -> "alisson becker")
+    # Single word name matching (e.g., "Alisson" -> "alisson becker", "Rodri" -> "rodrigo rodri hernandez")
     if norm_name and len(norm_name.split()) == 1:
+        # First try matching first word
         for key, value in norm_lookup.items():
             key_parts = key.split()
             if len(key_parts) >= 1 and key_parts[0] == norm_name:
                 return value
+        # Then try matching anywhere in the name (for nicknames like "Rodri")
+        for key, value in norm_lookup.items():
+            if norm_name in key.split():
+                return value
+
+    # For multi-word names, try abbreviated first initial + last name (e.g., "Santi Bueno" -> "S.Bueno")
+    parts = player_name.split()
+    if len(parts) >= 2:
+        first_initial = parts[0][0].upper()
+        last_name = parts[-1]
+        abbrev_key = f"{first_initial}.{last_name}"
+        if abbrev_key in player_data_map:
+            return player_data_map[abbrev_key]
 
     # Try partial match on last name only (for single-name lookups like "Casemiro")
-    parts = player_name.split()
     if len(parts) >= 1:
         last_name = parts[-1]
         if last_name in player_data_map:
