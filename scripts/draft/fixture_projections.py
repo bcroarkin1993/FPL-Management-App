@@ -3,11 +3,57 @@ import math
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from scripts.common.utils import find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures, \
-    get_team_id_by_name, get_rotowire_player_projections, get_team_composition_for_gameweek, \
-    merge_fpl_players_and_projections, normalize_apostrophes, get_historical_team_scores, get_draft_h2h_record
+from scripts.common.utils import (
+    find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures,
+    get_team_id_by_name, get_rotowire_player_projections, get_team_composition_for_gameweek,
+    merge_fpl_players_and_projections, normalize_apostrophes, get_historical_team_scores,
+    get_draft_h2h_record, get_live_gameweek_stats, is_gameweek_live, get_fpl_player_mapping
+)
 
-def _normal_cdf(x: float) -> float:  # <<< ADD
+def _blend_live_with_projections(team_df: pd.DataFrame, live_stats: dict, player_mapping: dict) -> pd.DataFrame:
+    """
+    Blend live points with projections for players who haven't played yet.
+
+    For each player:
+    - If they have played (minutes > 0): use actual points
+    - If they haven't played yet: use projected points
+
+    Returns DataFrame with additional columns:
+    - 'Live_Points': actual points scored (0 if not played)
+    - 'Has_Played': bool indicating if player has played
+    - 'Blended_Points': live points if played, projected if not
+    """
+    result = team_df.copy()
+
+    # Create reverse lookup: player name -> element_id
+    name_to_id = {}
+    for eid, pdata in player_mapping.items():
+        if isinstance(pdata, dict):
+            for name_field in ['web_name', 'name', 'Player']:
+                if name_field in pdata:
+                    name_to_id[pdata[name_field]] = eid
+                    break
+
+    result['Live_Points'] = 0
+    result['Has_Played'] = False
+    result['Blended_Points'] = result['Points'].fillna(0)
+
+    for idx, row in result.iterrows():
+        player_name = row.get('Player', '')
+        element_id = row.get('Player_ID') or name_to_id.get(player_name)
+
+        if element_id and element_id in live_stats:
+            stats = live_stats[element_id]
+            result.at[idx, 'Live_Points'] = stats.get('points', 0)
+            result.at[idx, 'Has_Played'] = stats.get('has_played', False)
+
+            if stats.get('has_played', False):
+                result.at[idx, 'Blended_Points'] = stats.get('points', 0)
+
+    return result
+
+
+def _normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 def _estimate_score_std(league_id: int) -> tuple[float, int]:  # <<< ADD
@@ -198,17 +244,23 @@ def _get_win_pct_color(pct: float) -> str:
         return "rgb(40, 167, 69)"  # Bootstrap success green
 
 
-def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd.DataFrame, sigma: float):
+def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd.DataFrame, sigma: float,
+                              live_stats: dict = None, player_mapping: dict = None, gw_is_live: bool = False):
     """
     Render an overview table showing all fixtures with projected scores and win probabilities.
+    If gw_is_live, blends actual points with projections for remaining players.
     """
     if not fixtures:
         return
 
+    live_stats = live_stats or {}
+    player_mapping = player_mapping or {}
+
     overview_data = []
     denom = math.sqrt(2.0 * (sigma ** 2)) if sigma > 0 else 1.0
 
-    with st.spinner("Calculating projections for all fixtures..."):
+    spinner_msg = "Calculating live scores..." if gw_is_live else "Calculating projections for all fixtures..."
+    with st.spinner(spinner_msg):
         for fixture in fixtures:
             try:
                 result = analyze_fixture_projections(fixture, league_id, projections_df)
@@ -217,10 +269,21 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
 
                 team1_df, team2_df, team1_name, team2_name = result
 
-                team1_score = team1_df['Points'].sum()
-                team2_score = team2_df['Points'].sum()
+                # Blend live points with projections if gameweek is live
+                if gw_is_live and live_stats:
+                    team1_df = _blend_live_with_projections(team1_df, live_stats, player_mapping)
+                    team2_df = _blend_live_with_projections(team2_df, live_stats, player_mapping)
+                    team1_score = team1_df['Blended_Points'].sum()
+                    team2_score = team2_df['Blended_Points'].sum()
+                    team1_live = team1_df['Live_Points'].sum()
+                    team2_live = team2_df['Live_Points'].sum()
+                else:
+                    team1_score = team1_df['Points'].sum()
+                    team2_score = team2_df['Points'].sum()
+                    team1_live = 0
+                    team2_live = 0
 
-                # Calculate win probability
+                # Calculate win probability based on blended/projected scores
                 z = (team1_score - team2_score) / denom
                 p_team1 = _normal_cdf(z)
                 p_team2 = 1.0 - p_team1
@@ -228,9 +291,11 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
                 overview_data.append({
                     "team1": format_team_name(team1_name),
                     "proj1": team1_score,
+                    "live1": team1_live if gw_is_live else None,
                     "pct1": p_team1 * 100,
                     "pct2": p_team2 * 100,
                     "proj2": team2_score,
+                    "live2": team2_live if gw_is_live else None,
                     "team2": format_team_name(team2_name),
                 })
             except Exception:
@@ -362,14 +427,25 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
         color1 = _get_win_pct_color(row["pct1"])
         color2 = _get_win_pct_color(row["pct2"])
 
+        # Format score display: show live points if available
+        if row.get("live1") is not None:
+            # Live game: show "live_pts (+remaining_proj)" format
+            remaining1 = row["proj1"] - row["live1"]
+            remaining2 = row["proj2"] - row["live2"]
+            score1_display = f'<span style="color:#e74c3c;font-weight:700;">{row["live1"]:.0f}</span><span style="color:#888;font-size:11px;"> (+{remaining1:.0f})</span>'
+            score2_display = f'<span style="color:#e74c3c;font-weight:700;">{row["live2"]:.0f}</span><span style="color:#888;font-size:11px;"> (+{remaining2:.0f})</span>'
+        else:
+            score1_display = f'{row["proj1"]:.1f}'
+            score2_display = f'{row["proj2"]:.1f}'
+
         html += f"""
         <tr>
             <td class="team-name team-left">{row["team1"]}</td>
-            <td class="proj-score">{row["proj1"]:.1f}</td>
+            <td class="proj-score">{score1_display}</td>
             <td class="win-pct" style="background: {color1}; color: white;">{row["pct1"]:.0f}%</td>
             <td class="vs-cell">vs</td>
             <td class="win-pct" style="background: {color2}; color: white;">{row["pct2"]:.0f}%</td>
-            <td class="proj-score">{row["proj2"]:.1f}</td>
+            <td class="proj-score">{score2_display}</td>
             <td class="team-name team-right">{row["team2"]}</td>
         </tr>
         """
@@ -389,17 +465,38 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
 def show_fixtures_page():
     st.title("Upcoming Fixtures & Projections")
 
-    # Header with refresh button
-    col1, col2 = st.columns([6, 1])
+    current_gw = config.CURRENT_GAMEWEEK
+    gw_is_live = is_gameweek_live(current_gw)
+
+    # Header with refresh button and live indicator
+    col1, col2, col3 = st.columns([5, 1, 1])
     with col1:
-        st.subheader(f"Gameweek {config.CURRENT_GAMEWEEK} Fixtures Overview")
+        if gw_is_live:
+            st.subheader(f"🔴 LIVE - Gameweek {current_gw}")
+        else:
+            st.subheader(f"Gameweek {current_gw} Fixtures Overview")
     with col2:
-        if st.button("🔄 Refresh", help="Refresh gameweek data"):
+        if gw_is_live:
+            # Auto-refresh toggle for live games
+            auto_refresh = st.checkbox("Auto", value=False, help="Auto-refresh every 60s")
+            if auto_refresh:
+                import time
+                time.sleep(0.1)  # Small delay to prevent infinite loop
+                st.rerun()
+    with col3:
+        if st.button("🔄", help="Refresh live data"):
+            # Clear cached live stats
+            get_live_gameweek_stats.clear()
+            is_gameweek_live.clear()
             config.refresh_gameweek()
             st.rerun()
 
+    # Get live stats if gameweek is live
+    live_stats = get_live_gameweek_stats(current_gw) if gw_is_live else {}
+    player_mapping = get_fpl_player_mapping() if gw_is_live else {}
+
     # Find the fixtures for the current gameweek
-    gameweek_fixtures = get_gameweek_fixtures(config.FPL_DRAFT_LEAGUE_ID, config.CURRENT_GAMEWEEK)
+    gameweek_fixtures = get_gameweek_fixtures(config.FPL_DRAFT_LEAGUE_ID, current_gw)
 
     if not gameweek_fixtures:
         st.warning("No fixtures found for the current gameweek.")
@@ -418,11 +515,15 @@ def show_fixtures_page():
     # Get sigma for win probability calculations
     sigma, n_hist = _estimate_score_std(config.FPL_DRAFT_LEAGUE_ID)
 
-    # Render the fixtures overview table
-    _render_fixtures_overview(gameweek_fixtures, config.FPL_DRAFT_LEAGUE_ID, fpl_player_projections, sigma)
+    # Render the fixtures overview table (with live data if available)
+    _render_fixtures_overview(gameweek_fixtures, config.FPL_DRAFT_LEAGUE_ID, fpl_player_projections, sigma,
+                              live_stats=live_stats, player_mapping=player_mapping, gw_is_live=gw_is_live)
 
-    hist_note = f"σ≈{sigma:.2f} from {n_hist} historical scores" if n_hist > 0 else f"σ≈{sigma:.2f} (default)"
-    st.caption(f"Win probability model: P(A>B) = Φ((μA−μB)/√(2σ²)). {hist_note}")
+    if gw_is_live:
+        st.caption("🔴 **LIVE**: Scores update as players finish. Projected points shown for players yet to play.")
+    else:
+        hist_note = f"σ≈{sigma:.2f} from {n_hist} historical scores" if n_hist > 0 else f"σ≈{sigma:.2f} (default)"
+        st.caption(f"Win probability model: P(A>B) = Φ((μA−μB)/√(2σ²)). {hist_note}")
 
     # Divider before detailed view
     st.divider()
@@ -447,14 +548,43 @@ def show_fixtures_page():
 
         team1_df, team2_df, team1_name, team2_name = result
 
-        # Extract team scores from df
-        team1_score = team1_df['Points'].sum()
-        team2_score = team2_df['Points'].sum()
+        # Blend live points if gameweek is live
+        if gw_is_live and live_stats:
+            team1_df = _blend_live_with_projections(team1_df, live_stats, player_mapping)
+            team2_df = _blend_live_with_projections(team2_df, live_stats, player_mapping)
+            team1_score = team1_df['Blended_Points'].sum()
+            team2_score = team2_df['Blended_Points'].sum()
+            team1_live = team1_df['Live_Points'].sum()
+            team2_live = team2_df['Live_Points'].sum()
+        else:
+            team1_score = team1_df['Points'].sum()
+            team2_score = team2_df['Points'].sum()
+            team1_live = None
+            team2_live = None
 
         # --- Win Probability (Normal model) ---
         denom = math.sqrt(2.0 * (sigma ** 2)) if sigma > 0 else 1.0
         z = (team1_score - team2_score) / denom
         p_team1 = _normal_cdf(z)
+
+        # Show live score summary if live
+        if gw_is_live and team1_live is not None:
+            st.subheader("🔴 Live Score")
+            lcol1, lcol2, lcol3 = st.columns([2, 1, 2])
+            with lcol1:
+                st.metric(
+                    label=format_team_name(team1_name),
+                    value=f"{team1_live:.0f}",
+                    delta=f"+{team1_score - team1_live:.0f} proj"
+                )
+            with lcol2:
+                st.markdown("<div style='text-align:center;padding-top:20px;font-size:24px;'>vs</div>", unsafe_allow_html=True)
+            with lcol3:
+                st.metric(
+                    label=format_team_name(team2_name),
+                    value=f"{team2_live:.0f}",
+                    delta=f"+{team2_score - team2_live:.0f} proj"
+                )
 
         st.subheader("Win Probability")
         _render_winprob_bar(format_team_name(team1_name), format_team_name(team2_name), p_team1)

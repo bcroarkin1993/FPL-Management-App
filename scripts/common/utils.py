@@ -543,6 +543,51 @@ def _get_draft_gw_live_points(gw: int) -> dict:
         return {}
 
 
+@st.cache_data(ttl=60)  # Short TTL for live data
+def get_live_gameweek_stats(gw: int) -> dict:
+    """
+    Returns live stats for all players in a gameweek.
+
+    Returns:
+        dict: {element_id: {'points': int, 'minutes': int, 'has_played': bool}}
+    """
+    try:
+        url = f"https://fantasy.premierleague.com/api/event/{gw}/live/"
+        resp = requests.get(url, timeout=30)
+        data = resp.json()
+        result = {}
+        for elem in data.get("elements", []):
+            stats = elem.get("stats", {})
+            minutes = stats.get("minutes", 0)
+            result[elem["id"]] = {
+                'points': stats.get("total_points", 0),
+                'minutes': minutes,
+                'has_played': minutes > 0,
+                'goals': stats.get("goals_scored", 0),
+                'assists': stats.get("assists", 0),
+                'bonus': stats.get("bonus", 0),
+            }
+        return result
+    except Exception:
+        _logger.warning("Failed to fetch live GW %s stats", gw, exc_info=True)
+        return {}
+
+
+@st.cache_data(ttl=300)
+def is_gameweek_live(gw: int) -> bool:
+    """
+    Check if any fixtures in the gameweek have started (players have minutes).
+
+    Returns:
+        bool: True if at least one fixture has kicked off
+    """
+    live_stats = get_live_gameweek_stats(gw)
+    if not live_stats:
+        return False
+    # Check if any player has played minutes
+    return any(stats.get('has_played', False) for stats in live_stats.values())
+
+
 @st.cache_data(ttl=3600)
 def _get_draft_entry_picks_for_gw(entry_id: int, gw: int) -> list:
     """Returns list of element IDs for a Draft entry's picks in a single GW."""
