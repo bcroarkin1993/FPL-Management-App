@@ -8,6 +8,7 @@ import streamlit as st
 from scripts.common.error_helpers import get_logger
 from scripts.fpl.injuries import get_fpl_availability_df
 from scripts.common.utils import get_classic_bootstrap_static
+from scripts.common.player_matching import canonical_normalize
 
 _logger = get_logger("fpl_app.projected_lineups")
 
@@ -128,15 +129,27 @@ def scrape_matchups(url):
 def get_player_data_map():
     """
     Fetches player data from FPL API and creates a lookup map by player name.
+    Uses multiple keys (web_name, full_name, normalized versions) for better matching.
 
     Returns:
     - dict: {player_name: {form, points_per_game, chance_of_playing, status, news, ...}}
     """
     player_map = {}
+    norm_to_data = {}  # Normalized name -> player data (for fuzzy lookup)
 
     try:
         # Get availability data
         avail_df = get_fpl_availability_df()
+        avail_lookup = {}
+        if not avail_df.empty:
+            for _, row in avail_df.iterrows():
+                web_name = row.get('Web_Name', '')
+                if web_name:
+                    avail_lookup[web_name] = {
+                        'play_pct': row.get('PlayPct', 100),
+                        'status_bucket': row.get('StatusBucket', 'Available'),
+                        'news': row.get('News', '')
+                    }
 
         # Get bootstrap data for form and other stats
         bootstrap = get_classic_bootstrap_static()
@@ -148,10 +161,15 @@ def get_player_data_map():
 
         for elem in elements:
             web_name = elem.get('web_name', '')
+            first_name = elem.get('first_name', '')
+            second_name = elem.get('second_name', '')
+            full_name = f"{first_name} {second_name}".strip()
+
             if not web_name:
                 continue
 
-            player_map[web_name] = {
+            # Build player data
+            pdata = {
                 'form': float(elem.get('form', 0) or 0),
                 'points_per_game': float(elem.get('points_per_game', 0) or 0),
                 'total_points': elem.get('total_points', 0),
@@ -163,22 +181,73 @@ def get_player_data_map():
                 'status': elem.get('status', 'a'),
                 'news': elem.get('news', ''),
                 'team': teams.get(elem.get('team'), ''),
+                'play_pct': 100,
+                'status_bucket': 'Available',
             }
 
-        # Merge availability data
-        if not avail_df.empty:
-            for _, row in avail_df.iterrows():
-                web_name = row.get('Web_Name', '')
-                if web_name in player_map:
-                    player_map[web_name]['play_pct'] = row.get('PlayPct', 100)
-                    player_map[web_name]['status_bucket'] = row.get('StatusBucket', 'Available')
-                    if row.get('News'):
-                        player_map[web_name]['news'] = row.get('News', '')
+            # Merge availability data
+            if web_name in avail_lookup:
+                pdata.update(avail_lookup[web_name])
+
+            # Store under multiple keys for better matching
+            player_map[web_name] = pdata
+            if full_name and full_name != web_name:
+                player_map[full_name] = pdata
+            if second_name and second_name != web_name:
+                player_map[second_name] = pdata
+
+            # Store normalized version for fuzzy lookup
+            norm_key = canonical_normalize(full_name)
+            if norm_key:
+                norm_to_data[norm_key] = pdata
+
+        # Store the normalized lookup for use in matching
+        player_map['_norm_lookup'] = norm_to_data
 
     except Exception as e:
         _logger.warning("Failed to fetch player data for lineup enhancement: %s", e)
 
     return player_map
+
+
+def lookup_player_data(player_name, player_data_map):
+    """
+    Look up player data with fallback to normalized name matching.
+    Handles cases where Rotowire uses shortened names (e.g., 'Bruno Fernandes')
+    but FPL uses full names (e.g., 'Bruno Borges Fernandes').
+    """
+    # Direct lookup
+    if player_name in player_data_map:
+        return player_data_map[player_name]
+
+    # Try normalized lookup (exact match)
+    norm_lookup = player_data_map.get('_norm_lookup', {})
+    norm_name = canonical_normalize(player_name)
+    if norm_name in norm_lookup:
+        return norm_lookup[norm_name]
+
+    # Try partial normalized match: find names that start and end with our words
+    # e.g., "bruno fernandes" should match "bruno borges fernandes"
+    if norm_name and len(norm_name.split()) >= 2:
+        norm_parts = norm_name.split()
+        first_word = norm_parts[0]
+        last_word = norm_parts[-1]
+
+        for key, value in norm_lookup.items():
+            key_parts = key.split()
+            if len(key_parts) >= 2:
+                # Match if first and last words align
+                if key_parts[0] == first_word and key_parts[-1] == last_word:
+                    return value
+
+    # Try partial match on last name only (for single-name lookups)
+    parts = player_name.split()
+    if len(parts) > 1:
+        last_name = parts[-1]
+        if last_name in player_data_map:
+            return player_data_map[last_name]
+
+    return {}
 
 
 def get_availability_color(status_bucket, play_pct=None):
@@ -282,7 +351,7 @@ def plot_soccer_field(player_df, team_name, player_data_map=None):
                     x += 2.0
 
             # Get player data for enhanced display
-            pdata = player_data_map.get(player_name, {})
+            pdata = lookup_player_data(player_name, player_data_map)
             form = pdata.get('form', 0)
             status_bucket = pdata.get('status_bucket', 'Available')
             play_pct = pdata.get('play_pct', 100)
@@ -367,7 +436,7 @@ def render_player_cards_html(player_df, player_data_map):
     for _, row in player_df.iterrows():
         player_name = row['Player']
         position = row['Position']
-        pdata = player_data_map.get(player_name, {})
+        pdata = lookup_player_data(player_name, player_data_map)
 
         form = pdata.get('form', 0)
         status_bucket = pdata.get('status_bucket', 'Available')
@@ -379,7 +448,7 @@ def render_player_cards_html(player_df, player_data_map):
         # Colors
         status_colors = {'Out': '#e74c3c', 'Doubtful': '#e67e22', 'Questionable': '#f1c40f', 'Likely': '#2ecc71', 'Available': '#27ae60'}
         status_color = status_colors.get(status_bucket, '#27ae60')
-        form_color = get_form_color(form) if form > 0 else '#666'
+        form_color = get_form_color(form) if form > 0 else '#888'
 
         # Status badge
         status_badge = ''
@@ -390,10 +459,16 @@ def render_player_cards_html(player_df, player_data_map):
         news_line = ''
         if news:
             news_short = (news[:50] + '...') if len(news) > 50 else news
-            news_line = f'<div style="color:#888;font-size:0.8em;margin-top:2px;font-style:italic;">{news_short}</div>'
+            news_line = f'<div style="color:#aaa;font-size:0.8em;margin-top:2px;font-style:italic;">{news_short}</div>'
 
-        # Build card
-        card = f'<div style="display:flex;align-items:center;padding:8px 10px;margin-bottom:5px;background:rgba(255,255,255,0.05);border-radius:6px;border-left:3px solid {form_color};"><div style="min-width:32px;text-align:center;background:#333;padding:3px 6px;border-radius:4px;margin-right:8px;"><span style="color:#fff;font-weight:bold;font-size:0.8em;">{position}</span></div><div style="flex:1;"><div style="color:#e0e0e0;font-weight:bold;font-size:0.95em;">{player_name}{status_badge}</div><div style="display:flex;gap:10px;margin-top:2px;"><span style="color:{form_color};font-size:0.8em;">Form: {form:.1f}</span><span style="color:#4ecca3;font-size:0.8em;">Pts: {total_points}</span><span style="color:#888;font-size:0.8em;">G:{goals} A:{assists}</span></div>{news_line}</div></div>'
+        # Stats display - show N/A if no data found
+        if pdata:
+            stats_html = f'<span style="color:{form_color};font-size:0.85em;">Form: {form:.1f}</span><span style="color:#4ecca3;font-size:0.85em;margin-left:12px;">Pts: {total_points}</span><span style="color:#bbb;font-size:0.85em;margin-left:12px;">G:{goals} A:{assists}</span>'
+        else:
+            stats_html = '<span style="color:#888;font-size:0.85em;">Stats unavailable</span>'
+
+        # Build card with better contrast colors
+        card = f'<div style="display:flex;align-items:center;padding:10px 12px;margin-bottom:6px;background:rgba(0,0,0,0.3);border-radius:6px;border-left:4px solid {form_color};"><div style="min-width:36px;text-align:center;background:#444;padding:4px 8px;border-radius:4px;margin-right:10px;"><span style="color:#fff;font-weight:bold;font-size:0.85em;">{position}</span></div><div style="flex:1;"><div style="color:#fff;font-weight:bold;font-size:1em;">{player_name}{status_badge}</div><div style="margin-top:4px;">{stats_html}</div>{news_line}</div></div>'
         cards.append(card)
 
     return ''.join(cards)
