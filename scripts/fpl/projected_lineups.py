@@ -219,8 +219,11 @@ def lookup_player_data(player_name, player_data_map):
     Look up player data with fallback to normalized name matching.
     Handles cases where Rotowire uses:
     - Shortened names: 'Bruno Fernandes' -> 'Bruno Borges Fernandes'
-    - Abbreviated names: 'R. Sanchez' -> 'Robert Sanchez'
+    - Abbreviated names: 'R. Sanchez' -> 'Robert Sanchez', 'J. Palhinha' -> 'João Palhinha'
+    - Single names: 'Alisson' -> 'Alisson Becker'
     """
+    import re
+
     # Direct lookup
     if player_name in player_data_map:
         return player_data_map[player_name]
@@ -231,28 +234,28 @@ def lookup_player_data(player_name, player_data_map):
     if norm_name in norm_lookup:
         return norm_lookup[norm_name]
 
-    # Handle abbreviated first names like "R. Sanchez" or "H. Maguire"
-    # Pattern: single letter followed by period and space, then last name
-    import re
-    abbrev_match = re.match(r'^([A-Z])\.\s+(.+)$', player_name)
+    # Handle abbreviated first names like "R. Sanchez", "J. Palhinha", "J.Palhinha"
+    # Patterns: "X. LastName" or "X.LastName"
+    abbrev_match = re.match(r'^([A-Z])\.[\s]?(.+)$', player_name)
     if abbrev_match:
         first_initial = abbrev_match.group(1).lower()
         last_name = abbrev_match.group(2)
         norm_last = canonical_normalize(last_name)
 
-        # Search for players whose first name starts with the initial and last name matches
+        # Search for players whose first name starts with the initial and name contains last name
         for key, value in norm_lookup.items():
             key_parts = key.split()
             if len(key_parts) >= 2:
-                if key_parts[0].startswith(first_initial) and key_parts[-1] == norm_last:
+                # Match if first name starts with initial and last name appears anywhere in key
+                if key_parts[0].startswith(first_initial) and norm_last in key:
                     return value
 
         # Also try direct last name match in player_map
         if last_name in player_data_map:
             return player_data_map[last_name]
 
-    # Try partial normalized match: find names that start and end with our words
-    # e.g., "bruno fernandes" should match "bruno borges fernandes"
+    # Try partial normalized match for multi-word names
+    # e.g., "raul jimenez" should match "raul jimenez rodriguez"
     if norm_name and len(norm_name.split()) >= 2:
         norm_parts = norm_name.split()
         first_word = norm_parts[0]
@@ -261,9 +264,16 @@ def lookup_player_data(player_name, player_data_map):
         for key, value in norm_lookup.items():
             key_parts = key.split()
             if len(key_parts) >= 2:
-                # Match if first and last words align
-                if key_parts[0] == first_word and key_parts[-1] == last_word:
+                # Match if first word matches AND last word appears anywhere in key
+                if key_parts[0] == first_word and last_word in key_parts:
                     return value
+
+    # Single word name matching (e.g., "Alisson" -> "alisson becker")
+    if norm_name and len(norm_name.split()) == 1:
+        for key, value in norm_lookup.items():
+            key_parts = key.split()
+            if len(key_parts) >= 1 and key_parts[0] == norm_name:
+                return value
 
     # Try partial match on last name only (for single-name lookups like "Casemiro")
     parts = player_name.split()
