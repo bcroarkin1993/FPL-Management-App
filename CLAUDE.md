@@ -152,7 +152,6 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Improve H2H Visuals | Not started | Better styling for H2H history sections (match history cards, icons, etc.) |
 | Player Trade Analyzer | Not started | Evaluate potential trades between teams (Draft mode) |
 | Live Score Integration | Not started | Real-time score tracking during gameweeks |
-| Enhanced Lineup Visualizations | Not started | Add player form, injury status to lineup views |
 | Historical Data Analysis | Not started | Past season trends and performance analysis |
 | Split utils.py | In progress | Created `player_matching.py`; more modules could be extracted |
 | Add basic tests | Not started | No test infrastructure currently |
@@ -162,6 +161,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Notes |
 |------|-------|
+| Enhanced Lineup Visualizations | Fixed duplicate team bug (matchup index tracking); player form and availability status with color coding; redesigned field with pitch markings; player cards with stats, injury news, and status badges |
 | Rotowire scraping robustness | Fallback table selectors (exact → partial → any); row validation before indexing; multiple regex patterns for URL discovery; proper logging throughout; replaced bare except clauses |
 | Performance optimizations | Added `@st.cache_data` to 9 uncached API functions; startup preload with `@st.cache_resource`; refactored Draft home to eliminate 4 redundant `/league/details` calls; 50-60% faster page loads after initial startup |
 | Season Highlights for Team Analysis | Best XI (optimal formation from top scorers), Team MVP (with starts/goals/assists/captain stats), Best Clubs (top 3 contributing EPL clubs); shared `team_analysis_helpers.py` module for Draft and Classic |

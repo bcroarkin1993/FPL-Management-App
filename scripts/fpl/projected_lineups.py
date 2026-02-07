@@ -6,20 +6,23 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 from scripts.common.error_helpers import get_logger
+from scripts.fpl.injuries import get_fpl_availability_df
+from scripts.common.utils import get_classic_bootstrap_static
 
 _logger = get_logger("fpl_app.projected_lineups")
 
-def extract_players(section, team_type, team_name):
+def extract_players(section, team_type, team_name, matchup_index):
     """
     Extracts valid players from the given section, excluding those listed in the Injuries section.
 
     Parameters:
-    - section (BeautifulSoup): The section containing the team’s lineup.
+    - section (BeautifulSoup): The section containing the team's lineup.
     - team_type (str): 'home' or 'visit' to determine the team type.
     - team_name (str): The name of the team.
+    - matchup_index (int): Index of the matchup to track which game this lineup belongs to.
 
     Returns:
-    - list: A list of tuples containing (Team, Position, Player) for valid players.
+    - list: A list of tuples containing (Team, Position, Player, MatchupIndex) for valid players.
     """
     player_list = []
     injuries_section_reached = False  # Track if the Injuries section has been reached
@@ -38,7 +41,7 @@ def extract_players(section, team_type, team_name):
                 try:
                     position = item.find('div', class_='lineup__pos').text.strip()
                     player_name = item.find('a').text.strip()
-                    player_list.append((team_name, position, player_name))
+                    player_list.append((team_name, position, player_name, matchup_index))
                 except AttributeError:
                     continue  # Skip if position or player name is missing
 
@@ -53,46 +56,51 @@ def scrape_rotowire_lineups(url):
     - url (str): The URL of the Rotowire lineups page.
 
     Returns:
-    - DataFrame containing the team names, player names, and positions.
+    - DataFrame containing the team names, player names, positions, and matchup index.
     """
     # Send a request to the Rotowire lineups page
     try:
         page = requests.get(url, timeout=30)
     except Exception as e:
         _logger.warning("Failed to fetch Rotowire lineups from %s: %s", url, e)
-        return pd.DataFrame(columns=['Team', 'Position', 'Player'])
+        return pd.DataFrame(columns=['Team', 'Position', 'Player', 'MatchupIndex'])
     soup = BeautifulSoup(page.content, 'html.parser')
 
     # Initialize an empty list to store match data
-    matchups = []
+    all_players = []
 
     # Find all lineup sections (home and away matchups)
     lineup_sections = soup.find_all('div', class_='lineup__main')
 
     # Iterate through each section to extract team and player data
-    for section in lineup_sections:
+    for matchup_index, section in enumerate(lineup_sections):
         try:
             # Extract home and away team names
             home_team = section.find_previous('div', class_='lineup__mteam is-home').text.strip()
             away_team = section.find_previous('div', class_='lineup__mteam is-visit').text.strip()
 
             # Extract players while excluding those listed in the Injuries section
-            home_players = extract_players(section, 'home', home_team)
-            away_players = extract_players(section, 'visit', away_team)
+            home_players = extract_players(section, 'home', home_team, matchup_index)
+            away_players = extract_players(section, 'visit', away_team, matchup_index)
 
-            # Add players to the matchups list
-            matchups.extend(home_players + away_players)
+            # Add players to the list
+            all_players.extend(home_players + away_players)
 
         except AttributeError as e:
             _logger.warning("Error parsing lineup section (HTML structure may have changed): %s", e)
 
     # Convert the data to a pandas DataFrame
-    lineups_df = pd.DataFrame(matchups, columns=['Team', 'Position', 'Player'])
+    lineups_df = pd.DataFrame(all_players, columns=['Team', 'Position', 'Player', 'MatchupIndex'])
 
     return lineups_df
 
 def scrape_matchups(url):
-    """Scrapes the matchups from the Rotowire page."""
+    """
+    Scrapes the matchups from the Rotowire page.
+
+    Returns:
+    - List of tuples: (home_team, away_team, matchup_index)
+    """
     try:
         page = requests.get(url, timeout=30)
     except Exception as e:
@@ -102,11 +110,11 @@ def scrape_matchups(url):
     matchups_section = soup.find_all('div', class_='lineup__matchup')
 
     matchups = []
-    for matchup in matchups_section:
+    for idx, matchup in enumerate(matchups_section):
         try:
             home_team = matchup.find('div', class_='lineup__mteam is-home').text.strip()
             away_team = matchup.find('div', class_='lineup__mteam is-visit').text.strip()
-            matchups.append((home_team, away_team))
+            matchups.append((home_team, away_team, idx))
         except AttributeError as e:
             _logger.warning("Error parsing matchup (HTML structure may have changed): %s", e)
             continue
@@ -116,26 +124,113 @@ def scrape_matchups(url):
 
     return matchups
 
-def plot_soccer_field(player_df, team_name):
+
+def get_player_data_map():
+    """
+    Fetches player data from FPL API and creates a lookup map by player name.
+
+    Returns:
+    - dict: {player_name: {form, points_per_game, chance_of_playing, status, news, ...}}
+    """
+    player_map = {}
+
+    try:
+        # Get availability data
+        avail_df = get_fpl_availability_df()
+
+        # Get bootstrap data for form and other stats
+        bootstrap = get_classic_bootstrap_static()
+        if not bootstrap:
+            return player_map
+
+        elements = bootstrap.get('elements', [])
+        teams = {t['id']: t['short_name'] for t in bootstrap.get('teams', [])}
+
+        for elem in elements:
+            web_name = elem.get('web_name', '')
+            if not web_name:
+                continue
+
+            player_map[web_name] = {
+                'form': float(elem.get('form', 0) or 0),
+                'points_per_game': float(elem.get('points_per_game', 0) or 0),
+                'total_points': elem.get('total_points', 0),
+                'minutes': elem.get('minutes', 0),
+                'goals_scored': elem.get('goals_scored', 0),
+                'assists': elem.get('assists', 0),
+                'clean_sheets': elem.get('clean_sheets', 0),
+                'chance_of_playing': elem.get('chance_of_playing_this_round'),
+                'status': elem.get('status', 'a'),
+                'news': elem.get('news', ''),
+                'team': teams.get(elem.get('team'), ''),
+            }
+
+        # Merge availability data
+        if not avail_df.empty:
+            for _, row in avail_df.iterrows():
+                web_name = row.get('Web_Name', '')
+                if web_name in player_map:
+                    player_map[web_name]['play_pct'] = row.get('PlayPct', 100)
+                    player_map[web_name]['status_bucket'] = row.get('StatusBucket', 'Available')
+                    if row.get('News'):
+                        player_map[web_name]['news'] = row.get('News', '')
+
+    except Exception as e:
+        _logger.warning("Failed to fetch player data for lineup enhancement: %s", e)
+
+    return player_map
+
+
+def get_availability_color(status_bucket, play_pct=None):
+    """Returns color based on player availability status."""
+    if status_bucket == 'Out':
+        return '#e74c3c'  # Red
+    elif status_bucket == 'Doubtful':
+        return '#e67e22'  # Orange
+    elif status_bucket == 'Questionable':
+        return '#f1c40f'  # Yellow
+    elif status_bucket == 'Likely':
+        return '#2ecc71'  # Light green
+    else:  # Available
+        return '#27ae60'  # Green
+
+
+def get_form_color(form):
+    """Returns color based on player form rating."""
+    if form >= 6:
+        return '#27ae60'  # Green - excellent
+    elif form >= 4:
+        return '#2ecc71'  # Light green - good
+    elif form >= 2:
+        return '#f1c40f'  # Yellow - average
+    else:
+        return '#e74c3c'  # Red - poor
+
+def plot_soccer_field(player_df, team_name, player_data_map=None):
     """
     Plots players on a soccer field based on their positions for a specific team.
+    Enhanced with player form and availability indicators.
 
     Parameters:
     - player_df (pd.DataFrame): A DataFrame containing 'Position' and 'Player' columns.
     - team_name (str): The name of the team, displayed as the title above the field.
+    - player_data_map (dict): Optional player data for form/availability enhancement.
     """
+    if player_data_map is None:
+        player_data_map = {}
+
     # Define positions with (x, y) coordinates
     position_mapping = {
-        'GK': (5, 0),  # Goalkeeper
-        'DL': (1.5, 1.5), 'DC': (5, 1), 'DR': (8.5, 1.5),  # Defenders
-        'DML': (2, 2), 'DMC': (5, 2), 'DMR': (8, 2),  # Defensive Midfielders
-        'ML': (1.5, 2.75), 'MC': (5, 2.5), 'MR': (8.5, 2.75),  # Midfielders
-        'AML': (1.4, 3.25), 'AMC': (5, 3.25), 'AMR': (8.6, 3.25),  # Attacking Midfielders
-        'FL': (2, 4.25), 'FWL': (2, 4.25), 'FC': (5, 4.5), 'FW': (5, 4.25), 'FWR': (8, 4.25), 'FR': (8, 4.25)  # Forwards
+        'GK': (5, 0.3),  # Goalkeeper
+        'DL': (1.5, 1.5), 'DC': (5, 1.2), 'DR': (8.5, 1.5),  # Defenders
+        'DML': (2, 2.1), 'DMC': (5, 2.1), 'DMR': (8, 2.1),  # Defensive Midfielders
+        'ML': (1.5, 2.9), 'MC': (5, 2.7), 'MR': (8.5, 2.9),  # Midfielders
+        'AML': (1.4, 3.5), 'AMC': (5, 3.5), 'AMR': (8.6, 3.5),  # Attacking Midfielders
+        'FL': (2, 4.4), 'FWL': (2, 4.4), 'FC': (5, 4.6), 'FW': (5, 4.4), 'FWR': (8, 4.4), 'FR': (8, 4.4)  # Forwards
     }
 
-    # Get the team's primary and secondary colors or use default values (black and white)
-    colors = config.TEAM_COLORS.get(team_name, {"primary": "#000000", "secondary": "#FFFFFF"})
+    # Get the team's primary and secondary colors or use default values
+    colors = config.TEAM_COLORS.get(team_name, {"primary": "#1a1a2e", "secondary": "#FFFFFF"})
     primary_color = colors["primary"]
     secondary_color = colors["secondary"]
 
@@ -147,85 +242,245 @@ def plot_soccer_field(player_df, team_name):
     # Create a Plotly figure
     fig = go.Figure()
 
-    # Draw field boundaries
-    fig.add_shape(type="rect", x0=0, y0=-0.5, x1=10, y1=6.5, line=dict(color="green", width=2))
+    # Draw enhanced field with better aesthetics
+    # Main field
+    fig.add_shape(type="rect", x0=0, y0=-0.3, x1=10, y1=5.5,
+                  fillcolor="#2d5a27", line=dict(color="#1e3d1a", width=3))
 
-    # Add a horizontal white line at the top (y = 5)
-    fig.add_shape(type="line", x0=0, y0=5, x1=10, y1=5, line=dict(color="white", dash="dash"))
+    # Center line
+    fig.add_shape(type="line", x0=0, y0=2.75, x1=10, y1=2.75,
+                  line=dict(color="rgba(255,255,255,0.4)", width=2))
+
+    # Center circle
+    fig.add_shape(type="circle", x0=4, y0=2, x1=6, y1=3.5,
+                  line=dict(color="rgba(255,255,255,0.4)", width=2))
+
+    # Penalty areas
+    fig.add_shape(type="rect", x0=2.5, y0=-0.3, x1=7.5, y1=0.8,
+                  line=dict(color="rgba(255,255,255,0.4)", width=2))
+    fig.add_shape(type="rect", x0=2.5, y0=4.4, x1=7.5, y1=5.5,
+                  line=dict(color="rgba(255,255,255,0.4)", width=2))
+
+    # Goal areas
+    fig.add_shape(type="rect", x0=3.5, y0=-0.3, x1=6.5, y1=0.2,
+                  line=dict(color="rgba(255,255,255,0.4)", width=2))
+    fig.add_shape(type="rect", x0=3.5, y0=5, x1=6.5, y1=5.5,
+                  line=dict(color="rgba(255,255,255,0.4)", width=2))
 
     # Add players to the field
     for position, players in grouped_players.items():
         for i, player_name in enumerate(players):
-            x, y = position_mapping.get(position, (5, 3))  # Default to MC if not found
+            x, y = position_mapping.get(position, (5, 2.75))  # Default to center if not found
 
-            # Adjust for two players in the same central position
+            # Adjust for multiple players in the same central position
             if len(players) == 2 and position in ['DC', 'MC', 'FC', 'FW', 'DMC', 'AMC']:
-                x += -1.25 if i == 0 else 1.25  # Shift left and right
-
-            # Adjust for three players in the same central position
+                x += -1.5 if i == 0 else 1.5
             elif len(players) == 3 and position in ['DC', 'MC', 'FC', 'DMC', 'AMC']:
                 if i == 0:
-                    x -= 1.75  # Shift left
+                    x -= 2.0
                 elif i == 2:
-                    x += 1.75  # Shift right
+                    x += 2.0
 
-            # Add player marker with team-specific color and hover info
+            # Get player data for enhanced display
+            pdata = player_data_map.get(player_name, {})
+            form = pdata.get('form', 0)
+            status_bucket = pdata.get('status_bucket', 'Available')
+            play_pct = pdata.get('play_pct', 100)
+            news = pdata.get('news', '')
+            total_points = pdata.get('total_points', 0)
+            goals = pdata.get('goals_scored', 0)
+            assists = pdata.get('assists', 0)
+
+            # Determine marker border color based on availability
+            border_color = get_availability_color(status_bucket, play_pct)
+
+            # Build hover text with player details
+            hover_lines = [
+                f"<b>{player_name}</b>",
+                f"Position: {position}",
+                f"Form: {form:.1f}" if form else "Form: N/A",
+                f"Total Points: {total_points}",
+            ]
+            if goals or assists:
+                hover_lines.append(f"G: {goals} | A: {assists}")
+            if status_bucket != 'Available':
+                hover_lines.append(f"Status: {status_bucket} ({play_pct:.0f}%)" if play_pct else f"Status: {status_bucket}")
+            if news:
+                # Truncate long news
+                news_short = news[:50] + "..." if len(news) > 50 else news
+                hover_lines.append(f"News: {news_short}")
+
+            hover_text = "<br>".join(hover_lines)
+
+            # Add player marker with enhanced styling
             fig.add_trace(go.Scatter(
-                x=[x], y=[y], mode='markers+text',
-                marker=dict(size=15, color=primary_color),
+                x=[x], y=[y],
+                mode='markers+text',
+                marker=dict(
+                    size=28,
+                    color=primary_color,
+                    line=dict(color=border_color, width=3),
+                    symbol='circle'
+                ),
                 text=player_name,
                 textposition="top center",
-                textfont=dict(color=secondary_color, size=16),
-                hovertemplate=f"Name: {player_name}<br>Position: {position}<br>Coordinates: ({x}, {y})<extra></extra>"
+                textfont=dict(color="#FFFFFF", size=11, family="Arial Black"),
+                hovertemplate=hover_text + "<extra></extra>",
+                hoverlabel=dict(
+                    bgcolor="#1a1a2e",
+                    font_size=12,
+                    font_family="Arial"
+                )
             ))
 
+            # Add form indicator below player name (small colored dot)
+            if form > 0:
+                form_color = get_form_color(form)
+                fig.add_trace(go.Scatter(
+                    x=[x], y=[y - 0.35],
+                    mode='markers+text',
+                    marker=dict(size=8, color=form_color, symbol='circle'),
+                    text=f"{form:.1f}",
+                    textposition="bottom center",
+                    textfont=dict(color="#FFFFFF", size=9),
+                    hoverinfo='skip',
+                    showlegend=False
+                ))
+
     fig.update_layout(
-        width=500, height=600,
-        xaxis=dict(range=[0, 10], visible=False),
-        yaxis=dict(range=[-0.2, 5.2], visible=False),  # Adjust y-axis range to zoom in
-        plot_bgcolor="green",
-        showlegend = False # Remove the legend
+        width=500, height=550,
+        xaxis=dict(range=[-0.5, 10.5], visible=False, fixedrange=True),
+        yaxis=dict(range=[-0.8, 6], visible=False, fixedrange=True),
+        plot_bgcolor="#2d5a27",
+        paper_bgcolor="#1a1a2e",
+        showlegend=False,
+        margin=dict(l=10, r=10, t=10, b=10),
+        dragmode=False,
     )
 
-    # Return the plot
     return fig
 
+def render_player_cards_html(player_df, player_data_map):
+    """Renders all player cards as a single HTML block."""
+    cards = []
+
+    for _, row in player_df.iterrows():
+        player_name = row['Player']
+        position = row['Position']
+        pdata = player_data_map.get(player_name, {})
+
+        form = pdata.get('form', 0)
+        status_bucket = pdata.get('status_bucket', 'Available')
+        total_points = pdata.get('total_points', 0)
+        goals = pdata.get('goals_scored', 0)
+        assists = pdata.get('assists', 0)
+        news = pdata.get('news', '')
+
+        # Colors
+        status_colors = {'Out': '#e74c3c', 'Doubtful': '#e67e22', 'Questionable': '#f1c40f', 'Likely': '#2ecc71', 'Available': '#27ae60'}
+        status_color = status_colors.get(status_bucket, '#27ae60')
+        form_color = get_form_color(form) if form > 0 else '#666'
+
+        # Status badge
+        status_badge = ''
+        if status_bucket != 'Available':
+            status_badge = f'<span style="background:{status_color};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.75em;margin-left:8px;">{status_bucket}</span>'
+
+        # News line
+        news_line = ''
+        if news:
+            news_short = (news[:50] + '...') if len(news) > 50 else news
+            news_line = f'<div style="color:#888;font-size:0.8em;margin-top:2px;font-style:italic;">{news_short}</div>'
+
+        # Build card
+        card = f'<div style="display:flex;align-items:center;padding:8px 10px;margin-bottom:5px;background:rgba(255,255,255,0.05);border-radius:6px;border-left:3px solid {form_color};"><div style="min-width:32px;text-align:center;background:#333;padding:3px 6px;border-radius:4px;margin-right:8px;"><span style="color:#fff;font-weight:bold;font-size:0.8em;">{position}</span></div><div style="flex:1;"><div style="color:#e0e0e0;font-weight:bold;font-size:0.95em;">{player_name}{status_badge}</div><div style="display:flex;gap:10px;margin-top:2px;"><span style="color:{form_color};font-size:0.8em;">Form: {form:.1f}</span><span style="color:#4ecca3;font-size:0.8em;">Pts: {total_points}</span><span style="color:#888;font-size:0.8em;">G:{goals} A:{assists}</span></div>{news_line}</div></div>'
+        cards.append(card)
+
+    return ''.join(cards)
+
+
 def show_projected_lineups():
-    st.title("FPL Matchups and Projected Lineups")
+    st.title("Projected Lineups")
+    st.write("View projected starting lineups with player form and availability status.")
 
     # Scrape the EPL matchups from Rotowire
     matchups = scrape_matchups(config.ROTOWIRE_LINEUPS_URL)
 
+    if not matchups:
+        st.warning("No matchups available. Rotowire may not have published lineups yet.")
+        return
+
     # Create a drop-down to choose the matchup to view
     selected_matchup = st.selectbox(
-        "Select a Matchup", matchups, format_func=lambda x: f"{x[0]} vs {x[1]}"
+        "Select a Matchup",
+        matchups,
+        format_func=lambda x: f"{x[0]} vs {x[1]}"
     )
 
     if selected_matchup:
-        home_team, away_team = selected_matchup
+        home_team, away_team, matchup_index = selected_matchup
+
+        # Fetch lineup data
         lineups_df = scrape_rotowire_lineups(config.ROTOWIRE_LINEUPS_URL)
 
-        home_team_df = lineups_df[lineups_df['Team'] == home_team]
-        away_team_df = lineups_df[lineups_df['Team'] == away_team]
+        # Filter by BOTH team name AND matchup index to fix duplicate team bug
+        home_team_df = lineups_df[
+            (lineups_df['Team'] == home_team) &
+            (lineups_df['MatchupIndex'] == matchup_index)
+        ]
+        away_team_df = lineups_df[
+            (lineups_df['Team'] == away_team) &
+            (lineups_df['MatchupIndex'] == matchup_index)
+        ]
+
+        # Fetch player data for enhancements
+        with st.spinner("Loading player data..."):
+            player_data_map = get_player_data_map()
+
+        # Add legend for availability colors
+        st.markdown("""
+        <div style="display:flex;gap:15px;margin-bottom:15px;flex-wrap:wrap;">
+            <span style="font-size:0.85em;color:#888;">Availability:</span>
+            <span style="font-size:0.85em;"><span style="color:#27ae60;">●</span> Available</span>
+            <span style="font-size:0.85em;"><span style="color:#2ecc71;">●</span> Likely</span>
+            <span style="font-size:0.85em;"><span style="color:#f1c40f;">●</span> Questionable</span>
+            <span style="font-size:0.85em;"><span style="color:#e67e22;">●</span> Doubtful</span>
+            <span style="font-size:0.85em;"><span style="color:#e74c3c;">●</span> Out</span>
+        </div>
+        """, unsafe_allow_html=True)
 
         col1, col2 = st.columns(2)
 
         with col1:
-            st.subheader(f"{home_team} Lineup")
-            st.plotly_chart(plot_soccer_field(home_team_df, home_team), use_container_width=True)
-            st.dataframe(
-                home_team_df[['Position', 'Player']].set_index('Player'),
+            st.subheader(f"{home_team}")
+            st.plotly_chart(
+                plot_soccer_field(home_team_df, home_team, player_data_map),
                 use_container_width=True,
-                height=422  # Adjust the height to ensure the entire table shows
+                config={'displayModeBar': False}
             )
 
+            # Enhanced player list
+            st.markdown("##### Squad Details")
+            if not home_team_df.empty:
+                cards_html = render_player_cards_html(home_team_df, player_data_map)
+                st.markdown(cards_html, unsafe_allow_html=True)
+            else:
+                st.info("No lineup data available for this team.")
+
         with col2:
-            st.subheader(f"{away_team} Lineup")
-            st.plotly_chart(plot_soccer_field(away_team_df, away_team), use_container_width=True)
-            st.dataframe(
-                away_team_df[['Position', 'Player']].set_index('Player'),
+            st.subheader(f"{away_team}")
+            st.plotly_chart(
+                plot_soccer_field(away_team_df, away_team, player_data_map),
                 use_container_width=True,
-                height=422  # Adjust the height to ensure the entire table shows
+                config={'displayModeBar': False}
             )
+
+            # Enhanced player list
+            st.markdown("##### Squad Details")
+            if not away_team_df.empty:
+                cards_html = render_player_cards_html(away_team_df, player_data_map)
+                st.markdown(cards_html, unsafe_allow_html=True)
+            else:
+                st.info("No lineup data available for this team.")
 
 
