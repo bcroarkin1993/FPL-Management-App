@@ -169,11 +169,15 @@ def get_player_data_map():
                 continue
 
             # Build player data
+            starts = elem.get('starts', 0) or 0
+            minutes = elem.get('minutes', 0) or 0
+
             pdata = {
                 'form': float(elem.get('form', 0) or 0),
                 'points_per_game': float(elem.get('points_per_game', 0) or 0),
                 'total_points': elem.get('total_points', 0),
-                'minutes': elem.get('minutes', 0),
+                'minutes': minutes,
+                'starts': starts,
                 'goals_scored': elem.get('goals_scored', 0),
                 'assists': elem.get('assists', 0),
                 'clean_sheets': elem.get('clean_sheets', 0),
@@ -376,61 +380,89 @@ def plot_soccer_field(player_df, team_name, player_data_map=None):
             form = pdata.get('form', 0)
             status_bucket = pdata.get('status_bucket', 'Available')
             play_pct = pdata.get('play_pct', 100)
+            chance_of_playing = pdata.get('chance_of_playing')  # Can be None
             news = pdata.get('news', '')
             total_points = pdata.get('total_points', 0)
             goals = pdata.get('goals_scored', 0)
             assists = pdata.get('assists', 0)
+            starts = pdata.get('starts', 0)
+            minutes = pdata.get('minutes', 0)
 
-            # Determine marker border color based on availability
-            border_color = get_availability_color(status_bucket, play_pct)
+            # Calculate start likelihood (0-100%)
+            # Base: they're in Rotowire lineup so start at 80%
+            # Adjust based on injury status and historical starts
+            if chance_of_playing is not None:
+                # FPL provides explicit chance
+                start_likelihood = chance_of_playing
+            elif status_bucket == 'Out':
+                start_likelihood = 0
+            elif status_bucket == 'Doubtful':
+                start_likelihood = 25
+            elif status_bucket == 'Questionable':
+                start_likelihood = 50
+            elif status_bucket == 'Likely':
+                start_likelihood = 75
+            else:
+                # Available - use historical start rate if available
+                # Assume ~22 gameweeks so far in the season
+                if starts > 0:
+                    historical_start_rate = min(100, (starts / 22) * 100)
+                    start_likelihood = max(80, historical_start_rate)  # At least 80% if in lineup
+                else:
+                    start_likelihood = 80  # Default for players in Rotowire lineup
+
+            # Determine marker appearance based on start likelihood
+            # Use opacity to show likelihood (more opaque = more likely to start)
+            marker_opacity = max(0.4, start_likelihood / 100)
+
+            # Border color based on likelihood
+            if start_likelihood >= 90:
+                border_color = '#27ae60'  # Green - very likely
+            elif start_likelihood >= 70:
+                border_color = '#2ecc71'  # Light green - likely
+            elif start_likelihood >= 50:
+                border_color = '#f1c40f'  # Yellow - questionable
+            elif start_likelihood >= 25:
+                border_color = '#e67e22'  # Orange - doubtful
+            else:
+                border_color = '#e74c3c'  # Red - unlikely
 
             # Build hover text with player details
             hover_lines = [
                 f"<b>{player_name}</b>",
                 f"Position: {position}",
+                f"Start Likelihood: {start_likelihood:.0f}%",
                 f"Form: {form:.1f}" if form else "Form: N/A",
                 f"Total Points: {total_points}",
             ]
             if goals or assists:
                 hover_lines.append(f"G: {goals} | A: {assists}")
+            if starts > 0:
+                hover_lines.append(f"Starts: {starts} | Mins: {minutes}")
             if status_bucket != 'Available':
-                hover_lines.append(f"Status: {status_bucket} ({play_pct:.0f}%)" if play_pct else f"Status: {status_bucket}")
+                hover_lines.append(f"Status: {status_bucket}")
             if news:
-                # Truncate long news
                 news_short = news[:50] + "..." if len(news) > 50 else news
                 hover_lines.append(f"News: {news_short}")
 
             hover_text = "<br>".join(hover_lines)
 
-            # Add player marker
+            # Add player marker with start likelihood indicator
             fig.add_trace(go.Scatter(
                 x=[x], y=[y],
                 mode='markers+text',
                 marker=dict(
-                    size=20,
+                    size=22,
                     color=primary_color,
-                    line=dict(color=border_color, width=2)
+                    opacity=marker_opacity,
+                    line=dict(color=border_color, width=3)
                 ),
                 text=player_name,
                 textposition="top center",
-                textfont=dict(color="#FFFFFF", size=12),
+                textfont=dict(color="#FFFFFF", size=14),
                 hovertemplate=hover_text + "<extra></extra>",
                 showlegend=False
             ))
-
-            # Add form indicator below player name (small colored dot)
-            if form > 0:
-                form_color = get_form_color(form)
-                fig.add_trace(go.Scatter(
-                    x=[x], y=[y - 0.35],
-                    mode='markers+text',
-                    marker=dict(size=8, color=form_color, symbol='circle'),
-                    text=f"{form:.1f}",
-                    textposition="bottom center",
-                    textfont=dict(color="#FFFFFF", size=9),
-                    hoverinfo='skip',
-                    showlegend=False
-                ))
 
     fig.update_layout(
         width=500, height=600,
@@ -527,15 +559,15 @@ def show_projected_lineups():
         with st.spinner("Loading player data..."):
             player_data_map = get_player_data_map()
 
-        # Add legend for availability colors
+        # Add legend for start likelihood colors (shown as border color on field)
         st.markdown("""
         <div style="display:flex;gap:15px;margin-bottom:15px;flex-wrap:wrap;">
-            <span style="font-size:0.85em;color:#888;">Availability:</span>
-            <span style="font-size:0.85em;"><span style="color:#27ae60;">●</span> Available</span>
-            <span style="font-size:0.85em;"><span style="color:#2ecc71;">●</span> Likely</span>
-            <span style="font-size:0.85em;"><span style="color:#f1c40f;">●</span> Questionable</span>
-            <span style="font-size:0.85em;"><span style="color:#e67e22;">●</span> Doubtful</span>
-            <span style="font-size:0.85em;"><span style="color:#e74c3c;">●</span> Out</span>
+            <span style="font-size:0.85em;color:#888;">Start Likelihood:</span>
+            <span style="font-size:0.85em;"><span style="color:#27ae60;">●</span> 90%+</span>
+            <span style="font-size:0.85em;"><span style="color:#2ecc71;">●</span> 70-89%</span>
+            <span style="font-size:0.85em;"><span style="color:#f1c40f;">●</span> 50-69%</span>
+            <span style="font-size:0.85em;"><span style="color:#e67e22;">●</span> 25-49%</span>
+            <span style="font-size:0.85em;"><span style="color:#e74c3c;">●</span> &lt;25%</span>
         </div>
         """, unsafe_allow_html=True)
 
