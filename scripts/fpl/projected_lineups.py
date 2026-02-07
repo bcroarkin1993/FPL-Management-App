@@ -213,8 +213,9 @@ def get_player_data_map():
 def lookup_player_data(player_name, player_data_map):
     """
     Look up player data with fallback to normalized name matching.
-    Handles cases where Rotowire uses shortened names (e.g., 'Bruno Fernandes')
-    but FPL uses full names (e.g., 'Bruno Borges Fernandes').
+    Handles cases where Rotowire uses:
+    - Shortened names: 'Bruno Fernandes' -> 'Bruno Borges Fernandes'
+    - Abbreviated names: 'R. Sanchez' -> 'Robert Sanchez'
     """
     # Direct lookup
     if player_name in player_data_map:
@@ -225,6 +226,26 @@ def lookup_player_data(player_name, player_data_map):
     norm_name = canonical_normalize(player_name)
     if norm_name in norm_lookup:
         return norm_lookup[norm_name]
+
+    # Handle abbreviated first names like "R. Sanchez" or "H. Maguire"
+    # Pattern: single letter followed by period and space, then last name
+    import re
+    abbrev_match = re.match(r'^([A-Z])\.\s+(.+)$', player_name)
+    if abbrev_match:
+        first_initial = abbrev_match.group(1).lower()
+        last_name = abbrev_match.group(2)
+        norm_last = canonical_normalize(last_name)
+
+        # Search for players whose first name starts with the initial and last name matches
+        for key, value in norm_lookup.items():
+            key_parts = key.split()
+            if len(key_parts) >= 2:
+                if key_parts[0].startswith(first_initial) and key_parts[-1] == norm_last:
+                    return value
+
+        # Also try direct last name match in player_map
+        if last_name in player_data_map:
+            return player_data_map[last_name]
 
     # Try partial normalized match: find names that start and end with our words
     # e.g., "bruno fernandes" should match "bruno borges fernandes"
@@ -240,9 +261,9 @@ def lookup_player_data(player_name, player_data_map):
                 if key_parts[0] == first_word and key_parts[-1] == last_word:
                     return value
 
-    # Try partial match on last name only (for single-name lookups)
+    # Try partial match on last name only (for single-name lookups like "Casemiro")
     parts = player_name.split()
-    if len(parts) > 1:
+    if len(parts) >= 1:
         last_name = parts[-1]
         if last_name in player_data_map:
             return player_data_map[last_name]
@@ -327,30 +348,14 @@ def plot_soccer_field(player_df, team_name, player_data_map=None):
     # Create a Plotly figure
     fig = go.Figure()
 
-    # Draw enhanced field with better aesthetics
-    # Main field
-    fig.add_shape(type="rect", x0=0, y0=-0.3, x1=10, y1=5.5,
-                  fillcolor="#2d5a27", line=dict(color="#1e3d1a", width=3))
+    # Draw simple field lines (original style)
+    # Field boundary
+    fig.add_shape(type="rect", x0=0, y0=-0.3, x1=10, y1=5.2,
+                  line=dict(color="white", width=2))
 
     # Center line
-    fig.add_shape(type="line", x0=0, y0=2.75, x1=10, y1=2.75,
-                  line=dict(color="rgba(255,255,255,0.4)", width=2))
-
-    # Center circle
-    fig.add_shape(type="circle", x0=4, y0=2, x1=6, y1=3.5,
-                  line=dict(color="rgba(255,255,255,0.4)", width=2))
-
-    # Penalty areas
-    fig.add_shape(type="rect", x0=2.5, y0=-0.3, x1=7.5, y1=0.8,
-                  line=dict(color="rgba(255,255,255,0.4)", width=2))
-    fig.add_shape(type="rect", x0=2.5, y0=4.4, x1=7.5, y1=5.5,
-                  line=dict(color="rgba(255,255,255,0.4)", width=2))
-
-    # Goal areas
-    fig.add_shape(type="rect", x0=3.5, y0=-0.3, x1=6.5, y1=0.2,
-                  line=dict(color="rgba(255,255,255,0.4)", width=2))
-    fig.add_shape(type="rect", x0=3.5, y0=5, x1=6.5, y1=5.5,
-                  line=dict(color="rgba(255,255,255,0.4)", width=2))
+    fig.add_shape(type="line", x0=0, y0=2.5, x1=10, y1=2.5,
+                  line=dict(color="white", dash="dash"))
 
     # Add players to the field
     for position, players in grouped_players.items():
@@ -397,25 +402,20 @@ def plot_soccer_field(player_df, team_name, player_data_map=None):
 
             hover_text = "<br>".join(hover_lines)
 
-            # Add player marker with enhanced styling
+            # Add player marker
             fig.add_trace(go.Scatter(
                 x=[x], y=[y],
                 mode='markers+text',
                 marker=dict(
-                    size=28,
+                    size=20,
                     color=primary_color,
-                    line=dict(color=border_color, width=3),
-                    symbol='circle'
+                    line=dict(color=border_color, width=2)
                 ),
                 text=player_name,
                 textposition="top center",
-                textfont=dict(color="#FFFFFF", size=11, family="Arial Black"),
+                textfont=dict(color="#FFFFFF", size=12),
                 hovertemplate=hover_text + "<extra></extra>",
-                hoverlabel=dict(
-                    bgcolor="#1a1a2e",
-                    font_size=12,
-                    font_family="Arial"
-                )
+                showlegend=False
             ))
 
             # Add form indicator below player name (small colored dot)
@@ -433,14 +433,13 @@ def plot_soccer_field(player_df, team_name, player_data_map=None):
                 ))
 
     fig.update_layout(
-        width=500, height=550,
-        xaxis=dict(range=[-0.5, 10.5], visible=False, fixedrange=True),
-        yaxis=dict(range=[-0.8, 6], visible=False, fixedrange=True),
-        plot_bgcolor="#2d5a27",
+        width=500, height=600,
+        xaxis=dict(range=[0, 10], visible=False),
+        yaxis=dict(range=[-0.5, 5.5], visible=False),
+        plot_bgcolor="#228B22",
         paper_bgcolor="#1a1a2e",
         showlegend=False,
-        margin=dict(l=10, r=10, t=10, b=10),
-        dragmode=False,
+        margin=dict(l=5, r=5, t=5, b=5),
     )
 
     return fig
@@ -544,11 +543,8 @@ def show_projected_lineups():
 
         with col1:
             st.subheader(f"{home_team}")
-            st.plotly_chart(
-                plot_soccer_field(home_team_df, home_team, player_data_map),
-                use_container_width=True,
-                config={'displayModeBar': False}
-            )
+            home_fig = plot_soccer_field(home_team_df, home_team, player_data_map)
+            st.plotly_chart(home_fig, use_container_width=True, key=f"home_{matchup_index}")
 
             # Enhanced player list
             st.markdown("##### Squad Details")
@@ -560,11 +556,8 @@ def show_projected_lineups():
 
         with col2:
             st.subheader(f"{away_team}")
-            st.plotly_chart(
-                plot_soccer_field(away_team_df, away_team, player_data_map),
-                use_container_width=True,
-                config={'displayModeBar': False}
-            )
+            away_fig = plot_soccer_field(away_team_df, away_team, player_data_map)
+            st.plotly_chart(away_fig, use_container_width=True, key=f"away_{matchup_index}")
 
             # Enhanced player list
             st.markdown("##### Squad Details")
