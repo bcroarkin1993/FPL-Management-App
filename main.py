@@ -2,6 +2,14 @@
 import streamlit as st
 import config
 
+from scripts.common.utils import (
+    get_fpl_player_mapping,
+    get_league_entries,
+    get_classic_bootstrap_static,
+    get_rotowire_player_projections,
+    get_league_player_ownership,
+)
+
 # --- Draft pages ---
 from scripts.draft.home import show_home_page
 from scripts.draft.fixture_projections import show_fixtures_page
@@ -103,9 +111,46 @@ def render_placeholder(page_label: str):
     st.info("This section is coming soon. Wire in your Classic endpoints or reuse your Draft logic if applicable.")
 
 # ------------------------------------------------------------
+# Startup Preload - warm caches for faster page navigation
+# ------------------------------------------------------------
+@st.cache_resource(show_spinner="Loading app data...")
+def preload_app_data():
+    """
+    Preload commonly used data at app startup.
+
+    Uses @st.cache_resource so this runs once per session and persists
+    across page navigations. Individual functions use @st.cache_data
+    which will be warm after this initial load.
+    """
+    data = {}
+
+    # Core player data (used by almost every page)
+    data['fpl_players'] = get_fpl_player_mapping()
+    data['bootstrap_static'] = get_classic_bootstrap_static()
+
+    # Draft league data (if configured)
+    draft_league_id = getattr(config, 'FPL_DRAFT_LEAGUE_ID', None)
+    if draft_league_id:
+        data['league_entries'] = get_league_entries(draft_league_id)
+        data['league_ownership'] = get_league_player_ownership(draft_league_id)
+
+    # Rotowire projections (expensive scrape, used by multiple pages)
+    try:
+        rotowire_url = config.ROTOWIRE_URL
+        if rotowire_url:
+            data['rotowire_projections'] = get_rotowire_player_projections(rotowire_url)
+    except Exception:
+        pass  # Rotowire URL discovery may fail, that's ok
+
+    return data
+
+# ------------------------------------------------------------
 # Main
 # ------------------------------------------------------------
 def main():
+    # Preload data at startup for faster page navigation
+    preload_app_data()
+
     # Sidebar
     st.sidebar.title("Navigation")
     st.sidebar.image("images/fpl_logo1.jpeg", use_column_width=True)

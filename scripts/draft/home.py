@@ -4,7 +4,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 from scripts.common.error_helpers import get_logger, show_api_error
-from scripts.common.utils import get_current_gameweek
+from scripts.common.utils import get_current_gameweek, get_draft_league_details
 
 _logger = get_logger("fpl_app.draft.home")
 
@@ -81,6 +81,7 @@ def findOptimalLineup(df):
         print("Invalid Lineup")
         return(final_selection)
 
+@st.cache_data(ttl=300)
 def get_fpl_draft_league_standings(draft_league_id, show_luck_adjusted_stats=False):
     """
     Fetches and displays the current league standings for an FPL Draft league,
@@ -94,14 +95,16 @@ def get_fpl_draft_league_standings(draft_league_id, show_luck_adjusted_stats=Fal
     Returns:
     - pandas.DataFrame: League standings with columns:
         Rank, Team, Player, W, D, L, PF, PA, Pts
-      If the season hasn’t started (or data is incomplete), a placeholder table is returned with zero stats.
+      If the season hasn't started (or data is incomplete), a placeholder table is returned with zero stats.
     """
     expected_columns = ['Rank', 'Team', 'Player', 'W', 'D', 'L', 'PF', 'PA', 'Pts']
 
     try:
-        # API call
-        league_url = f"https://draft.premierleague.com/api/league/{draft_league_id}/details"
-        league_response = requests.get(league_url, timeout=30).json()
+        # Use cached league details
+        league_response = get_draft_league_details(draft_league_id)
+        if not league_response:
+            st.error("Failed to fetch league data.")
+            return pd.DataFrame(columns=expected_columns).set_index('Rank')
 
         standings = league_response.get('standings', [])
         league_entries = league_response.get('league_entries', [])
@@ -218,14 +221,10 @@ def show_fixture_results(draft_league_id, gameweek):
         - Win/Loss/Draw results
     - If no fixture data is available yet (season not started), displays an info message in Streamlit.
     """
-    # Draft League API URL
-    league_url = f"https://draft.premierleague.com/api/league/{draft_league_id}/details"
-
-    # Fetch the league details
-    try:
-        league_response = requests.get(league_url, timeout=30).json()
-    except Exception as e:
-        show_api_error("fetching fixture results", exception=e)
+    # Use cached league details
+    league_response = get_draft_league_details(draft_league_id)
+    if not league_response:
+        show_api_error("fetching fixture results", exception=Exception("No league data available"))
         return
 
     # Check if the season has started (i.e., 'matches' key exists)
@@ -290,19 +289,15 @@ def get_luck_adjusted_league_standings(draft_league_id):
     Returns:
     - standings_df: A DataFrame showing the adjusted standings based on luck and average weekly rank.
     """
-    # Draft League API URLs
-    league_url = f"https://draft.premierleague.com/api/league/{draft_league_id}/details"
-
-    # Get league details, fixtures, and team details
-    try:
-        league_response = requests.get(league_url, timeout=30).json()
-    except Exception as e:
-        _logger.warning("Failed to fetch luck-adjusted standings: %s", e)
+    # Use cached league details
+    league_response = get_draft_league_details(draft_league_id)
+    if not league_response:
+        _logger.warning("Failed to fetch luck-adjusted standings")
         return pd.DataFrame()
 
     # Extract the standings and league_entries sections of the JSON
-    fixtures = league_response['matches']
-    league_entries = league_response['league_entries']
+    fixtures = league_response.get('matches', [])
+    league_entries = league_response.get('league_entries', [])
     # Create a dictionary mapping entry_ids to team names
     team_names = {entry['id']: entry['entry_name'] for entry in league_entries}
 
@@ -410,12 +405,10 @@ def plot_league_points_over_time(draft_league_id):
         st.info("⚠️ The season hasn't started yet. Points over time will be shown once games begin.")
         return None  # Or return an empty figure
 
-    # Step 2: Fetch league details
-    league_url = f"https://draft.premierleague.com/api/league/{draft_league_id}/details"
-    try:
-        league_response = requests.get(league_url, timeout=30).json()
-    except Exception as e:
-        _logger.warning("Failed to fetch league details for points chart: %s", e)
+    # Step 2: Use cached league details
+    league_response = get_draft_league_details(draft_league_id)
+    if not league_response:
+        _logger.warning("Failed to fetch league details for points chart")
         return None
 
     # Step 3: Create a dictionary mapping entry_ids to team names
@@ -491,16 +484,14 @@ def plot_team_points_over_time(draft_league_id):
     if current_gameweek is None:
         return None  # Or return an empty figure
 
-    # Step 2: Fetch league details
-    league_url = f"https://draft.premierleague.com/api/league/{draft_league_id}/details"
-    try:
-        league_response = requests.get(league_url, timeout=30).json()
-    except Exception as e:
-        _logger.warning("Failed to fetch league details for team points chart: %s", e)
+    # Step 2: Use cached league details
+    league_response = get_draft_league_details(draft_league_id)
+    if not league_response:
+        _logger.warning("Failed to fetch league details for team points chart")
         return None
 
     # Step 3: Create a dictionary mapping entry_ids to team names
-    league_entries = league_response['league_entries']
+    league_entries = league_response.get('league_entries', [])
     team_names = {entry['id']: entry['entry_name'] for entry in league_entries}
 
     # Check if the season has started (i.e., 'matches' key exists)

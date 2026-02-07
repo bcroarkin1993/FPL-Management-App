@@ -268,6 +268,7 @@ def get_draft_picks(league_id):
     return get_starting_team_composition(league_id)
 
 
+@st.cache_data(ttl=3600)
 def get_fpl_player_mapping():
     """
     Fetches FPL player data from the FPL Draft API and returns it as a dictionary to link player ids to player names.
@@ -422,6 +423,7 @@ def get_historical_team_scores(league_id: int) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=600)
 def get_league_entries(league_id):
     """
     Fetches the league entries and creates a mapping of entry IDs to team names.
@@ -442,6 +444,7 @@ def get_league_entries(league_id):
     return {entry['entry_id']: entry['entry_name'] for entry in response['league_entries']}
 
 
+@st.cache_data(ttl=300)
 def get_league_player_ownership(league_id):
     """
     Fetch the current gameweek ownership for a Draft league and group by team (ID) and position.
@@ -743,6 +746,7 @@ def get_league_teams(league_id):
     return config.LEAGUE_DATA
 
 
+@st.cache_data(ttl=3600)
 def get_starting_team_composition(league_id):
     """
     Fetches the draft picks for each team in the league and returns a dictionary with team_id as the primary key
@@ -800,6 +804,7 @@ def get_starting_team_composition(league_id):
     return draft_picks
 
 
+@st.cache_data(ttl=600)
 def get_team_composition_for_gameweek(league_id, team_id, gameweek):
     """
     Determines the composition of a given FPL team for a specified gameweek.
@@ -1241,6 +1246,7 @@ def get_draft_h2h_record(league_id: int, team1_id: int, team2_id: int) -> Dict[s
     return result
 
 
+@st.cache_data(ttl=600)
 def get_draft_all_h2h_records(league_id: int, team_id: int) -> List[Dict[str, Any]]:
     """
     Calculate head-to-head records for a team against all opponents in a Draft league.
@@ -1639,6 +1645,7 @@ def get_classic_transfers(team_id: int) -> Optional[List[Dict[str, Any]]]:
         return None
 
 
+@st.cache_data(ttl=600)
 def get_entry_details(team_id: int) -> Optional[Dict[str, Any]]:
     """
     Fetches entry details for a Classic FPL team.
@@ -1662,6 +1669,7 @@ def get_entry_details(team_id: int) -> Optional[Dict[str, Any]]:
 # 6. ROTOWIRE SCRAPING
 # =============================================================================
 
+@st.cache_data(ttl=3600)
 def get_rotowire_player_projections(url, limit=None):
     """
     Fetches fantasy rankings and projected points for players from RotoWire.
@@ -1809,6 +1817,7 @@ def get_rotowire_rankings_url(current_gameweek=None, timeout=15):
     return max(candidates, key=lambda x: x[1])[2]
 
 
+@st.cache_data(ttl=7200)
 def get_rotowire_season_rankings(url: str, limit: Optional[int] = None) -> pd.DataFrame:
     """
     Scrape Rotowire's season-long FPL rankings table.

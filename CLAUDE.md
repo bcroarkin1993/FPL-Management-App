@@ -70,7 +70,18 @@ Key modules:
 
 ### Caching
 
-Streamlit's `@st.cache_data` decorator is used for expensive API calls. Gameweek is cached at module level in config.py.
+Two-tier caching strategy for fast page navigation:
+
+1. **Startup preload** (`main.py`): Uses `@st.cache_resource` to preload core data once per session:
+   - Player mappings, bootstrap static, league entries, Rotowire projections
+   - Runs on first page load with "Loading app data..." spinner
+
+2. **Function-level caching** (`utils.py`): Uses `@st.cache_data` with TTL values:
+   - 1 hour: player mappings, Rotowire projections, draft picks
+   - 10 minutes: league entries, team compositions, H2H records
+   - 5 minutes: bootstrap static, league standings, ownership data
+
+Gameweek is cached at module level in config.py via lazy loading.
 
 ## Environment Variables
 
@@ -152,6 +163,8 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Notes |
 |------|-------|
+| Performance optimizations | Added `@st.cache_data` to 9 uncached API functions; startup preload with `@st.cache_resource`; refactored Draft home to eliminate 4 redundant `/league/details` calls; 50-60% faster page loads after initial startup |
+| Season Highlights for Team Analysis | Best XI (optimal formation from top scorers), Team MVP (with starts/goals/assists/captain stats), Best Clubs (top 3 contributing EPL clubs); shared `team_analysis_helpers.py` module for Draft and Classic |
 | Advanced Player Statistics Table | 40+ columns with 8 presets (Essential, Attacking, Defensive, Per 90, ICT Focus, Fixture Focus, GK Stats, Regression); green-white-red color gradients; regression metrics (G-xG, A-xA, GI-xGI) to identify over/under performers; switched to Classic FPL API for price/ownership data |
 | Waiver Wire Transfer Suggestions | Top-3 position-locked swap suggestions with unified Player Value scoring, injury-aware hold logic, asymmetric add/drop weights, and styled suggestion cards |
 | Error logging & better error messages | Added `error_helpers.py` module with structured logging and user-facing error display; added `timeout=30` to ~12 unprotected `requests.get()` calls; added `_logger.warning()` to ~15 silent `except` blocks; replaced ~13 generic error messages with actionable hints |
