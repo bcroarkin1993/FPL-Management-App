@@ -23,24 +23,87 @@ def _blend_live_with_projections(team_df: pd.DataFrame, live_stats: dict, player
     - 'Has_Played': bool indicating if player has played
     - 'Blended_Points': live points if played, projected if not
     """
+    from scripts.common.player_matching import canonical_normalize
+
     result = team_df.copy()
 
-    # Create reverse lookup: player name -> element_id
+    # Create multiple lookups for matching: name -> element_id
     name_to_id = {}
+    norm_to_id = {}  # normalized name -> element_id
+    last_name_to_ids = {}  # last name -> list of (element_id, team)
+
     for eid, pdata in player_mapping.items():
         if isinstance(pdata, dict):
-            for name_field in ['web_name', 'name', 'Player']:
-                if name_field in pdata:
-                    name_to_id[pdata[name_field]] = eid
-                    break
+            web_name = pdata.get('Web_Name', '')
+            full_name = pdata.get('Player', '')
+            team = pdata.get('Team', '')
+
+            if web_name:
+                name_to_id[web_name] = eid
+                norm_to_id[canonical_normalize(web_name)] = eid
+            if full_name:
+                name_to_id[full_name] = eid
+                norm_to_id[canonical_normalize(full_name)] = eid
+                # Store first + last name combo (e.g., "Robert Sánchez" from "Robert Lynch Sánchez")
+                parts = full_name.split()
+                if len(parts) >= 2:
+                    first_last = f"{parts[0]} {parts[-1]}"
+                    norm_to_id[canonical_normalize(first_last)] = eid
+                    # Also store last name only for fallback matching
+                    last_norm = canonical_normalize(parts[-1])
+                    if last_norm not in last_name_to_ids:
+                        last_name_to_ids[last_norm] = []
+                    last_name_to_ids[last_norm].append((eid, team))
 
     result['Live_Points'] = 0
     result['Has_Played'] = False
     result['Blended_Points'] = result['Points'].fillna(0)
 
-    for idx, row in result.iterrows():
-        player_name = row.get('Player', '')
-        element_id = row.get('Player_ID') or name_to_id.get(player_name)
+    # Get team info from DataFrame if available
+    team_col = 'Team' if 'Team' in result.columns else None
+
+    # Player name is in the index for this DataFrame
+    for idx in result.index:
+        player_name = idx  # Index is the player name
+        player_team = result.at[idx, team_col] if team_col else None
+
+        # Try multiple matching strategies
+        element_id = None
+
+        # Strategy 1: Direct match
+        if player_name in name_to_id:
+            element_id = name_to_id[player_name]
+
+        # Strategy 2: Normalized match
+        if element_id is None:
+            norm_name = canonical_normalize(player_name)
+            if norm_name in norm_to_id:
+                element_id = norm_to_id[norm_name]
+
+        # Strategy 3: First + last name match (handles middle names)
+        if element_id is None:
+            parts = player_name.split()
+            if len(parts) >= 2:
+                first_last_norm = canonical_normalize(f"{parts[0]} {parts[-1]}")
+                if first_last_norm in norm_to_id:
+                    element_id = norm_to_id[first_last_norm]
+
+        # Strategy 4: Last name only with team disambiguation
+        if element_id is None:
+            parts = player_name.split()
+            if parts:
+                last_norm = canonical_normalize(parts[-1])
+                if last_norm in last_name_to_ids:
+                    candidates = last_name_to_ids[last_norm]
+                    if len(candidates) == 1:
+                        # Only one player with this last name
+                        element_id = candidates[0][0]
+                    elif player_team:
+                        # Try to match by team
+                        for eid, team in candidates:
+                            if team == player_team:
+                                element_id = eid
+                                break
 
         if element_id and element_id in live_stats:
             stats = live_stats[element_id]
