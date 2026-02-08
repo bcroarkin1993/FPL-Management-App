@@ -150,6 +150,133 @@ def _estimate_score_std(league_id: int) -> tuple[float, int]:  # <<< ADD
         pass
     return 15.0, 0  # conservative default if nothing available
 
+
+def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = False):
+    """
+    Render a styled team lineup with player cards grouped by position.
+    Shows live points, projected points, and performance indicators.
+    """
+    # Position display order and colors
+    pos_config = {
+        'G': {'name': 'Goalkeeper', 'color': '#f39c12', 'short': 'GK'},
+        'D': {'name': 'Defenders', 'color': '#3498db', 'short': 'DEF'},
+        'M': {'name': 'Midfielders', 'color': '#2ecc71', 'short': 'MID'},
+        'F': {'name': 'Forwards', 'color': '#e74c3c', 'short': 'FWD'},
+    }
+
+    html = f"""
+    <style>
+        .lineup-container {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }}
+        .pos-group {{ margin-bottom: 12px; }}
+        .pos-header {{
+            font-size: 11px; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.5px; padding: 6px 10px; border-radius: 4px;
+            margin-bottom: 6px; color: white;
+        }}
+        .player-card {{
+            display: flex; align-items: center; justify-content: space-between;
+            background: #f8f9fa; border-radius: 6px; padding: 8px 12px;
+            margin-bottom: 4px; border-left: 3px solid #ddd;
+        }}
+        .player-card.played {{ border-left-color: #28a745; background: #f0fff4; }}
+        .player-card.upcoming {{ border-left-color: #6c757d; }}
+        .player-info {{ flex: 1; min-width: 0; }}
+        .player-name {{ font-weight: 600; font-size: 13px; color: #1a1a2e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+        .player-team {{ font-size: 10px; color: #888; text-transform: uppercase; }}
+        .player-matchup {{ font-size: 10px; color: #666; }}
+        .player-points {{ text-align: right; min-width: 70px; }}
+        .live-pts {{ font-size: 18px; font-weight: 700; color: #28a745; }}
+        .proj-pts {{ font-size: 12px; color: #666; }}
+        .proj-only {{ font-size: 16px; font-weight: 600; color: #555; }}
+        .perf-indicator {{ font-size: 10px; margin-top: 2px; }}
+        .perf-up {{ color: #28a745; }}
+        .perf-down {{ color: #dc3545; }}
+        .status-badge {{
+            font-size: 9px; padding: 2px 6px; border-radius: 3px;
+            text-transform: uppercase; font-weight: 600; margin-left: 8px;
+        }}
+        .status-played {{ background: #d4edda; color: #155724; }}
+        .status-upcoming {{ background: #e2e3e5; color: #383d41; }}
+    </style>
+    <div class="lineup-container">
+    """
+
+    # Group players by position
+    for pos_code in ['G', 'D', 'M', 'F']:
+        pos_info = pos_config.get(pos_code, {'name': pos_code, 'color': '#888', 'short': pos_code})
+
+        # Filter players for this position
+        if 'Position' in team_df.columns:
+            pos_players = team_df[team_df['Position'] == pos_code]
+        else:
+            pos_players = pd.DataFrame()
+
+        if pos_players.empty:
+            continue
+
+        html += f"""
+        <div class="pos-group">
+            <div class="pos-header" style="background: {pos_info['color']};">{pos_info['name']}</div>
+        """
+
+        for player_name in pos_players.index:
+            row = pos_players.loc[player_name]
+            team = row.get('Team', '')
+            matchup = row.get('Matchup', '')
+            proj_pts = row.get('Points', 0) or 0
+
+            if is_live:
+                live_pts = row.get('Live_Points', 0) or 0
+                has_played = row.get('Has_Played', False)
+                blended_pts = row.get('Blended_Points', 0) or 0
+
+                if has_played:
+                    # Player has finished - show actual vs projected
+                    diff = live_pts - proj_pts
+                    diff_sign = "+" if diff > 0 else ""
+                    diff_class = "perf-up" if diff > 0 else "perf-down" if diff < 0 else ""
+
+                    points_html = f"""
+                        <div class="live-pts">{live_pts:.0f}</div>
+                        <div class="perf-indicator {diff_class}">proj: {proj_pts:.1f} ({diff_sign}{diff:.1f})</div>
+                    """
+                    card_class = "player-card played"
+                    status_html = '<span class="status-badge status-played">Played</span>'
+                else:
+                    # Player yet to play - show projected
+                    points_html = f"""
+                        <div class="proj-only">{proj_pts:.1f}</div>
+                        <div class="proj-pts">projected</div>
+                    """
+                    card_class = "player-card upcoming"
+                    status_html = '<span class="status-badge status-upcoming">Upcoming</span>'
+            else:
+                # Pre-match: just show projections
+                points_html = f'<div class="proj-only">{proj_pts:.1f}</div>'
+                card_class = "player-card"
+                status_html = ""
+
+            html += f"""
+            <div class="{card_class}">
+                <div class="player-info">
+                    <div class="player-name">{player_name}{status_html}</div>
+                    <div class="player-team">{team}</div>
+                    <div class="player-matchup">{matchup}</div>
+                </div>
+                <div class="player-points">{points_html}</div>
+            </div>
+            """
+
+        html += "</div>"
+
+    html += "</div>"
+
+    # Calculate total height based on player count
+    player_count = len(team_df)
+    height = 50 + (player_count * 52) + (4 * 35)  # players + position headers
+    components.html(html, height=height, scrolling=False)
+
+
 # --- Win % bar (two-color) ---
 def _render_winprob_bar(team1_name: str, team2_name: str, p_team1: float):
     p1 = max(0.0, min(100.0, round(p_team1 * 100, 1)))
@@ -332,33 +459,39 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
 
                 team1_df, team2_df, team1_name, team2_name = result
 
+                # Store original projections before blending
+                team1_orig_proj = team1_df['Points'].sum()
+                team2_orig_proj = team2_df['Points'].sum()
+
                 # Blend live points with projections if gameweek is live
                 if gw_is_live and live_stats:
                     team1_df = _blend_live_with_projections(team1_df, live_stats, player_mapping)
                     team2_df = _blend_live_with_projections(team2_df, live_stats, player_mapping)
-                    team1_score = team1_df['Blended_Points'].sum()
-                    team2_score = team2_df['Blended_Points'].sum()
+                    team1_blended = team1_df['Blended_Points'].sum()
+                    team2_blended = team2_df['Blended_Points'].sum()
                     team1_live = team1_df['Live_Points'].sum()
                     team2_live = team2_df['Live_Points'].sum()
                 else:
-                    team1_score = team1_df['Points'].sum()
-                    team2_score = team2_df['Points'].sum()
+                    team1_blended = team1_df['Points'].sum()
+                    team2_blended = team2_df['Points'].sum()
                     team1_live = 0
                     team2_live = 0
 
                 # Calculate win probability based on blended/projected scores
-                z = (team1_score - team2_score) / denom
+                z = (team1_blended - team2_blended) / denom
                 p_team1 = _normal_cdf(z)
                 p_team2 = 1.0 - p_team1
 
                 overview_data.append({
                     "team1": format_team_name(team1_name),
-                    "proj1": team1_score,
+                    "blended1": team1_blended,
                     "live1": team1_live if gw_is_live else None,
+                    "orig1": team1_orig_proj,
                     "pct1": p_team1 * 100,
                     "pct2": p_team2 * 100,
-                    "proj2": team2_score,
+                    "blended2": team2_blended,
                     "live2": team2_live if gw_is_live else None,
+                    "orig2": team2_orig_proj,
                     "team2": format_team_name(team2_name),
                 })
             except Exception:
@@ -368,150 +501,155 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
         st.warning("Could not calculate projections for fixtures.")
         return
 
-    # Build HTML table with fancy styling
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: transparent;
-        }
-        .fixtures-table {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
-            margin: 10px 0;
-        }
-        .fixtures-table th {
-            background: linear-gradient(135deg, #37003c 0%, #5a0050 100%);
-            color: white;
-            padding: 14px 12px;
-            text-align: center;
-            font-weight: 600;
-            font-size: 13px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .fixtures-table th:first-child {
-            border-radius: 10px 0 0 0;
-        }
-        .fixtures-table th:last-child {
-            border-radius: 0 10px 0 0;
-        }
-        .fixtures-table td {
-            padding: 14px 12px;
-            text-align: center;
-            border-bottom: 1px solid #e0e0e0;
-            font-size: 14px;
-        }
-        .fixtures-table tr:last-child td:first-child {
-            border-radius: 0 0 0 10px;
-        }
-        .fixtures-table tr:last-child td:last-child {
-            border-radius: 0 0 10px 0;
-        }
-        .fixtures-table tr:hover td {
-            background-color: #f8f4f9;
-        }
-        .team-name {
-            font-weight: 600;
-            color: #1a1a2e;
-            min-width: 140px;
-        }
-        .team-left {
-            text-align: right !important;
-            padding-right: 20px !important;
-        }
-        .team-right {
-            text-align: left !important;
-            padding-left: 20px !important;
-        }
-        .proj-score {
-            font-weight: 500;
-            color: #444;
-            min-width: 55px;
-        }
-        .win-pct {
-            font-weight: 700;
-            font-size: 15px;
-            min-width: 65px;
-            padding: 8px 12px !important;
-            border-radius: 6px;
-        }
-        .vs-cell {
-            color: #888;
-            font-weight: 500;
-            font-size: 12px;
-            min-width: 40px;
-        }
-        .prob-bar-container {
-            width: 100%;
-            height: 8px;
-            background: #e0e0e0;
-            border-radius: 4px;
-            margin-top: 12px;
-            overflow: hidden;
-            display: flex;
-        }
-        .prob-bar-left {
-            height: 100%;
-            transition: width 0.3s ease;
-        }
-        .prob-bar-right {
-            height: 100%;
-            transition: width 0.3s ease;
-        }
-    </style>
-    </head>
-    <body>
-    <table class="fixtures-table">
-    <thead>
-        <tr>
-            <th>Team</th>
-            <th>Proj</th>
-            <th>Win %</th>
-            <th></th>
-            <th>Win %</th>
-            <th>Proj</th>
-            <th>Team</th>
-        </tr>
-    </thead>
-    <tbody>
-    """
-
-    for row in overview_data:
-        color1 = _get_win_pct_color(row["pct1"])
-        color2 = _get_win_pct_color(row["pct2"])
-
-        # Format score display: show live points if available
-        if row.get("live1") is not None:
-            # Live game: show "live_pts (+remaining_proj)" format
-            remaining1 = row["proj1"] - row["live1"]
-            remaining2 = row["proj2"] - row["live2"]
-            score1_display = f'<span style="color:#e74c3c;font-weight:700;">{row["live1"]:.0f}</span><span style="color:#888;font-size:11px;"> (+{remaining1:.0f})</span>'
-            score2_display = f'<span style="color:#e74c3c;font-weight:700;">{row["live2"]:.0f}</span><span style="color:#888;font-size:11px;"> (+{remaining2:.0f})</span>'
-        else:
-            score1_display = f'{row["proj1"]:.1f}'
-            score2_display = f'{row["proj2"]:.1f}'
-
-        html += f"""
-        <tr>
-            <td class="team-name team-left">{row["team1"]}</td>
-            <td class="proj-score">{score1_display}</td>
-            <td class="win-pct" style="background: {color1}; color: white;">{row["pct1"]:.0f}%</td>
-            <td class="vs-cell">vs</td>
-            <td class="win-pct" style="background: {color2}; color: white;">{row["pct2"]:.0f}%</td>
-            <td class="proj-score">{score2_display}</td>
-            <td class="team-name team-right">{row["team2"]}</td>
-        </tr>
+    # Build HTML table with fancy styling - different layout for live vs pre-match
+    if gw_is_live:
+        # Live layout: Live Score | Updated Proj | Win % | vs | Win % | Updated Proj | Live Score
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: transparent; }
+            .fixtures-table { width: 100%; border-collapse: separate; border-spacing: 0; margin: 10px 0; }
+            .fixtures-table th {
+                background: linear-gradient(135deg, #37003c 0%, #5a0050 100%);
+                color: white; padding: 12px 8px; text-align: center;
+                font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+            }
+            .fixtures-table th:first-child { border-radius: 10px 0 0 0; }
+            .fixtures-table th:last-child { border-radius: 0 10px 0 0; }
+            .fixtures-table td { padding: 12px 8px; text-align: center; border-bottom: 1px solid #e0e0e0; font-size: 13px; vertical-align: middle; }
+            .fixtures-table tr:last-child td:first-child { border-radius: 0 0 0 10px; }
+            .fixtures-table tr:last-child td:last-child { border-radius: 0 0 10px 0; }
+            .fixtures-table tr:hover td { background-color: #f8f4f9; }
+            .team-name { font-weight: 600; color: #1a1a2e; min-width: 120px; }
+            .team-left { text-align: right !important; padding-right: 12px !important; }
+            .team-right { text-align: left !important; padding-left: 12px !important; }
+            .score-cell { min-width: 90px; }
+            .live-score { font-size: 22px; font-weight: 700; color: #e74c3c; }
+            .blended-score { font-size: 13px; color: #555; margin-top: 2px; }
+            .orig-proj { font-size: 10px; color: #999; margin-top: 1px; }
+            .perf-up { color: #28a745; }
+            .perf-down { color: #dc3545; }
+            .win-pct { font-weight: 700; font-size: 14px; min-width: 55px; padding: 6px 10px !important; border-radius: 6px; }
+            .vs-cell { color: #888; font-weight: 500; font-size: 12px; min-width: 30px; }
+        </style>
+        </head>
+        <body>
+        <table class="fixtures-table">
+        <thead>
+            <tr>
+                <th>Team</th>
+                <th>Live / Proj</th>
+                <th>Win %</th>
+                <th></th>
+                <th>Win %</th>
+                <th>Live / Proj</th>
+                <th>Team</th>
+            </tr>
+        </thead>
+        <tbody>
         """
+
+        for row in overview_data:
+            color1 = _get_win_pct_color(row["pct1"])
+            color2 = _get_win_pct_color(row["pct2"])
+
+            # Calculate performance vs original projection
+            perf1 = row["live1"] - (row["orig1"] * (row["live1"] / row["blended1"])) if row["blended1"] > 0 else 0
+            perf2 = row["live2"] - (row["orig2"] * (row["live2"] / row["blended2"])) if row["blended2"] > 0 else 0
+
+            # Format: Live pts on top, blended proj below, original proj as reference
+            diff1 = row["blended1"] - row["orig1"]
+            diff2 = row["blended2"] - row["orig2"]
+            diff1_class = "perf-up" if diff1 > 0 else "perf-down" if diff1 < 0 else ""
+            diff2_class = "perf-up" if diff2 > 0 else "perf-down" if diff2 < 0 else ""
+            diff1_sign = "+" if diff1 > 0 else ""
+            diff2_sign = "+" if diff2 > 0 else ""
+
+            score1_html = f'''
+                <div class="live-score">{row["live1"]:.0f}</div>
+                <div class="blended-score">→ {row["blended1"]:.1f} proj</div>
+                <div class="orig-proj">orig: {row["orig1"]:.1f} <span class="{diff1_class}">({diff1_sign}{diff1:.1f})</span></div>
+            '''
+            score2_html = f'''
+                <div class="live-score">{row["live2"]:.0f}</div>
+                <div class="blended-score">→ {row["blended2"]:.1f} proj</div>
+                <div class="orig-proj">orig: {row["orig2"]:.1f} <span class="{diff2_class}">({diff2_sign}{diff2:.1f})</span></div>
+            '''
+
+            html += f"""
+            <tr>
+                <td class="team-name team-left">{row["team1"]}</td>
+                <td class="score-cell">{score1_html}</td>
+                <td class="win-pct" style="background: {color1}; color: white;">{row["pct1"]:.0f}%</td>
+                <td class="vs-cell">vs</td>
+                <td class="win-pct" style="background: {color2}; color: white;">{row["pct2"]:.0f}%</td>
+                <td class="score-cell">{score2_html}</td>
+                <td class="team-name team-right">{row["team2"]}</td>
+            </tr>
+            """
+    else:
+        # Pre-match layout: Team | Proj | Win % | vs | Win % | Proj | Team
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: transparent; }
+            .fixtures-table { width: 100%; border-collapse: separate; border-spacing: 0; margin: 10px 0; }
+            .fixtures-table th {
+                background: linear-gradient(135deg, #37003c 0%, #5a0050 100%);
+                color: white; padding: 14px 12px; text-align: center;
+                font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;
+            }
+            .fixtures-table th:first-child { border-radius: 10px 0 0 0; }
+            .fixtures-table th:last-child { border-radius: 0 10px 0 0; }
+            .fixtures-table td { padding: 14px 12px; text-align: center; border-bottom: 1px solid #e0e0e0; font-size: 14px; }
+            .fixtures-table tr:last-child td:first-child { border-radius: 0 0 0 10px; }
+            .fixtures-table tr:last-child td:last-child { border-radius: 0 0 10px 0; }
+            .fixtures-table tr:hover td { background-color: #f8f4f9; }
+            .team-name { font-weight: 600; color: #1a1a2e; min-width: 140px; }
+            .team-left { text-align: right !important; padding-right: 20px !important; }
+            .team-right { text-align: left !important; padding-left: 20px !important; }
+            .proj-score { font-weight: 500; color: #444; min-width: 55px; }
+            .win-pct { font-weight: 700; font-size: 15px; min-width: 65px; padding: 8px 12px !important; border-radius: 6px; }
+            .vs-cell { color: #888; font-weight: 500; font-size: 12px; min-width: 40px; }
+        </style>
+        </head>
+        <body>
+        <table class="fixtures-table">
+        <thead>
+            <tr>
+                <th>Team</th>
+                <th>Proj</th>
+                <th>Win %</th>
+                <th></th>
+                <th>Win %</th>
+                <th>Proj</th>
+                <th>Team</th>
+            </tr>
+        </thead>
+        <tbody>
+        """
+
+        for row in overview_data:
+            color1 = _get_win_pct_color(row["pct1"])
+            color2 = _get_win_pct_color(row["pct2"])
+
+            html += f"""
+            <tr>
+                <td class="team-name team-left">{row["team1"]}</td>
+                <td class="proj-score">{row["blended1"]:.1f}</td>
+                <td class="win-pct" style="background: {color1}; color: white;">{row["pct1"]:.0f}%</td>
+                <td class="vs-cell">vs</td>
+                <td class="win-pct" style="background: {color2}; color: white;">{row["pct2"]:.0f}%</td>
+                <td class="proj-score">{row["blended2"]:.1f}</td>
+                <td class="team-name team-right">{row["team2"]}</td>
+            </tr>
+            """
 
     html += """
     </tbody>
@@ -520,8 +658,9 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
     </html>
     """
 
-    # Calculate height based on number of fixtures
-    table_height = 60 + (len(overview_data) * 52)
+    # Calculate height based on number of fixtures (taller rows for live view)
+    row_height = 72 if gw_is_live else 52
+    table_height = 60 + (len(overview_data) * row_height)
     components.html(html, height=table_height, scrolling=False)
 
 
@@ -696,21 +835,40 @@ def show_fixtures_page():
                             hide_index=True
                         )
 
-        # Create columns for side-by-side detailed display
+        # Team Lineups section
+        st.subheader("Team Lineups")
+
+        # Create columns for side-by-side lineup display
         col1, col2 = st.columns(2)
 
         with col1:
-            st.write(f"{format_team_name(team1_name)} Projections")
-            st.dataframe(team1_df,
-                         use_container_width=True,
-                         height=422  # Adjust the height to ensure the entire table shows
-                         )
-            st.markdown(f"**Projected Score: {team1_score:.2f}**")
+            # Team 1 header with score summary
+            if gw_is_live and team1_live is not None:
+                orig_proj1 = team1_df['Points'].sum()
+                st.markdown(f"### {format_team_name(team1_name)}")
+                st.markdown(f"**Live: {team1_live:.0f}** → Proj: {team1_score:.1f}")
+                diff1 = team1_score - orig_proj1
+                diff1_color = "green" if diff1 > 0 else "red" if diff1 < 0 else "gray"
+                diff1_sign = "+" if diff1 > 0 else ""
+                st.caption(f"Original projection: {orig_proj1:.1f} (:{diff1_color}[{diff1_sign}{diff1:.1f}])")
+            else:
+                st.markdown(f"### {format_team_name(team1_name)}")
+                st.markdown(f"**Projected: {team1_score:.1f}**")
+
+            _render_team_lineup(team1_df, team1_name, is_live=gw_is_live)
 
         with col2:
-            st.write(f"{format_team_name(team2_name)} Projections")
-            st.dataframe(team2_df,
-                         use_container_width=True,
-                         height=422  # Adjust the height to ensure the entire table shows
-                         )
-            st.markdown(f"**Projected Score: {team2_score:.2f}**")
+            # Team 2 header with score summary
+            if gw_is_live and team2_live is not None:
+                orig_proj2 = team2_df['Points'].sum()
+                st.markdown(f"### {format_team_name(team2_name)}")
+                st.markdown(f"**Live: {team2_live:.0f}** → Proj: {team2_score:.1f}")
+                diff2 = team2_score - orig_proj2
+                diff2_color = "green" if diff2 > 0 else "red" if diff2 < 0 else "gray"
+                diff2_sign = "+" if diff2 > 0 else ""
+                st.caption(f"Original projection: {orig_proj2:.1f} (:{diff2_color}[{diff2_sign}{diff2:.1f}])")
+            else:
+                st.markdown(f"### {format_team_name(team2_name)}")
+                st.markdown(f"**Projected: {team2_score:.1f}**")
+
+            _render_team_lineup(team2_df, team2_name, is_live=gw_is_live)
