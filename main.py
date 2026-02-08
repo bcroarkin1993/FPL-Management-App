@@ -171,7 +171,7 @@ def main():
                 "Home",
                 "Gameweek Fixtures",
                 "Projected Lineups",
-                "Player Projections",
+                "Projections Hub",
                 "Player Statistics",
                 "Player Injuries"
             ],
@@ -183,7 +183,7 @@ def main():
             show_club_fixtures_section()
         elif subpage == "Projected Lineups":
             show_projected_lineups()
-        elif subpage == "Player Projections":
+        elif subpage == "Projections Hub":
             show_player_projections_page()
         elif subpage == "Player Statistics":
             show_player_stats_page()

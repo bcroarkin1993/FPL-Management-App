@@ -124,14 +124,17 @@ Optional (Development):
    - Examples: `feature/h2h-history`, `fix/player-matching`
 2. **Do ALL work on the feature branch** - All commits, testing, and iterations happen here
 3. **Test thoroughly on the feature branch** before merging
-4. **Merge to `main` only when complete** - Feature must be tested and working
+4. **ASK USER TO TEST before merging** - Before any merge to `main`, prompt the user to run `streamlit run main.py` and verify the changes work correctly. Wait for user confirmation before proceeding with the merge.
+5. **Merge to `main` only when complete** - Feature must be tested and working, AND user has confirmed
 
 ```bash
 # CORRECT workflow - always start with a branch
 git checkout main
 git pull origin main                     # Get latest changes
 git checkout -b feature/my-feature       # Create feature branch BEFORE any work
-# ... do work, commit changes, test ...
+# ... do work, commit changes ...
+# ASK USER: "Please test with `streamlit run main.py` and confirm the changes work"
+# ... wait for user confirmation ...
 git checkout main && git merge feature/my-feature   # Merge when complete
 git push origin main
 ```
