@@ -3,8 +3,10 @@ FPL Projections Hub
 
 A unified projections page that aggregates data from multiple sources:
 - Rotowire Player Projections (point projections)
-- Goal Scorer Odds (betting market probabilities)
-- Clean Sheet Odds (team clean sheet probabilities)
+- Fantasy Football Pundit Points Predictor (alternative projections with start %)
+- FFP Goal Scorer & Assist Odds (betting market probabilities)
+- FFP Clean Sheet Odds (team clean sheet probabilities)
+- The Odds API Match Odds (match-level betting data)
 
 Each data source is displayed in its own tab with clear attribution.
 """
@@ -12,11 +14,34 @@ Each data source is displayed in its own tab with clear attribution.
 import config
 import pandas as pd
 import streamlit as st
-from scripts.common.utils import get_rotowire_player_projections, get_rotowire_rankings_url
+from scripts.common.utils import (
+    get_rotowire_player_projections,
+    get_rotowire_rankings_url,
+    get_ffp_projections_data,
+    get_ffp_points_predictor,
+    get_ffp_goalscorer_odds,
+    get_ffp_clean_sheet_odds,
+    get_odds_api_match_odds,
+)
 
 
 # =============================================================================
-# Rotowire Projections (existing functionality)
+# Data Source Banners
+# =============================================================================
+
+def _render_source_banner(source: str, description: str, color: str, border_color: str, url: str = None):
+    """Render a styled data source attribution banner."""
+    link_html = f'<a href="{url}" target="_blank">{source}</a>' if url else source
+    st.markdown(f"""
+    <div style="background: {color}; border-left: 4px solid {border_color}; padding: 12px 16px; border-radius: 4px; margin-bottom: 16px;">
+        <strong>Data Source:</strong> {link_html}<br>
+        <small>{description}</small>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# =============================================================================
+# Rotowire Projections Tab
 # =============================================================================
 
 def rotowire_url_selector():
@@ -41,12 +66,12 @@ def rotowire_url_selector():
 
 def render_rotowire_projections():
     """Render the Rotowire player projections tab."""
-    st.markdown("""
-    <div style="background: #f0f9ff; border-left: 4px solid #0ea5e9; padding: 12px 16px; border-radius: 4px; margin-bottom: 16px;">
-        <strong>Data Source:</strong> <a href="https://www.rotowire.com/soccer/" target="_blank">Rotowire</a><br>
-        <small>Weekly gameweek projections based on expert analysis, matchups, and form.</small>
-    </div>
-    """, unsafe_allow_html=True)
+    _render_source_banner(
+        "Rotowire",
+        "Weekly gameweek projections based on expert analysis, matchups, and form.",
+        "#f0f9ff", "#0ea5e9",
+        "https://www.rotowire.com/soccer/"
+    )
 
     # Get projections
     if config.ROTOWIRE_URL:
@@ -79,23 +104,24 @@ def render_rotowire_projections():
 
         num_players = col1.slider(
             "Number of players to display",
-            min_value=10, max_value=300, value=100, step=10
+            min_value=10, max_value=300, value=100, step=10,
+            key="rw_num_players"
         )
 
-        player_filter = col2.text_input("Search by name", placeholder="e.g., Salah")
+        player_filter = col2.text_input("Search by name", placeholder="e.g., Salah", key="rw_player_filter")
 
         col3, col4 = st.columns(2)
 
         if 'Position' in player_projections.columns:
             all_positions = player_projections['Position'].dropna().unique().tolist()
-            position_filter = col3.multiselect("Position", options=all_positions, default=all_positions)
+            position_filter = col3.multiselect("Position", options=all_positions, default=all_positions, key="rw_pos")
         else:
             position_filter = None
 
         if 'Price' in player_projections.columns:
             min_price = float(player_projections['Price'].min())
             max_price = float(player_projections['Price'].max())
-            price_filter = col4.slider("Max price", min_value=min_price, max_value=max_price, value=max_price, step=0.5)
+            price_filter = col4.slider("Max price", min_value=min_price, max_value=max_price, value=max_price, step=0.5, key="rw_price")
         else:
             price_filter = None
 
@@ -119,118 +145,286 @@ def render_rotowire_projections():
 
 
 # =============================================================================
-# Goal Scorer Odds (placeholder for betting data)
+# Fantasy Football Pundit Points Predictor Tab
 # =============================================================================
 
-def render_goal_scorer_odds():
-    """Render the goal scorer odds tab (placeholder for betting data integration)."""
-    st.markdown("""
-    <div style="background: #fefce8; border-left: 4px solid #eab308; padding: 12px 16px; border-radius: 4px; margin-bottom: 16px;">
-        <strong>Data Source:</strong> Coming Soon<br>
-        <small>Anytime goalscorer odds from betting markets, converted to probabilities.</small>
-    </div>
-    """, unsafe_allow_html=True)
+def render_ffp_points_predictor():
+    """Render the FFP points predictor tab."""
+    _render_source_banner(
+        "Fantasy Football Pundit",
+        "Points predictions with start probability, multi-GW forecasts, and ownership data.",
+        "#fef3c7", "#f59e0b",
+        "https://www.fantasyfootballpundit.com/fpl-points-predictor/"
+    )
 
-    st.info("**Goal Scorer Odds** - This section will display anytime goalscorer probabilities from betting markets.")
+    df = get_ffp_points_predictor()
 
-    # Placeholder structure showing what the data will look like
-    st.subheader("Expected Data Format")
+    if df is None or df.empty:
+        st.warning("Could not load FFP points predictor data. The data source may be temporarily unavailable.")
+        return
 
-    st.markdown("""
-    This section will show:
-    - **Player name** and team
-    - **Goal probability %** (converted from betting odds)
-    - **Odds value** (decimal odds from bookmakers)
-    - **Fixture** for the gameweek
+    # Filters
+    with st.expander("Filters", expanded=True):
+        col1, col2 = st.columns(2)
 
-    Example of how data will be displayed:
-    """)
+        num_players = col1.slider(
+            "Number of players to display",
+            min_value=10, max_value=300, value=100, step=10,
+            key="ffp_num_players"
+        )
 
-    # Sample placeholder data
-    sample_data = pd.DataFrame({
-        "Player": ["M. Salah", "E. Haaland", "C. Palmer", "B. Saka", "A. Isak"],
-        "Team": ["LIV", "MCI", "CHE", "ARS", "NEW"],
-        "Position": ["M", "F", "M", "M", "F"],
-        "Fixture": ["LIV vs BOU (H)", "MCI vs EVE (H)", "CHE vs WOL (A)", "ARS vs NFO (H)", "NEW vs BRE (H)"],
-        "Goal Prob %": ["68%", "72%", "52%", "48%", "55%"],
-        "Odds": [1.47, 1.39, 1.92, 2.08, 1.82],
-    })
+        player_filter = col2.text_input("Search by name", placeholder="e.g., Salah", key="ffp_player_filter")
 
-    st.dataframe(sample_data, use_container_width=True, hide_index=True)
+        col3, col4 = st.columns(2)
 
-    st.markdown("---")
+        if 'Position' in df.columns:
+            all_positions = df['Position'].dropna().unique().tolist()
+            position_filter = col3.multiselect("Position", options=all_positions, default=all_positions, key="ffp_pos")
+        else:
+            position_filter = None
 
-    st.markdown("""
-    ### Integration Notes
+        if 'Start %' in df.columns:
+            min_start = col4.slider("Min start %", min_value=0, max_value=100, value=10, step=5, key="ffp_start")
+        else:
+            min_start = 0
 
-    To enable this feature, you'll need to configure a data source:
+    # Apply filters
+    result = df.head(num_players)
 
-    1. **The Odds API** - Paid API with free tier ([the-odds-api.com](https://the-odds-api.com))
-    2. **Custom scraper** - Scrape from OddsChecker or similar aggregator
-    3. **Manual CSV upload** - Upload odds data manually
+    if player_filter and 'Player' in result.columns:
+        result = result[result['Player'].str.contains(player_filter, case=False, na=False)]
 
-    Once configured, add your API key or data source in the `.env` file:
-    ```
-    ODDS_API_KEY=your_api_key_here
-    ```
-    """)
+    if position_filter and 'Position' in result.columns:
+        result = result[result['Position'].isin(position_filter)]
+
+    if min_start > 0 and 'Start %' in result.columns:
+        result = result[result['Start %'] >= min_start]
+
+    # Display
+    st.subheader(f"GW{config.CURRENT_GAMEWEEK} Points Predictions")
+
+    # Format for display
+    display_df = result.copy()
+    if 'Ownership %' in display_df.columns:
+        display_df['Ownership %'] = display_df['Ownership %'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "")
+    if 'Start %' in display_df.columns:
+        display_df['Start %'] = display_df['Start %'].apply(lambda x: f"{x:.0f}%" if pd.notna(x) else "")
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    st.caption(f"Showing {len(result)} players. Data from Fantasy Football Pundit.")
+
+    # Comparison note
+    with st.expander("About FFP vs Rotowire"):
+        st.markdown("""
+        **Key differences:**
+        - **Start %**: FFP includes probability of player starting (accounting for rotation/injury risk)
+        - **Pts (if starts)**: Points prediction assuming the player starts
+        - **Multi-GW forecasts**: See expected points over next 2-6 gameweeks
+        - **Ownership %**: Current FPL ownership for differential picks
+
+        Both sources use different methodologies. Compare predictions to find consensus picks
+        or identify divergences where one source sees value others miss.
+        """)
 
 
 # =============================================================================
-# Clean Sheet Odds (placeholder for betting data)
+# Goal Scorer & Assist Odds Tab
+# =============================================================================
+
+def render_goalscorer_odds():
+    """Render the goal scorer and assist odds tab."""
+    _render_source_banner(
+        "Fantasy Football Pundit (Betting Odds)",
+        "Anytime goalscorer and assist probabilities converted from bookmaker odds.",
+        "#fefce8", "#eab308",
+        "https://www.fantasyfootballpundit.com/premier-league-goalscorer-assist-odds/"
+    )
+
+    df = get_ffp_goalscorer_odds()
+
+    if df is None or df.empty:
+        st.warning("Could not load goalscorer odds data. The data source may be temporarily unavailable.")
+        return
+
+    # Filters
+    with st.expander("Filters", expanded=True):
+        col1, col2 = st.columns(2)
+
+        num_players = col1.slider(
+            "Number of players to display",
+            min_value=10, max_value=200, value=50, step=10,
+            key="gs_num_players"
+        )
+
+        player_filter = col2.text_input("Search by name", placeholder="e.g., Haaland", key="gs_player_filter")
+
+        col3, col4 = st.columns(2)
+
+        if 'Position' in df.columns:
+            all_positions = df['Position'].dropna().unique().tolist()
+            position_filter = col3.multiselect("Position", options=all_positions, default=all_positions, key="gs_pos")
+        else:
+            position_filter = None
+
+        if 'Team' in df.columns:
+            all_teams = sorted(df['Team'].dropna().unique().tolist())
+            team_filter = col4.multiselect("Team", options=all_teams, default=[], key="gs_team",
+                                           help="Leave empty for all teams")
+        else:
+            team_filter = []
+
+    # Apply filters
+    result = df.head(num_players)
+
+    if player_filter and 'Player' in result.columns:
+        result = result[result['Player'].str.contains(player_filter, case=False, na=False)]
+
+    if position_filter and 'Position' in result.columns:
+        result = result[result['Position'].isin(position_filter)]
+
+    if team_filter and 'Team' in result.columns:
+        result = result[result['Team'].isin(team_filter)]
+
+    # Display
+    st.subheader(f"GW{config.CURRENT_GAMEWEEK} Goalscorer & Assist Probabilities")
+
+    # Format percentages
+    display_df = result.copy()
+    for col in ['Goal %', 'Assist %', 'Return %', 'Start %']:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(lambda x: f"{x:.0f}%" if pd.notna(x) else "")
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    st.caption(f"Showing {len(result)} players. Data from Fantasy Football Pundit (betting odds converted to %).")
+
+    # Usage tips
+    with st.expander("How to use this data"):
+        st.markdown("""
+        **Column explanations:**
+        - **Goal %**: Probability of scoring at least one goal (anytime goalscorer)
+        - **Assist %**: Probability of registering at least one assist
+        - **Return %**: Probability of either a goal OR assist (useful for attacking returns)
+        - **Start %**: Probability player will start the match
+
+        **FPL applications:**
+        - **Captaincy**: High Goal % players are strong captain options
+        - **Differentials**: Players with high Return % but low ownership
+        - **Transfers**: Compare Return % to identify best attacking assets
+        """)
+
+
+# =============================================================================
+# Clean Sheet Odds Tab
 # =============================================================================
 
 def render_clean_sheet_odds():
-    """Render the clean sheet odds tab (placeholder for betting data integration)."""
-    st.markdown("""
-    <div style="background: #f0fdf4; border-left: 4px solid #22c55e; padding: 12px 16px; border-radius: 4px; margin-bottom: 16px;">
-        <strong>Data Source:</strong> Coming Soon<br>
-        <small>Team clean sheet probabilities from betting markets.</small>
-    </div>
-    """, unsafe_allow_html=True)
+    """Render the clean sheet odds tab."""
+    _render_source_banner(
+        "Fantasy Football Pundit (Clean Sheet Odds)",
+        "Team clean sheet probabilities from betting markets.",
+        "#f0fdf4", "#22c55e",
+        "https://www.fantasyfootballpundit.com/premier-league-clean-sheet-odds/"
+    )
 
-    st.info("**Clean Sheet Odds** - This section will display team clean sheet probabilities from betting markets.")
+    df = get_ffp_clean_sheet_odds()
 
-    st.subheader("Expected Data Format")
+    if df is None or df.empty:
+        st.warning("Could not load clean sheet odds data. The data source may be temporarily unavailable.")
+        return
 
-    st.markdown("""
-    This section will show:
-    - **Team** name
-    - **Clean Sheet probability %** (converted from betting odds)
-    - **Fixture** and venue (H/A)
-    - **Opponent attacking strength** for context
+    # Display
+    st.subheader(f"GW{config.CURRENT_GAMEWEEK} Clean Sheet Probabilities")
 
-    Useful for selecting **goalkeepers and defenders**.
-    """)
+    # Format for display
+    display_df = df.copy()
+    if 'CS Prob %' in display_df.columns:
+        display_df['CS Prob %'] = display_df['CS Prob %'].apply(lambda x: f"{x:.0f}%" if pd.notna(x) else "")
 
-    # Sample placeholder data
-    sample_data = pd.DataFrame({
-        "Team": ["Liverpool", "Arsenal", "Man City", "Chelsea", "Newcastle"],
-        "Short": ["LIV", "ARS", "MCI", "CHE", "NEW"],
-        "Fixture": ["vs BOU (H)", "vs NFO (H)", "vs EVE (H)", "vs WOL (A)", "vs BRE (H)"],
-        "CS Prob %": ["52%", "48%", "55%", "38%", "42%"],
-        "CS Odds": [1.92, 2.08, 1.82, 2.63, 2.38],
-        "Opp Attack Rating": ["Weak", "Weak", "Weak", "Medium", "Medium"],
-    })
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-    st.dataframe(sample_data, use_container_width=True, hide_index=True)
+    st.caption(f"Showing {len(df)} teams. Data from Fantasy Football Pundit.")
 
-    st.markdown("---")
+    # Multi-GW note
+    st.info("**Tip**: For multi-gameweek clean sheet analysis, visit the FFP website directly for GW1-6 forecasts.")
 
-    st.markdown("""
-    ### Multi-Gameweek View
+    # Usage tips
+    with st.expander("How to use this data"):
+        st.markdown("""
+        **For defenders and goalkeepers:**
+        - Higher CS % = more likely to earn clean sheet points (4 pts for DEF/GK)
+        - Consider fixture difficulty when selecting defensive assets
+        - Stack defenders from teams with high CS probability
 
-    Once enabled, you'll be able to view clean sheet probabilities across multiple gameweeks
-    to help with transfer planning:
+        **Combining with other data:**
+        - DEF with high CS % AND high assist odds = premium picks
+        - Budget GKs from high CS % teams = value options
+        """)
 
-    | Team | GW25 | GW26 | GW27 | GW28 | Avg CS% |
-    |------|------|------|------|------|---------|
-    | LIV  | 52%  | 45%  | 38%  | 55%  | 47.5%   |
-    | ARS  | 48%  | 52%  | 48%  | 42%  | 47.5%   |
-    | MCI  | 55%  | 48%  | 52%  | 48%  | 50.8%   |
 
-    This helps identify teams with favorable defensive fixtures over a horizon.
-    """)
+# =============================================================================
+# Match Odds Tab (The Odds API)
+# =============================================================================
+
+def render_match_odds():
+    """Render the match betting odds tab from The Odds API."""
+    import os
+    api_key = os.getenv("ODDS_API_KEY", "")
+
+    _render_source_banner(
+        "The Odds API",
+        "Match betting odds aggregated from UK bookmakers (h2h markets).",
+        "#ede9fe", "#8b5cf6",
+        "https://the-odds-api.com"
+    )
+
+    if not api_key:
+        st.warning("**ODDS_API_KEY not configured.** Add your API key to `.env` to enable match odds.")
+        st.markdown("""
+        Get a free API key at [the-odds-api.com](https://the-odds-api.com) (500 requests/month free tier).
+
+        Add to your `.env` file:
+        ```
+        ODDS_API_KEY=your_api_key_here
+        ```
+        """)
+        return
+
+    df = get_odds_api_match_odds(api_key)
+
+    if df is None or df.empty:
+        st.warning("Could not load match odds data. The API may be temporarily unavailable or rate limited.")
+        return
+
+    # Display
+    st.subheader(f"GW{config.CURRENT_GAMEWEEK} Match Odds")
+
+    # Format percentages
+    display_df = df.copy()
+    for col in ['Home Win %', 'Draw %', 'Away Win %']:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "")
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    st.caption(f"Showing {len(df)} matches. Data from The Odds API (UK bookmakers average).")
+
+    # Usage tips
+    with st.expander("How to use this data"):
+        st.markdown("""
+        **Match odds indicate expected outcomes:**
+        - **Home Win %**: Market probability of home team winning
+        - **Draw %**: Market probability of a draw
+        - **Away Win %**: Market probability of away team winning
+
+        **FPL applications:**
+        - Teams favored to win are more likely to score (good for attackers)
+        - Underdogs may struggle to keep clean sheets
+        - High draw % games may be low-scoring (consider defensive picks)
+
+        **Note**: Probabilities may sum to >100% due to bookmaker margin.
+        """)
 
 
 # =============================================================================
@@ -243,20 +437,28 @@ def show_player_projections_page():
     st.caption("Player and team projections from multiple data sources to inform your FPL decisions.")
 
     # Create tabs for different data sources
-    tab1, tab2, tab3 = st.tabs([
-        "📊 Rotowire Projections",
-        "⚽ Goal Scorer Odds",
-        "🧤 Clean Sheet Odds"
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📊 Rotowire",
+        "🎯 FFP Predictor",
+        "⚽ Goal/Assist Odds",
+        "🧤 Clean Sheet Odds",
+        "📈 Match Odds"
     ])
 
     with tab1:
         render_rotowire_projections()
 
     with tab2:
-        render_goal_scorer_odds()
+        render_ffp_points_predictor()
 
     with tab3:
+        render_goalscorer_odds()
+
+    with tab4:
         render_clean_sheet_odds()
+
+    with tab5:
+        render_match_odds()
 
     # Footer with data source summary
     st.markdown("---")
@@ -267,17 +469,21 @@ def show_player_projections_page():
         | Source | Type | Status | Update Frequency |
         |--------|------|--------|------------------|
         | **Rotowire** | Player point projections | ✅ Active | Weekly (before each GW) |
-        | **Goal Scorer Odds** | Betting market probabilities | 🔜 Coming Soon | Daily |
-        | **Clean Sheet Odds** | Team CS probabilities | 🔜 Coming Soon | Daily |
+        | **FFP Predictor** | Points with start % | ✅ Active | Updated throughout GW |
+        | **FFP Goal/Assist Odds** | Betting probabilities | ✅ Active | Daily |
+        | **FFP Clean Sheet Odds** | Team CS probabilities | ✅ Active | Daily |
+        | **The Odds API** | Match betting odds | ✅ Active | Live updates |
 
         ### How to Use This Data
 
-        - **Rotowire Projections**: Best for overall player rankings and expected points
-        - **Goal Scorer Odds**: Identify players most likely to score (great for captaincy)
+        - **Rotowire**: Expert rankings based on analysis and matchups
+        - **FFP Predictor**: Alternative projections accounting for rotation risk
+        - **Goal/Assist Odds**: Identify players most likely to return attacking points
         - **Clean Sheet Odds**: Find defenders/GKs with best CS potential
+        - **Match Odds**: Understand expected match outcomes for context
 
-        ### Contributing Data Sources
+        ### Comparing Sources
 
-        If you have access to additional projection sources or APIs, they can be integrated here.
-        Check `scripts/fpl/player_projections.py` for the integration pattern.
+        When Rotowire and FFP agree on a player, that's a high-confidence pick.
+        When they diverge, dig deeper to understand why (injury doubt, rotation risk, etc.).
         """)

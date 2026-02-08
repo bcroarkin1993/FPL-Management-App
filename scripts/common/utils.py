@@ -2131,6 +2131,282 @@ def get_rotowire_season_rankings(url: str, limit: Optional[int] = None) -> pd.Da
 
 
 # =============================================================================
+# 6B. FANTASY FOOTBALL PUNDIT DATA
+# =============================================================================
+
+# FFP Google Sheets URL (public CSV export)
+FFP_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRaiTmUKjtQ7MxiGibN2GAZ8m9NHF3IA2U-yE0PhBpCOXHewhs57PrjZO7GQzZvrEGGBW7HFEE43yX0/pub?output=csv"
+
+
+@st.cache_data(ttl=300)
+def get_ffp_projections_data() -> Optional[pd.DataFrame]:
+    """
+    Fetch Fantasy Football Pundit projections data from their public Google Sheet.
+
+    Returns DataFrame with columns:
+    - Name, Team, Position, Fixture, Ownership, Start %, Price
+    - CS (Clean Sheet odds), AnytimeGoal, AnytimeAssist, AnytimeReturn
+    - Predicted, StartingPredicted (points predictions)
+    - GW2-GW6, Next2GWs-Next6GWs (multi-GW forecasts)
+    """
+    try:
+        from io import StringIO
+        resp = requests.get(FFP_SHEET_URL, timeout=15)
+        resp.raise_for_status()
+        df = pd.read_csv(StringIO(resp.text))
+
+        if df.empty:
+            _logger.warning("FFP data fetch returned empty DataFrame")
+            return None
+
+        # Clean up percentage columns (remove % sign, convert to float)
+        pct_cols = ['Ownership', 'Start', 'LongStart', 'CS', 'AnytimeAssist', 'AnytimeGoal', 'AnytimeReturn']
+        for col in pct_cols:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.replace('%', '').str.strip()
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # Clean up price column (remove £ and m)
+        if 'Price' in df.columns:
+            df['Price'] = df['Price'].astype(str).str.replace('£', '').str.replace('m', '').str.strip()
+            df['Price'] = pd.to_numeric(df['Price'], errors='coerce')
+
+        # Ensure numeric columns are properly typed
+        numeric_cols = ['Predicted', 'StartingPredicted', 'GW2', 'GW3', 'GW4', 'GW5', 'GW6',
+                        'Next2GWs', 'Next3GWs', 'Next4GWs', 'Next5GWs', 'Next6GWs',
+                        'Next2GWsStart', 'Next3GWsStart', 'Next4GWsStart', 'Next5GWsStart', 'Next6GWsStart']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        _logger.debug("FFP data fetched successfully: %d players", len(df))
+        return df
+
+    except Exception as e:
+        _logger.warning("Failed to fetch FFP projections data: %s", str(e))
+        return None
+
+
+def get_ffp_points_predictor() -> Optional[pd.DataFrame]:
+    """
+    Get FFP points predictor data formatted for display.
+
+    Returns DataFrame with key columns for points predictions.
+    """
+    df = get_ffp_projections_data()
+    if df is None:
+        return None
+
+    # Select and rename columns for display
+    cols = {
+        'Name': 'Player',
+        'Team': 'Team',
+        'Position': 'Position',
+        'Fixture': 'Fixture',
+        'Price': 'Price',
+        'Ownership': 'Ownership %',
+        'Start': 'Start %',
+        'Predicted': 'Predicted Pts',
+        'StartingPredicted': 'Pts (if starts)',
+        'Next2GWs': 'Next 2 GWs',
+        'Next3GWs': 'Next 3 GWs',
+        'Next6GWs': 'Next 6 GWs',
+    }
+
+    available = {k: v for k, v in cols.items() if k in df.columns}
+    result = df[list(available.keys())].rename(columns=available)
+
+    # Filter to players with >0% start chance for meaningful data
+    if 'Start %' in result.columns:
+        result = result[result['Start %'] > 0].copy()
+
+    # Sort by predicted points
+    if 'Predicted Pts' in result.columns:
+        result = result.sort_values('Predicted Pts', ascending=False)
+
+    return result.reset_index(drop=True)
+
+
+def get_ffp_goalscorer_odds() -> Optional[pd.DataFrame]:
+    """
+    Get FFP anytime goalscorer odds data.
+
+    Returns DataFrame with goal/assist probabilities.
+    """
+    df = get_ffp_projections_data()
+    if df is None:
+        return None
+
+    cols = {
+        'Name': 'Player',
+        'Team': 'Team',
+        'Position': 'Position',
+        'Fixture': 'Fixture',
+        'Start': 'Start %',
+        'AnytimeGoal': 'Goal %',
+        'AnytimeAssist': 'Assist %',
+        'AnytimeReturn': 'Return %',
+    }
+
+    available = {k: v for k, v in cols.items() if k in df.columns}
+    result = df[list(available.keys())].rename(columns=available)
+
+    # Filter to players with goal probability > 0
+    if 'Goal %' in result.columns:
+        result = result[result['Goal %'] > 0].copy()
+        result = result.sort_values('Goal %', ascending=False)
+
+    return result.reset_index(drop=True)
+
+
+def get_ffp_clean_sheet_odds() -> Optional[pd.DataFrame]:
+    """
+    Get FFP clean sheet odds aggregated by team.
+
+    Returns DataFrame with team-level CS probabilities.
+    """
+    df = get_ffp_projections_data()
+    if df is None:
+        return None
+
+    # Aggregate by team (CS is the same for all players on a team)
+    if 'CS' not in df.columns or 'Team' not in df.columns:
+        return None
+
+    # Get unique team entries with their fixtures
+    team_df = df.groupby('Team').agg({
+        'CS': 'first',
+        'Fixture': 'first',
+    }).reset_index()
+
+    team_df = team_df.rename(columns={'CS': 'CS Prob %'})
+    team_df = team_df.sort_values('CS Prob %', ascending=False)
+
+    return team_df.reset_index(drop=True)
+
+
+# =============================================================================
+# 6C. THE ODDS API INTEGRATION
+# =============================================================================
+
+@st.cache_data(ttl=300)
+def get_odds_api_match_odds(api_key: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """
+    Fetch EPL match odds from The Odds API.
+
+    Args:
+        api_key: The Odds API key (falls back to env var ODDS_API_KEY)
+
+    Returns DataFrame with columns:
+    - Home Team, Away Team, Kickoff
+    - Home Win %, Draw %, Away Win % (converted from decimal odds)
+    - BTTS Yes %, Over 2.5 %
+    """
+    import os
+    key = api_key or os.getenv("ODDS_API_KEY", "")
+    if not key:
+        _logger.debug("No ODDS_API_KEY configured")
+        return None
+
+    base_url = "https://api.the-odds-api.com/v4/sports/soccer_epl"
+
+    try:
+        # Fetch h2h odds
+        h2h_resp = requests.get(
+            f"{base_url}/odds",
+            params={"apiKey": key, "regions": "uk", "markets": "h2h", "oddsFormat": "decimal"},
+            timeout=15
+        )
+        h2h_resp.raise_for_status()
+        h2h_data = h2h_resp.json()
+
+        if not h2h_data:
+            return None
+
+        matches = []
+        for match in h2h_data:
+            home = match.get("home_team", "")
+            away = match.get("away_team", "")
+            kickoff = match.get("commence_time", "")
+
+            # Get average odds across bookmakers
+            h2h_odds = {"home": [], "draw": [], "away": []}
+            for bm in match.get("bookmakers", []):
+                for market in bm.get("markets", []):
+                    if market.get("key") == "h2h":
+                        for outcome in market.get("outcomes", []):
+                            name = outcome.get("name", "")
+                            price = outcome.get("price", 0)
+                            if name == home:
+                                h2h_odds["home"].append(price)
+                            elif name == away:
+                                h2h_odds["away"].append(price)
+                            elif name == "Draw":
+                                h2h_odds["draw"].append(price)
+
+            # Convert average odds to implied probability
+            def odds_to_prob(odds_list):
+                if not odds_list:
+                    return None
+                avg_odds = sum(odds_list) / len(odds_list)
+                return round((1 / avg_odds) * 100, 1) if avg_odds > 0 else None
+
+            matches.append({
+                "Home Team": home,
+                "Away Team": away,
+                "Kickoff": kickoff[:16].replace("T", " ") if kickoff else "",
+                "Home Win %": odds_to_prob(h2h_odds["home"]),
+                "Draw %": odds_to_prob(h2h_odds["draw"]),
+                "Away Win %": odds_to_prob(h2h_odds["away"]),
+            })
+
+        df = pd.DataFrame(matches)
+        _logger.debug("Odds API: fetched %d matches", len(df))
+        return df
+
+    except requests.exceptions.RequestException as e:
+        _logger.warning("Failed to fetch Odds API data: %s", str(e))
+        return None
+    except Exception as e:
+        _logger.warning("Error processing Odds API data: %s", str(e))
+        return None
+
+
+@st.cache_data(ttl=300)
+def get_odds_api_match_details(event_id: str, api_key: Optional[str] = None) -> Optional[dict]:
+    """
+    Fetch detailed odds for a specific match including BTTS and totals.
+
+    Args:
+        event_id: The Odds API event ID
+        api_key: API key (falls back to env var)
+
+    Returns dict with detailed odds data.
+    """
+    import os
+    key = api_key or os.getenv("ODDS_API_KEY", "")
+    if not key:
+        return None
+
+    try:
+        resp = requests.get(
+            f"https://api.the-odds-api.com/v4/sports/soccer_epl/events/{event_id}/odds",
+            params={
+                "apiKey": key,
+                "regions": "uk",
+                "markets": "h2h,btts,totals",
+                "oddsFormat": "decimal"
+            },
+            timeout=15
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        _logger.warning("Failed to fetch match details for %s: %s", event_id, str(e))
+        return None
+
+
+# =============================================================================
 # 7. FIXTURES & SCHEDULING
 # =============================================================================
 
