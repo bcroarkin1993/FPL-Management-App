@@ -151,16 +151,15 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 |------|--------|-------|
 | Improve H2H Visuals | Not started | Better styling for H2H history sections (match history cards, icons, etc.) |
 | Player Trade Analyzer | Not started | Evaluate potential trades between teams (Draft mode) |
-| Live Score Integration | Not started | Real-time score tracking during gameweeks |
 | Historical Data Analysis | Not started | Past season trends and performance analysis |
 | Split utils.py | In progress | Created `player_matching.py`; more modules could be extracted |
 | Add basic tests | Not started | No test infrastructure currently |
-| Gameweek refresh logic | Not started | Cached at module level, doesn't auto-update during day |
 
 ### Completed
 
 | Task | Notes |
 |------|-------|
+| Live Score Integration & Gameweek Refresh | TTL-based gameweek caching (5 min) with manual refresh; live points from FPL API blended with Rotowire projections; actual starting 11 from Draft picks API (not optimal projections); styled overview table showing live/blended/original scores; player cards with played/upcoming status; win probability updates in real-time |
 | Enhanced Lineup Visualizations | Fixed duplicate team bug (matchup index tracking); start likelihood indicator (opacity + border color based on injury status, FPL chance_of_playing, historical starts); robust player name matching (abbreviated names, nicknames, Nordic characters); team name mapping (Rotowire → FPL); Squad Details cards with form, points, goals/assists |
 | Rotowire scraping robustness | Fallback table selectors (exact → partial → any); row validation before indexing; multiple regex patterns for URL discovery; proper logging throughout; replaced bare except clauses |
 | Performance optimizations | Added `@st.cache_data` to 9 uncached API functions; startup preload with `@st.cache_resource`; refactored Draft home to eliminate 4 redundant `/league/details` calls; 50-60% faster page loads after initial startup |
