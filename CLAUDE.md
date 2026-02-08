@@ -26,9 +26,11 @@ python -m scripts.common.waiver_alerts
 
 ### Data Flow
 ```
-FPL Draft API  ──┐
-                 ├──> scripts/common/utils.py (normalize/merge) ──> Page scripts ──> Streamlit UI
-Rotowire scrape ─┘
+FPL Draft API  ──────────┐
+FPL Classic API ─────────┤
+Rotowire scrape ─────────┼──> scripts/common/utils.py (normalize/merge) ──> Page scripts ──> Streamlit UI
+Fantasy Football Pundit ─┤
+The Odds API ────────────┘
 ```
 
 ### Key Components
@@ -57,6 +59,8 @@ Rotowire scrape ─┘
 | `draft.premierleague.com/api/` | League data, rosters, transactions |
 | `fantasy.premierleague.com/api/` | Player stats, fixtures, FDR |
 | `rotowire.com/soccer/` | Player projections, EPL lineups |
+| `fantasyfootballpundit.com` | Points predictions, goal/assist odds, clean sheet odds (via Google Sheets) |
+| `api.the-odds-api.com` | Match betting odds (h2h, BTTS, totals) |
 
 ### Player Matching
 
@@ -101,6 +105,9 @@ Optional (Notifications):
 Optional (Classic):
 - `FPL_CLASSIC_LEAGUE_IDS` - Comma-separated list of `league_id:League Name` pairs (e.g., `123456:My League,789012:Friends`)
 - `FPL_CLASSIC_TEAM_ID` - Your Classic FPL team ID
+
+Optional (External APIs):
+- `ODDS_API_KEY` - The Odds API key for match betting odds (free tier: 500 requests/month)
 
 Optional (Development):
 - `FPL_CURRENT_GAMEWEEK` - Override for offline development
@@ -159,6 +166,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Notes |
 |------|-------|
+| Projections Hub | Unified projections page with 5 data source tabs: Rotowire expert rankings, FFP Points Predictor (start %, multi-GW forecasts), Goal/Assist Odds, Clean Sheet Odds, Match Odds (The Odds API). Each tab has data source attribution, filters, and usage tips. |
 | Live Score Integration & Gameweek Refresh | TTL-based gameweek caching (5 min) with manual refresh; live points from FPL API blended with Rotowire projections; actual starting 11 from Draft picks API (not optimal projections); styled overview table showing live/blended/original scores; player cards with played/upcoming status; win probability updates in real-time |
 | Enhanced Lineup Visualizations | Fixed duplicate team bug (matchup index tracking); start likelihood indicator (opacity + border color based on injury status, FPL chance_of_playing, historical starts); robust player name matching (abbreviated names, nicknames, Nordic characters); team name mapping (Rotowire → FPL); Squad Details cards with form, points, goals/assists |
 | Rotowire scraping robustness | Fallback table selectors (exact → partial → any); row validation before indexing; multiple regex patterns for URL discovery; proper logging throughout; replaced bare except clauses |
