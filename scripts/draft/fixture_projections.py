@@ -7,7 +7,8 @@ from scripts.common.utils import (
     find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures,
     get_team_id_by_name, get_rotowire_player_projections, get_team_composition_for_gameweek,
     merge_fpl_players_and_projections, normalize_apostrophes, get_historical_team_scores,
-    get_draft_h2h_record, get_live_gameweek_stats, is_gameweek_live, get_fpl_player_mapping
+    get_draft_h2h_record, get_live_gameweek_stats, is_gameweek_live, get_fpl_player_mapping,
+    get_team_actual_lineup
 )
 
 def _blend_live_with_projections(team_df: pd.DataFrame, live_stats: dict, player_mapping: dict) -> pd.DataFrame:
@@ -271,9 +272,11 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
 
     html += "</div>"
 
-    # Calculate total height based on player count (with extra buffer for margins)
+    # Calculate total height based on player count
     player_count = len(team_df)
-    height = 80 + (player_count * 60) + (4 * 40)  # players + position headers + buffer
+    # Count actual position groups present
+    pos_groups = team_df['Position'].nunique() if 'Position' in team_df.columns else 4
+    height = 40 + (player_count * 56) + (pos_groups * 32)
     components.html(html, height=height, scrolling=False)
 
 
@@ -323,15 +326,17 @@ def _render_winprob_bar(team1_name: str, team2_name: str, p_team1: float):
     """
     st.markdown(html, unsafe_allow_html=True)
 
-def analyze_fixture_projections(fixture, league_id, projections_df):
+def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_lineup: bool = False):
     """
-    Returns two DataFrames representing optimal projected lineups and points for each team in a fixture,
+    Returns two DataFrames representing lineups and points for each team in a fixture,
     sorted by position (GK, DEF, MID, FWD) and then by descending projected points within each position.
 
     Parameters:
     - fixture (str): The selected fixture, formatted as "Team1 (Player1) vs Team2 (Player2)".
     - league_id (int): The ID of the FPL Draft league.
     - projections_df (DataFrame): DataFrame containing player projections from Rotowire.
+    - use_actual_lineup (bool): If True, use the manager's actual starting 11 picks.
+                                If False, calculate the optimal lineup by projections.
 
     Returns:
     - Tuple of two DataFrames: (team1_df, team2_df, team1_name, team2_name)
@@ -350,32 +355,50 @@ def analyze_fixture_projections(fixture, league_id, projections_df):
     # Get the current gameweek
     gameweek = get_current_gameweek()
 
-    # Retrieve team compositions for the current gameweek and convert to dataframes
-    team1_composition = get_team_composition_for_gameweek(league_id, team1_id, gameweek)
-    team2_composition = get_team_composition_for_gameweek(league_id, team2_id, gameweek)
+    if use_actual_lineup:
+        # Use actual picks from the FPL Draft API
+        team1_actual = get_team_actual_lineup(team1_id, gameweek)
+        team2_actual = get_team_actual_lineup(team2_id, gameweek)
 
-    # Merge FPL players with projections for both teams
-    team1_df = merge_fpl_players_and_projections(
-        team1_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
-    )
-    team2_df = merge_fpl_players_and_projections(
-        team2_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
-    )
+        # Filter to starters only (positions 1-11)
+        team1_starters = team1_actual[team1_actual['Is_Starter'] == True].copy()
+        team2_starters = team2_actual[team2_actual['Is_Starter'] == True].copy()
 
-    # Debugging: Check if 'Points' column exists
+        # Merge with projections
+        team1_df = merge_fpl_players_and_projections(
+            team1_starters[['Player', 'Team', 'Position']],
+            projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+        )
+        team2_df = merge_fpl_players_and_projections(
+            team2_starters[['Player', 'Team', 'Position']],
+            projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+        )
+    else:
+        # Use optimal lineup calculation (original behavior)
+        team1_composition = get_team_composition_for_gameweek(league_id, team1_id, gameweek)
+        team2_composition = get_team_composition_for_gameweek(league_id, team2_id, gameweek)
+
+        # Merge FPL players with projections for both teams
+        team1_df = merge_fpl_players_and_projections(
+            team1_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+        )
+        team2_df = merge_fpl_players_and_projections(
+            team2_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+        )
+
+    # Check if 'Points' column exists
     if 'Points' not in team1_df or 'Points' not in team2_df:
         print("Error: 'Points' column not found in one or both dataframes.")
-        print("Team 1 DataFrame:\n", team1_df.head())
-        print("Team 2 DataFrame:\n", team2_df.head())
-        return None  # Exit the function early if the column is missing
+        return None
 
     # Fill NaN values in 'Points' column with 0.0
     team1_df['Points'] = pd.to_numeric(team1_df['Points'], errors='coerce').fillna(0.0)
     team2_df['Points'] = pd.to_numeric(team2_df['Points'], errors='coerce').fillna(0.0)
 
-    # Find the optimal lineup (top 11 players) for each team
-    team1_df = find_optimal_lineup(team1_df)
-    team2_df = find_optimal_lineup(team2_df)
+    if not use_actual_lineup:
+        # Find the optimal lineup (top 11 players) for each team
+        team1_df = find_optimal_lineup(team1_df)
+        team2_df = find_optimal_lineup(team2_df)
 
     # Define the position order for sorting
     position_order = ['G', 'D', 'M', 'F']
@@ -453,7 +476,8 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
     with st.spinner(spinner_msg):
         for fixture in fixtures:
             try:
-                result = analyze_fixture_projections(fixture, league_id, projections_df)
+                # Use actual lineups for live gameweeks, optimal projections otherwise
+                result = analyze_fixture_projections(fixture, league_id, projections_df, use_actual_lineup=gw_is_live)
                 if result is None:
                     continue
 
@@ -738,8 +762,8 @@ def show_fixtures_page():
 
     # Create the Streamlit visuals
     if fixture_selection:
-        # Analyze fixture projections
-        result = analyze_fixture_projections(fixture_selection, config.FPL_DRAFT_LEAGUE_ID, fpl_player_projections)
+        # Analyze fixture projections - use actual lineups for live gameweeks
+        result = analyze_fixture_projections(fixture_selection, config.FPL_DRAFT_LEAGUE_ID, fpl_player_projections, use_actual_lineup=gw_is_live)
 
         if result is None:
             st.error(
@@ -846,7 +870,7 @@ def show_fixtures_page():
             h2h = get_draft_h2h_record(config.FPL_DRAFT_LEAGUE_ID, team1_id, team2_id)
 
             if h2h["wins"] + h2h["draws"] + h2h["losses"] > 0:
-                st.divider()
+                st.markdown("<div style='margin-top: 24px;'></div>", unsafe_allow_html=True)
                 st.subheader("Head-to-Head History")
 
                 # Styled H2H record display

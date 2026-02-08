@@ -849,6 +849,55 @@ def get_starting_team_composition(league_id):
     return draft_picks
 
 
+@st.cache_data(ttl=60)
+def get_team_actual_lineup(team_id: int, gameweek: int) -> pd.DataFrame:
+    """
+    Get the actual starting 11 picks for a team in a specific gameweek.
+
+    Uses the FPL Draft picks API to get the real lineup the manager selected,
+    not an "optimal" calculated lineup.
+
+    Parameters:
+    - team_id: The team/entry ID
+    - gameweek: The gameweek number
+
+    Returns:
+    - DataFrame with columns ['Player', 'Team', 'Position', 'Is_Starter'] for all 15 players
+      Is_Starter is True for positions 1-11, False for bench (12-15)
+    """
+    player_map = get_fpl_player_mapping()
+
+    url = f"https://draft.premierleague.com/api/entry/{team_id}/event/{gameweek}"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        _logger.warning("Failed to fetch team picks for team %s GW %s: %s", team_id, gameweek, e)
+        return pd.DataFrame(columns=['Player', 'Team', 'Position', 'Is_Starter'])
+
+    picks = data.get('picks', [])
+    if not picks:
+        return pd.DataFrame(columns=['Player', 'Team', 'Position', 'Is_Starter'])
+
+    rows = []
+    for pick in picks:
+        element_id = pick.get('element')
+        position_slot = pick.get('position', 0)  # 1-11 = starters, 12-15 = bench
+        is_starter = position_slot <= 11
+
+        player_info = player_map.get(element_id, {})
+        rows.append({
+            'Player': player_info.get('Player', f'Unknown ({element_id})'),
+            'Team': player_info.get('Team', '???'),
+            'Position': player_info.get('Position', '?'),
+            'Is_Starter': is_starter,
+            'Player_ID': element_id,
+        })
+
+    return pd.DataFrame(rows)
+
+
 @st.cache_data(ttl=600)
 def get_team_composition_for_gameweek(league_id, team_id, gameweek):
     """
@@ -3049,31 +3098,66 @@ def check_valid_lineup(df):
 
 def find_optimal_lineup(df):
     """
-    Function to find a team's optimal lineup given their player_projections_df
+    Function to find a team's optimal lineup given their player_projections_df.
+
+    Enforces valid FPL formation:
+    - Exactly 1 GK
+    - 3-5 DEF
+    - 2-5 MID
+    - 1-3 FWD
+    - Total of 11 players
+
     :param df: a dataframe of the team's player projections
     :return: optimal 11-player lineup DataFrame
     """
-    # 1. Find the top scoring GK
+    # 1. Find the top scoring GK (exactly 1)
     top_gk = df[df['Position'] == 'G'].sort_values(by='Points', ascending=False).head(1)
 
-    # 2. Find the top 3 scoring DEF
-    top_def = df[df['Position'] == 'D'].sort_values(by='Points', ascending=False).head(3)
+    # 2. Find the top 3 scoring DEF (minimum required)
+    all_def = df[df['Position'] == 'D'].sort_values(by='Points', ascending=False)
+    top_def = all_def.head(3)
 
-    # 3. Find the top 3 scoring MID
-    top_mid = df[df['Position'] == 'M'].sort_values(by='Points', ascending=False).head(3)
+    # 3. Find the top 2 scoring MID (minimum required, need at least 2)
+    all_mid = df[df['Position'] == 'M'].sort_values(by='Points', ascending=False)
+    top_mid = all_mid.head(2)
 
-    # 4. Find the top scoring FWD
-    top_fwd = df[df['Position'] == 'F'].sort_values(by='Points', ascending=False).head(1)
+    # 4. Find the top scoring FWD (minimum 1)
+    all_fwd = df[df['Position'] == 'F'].sort_values(by='Points', ascending=False)
+    top_fwd = all_fwd.head(1)
 
-    # 5. Combine the selected players
+    # 5. Combine the base selected players (1 GK + 3 DEF + 2 MID + 1 FWD = 7 players)
     selected_players = pd.concat([top_gk, top_def, top_mid, top_fwd])
+    selected_names = set(selected_players['Player'].tolist())
 
-    # 6. Find the remaining top 3 scoring players not in the selected players
-    remaining_players = df[~df['Player'].isin(selected_players['Player'])]
-    top_remaining = remaining_players.sort_values(by='Points', ascending=False).head(3)
+    # 6. Need to add 4 more players from remaining (excluding GKs)
+    # Remaining pool: DEF (up to 2 more), MID (up to 3 more), FWD (up to 2 more)
+    remaining_def = all_def[~all_def['Player'].isin(selected_names)].head(2)  # Can add up to 2 more DEF
+    remaining_mid = all_mid[~all_mid['Player'].isin(selected_names)].head(3)  # Can add up to 3 more MID
+    remaining_fwd = all_fwd[~all_fwd['Player'].isin(selected_names)].head(2)  # Can add up to 2 more FWD
+
+    # Combine remaining candidates (no GKs allowed)
+    remaining_pool = pd.concat([remaining_def, remaining_mid, remaining_fwd])
+    remaining_pool = remaining_pool.sort_values(by='Points', ascending=False)
+
+    # Track position counts as we add players
+    pos_counts = {'G': 1, 'D': 3, 'M': 2, 'F': 1}
+    max_counts = {'G': 1, 'D': 5, 'M': 5, 'F': 3}
+
+    players_to_add = []
+    for _, player in remaining_pool.iterrows():
+        if len(players_to_add) >= 4:
+            break
+        pos = player['Position']
+        if pos_counts.get(pos, 0) < max_counts.get(pos, 0):
+            players_to_add.append(player)
+            pos_counts[pos] = pos_counts.get(pos, 0) + 1
 
     # 7. Combine all selected players
-    final_selection = pd.concat([selected_players, top_remaining])
+    if players_to_add:
+        additional = pd.DataFrame(players_to_add)
+        final_selection = pd.concat([selected_players, additional])
+    else:
+        final_selection = selected_players
 
     # 8. Organize the final selection by Position and descending Projected_Points
     final_selection = final_selection.sort_values(
@@ -3082,5 +3166,4 @@ def find_optimal_lineup(df):
         ascending=[True, False]
     ).reset_index(drop=True)
 
-    # Display the final selection
-    return(final_selection)
+    return final_selection
