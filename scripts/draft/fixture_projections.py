@@ -271,9 +271,9 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
 
     html += "</div>"
 
-    # Calculate total height based on player count
+    # Calculate total height based on player count (with extra buffer for margins)
     player_count = len(team_df)
-    height = 50 + (player_count * 52) + (4 * 35)  # players + position headers
+    height = 80 + (player_count * 60) + (4 * 40)  # players + position headers + buffer
     components.html(html, height=height, scrolling=False)
 
 
@@ -658,9 +658,9 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
     </html>
     """
 
-    # Calculate height based on number of fixtures (taller rows for live view)
-    row_height = 72 if gw_is_live else 52
-    table_height = 60 + (len(overview_data) * row_height)
+    # Calculate height based on number of fixtures (taller rows for live view with 3 lines of text)
+    row_height = 90 if gw_is_live else 52
+    table_height = 70 + (len(overview_data) * row_height)
     components.html(html, height=table_height, scrolling=False)
 
 
@@ -769,29 +769,76 @@ def show_fixtures_page():
         z = (team1_score - team2_score) / denom
         p_team1 = _normal_cdf(z)
 
-        # Show live score summary if live
-        if gw_is_live and team1_live is not None:
-            st.subheader("🔴 Live Score")
-            lcol1, lcol2, lcol3 = st.columns([2, 1, 2])
-            with lcol1:
-                st.metric(
-                    label=format_team_name(team1_name),
-                    value=f"{team1_live:.0f}",
-                    delta=f"+{team1_score - team1_live:.0f} proj"
-                )
-            with lcol2:
-                st.markdown("<div style='text-align:center;padding-top:20px;font-size:24px;'>vs</div>", unsafe_allow_html=True)
-            with lcol3:
-                st.metric(
-                    label=format_team_name(team2_name),
-                    value=f"{team2_live:.0f}",
-                    delta=f"+{team2_score - team2_live:.0f} proj"
-                )
-
         st.subheader("Win Probability")
         _render_winprob_bar(format_team_name(team1_name), format_team_name(team2_name), p_team1)
 
-        # --- Head-to-Head History ---
+        # Team Lineups section
+        st.subheader("Team Lineups")
+
+        # Create columns for side-by-side lineup display
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # Team 1 header with prominent score
+            orig_proj1 = team1_df['Points'].sum()
+            if gw_is_live and team1_live is not None:
+                diff1 = team1_score - orig_proj1
+                diff1_color = "green" if diff1 > 0 else "red" if diff1 < 0 else "gray"
+                diff1_sign = "+" if diff1 > 0 else ""
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #37003c 0%, #5a0050 100%); padding: 16px; border-radius: 10px; margin-bottom: 12px;">
+                    <div style="color: white; font-size: 14px; font-weight: 500; margin-bottom: 4px;">{format_team_name(team1_name)}</div>
+                    <div style="display: flex; align-items: baseline; gap: 12px;">
+                        <span style="color: #00ff87; font-size: 32px; font-weight: 700;">{team1_live:.0f}</span>
+                        <span style="color: rgba(255,255,255,0.7); font-size: 16px;">→ {team1_score:.1f} proj</span>
+                    </div>
+                    <div style="color: rgba(255,255,255,0.6); font-size: 12px; margin-top: 4px;">
+                        Pre-match: {orig_proj1:.1f} <span style="color: {'#00ff87' if diff1 > 0 else '#ff6b6b' if diff1 < 0 else 'rgba(255,255,255,0.6)'};">({diff1_sign}{diff1:.1f})</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #37003c 0%, #5a0050 100%); padding: 16px; border-radius: 10px; margin-bottom: 12px;">
+                    <div style="color: white; font-size: 14px; font-weight: 500; margin-bottom: 4px;">{format_team_name(team1_name)}</div>
+                    <div style="color: #00ff87; font-size: 32px; font-weight: 700;">{team1_score:.1f}</div>
+                    <div style="color: rgba(255,255,255,0.6); font-size: 12px;">Projected Points</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            _render_team_lineup(team1_df, team1_name, is_live=gw_is_live)
+
+        with col2:
+            # Team 2 header with prominent score
+            orig_proj2 = team2_df['Points'].sum()
+            if gw_is_live and team2_live is not None:
+                diff2 = team2_score - orig_proj2
+                diff2_color = "green" if diff2 > 0 else "red" if diff2 < 0 else "gray"
+                diff2_sign = "+" if diff2 > 0 else ""
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #37003c 0%, #5a0050 100%); padding: 16px; border-radius: 10px; margin-bottom: 12px;">
+                    <div style="color: white; font-size: 14px; font-weight: 500; margin-bottom: 4px;">{format_team_name(team2_name)}</div>
+                    <div style="display: flex; align-items: baseline; gap: 12px;">
+                        <span style="color: #00ff87; font-size: 32px; font-weight: 700;">{team2_live:.0f}</span>
+                        <span style="color: rgba(255,255,255,0.7); font-size: 16px;">→ {team2_score:.1f} proj</span>
+                    </div>
+                    <div style="color: rgba(255,255,255,0.6); font-size: 12px; margin-top: 4px;">
+                        Pre-match: {orig_proj2:.1f} <span style="color: {'#00ff87' if diff2 > 0 else '#ff6b6b' if diff2 < 0 else 'rgba(255,255,255,0.6)'};">({diff2_sign}{diff2:.1f})</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #37003c 0%, #5a0050 100%); padding: 16px; border-radius: 10px; margin-bottom: 12px;">
+                    <div style="color: white; font-size: 14px; font-weight: 500; margin-bottom: 4px;">{format_team_name(team2_name)}</div>
+                    <div style="color: #00ff87; font-size: 32px; font-weight: 700;">{team2_score:.1f}</div>
+                    <div style="color: rgba(255,255,255,0.6); font-size: 12px;">Projected Points</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            _render_team_lineup(team2_df, team2_name, is_live=gw_is_live)
+
+        # --- Head-to-Head History (below lineups) ---
         team1_id = get_team_id_by_name(config.FPL_DRAFT_LEAGUE_ID, team1_name)
         team2_id = get_team_id_by_name(config.FPL_DRAFT_LEAGUE_ID, team2_name)
 
@@ -799,24 +846,37 @@ def show_fixtures_page():
             h2h = get_draft_h2h_record(config.FPL_DRAFT_LEAGUE_ID, team1_id, team2_id)
 
             if h2h["wins"] + h2h["draws"] + h2h["losses"] > 0:
+                st.divider()
                 st.subheader("Head-to-Head History")
 
-                h2h_col1, h2h_col2, h2h_col3 = st.columns(3)
-                with h2h_col1:
-                    st.metric(
-                        label=f"{format_team_name(team1_name)} Wins",
-                        value=h2h["wins"]
-                    )
-                with h2h_col2:
-                    st.metric(
-                        label="Draws",
-                        value=h2h["draws"]
-                    )
-                with h2h_col3:
-                    st.metric(
-                        label=f"{format_team_name(team2_name)} Wins",
-                        value=h2h["losses"]
-                    )
+                # Styled H2H record display
+                total_matches = h2h["wins"] + h2h["draws"] + h2h["losses"]
+                t1_pct = (h2h["wins"] / total_matches * 100) if total_matches > 0 else 0
+                t2_pct = (h2h["losses"] / total_matches * 100) if total_matches > 0 else 0
+
+                st.markdown(f"""
+                <div style="background: #f8f9fa; border-radius: 10px; padding: 20px; margin-bottom: 16px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                        <div style="text-align: center; flex: 1;">
+                            <div style="font-size: 36px; font-weight: 700; color: #28a745;">{h2h["wins"]}</div>
+                            <div style="font-size: 12px; color: #666; text-transform: uppercase;">{format_team_name(team1_name)} Wins</div>
+                        </div>
+                        <div style="text-align: center; flex: 1;">
+                            <div style="font-size: 36px; font-weight: 700; color: #6c757d;">{h2h["draws"]}</div>
+                            <div style="font-size: 12px; color: #666; text-transform: uppercase;">Draws</div>
+                        </div>
+                        <div style="text-align: center; flex: 1;">
+                            <div style="font-size: 36px; font-weight: 700; color: #dc3545;">{h2h["losses"]}</div>
+                            <div style="font-size: 12px; color: #666; text-transform: uppercase;">{format_team_name(team2_name)} Wins</div>
+                        </div>
+                    </div>
+                    <div style="height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden; display: flex;">
+                        <div style="width: {t1_pct}%; background: #28a745;"></div>
+                        <div style="width: {100 - t1_pct - t2_pct}%; background: #6c757d;"></div>
+                        <div style="width: {t2_pct}%; background: #dc3545;"></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
                 # Show recent matchups if available
                 if h2h["matches"]:
@@ -834,41 +894,3 @@ def show_fixtures_page():
                             use_container_width=True,
                             hide_index=True
                         )
-
-        # Team Lineups section
-        st.subheader("Team Lineups")
-
-        # Create columns for side-by-side lineup display
-        col1, col2 = st.columns(2)
-
-        with col1:
-            # Team 1 header with score summary
-            if gw_is_live and team1_live is not None:
-                orig_proj1 = team1_df['Points'].sum()
-                st.markdown(f"### {format_team_name(team1_name)}")
-                st.markdown(f"**Live: {team1_live:.0f}** → Proj: {team1_score:.1f}")
-                diff1 = team1_score - orig_proj1
-                diff1_color = "green" if diff1 > 0 else "red" if diff1 < 0 else "gray"
-                diff1_sign = "+" if diff1 > 0 else ""
-                st.caption(f"Original projection: {orig_proj1:.1f} (:{diff1_color}[{diff1_sign}{diff1:.1f}])")
-            else:
-                st.markdown(f"### {format_team_name(team1_name)}")
-                st.markdown(f"**Projected: {team1_score:.1f}**")
-
-            _render_team_lineup(team1_df, team1_name, is_live=gw_is_live)
-
-        with col2:
-            # Team 2 header with score summary
-            if gw_is_live and team2_live is not None:
-                orig_proj2 = team2_df['Points'].sum()
-                st.markdown(f"### {format_team_name(team2_name)}")
-                st.markdown(f"**Live: {team2_live:.0f}** → Proj: {team2_score:.1f}")
-                diff2 = team2_score - orig_proj2
-                diff2_color = "green" if diff2 > 0 else "red" if diff2 < 0 else "gray"
-                diff2_sign = "+" if diff2 > 0 else ""
-                st.caption(f"Original projection: {orig_proj2:.1f} (:{diff2_color}[{diff2_sign}{diff2:.1f}])")
-            else:
-                st.markdown(f"### {format_team_name(team2_name)}")
-                st.markdown(f"**Projected: {team2_score:.1f}**")
-
-            _render_team_lineup(team2_df, team2_name, is_live=gw_is_live)
