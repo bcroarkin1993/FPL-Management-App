@@ -6,6 +6,13 @@ import requests
 import streamlit as st
 from typing import Tuple
 from scripts.common.utils import get_current_gameweek, get_fixture_difficulty_grid, style_fixture_difficulty
+from scripts.fpl.projected_lineups import (
+    scrape_rotowire_lineups,
+    scrape_matchups,
+    get_player_data_map,
+    plot_soccer_field,
+    render_player_cards_html,
+)
 
 # ---------- optional local tz (EST) ----------
 try:
@@ -302,6 +309,137 @@ def _render_text_schedule_two_cols(fixtures_df: pd.DataFrame):
                     col.markdown(line, unsafe_allow_html=True)
         st.markdown("---")
 
+# ---------- position grouping for compact lineup cards ----------
+_POS_GROUP = {
+    'GK': 'GK',
+    'DL': 'DEF', 'DC': 'DEF', 'DR': 'DEF', 'DML': 'DEF', 'DMR': 'DEF',
+    'DMC': 'MID', 'ML': 'MID', 'MC': 'MID', 'MR': 'MID',
+    'AML': 'MID', 'AMC': 'MID', 'AMR': 'MID',
+    'FL': 'FWD', 'FC': 'FWD', 'FR': 'FWD', 'FW': 'FWD', 'FWL': 'FWD', 'FWR': 'FWD',
+}
+
+_POS_ORDER = {'GK': 0, 'DEF': 1, 'MID': 2, 'FWD': 3}
+
+
+def _build_lineup_card_html(home_team, away_team, home_players, away_players):
+    """Build a compact HTML card showing both teams' lineups side-by-side."""
+
+    def _players_by_group(players_df):
+        """Group players by position category and return ordered list of (group, [names])."""
+        groups = {}
+        for _, row in players_df.iterrows():
+            grp = _POS_GROUP.get(row['Position'], 'MID')
+            groups.setdefault(grp, []).append(row['Player'])
+        return sorted(groups.items(), key=lambda x: _POS_ORDER.get(x[0], 9))
+
+    def _render_side(players_df):
+        if players_df.empty:
+            return '<div style="color:#999;font-size:0.85em;">Lineup not available</div>'
+        lines = []
+        for grp, names in _players_by_group(players_df):
+            color = {'GK': '#f1c40f', 'DEF': '#3498db', 'MID': '#2ecc71', 'FWD': '#e74c3c'}.get(grp, '#ccc')
+            badge = f'<span style="display:inline-block;background:{color};color:#fff;font-size:0.7em;font-weight:700;padding:1px 5px;border-radius:3px;margin-right:4px;min-width:28px;text-align:center;">{grp}</span>'
+            player_str = ", ".join(names)
+            lines.append(f'<div style="margin-bottom:3px;">{badge}<span style="color:#ddd;font-size:0.88em;">{player_str}</span></div>')
+        return "".join(lines)
+
+    home_html = _render_side(home_players)
+    away_html = _render_side(away_players)
+
+    return f"""
+    <div style="background:#1e2a3a;border-radius:10px;padding:14px 16px;margin-bottom:12px;border:1px solid #2c3e50;">
+        <div style="text-align:center;font-weight:700;font-size:1.05em;color:#fff;margin-bottom:10px;">
+            {home_team} <span style="color:#888;font-size:0.9em;">vs</span> {away_team}
+        </div>
+        <div style="display:flex;gap:16px;">
+            <div style="flex:1;border-right:1px solid #2c3e50;padding-right:12px;">
+                <div style="color:#aaa;font-size:0.75em;font-weight:600;margin-bottom:5px;text-transform:uppercase;">{home_team}</div>
+                {home_html}
+            </div>
+            <div style="flex:1;padding-left:4px;">
+                <div style="color:#aaa;font-size:0.75em;font-weight:600;margin-bottom:5px;text-transform:uppercase;">{away_team}</div>
+                {away_html}
+            </div>
+        </div>
+    </div>
+    """
+
+
+def _render_projected_lineups_section():
+    """Render projected lineups overview cards and drill-down section."""
+    st.subheader("⚽ Projected Lineups")
+
+    matchups = scrape_matchups(config.ROTOWIRE_LINEUPS_URL)
+    if not matchups:
+        st.info("No projected lineups available. Rotowire may not have published lineups for the upcoming gameweek yet.")
+        return
+
+    lineups_df = scrape_rotowire_lineups(config.ROTOWIRE_LINEUPS_URL)
+    if lineups_df.empty:
+        st.info("Lineup data is not available yet.")
+        return
+
+    # -- Overview cards: show all matchups in a 2-column grid --
+    with st.expander("Lineup Overview (all matches)", expanded=True):
+        cols = st.columns(2)
+        for i, (home_team, away_team, idx) in enumerate(matchups):
+            home_df = lineups_df[(lineups_df['Team'] == home_team) & (lineups_df['MatchupIndex'] == idx)]
+            away_df = lineups_df[(lineups_df['Team'] == away_team) & (lineups_df['MatchupIndex'] == idx)]
+            card_html = _build_lineup_card_html(home_team, away_team, home_df, away_df)
+            cols[i % 2].markdown(card_html, unsafe_allow_html=True)
+
+    # -- Drill-down: full soccer field + squad detail cards --
+    st.markdown("##### Match Drill-Down")
+    selected = st.selectbox(
+        "Select a match for full visualization",
+        matchups,
+        format_func=lambda x: f"{x[0]} vs {x[1]}",
+        key="fixtures_lineup_drilldown",
+    )
+
+    if selected:
+        home_team, away_team, matchup_index = selected
+        home_team_df = lineups_df[(lineups_df['Team'] == home_team) & (lineups_df['MatchupIndex'] == matchup_index)]
+        away_team_df = lineups_df[(lineups_df['Team'] == away_team) & (lineups_df['MatchupIndex'] == matchup_index)]
+
+        with st.spinner("Loading player data..."):
+            player_data_map = get_player_data_map()
+
+        # Start likelihood legend
+        st.markdown("""
+        <div style="display:flex;gap:15px;margin-bottom:15px;flex-wrap:wrap;">
+            <span style="font-size:0.85em;color:#888;">Start Likelihood:</span>
+            <span style="font-size:0.85em;"><span style="color:#27ae60;">●</span> 90%+</span>
+            <span style="font-size:0.85em;"><span style="color:#2ecc71;">●</span> 70-89%</span>
+            <span style="font-size:0.85em;"><span style="color:#f1c40f;">●</span> 50-69%</span>
+            <span style="font-size:0.85em;"><span style="color:#e67e22;">●</span> 25-49%</span>
+            <span style="font-size:0.85em;"><span style="color:#e74c3c;">●</span> &lt;25%</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader(f"{home_team}")
+            home_fig = plot_soccer_field(home_team_df, home_team, player_data_map)
+            st.plotly_chart(home_fig, use_container_width=True, key=f"fix_home_{matchup_index}")
+            st.markdown("##### Squad Details")
+            if not home_team_df.empty:
+                st.markdown(render_player_cards_html(home_team_df, player_data_map), unsafe_allow_html=True)
+            else:
+                st.info("No lineup data available for this team.")
+
+        with col2:
+            st.subheader(f"{away_team}")
+            away_fig = plot_soccer_field(away_team_df, away_team, player_data_map)
+            st.plotly_chart(away_fig, use_container_width=True, key=f"fix_away_{matchup_index}")
+            st.markdown("##### Squad Details")
+            if not away_team_df.empty:
+                st.markdown(render_player_cards_html(away_team_df, player_data_map), unsafe_allow_html=True)
+            else:
+                st.info("No lineup data available for this team.")
+
+
 # ============== MAIN SECTION (filters at top, text fixtures at bottom) ==============
 def show_club_fixtures_section():
     st.markdown(_COMPACT_CSS, unsafe_allow_html=True)
@@ -419,6 +557,9 @@ def show_club_fixtures_section():
             ),
         },
     )
+
+    # ---- Projected Lineups Section ----
+    _render_projected_lineups_section()
 
     # ---- Text Fixtures Table (MIDDLE) ----
     left, right = st.columns([1.75, 1])
