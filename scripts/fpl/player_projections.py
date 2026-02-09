@@ -283,13 +283,22 @@ def render_player_table_with_badges(df: pd.DataFrame, gradient_cols: dict, posit
 
     display_df = df.copy()
 
-    # Add position badge as colored text indicator (simple approach)
-    if position_col in display_df.columns:
-        # We'll use the standard dataframe but style the position column
-        pass
+    # Format numeric columns with proper decimal places
+    format_dict = {}
+    for col in display_df.columns:
+        if col in ['Points', 'Price', 'TSB %']:
+            format_dict[col] = '{:.1f}'
+        elif col == 'Value':
+            format_dict[col] = '{:.2f}'
+        elif col == 'Pos Rank':
+            format_dict[col] = '{:.0f}'
 
-    # Apply gradient styling
+    # Apply gradient styling with formatting
     styled_df = style_dataframe_with_gradient(display_df, gradient_cols, position_col=position_col)
+
+    # Apply number formatting
+    if format_dict:
+        styled_df = styled_df.format(format_dict, na_rep='-')
 
     # Render the dataframe
     st.dataframe(styled_df, use_container_width=True, hide_index=True, height=600)
@@ -356,8 +365,10 @@ def render_rotowire_projections():
     data_gw = int(url_gw_match.group(1)) if url_gw_match else None
     current_gw = config.CURRENT_GAMEWEEK
 
+    # Block stale data - don't show previous GW projections
     if data_gw and data_gw != current_gw:
-        st.warning(f"Data is for GW{data_gw} (GW{current_gw} projections not yet available from Rotowire)")
+        st.info(f"GW{current_gw} projections are not yet available from Rotowire. Check back closer to the gameweek deadline.")
+        return
 
     player_projections = get_rotowire_player_projections(url)
 
