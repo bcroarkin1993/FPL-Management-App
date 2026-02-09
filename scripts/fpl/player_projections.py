@@ -733,10 +733,27 @@ def _get_odds_color(pct: float) -> str:
 
 def _render_match_card_native(home_team: str, away_team: str, kickoff: str, home_pct: float, draw_pct: float, away_pct: float):
     """Render a single match with color-coded odds visualization."""
-    # Format kickoff time
+    from zoneinfo import ZoneInfo
+
+    # Format kickoff time in EST with full format
     try:
         kickoff_dt = pd.to_datetime(kickoff)
-        kickoff_str = kickoff_dt.strftime("%a %b %d, %H:%M")
+        # Convert UTC to EST
+        if kickoff_dt.tzinfo is None:
+            kickoff_dt = kickoff_dt.replace(tzinfo=ZoneInfo('UTC'))
+        kickoff_est = kickoff_dt.astimezone(ZoneInfo('America/New_York'))
+
+        # Format: "Tuesday, February 10th, 2:30pm EST"
+        day_name = kickoff_est.strftime("%A")
+        month = kickoff_est.strftime("%B")
+        day = kickoff_est.day
+        # Add ordinal suffix
+        if 10 <= day % 100 <= 20:
+            suffix = 'th'
+        else:
+            suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(day % 10, 'th')
+        time_str = kickoff_est.strftime("%I:%M%p").lstrip('0').lower()
+        kickoff_str = f"{day_name}, {month} {day}{suffix}, {time_str} EST"
     except:
         kickoff_str = str(kickoff) if kickoff else ""
 
@@ -745,7 +762,7 @@ def _render_match_card_native(home_team: str, away_team: str, kickoff: str, home
     draw_color = _get_odds_color(draw_pct)
     away_color = _get_odds_color(away_pct)
 
-    # Determine favorite indicator
+    # Determine favorite indicator (star = heavy favorite with 10%+ advantage)
     if home_pct > away_pct + 10:
         home_indicator = " ⭐"
         away_indicator = ""
@@ -756,16 +773,22 @@ def _render_match_card_native(home_team: str, away_team: str, kickoff: str, home
         home_indicator = ""
         away_indicator = ""
 
-    # Build styled card using HTML
+    # Build styled card using HTML with larger team names and Home/Away labels
     card_html = f'''
-    <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; margin-bottom: 12px; background: #ffffff;">
-        <div style="text-align: center; color: #6b7280; font-size: 12px; margin-bottom: 8px;">{kickoff_str}</div>
-        <div style="display: flex; align-items: center; justify-content: space-between;">
-            <div style="flex: 2; text-align: left; font-weight: 600; font-size: 14px;">{home_team}{home_indicator}</div>
-            <div style="flex: 1; text-align: center; padding: 6px 8px; border-radius: 4px; background: {home_color}; font-weight: 600;">{home_pct:.0f}%</div>
-            <div style="flex: 1; text-align: center; padding: 6px 8px; border-radius: 4px; background: {draw_color}; margin: 0 4px;">{draw_pct:.0f}%</div>
-            <div style="flex: 1; text-align: center; padding: 6px 8px; border-radius: 4px; background: {away_color}; font-weight: 600;">{away_pct:.0f}%</div>
-            <div style="flex: 2; text-align: right; font-weight: 600; font-size: 14px;">{away_indicator}{away_team}</div>
+    <div style="border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; margin-bottom: 14px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.08);">
+        <div style="text-align: center; color: #6b7280; font-size: 13px; margin-bottom: 12px;">{kickoff_str}</div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+            <div style="flex: 2; text-align: left;">
+                <div style="font-size: 10px; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px;">Home</div>
+                <div style="font-weight: 700; font-size: 17px;">{home_team}{home_indicator}</div>
+            </div>
+            <div style="flex: 1; text-align: center; padding: 8px 10px; border-radius: 6px; background: {home_color}; font-weight: 700; font-size: 16px;">{home_pct:.0f}%</div>
+            <div style="flex: 1; text-align: center; padding: 8px 10px; border-radius: 6px; background: {draw_color}; margin: 0 4px; font-size: 14px; color: #4b5563;">Draw<br><strong>{draw_pct:.0f}%</strong></div>
+            <div style="flex: 1; text-align: center; padding: 8px 10px; border-radius: 6px; background: {away_color}; font-weight: 700; font-size: 16px;">{away_pct:.0f}%</div>
+            <div style="flex: 2; text-align: right;">
+                <div style="font-size: 10px; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px;">Away</div>
+                <div style="font-weight: 700; font-size: 17px;">{away_indicator}{away_team}</div>
+            </div>
         </div>
     </div>
     '''
@@ -920,4 +943,16 @@ def show_player_projections_page():
         - **DEF** (Blue) - Defenders
         - **MID** (Green) - Midfielders
         - **FWD** (Red) - Forwards
+
+        ### Match Odds Visual Guide
+
+        Each match card displays:
+        - **Home team** (left) and **Away team** (right) with clear labels
+        - **Win probabilities** with color-coded backgrounds:
+          - 🟢 Green (55%+) = Strong favorite
+          - 🟡 Yellow (40-55%) = Slight favorite
+          - 🟠 Orange (30-40%) = Competitive match
+          - 🔴 Red (<30%) = Underdog
+        - **⭐ Star indicator** = Heavy favorite (10%+ win probability advantage over opponent)
+        - **Kickoff times** shown in Eastern Time (EST/EDT)
         """)
