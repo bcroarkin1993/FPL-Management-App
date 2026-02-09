@@ -12,6 +12,7 @@ Each data source is displayed in its own tab with clear attribution.
 """
 
 import config
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -56,14 +57,14 @@ def get_gradient_color(value, col_min, col_max, high_is_good=True):
     return f"rgb({r},{g},{b})"
 
 
-def style_dataframe_with_gradient(df: pd.DataFrame, gradient_cols: dict, format_cols: dict = None):
+def style_dataframe_with_gradient(df: pd.DataFrame, gradient_cols: dict, position_col: str = None):
     """
     Apply gradient coloring to specified columns.
 
     Args:
         df: DataFrame to style
         gradient_cols: dict of {column_name: high_is_good} for gradient coloring
-        format_cols: dict of {column_name: format_string} for number formatting
+        position_col: if set, apply Pos Rank gradient within each position group
 
     Returns:
         Styled DataFrame
@@ -103,13 +104,55 @@ def style_dataframe_with_gradient(df: pd.DataFrame, gradient_cols: dict, format_
 
         return styles
 
-    styled = df.style.apply(apply_gradient, axis=0)
+    def apply_gradient_by_position(col):
+        """Apply gradient for Pos Rank within each position group."""
+        col_name = col.name
+        if col_name != 'Pos Rank' or position_col is None or position_col not in df.columns:
+            return apply_gradient(col)
 
-    # Apply number formatting if specified
-    if format_cols:
-        styled = styled.format(format_cols, na_rep='-')
+        styles = [''] * len(col)
+        positions = df[position_col].values
 
-    return styled
+        for pos in df[position_col].unique():
+            if pd.isna(pos):
+                continue
+            mask = positions == pos
+            indices = np.where(mask)[0]
+
+            if len(indices) == 0:
+                continue
+
+            pos_values = []
+            for idx in indices:
+                val = col.iloc[idx]
+                if pd.isna(val):
+                    pos_values.append(np.nan)
+                elif isinstance(val, (int, float)):
+                    pos_values.append(float(val))
+                else:
+                    pos_values.append(np.nan)
+
+            pos_series = pd.Series(pos_values)
+            col_min = pos_series.min()
+            col_max = pos_series.max()
+
+            for i, idx in enumerate(indices):
+                color = get_gradient_color(pos_values[i], col_min, col_max, False)  # Low rank is good
+                styles[idx] = f'background-color: {color}'
+
+        return styles
+
+    # Use position-aware gradient for Pos Rank if position_col is provided
+    if position_col and 'Pos Rank' in gradient_cols:
+        # Apply regular gradient to non-Pos Rank columns
+        other_cols = {k: v for k, v in gradient_cols.items() if k != 'Pos Rank'}
+        styled = df.style.apply(apply_gradient, axis=0, subset=list(other_cols.keys()) if other_cols else None)
+        # Apply position-aware gradient to Pos Rank
+        if 'Pos Rank' in df.columns:
+            styled = styled.apply(apply_gradient_by_position, axis=0, subset=['Pos Rank'])
+        return styled
+    else:
+        return df.style.apply(apply_gradient, axis=0)
 
 
 def _render_source_banner(source: str, description: str, bg_color: str, border_color: str, url: str = None):
@@ -121,6 +164,113 @@ def _render_source_banner(source: str, description: str, bg_color: str, border_c
         <small style="opacity: 0.85;">{description}</small>
     </div>
     """, unsafe_allow_html=True)
+
+
+# =============================================================================
+# Position Badges
+# =============================================================================
+
+# Position badge colors
+POSITION_COLORS = {
+    'GK': {'bg': '#f97316', 'text': '#ffffff'},   # Orange
+    'GKP': {'bg': '#f97316', 'text': '#ffffff'},  # Orange (alternate name)
+    'DEF': {'bg': '#3b82f6', 'text': '#ffffff'},  # Blue
+    'MID': {'bg': '#22c55e', 'text': '#ffffff'},  # Green
+    'FWD': {'bg': '#ef4444', 'text': '#ffffff'},  # Red
+}
+
+
+def get_position_badge_html(position: str) -> str:
+    """Generate HTML for a colored position badge."""
+    if pd.isna(position):
+        return ""
+
+    pos = str(position).strip().upper()
+    colors = POSITION_COLORS.get(pos, {'bg': '#6b7280', 'text': '#ffffff'})
+
+    return f'''<span style="
+        background: {colors['bg']};
+        color: {colors['text']};
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+    ">{pos}</span>'''
+
+
+def render_player_table_with_badges(df: pd.DataFrame, gradient_cols: dict, position_col: str = 'Position'):
+    """
+    Render a player table with position badges as HTML.
+
+    This creates a custom HTML table with position badges while maintaining
+    gradient coloring for numeric columns.
+    """
+    if df.empty:
+        st.info("No data to display.")
+        return
+
+    # Convert position to badges
+    if position_col in df.columns:
+        df = df.copy()
+        df['_pos_badge'] = df[position_col].apply(get_position_badge_html)
+
+    # Build HTML table
+    html = '<div style="overflow-x: auto;"><table style="width: 100%; border-collapse: collapse; font-size: 14px;">'
+
+    # Header row
+    html += '<thead><tr style="background: #f8fafc; border-bottom: 2px solid #e2e8f0;">'
+    for col in df.columns:
+        if col.startswith('_'):
+            continue
+        if col == position_col:
+            html += f'<th style="padding: 12px 8px; text-align: left; font-weight: 600;">Pos</th>'
+        else:
+            html += f'<th style="padding: 12px 8px; text-align: left; font-weight: 600;">{col}</th>'
+    html += '</tr></thead>'
+
+    # Calculate gradient bounds for each column
+    col_bounds = {}
+    for col, high_is_good in gradient_cols.items():
+        if col in df.columns:
+            numeric_vals = pd.to_numeric(df[col].astype(str).str.replace('%', '').str.replace('-', ''), errors='coerce')
+            col_bounds[col] = {
+                'min': numeric_vals.min(),
+                'max': numeric_vals.max(),
+                'high_is_good': high_is_good
+            }
+
+    # Data rows
+    html += '<tbody>'
+    for idx, row in df.iterrows():
+        html += '<tr style="border-bottom: 1px solid #e2e8f0;">'
+        for col in df.columns:
+            if col.startswith('_'):
+                continue
+
+            val = row[col]
+
+            if col == position_col:
+                # Use badge instead of plain text
+                html += f'<td style="padding: 10px 8px;">{row["_pos_badge"]}</td>'
+            elif col in col_bounds:
+                # Apply gradient background
+                bounds = col_bounds[col]
+                try:
+                    numeric_val = float(str(val).replace('%', '').replace('-', '')) if val else None
+                    if numeric_val is not None and pd.notna(numeric_val):
+                        color = get_gradient_color(numeric_val, bounds['min'], bounds['max'], bounds['high_is_good'])
+                    else:
+                        color = '#f5f5f5'
+                except (ValueError, TypeError):
+                    color = '#f5f5f5'
+                html += f'<td style="padding: 10px 8px; background: {color};">{val}</td>'
+            else:
+                html += f'<td style="padding: 10px 8px;">{val}</td>'
+        html += '</tr>'
+    html += '</tbody></table></div>'
+
+    st.markdown(html, unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -179,7 +329,7 @@ def render_rotowire_projections():
 
     # Add value column if we have Points and Price
     if 'Points' in df.columns and 'Price' in df.columns:
-        df['Value'] = (df['Points'] / df['Price']).round(2)
+        df['Value'] = df['Points'] / df['Price']
 
     # Filters
     with st.expander("Filters", expanded=False):
@@ -212,34 +362,25 @@ def render_rotowire_projections():
     if price_filter and 'Price' in result.columns:
         result = result[result['Price'] <= price_filter]
 
-    # Display with gradient coloring
+    # Display with gradient coloring and position badges
     st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Player Projections")
 
-    # Format numeric columns before styling
+    # Format numeric columns for display
     display_df = result.copy()
-
-    def safe_round(x, decimals):
-        """Round numeric values, pass through strings unchanged."""
-        if pd.isna(x):
-            return x
-        if isinstance(x, (int, float)):
-            return round(x, decimals)
-        return x  # Already a string, leave as-is
-
     if 'Points' in display_df.columns:
-        display_df['Points'] = display_df['Points'].apply(lambda x: safe_round(x, 1))
+        display_df['Points'] = pd.to_numeric(display_df['Points'], errors='coerce').round(1)
     if 'Value' in display_df.columns:
-        display_df['Value'] = display_df['Value'].apply(lambda x: safe_round(x, 2))
-    if 'TSB %' in display_df.columns:
-        display_df['TSB %'] = display_df['TSB %'].apply(lambda x: safe_round(x, 1))
+        display_df['Value'] = pd.to_numeric(display_df['Value'], errors='coerce').round(2)
     if 'Price' in display_df.columns:
-        display_df['Price'] = display_df['Price'].apply(lambda x: safe_round(x, 1))
+        display_df['Price'] = pd.to_numeric(display_df['Price'], errors='coerce').round(1)
+    if 'TSB %' in display_df.columns:
+        display_df['TSB %'] = pd.to_numeric(display_df['TSB %'], errors='coerce').round(1)
 
-    # Define which columns get gradient coloring and their direction
+    # Define which columns get gradient coloring
     gradient_cols = {
         'Points': True,      # High is good
         'Value': True,       # High is good
-        'Pos Rank': False,   # Low is good (rank 1 is best)
+        'Pos Rank': False,   # Low is good (rank 1 is best) - will be by position
         'TSB %': True,       # High ownership = popular pick
         'Price': False,      # Lower price = better value potential
     }
@@ -247,8 +388,8 @@ def render_rotowire_projections():
     # Only apply gradient to columns that exist
     active_gradient = {k: v for k, v in gradient_cols.items() if k in display_df.columns}
 
-    styled_df = style_dataframe_with_gradient(display_df, active_gradient)
-    st.dataframe(styled_df, use_container_width=True, hide_index=True, height=600)
+    # Render with position badges
+    render_player_table_with_badges(display_df, active_gradient, position_col='Position')
     st.caption(f"Showing {len(result)} of {len(df)} players. Data from Rotowire.")
 
 
@@ -353,13 +494,13 @@ def render_ffp_data():
 
     # Format Price to 1 decimal
     if 'Price' in display_df.columns:
-        display_df['Price'] = display_df['Price'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "-")
+        display_df['Price'] = pd.to_numeric(display_df['Price'], errors='coerce').round(1)
 
     # Format prediction columns to 1 decimal
     pred_cols = ['Pred Pts', 'Pts (if starts)', 'Next 2 GW', 'Next 3 GW', 'Next 6 GW']
     for col in pred_cols:
         if col in display_df.columns:
-            display_df[col] = display_df[col].apply(lambda x: f"{x:.1f}" if pd.notna(x) and x != 0 else "-")
+            display_df[col] = pd.to_numeric(display_df[col], errors='coerce').round(1)
 
     # Format percentage columns
     pct_cols = [c for c in display_df.columns if '%' in c]
@@ -367,14 +508,14 @@ def render_ffp_data():
         if col in display_df.columns:
             display_df[col] = display_df[col].apply(lambda x: f"{x:.0f}%" if pd.notna(x) and x != 0 else "-")
 
-    # Display with gradient
+    # Display with gradient and position badges
     st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Player Data")
 
     # Apply gradient only to existing columns
     active_gradient = {k: v for k, v in gradient_cols.items() if k in display_df.columns}
-    styled_df = style_dataframe_with_gradient(display_df, active_gradient)
 
-    st.dataframe(styled_df, use_container_width=True, hide_index=True, height=600)
+    # Render with position badges
+    render_player_table_with_badges(display_df, active_gradient, position_col='Position')
     st.caption(f"Showing {len(result)} of {len(df)} players. Data from Fantasy Football Pundit.")
 
 
@@ -434,14 +575,14 @@ def render_goalscorer_odds():
         if col in display_df.columns:
             display_df[col] = display_df[col].apply(lambda x: f"{x:.0f}%" if pd.notna(x) else "-")
 
-    # Display with gradient
+    # Display with gradient and position badges
     st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Goalscorer & Assist Probabilities")
 
     gradient_cols = {'Goal %': True, 'Assist %': True, 'Return %': True, 'Start %': True}
     active_gradient = {k: v for k, v in gradient_cols.items() if k in display_df.columns}
-    styled_df = style_dataframe_with_gradient(display_df, active_gradient)
 
-    st.dataframe(styled_df, use_container_width=True, hide_index=True, height=600)
+    # Render with position badges
+    render_player_table_with_badges(display_df, active_gradient, position_col='Position')
     st.caption(f"Showing {len(result)} of {len(df)} players. Betting odds converted to probabilities.")
 
 
@@ -450,7 +591,7 @@ def render_goalscorer_odds():
 # =============================================================================
 
 def render_clean_sheet_odds():
-    """Render the clean sheet odds tab."""
+    """Render the clean sheet odds tab with horizontal bar visualization."""
     _render_source_banner(
         "Fantasy Football Pundit (Clean Sheet Odds)",
         "Team clean sheet probabilities from betting markets.",
@@ -464,27 +605,143 @@ def render_clean_sheet_odds():
         st.warning("Could not load clean sheet odds data. The data source may be temporarily unavailable.")
         return
 
-    # Display
     st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Clean Sheet Probabilities")
 
-    # Format for display
-    display_df = df.copy()
-    if 'CS Prob %' in display_df.columns:
-        display_df['CS Prob %'] = display_df['CS Prob %'].apply(lambda x: f"{x:.0f}%" if pd.notna(x) else "-")
+    # Create horizontal bar chart visualization
+    if 'CS Prob %' in df.columns and 'Team' in df.columns:
+        # Sort by CS probability descending
+        df_sorted = df.sort_values('CS Prob %', ascending=False).reset_index(drop=True)
 
-    gradient_cols = {'CS Prob %': True}
-    styled_df = style_dataframe_with_gradient(display_df, gradient_cols)
+        # Build HTML for horizontal bars
+        bars_html = '<div style="display: flex; flex-direction: column; gap: 8px;">'
 
-    st.dataframe(styled_df, use_container_width=True, hide_index=True, height=500)
-    st.caption(f"Showing {len(df)} teams. Betting odds converted to probabilities.")
+        for _, row in df_sorted.iterrows():
+            team = row['Team']
+            fixture = row.get('Fixture', '')
+            prob = row['CS Prob %']
+
+            if pd.isna(prob):
+                prob = 0
+
+            # Color based on probability (green gradient)
+            if prob >= 50:
+                bar_color = "#22c55e"  # Strong green
+            elif prob >= 35:
+                bar_color = "#86efac"  # Light green
+            elif prob >= 25:
+                bar_color = "#fde047"  # Yellow
+            else:
+                bar_color = "#fca5a5"  # Light red
+
+            bars_html += f'''
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <div style="width: 100px; font-weight: 600; font-size: 14px;">{team}</div>
+                <div style="flex: 1; background: #e5e7eb; border-radius: 4px; height: 24px; position: relative;">
+                    <div style="width: {prob}%; background: {bar_color}; height: 100%; border-radius: 4px; transition: width 0.3s;"></div>
+                    <span style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); font-size: 12px; font-weight: 500;">{prob:.0f}%</span>
+                </div>
+                <div style="width: 140px; font-size: 12px; color: #6b7280;">{fixture}</div>
+            </div>
+            '''
+
+        bars_html += '</div>'
+
+        st.markdown(bars_html, unsafe_allow_html=True)
+        st.caption(f"Showing {len(df)} teams. Betting odds converted to probabilities.")
+    else:
+        st.warning("Data format not as expected.")
 
 
 # =============================================================================
 # Match Odds Tab (The Odds API)
 # =============================================================================
 
+def _get_odds_color(pct: float) -> str:
+    """Get color based on win probability percentage."""
+    if pct >= 60:
+        return "#22c55e"  # Strong green - heavy favorite
+    elif pct >= 45:
+        return "#86efac"  # Light green - slight favorite
+    elif pct >= 35:
+        return "#fde047"  # Yellow - toss-up
+    elif pct >= 25:
+        return "#fca5a5"  # Light red - underdog
+    else:
+        return "#ef4444"  # Strong red - big underdog
+
+
+def _render_match_card(home_team: str, away_team: str, kickoff: str, home_pct: float, draw_pct: float, away_pct: float):
+    """Render a single match card with odds visualization."""
+    # Format kickoff time
+    try:
+        kickoff_dt = pd.to_datetime(kickoff)
+        kickoff_str = kickoff_dt.strftime("%a %b %d, %H:%M")
+    except:
+        kickoff_str = str(kickoff) if kickoff else ""
+
+    home_color = _get_odds_color(home_pct)
+    away_color = _get_odds_color(away_pct)
+
+    card_html = f'''
+    <div style="
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 12px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    ">
+        <div style="text-align: center; font-size: 12px; color: #6b7280; margin-bottom: 12px;">
+            {kickoff_str}
+        </div>
+
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px;">
+            <!-- Home Team -->
+            <div style="flex: 1; text-align: center;">
+                <div style="font-weight: 700; font-size: 16px; margin-bottom: 8px;">{home_team}</div>
+                <div style="
+                    background: {home_color};
+                    color: #ffffff;
+                    padding: 8px 16px;
+                    border-radius: 8px;
+                    font-size: 20px;
+                    font-weight: 700;
+                ">{home_pct:.0f}%</div>
+            </div>
+
+            <!-- Draw -->
+            <div style="text-align: center;">
+                <div style="font-size: 12px; color: #9ca3af; margin-bottom: 8px;">Draw</div>
+                <div style="
+                    background: #f3f4f6;
+                    color: #374151;
+                    padding: 8px 12px;
+                    border-radius: 8px;
+                    font-size: 16px;
+                    font-weight: 600;
+                ">{draw_pct:.0f}%</div>
+            </div>
+
+            <!-- Away Team -->
+            <div style="flex: 1; text-align: center;">
+                <div style="font-weight: 700; font-size: 16px; margin-bottom: 8px;">{away_team}</div>
+                <div style="
+                    background: {away_color};
+                    color: #ffffff;
+                    padding: 8px 16px;
+                    border-radius: 8px;
+                    font-size: 20px;
+                    font-weight: 700;
+                ">{away_pct:.0f}%</div>
+            </div>
+        </div>
+    </div>
+    '''
+    return card_html
+
+
 def render_match_odds():
-    """Render the match betting odds tab from The Odds API."""
+    """Render the match betting odds tab from The Odds API with card layout."""
     import os
     api_key = os.getenv("ODDS_API_KEY", "")
 
@@ -508,20 +765,80 @@ def render_match_odds():
         st.warning("Could not load match odds data. The API may be temporarily unavailable or rate limited.")
         return
 
-    # Display
-    st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Match Odds")
+    # Parse kickoff times and group by gameweek
+    if 'Kickoff' in df.columns:
+        df['Kickoff_dt'] = pd.to_datetime(df['Kickoff'], errors='coerce')
+        df = df.sort_values('Kickoff_dt')
 
-    # Format percentages
-    display_df = df.copy()
-    for col in ['Home Win %', 'Draw %', 'Away Win %']:
-        if col in display_df.columns:
-            display_df[col] = display_df[col].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "-")
+        # Group matches by date range (approximate GW - matches within 4 days of each other)
+        current_gw = config.CURRENT_GAMEWEEK
+        gw_matches = []
+        current_gw_num = current_gw
 
-    gradient_cols = {'Home Win %': True, 'Away Win %': True}
-    styled_df = style_dataframe_with_gradient(display_df, gradient_cols)
+        if len(df) > 0:
+            first_date = df['Kickoff_dt'].min()
+            for idx, row in df.iterrows():
+                match_date = row['Kickoff_dt']
+                if pd.notna(match_date) and pd.notna(first_date):
+                    days_diff = (match_date - first_date).days
+                    # If more than 5 days from first match, it's next GW
+                    if days_diff > 5:
+                        current_gw_num = current_gw + 1
+                        first_date = match_date
+                gw_matches.append(current_gw_num)
 
-    st.dataframe(styled_df, use_container_width=True, hide_index=True, height=450)
-    st.caption(f"Showing {len(df)} matches. UK bookmakers average odds.")
+            df['GW'] = gw_matches
+
+            # Display by gameweek with card layout
+            for gw in sorted(df['GW'].unique()):
+                gw_df = df[df['GW'] == gw].copy()
+
+                st.markdown(f"#### GW{gw} Match Odds")
+
+                # Create 2-column layout for match cards
+                cols = st.columns(2)
+                col_idx = 0
+
+                for _, row in gw_df.iterrows():
+                    home_team = row.get('Home Team', '')
+                    away_team = row.get('Away Team', '')
+                    kickoff = row.get('Kickoff', '')
+                    home_pct = row.get('Home Win %', 0) or 0
+                    draw_pct = row.get('Draw %', 0) or 0
+                    away_pct = row.get('Away Win %', 0) or 0
+
+                    card_html = _render_match_card(home_team, away_team, kickoff, home_pct, draw_pct, away_pct)
+
+                    with cols[col_idx]:
+                        st.markdown(card_html, unsafe_allow_html=True)
+
+                    col_idx = (col_idx + 1) % 2
+
+                st.caption(f"{len(gw_df)} matches. UK bookmakers average odds.")
+
+                if gw != max(df['GW'].unique()):
+                    st.markdown("---")
+    else:
+        # Fallback if no Kickoff column - use simple card layout
+        st.markdown(f"#### Match Odds")
+
+        cols = st.columns(2)
+        col_idx = 0
+
+        for _, row in df.iterrows():
+            home_team = row.get('Home Team', '')
+            away_team = row.get('Away Team', '')
+            kickoff = row.get('Kickoff', '')
+            home_pct = row.get('Home Win %', 0) or 0
+            draw_pct = row.get('Draw %', 0) or 0
+            away_pct = row.get('Away Win %', 0) or 0
+
+            card_html = _render_match_card(home_team, away_team, kickoff, home_pct, draw_pct, away_pct)
+
+            with cols[col_idx]:
+                st.markdown(card_html, unsafe_allow_html=True)
+
+            col_idx = (col_idx + 1) % 2
 
 
 # =============================================================================
@@ -578,8 +895,13 @@ def show_player_projections_page():
         - **White** = Average values
         - **Red** = Poor values
 
-        ### Comparing Sources
+        **Pos Rank** is colored within each position group (so GK rank 1 and MID rank 1 both show as green).
 
-        When Rotowire and FFP agree on a player, that's a high-confidence pick.
-        When they diverge, investigate further (injury doubt, rotation risk, etc.).
+        ### Position Badges
+
+        Player positions are displayed with color-coded badges:
+        - **GK** (Orange) - Goalkeepers
+        - **DEF** (Blue) - Defenders
+        - **MID** (Green) - Midfielders
+        - **FWD** (Red) - Forwards
         """)
