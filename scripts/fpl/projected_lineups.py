@@ -544,6 +544,75 @@ def render_player_cards_html(player_df, player_data_map):
     return ''.join(cards)
 
 
+_POS_GROUP = {
+    'GK': 'GK',
+    'DL': 'DEF', 'DC': 'DEF', 'DR': 'DEF', 'DML': 'DEF', 'DMR': 'DEF',
+    'DMC': 'MID', 'ML': 'MID', 'MC': 'MID', 'MR': 'MID',
+    'AML': 'MID', 'AMC': 'MID', 'AMR': 'MID',
+    'FL': 'FWD', 'FC': 'FWD', 'FR': 'FWD', 'FW': 'FWD', 'FWL': 'FWD', 'FWR': 'FWD',
+}
+
+_POS_ORDER = {'GK': 0, 'DEF': 1, 'MID': 2, 'FWD': 3}
+
+_GROUP_COLOR = {'GK': '#f1c40f', 'DEF': '#3498db', 'MID': '#2ecc71', 'FWD': '#e74c3c'}
+
+
+def _build_lineup_card_html(home_team, away_team, home_players, away_players):
+    """Build a compact HTML card showing both teams' lineups side-by-side, one player per line."""
+
+    def _render_side(players_df):
+        if players_df.empty:
+            return '<div style="color:#999;font-size:0.85em;">Lineup not available</div>'
+        # Add group column and sort by position order then original row order
+        rows = []
+        for _, row in players_df.iterrows():
+            grp = _POS_GROUP.get(row['Position'], 'MID')
+            rows.append({'Player': row['Player'], 'Position': row['Position'], 'Group': grp, 'Order': _POS_ORDER.get(grp, 9)})
+        rows.sort(key=lambda r: r['Order'])
+
+        lines = []
+        current_group = None
+        for r in rows:
+            grp = r['Group']
+            pos = r['Position']
+            color = _GROUP_COLOR.get(grp, '#ccc')
+            # Group separator
+            if grp != current_group:
+                if current_group is not None:
+                    lines.append('<div style="height:4px;"></div>')
+                current_group = grp
+            group_badge = f'<span style="display:inline-block;background:{color};color:#fff;font-size:0.68em;font-weight:700;padding:1px 4px;border-radius:3px;min-width:28px;text-align:center;">{grp}</span>'
+            pos_badge = f'<span style="display:inline-block;color:{color};font-size:0.78em;font-weight:600;min-width:26px;text-align:center;">{pos}</span>'
+            lines.append(
+                f'<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">'
+                f'{group_badge}{pos_badge}'
+                f'<span style="color:#ddd;font-size:0.88em;">{r["Player"]}</span>'
+                f'</div>'
+            )
+        return "".join(lines)
+
+    home_html = _render_side(home_players)
+    away_html = _render_side(away_players)
+
+    return f"""
+    <div style="background:#1e2a3a;border-radius:10px;padding:14px 16px;margin-bottom:12px;border:1px solid #2c3e50;">
+        <div style="text-align:center;font-weight:700;font-size:1.05em;color:#fff;margin-bottom:10px;">
+            {home_team} <span style="color:#888;font-size:0.9em;">vs</span> {away_team}
+        </div>
+        <div style="display:flex;gap:16px;">
+            <div style="flex:1;border-right:1px solid #2c3e50;padding-right:12px;">
+                <div style="color:#aaa;font-size:0.75em;font-weight:600;margin-bottom:5px;text-transform:uppercase;">{home_team}</div>
+                {home_html}
+            </div>
+            <div style="flex:1;padding-left:4px;">
+                <div style="color:#aaa;font-size:0.75em;font-weight:600;margin-bottom:5px;text-transform:uppercase;">{away_team}</div>
+                {away_html}
+            </div>
+        </div>
+    </div>
+    """
+
+
 def show_projected_lineups():
     st.title("Projected Lineups")
     st.write("View projected starting lineups with player form and availability status.")
@@ -555,6 +624,22 @@ def show_projected_lineups():
         st.warning("No matchups available. Rotowire may not have published lineups yet.")
         return
 
+    # Fetch lineup data once for overview + drill-down
+    lineups_df = scrape_rotowire_lineups(config.ROTOWIRE_LINEUPS_URL)
+
+    # -- Overview cards: all matchups at a glance --
+    if not lineups_df.empty:
+        with st.expander("Lineup Overview (all matches)", expanded=True):
+            cols = st.columns(2)
+            for i, (home_team, away_team, idx) in enumerate(matchups):
+                home_df = lineups_df[(lineups_df['Team'] == home_team) & (lineups_df['MatchupIndex'] == idx)]
+                away_df = lineups_df[(lineups_df['Team'] == away_team) & (lineups_df['MatchupIndex'] == idx)]
+                card_html = _build_lineup_card_html(home_team, away_team, home_df, away_df)
+                cols[i % 2].markdown(card_html, unsafe_allow_html=True)
+
+    # -- Drill-down: full soccer field + squad detail cards --
+    st.markdown("---")
+    st.markdown("##### Match Drill-Down")
     # Create a drop-down to choose the matchup to view
     selected_matchup = st.selectbox(
         "Select a Matchup",
@@ -564,9 +649,6 @@ def show_projected_lineups():
 
     if selected_matchup:
         home_team, away_team, matchup_index = selected_matchup
-
-        # Fetch lineup data
-        lineups_df = scrape_rotowire_lineups(config.ROTOWIRE_LINEUPS_URL)
 
         # Filter by BOTH team name AND matchup index to fix duplicate team bug
         home_team_df = lineups_df[
