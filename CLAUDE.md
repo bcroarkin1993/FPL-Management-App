@@ -159,6 +159,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
+| Data Source Update Alerts | Not started | Discord notification when new GW data becomes available from Rotowire/FFP (detect fixture changes in data sources) |
 | Improve H2H Visuals | Not started | Better styling for H2H history sections (match history cards, icons, etc.) |
 | Player Trade Analyzer | Not started | Evaluate potential trades between teams (Draft mode) |
 | Historical Data Analysis | Not started | Past season trends and performance analysis |

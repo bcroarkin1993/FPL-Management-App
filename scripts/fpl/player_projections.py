@@ -15,6 +15,7 @@ import config
 from datetime import datetime
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 from scripts.common.utils import (
     get_rotowire_player_projections,
@@ -23,7 +24,78 @@ from scripts.common.utils import (
     get_ffp_goalscorer_odds,
     get_ffp_clean_sheet_odds,
     get_odds_api_match_odds,
+    get_classic_bootstrap_static,
 )
+
+
+# =============================================================================
+# Data Freshness Detection
+# =============================================================================
+
+@st.cache_data(ttl=300)
+def _get_current_gw_teams() -> set:
+    """Get set of team short names playing in the current gameweek."""
+    try:
+        # Get bootstrap data for team names
+        bootstrap = get_classic_bootstrap_static()
+        if not bootstrap:
+            return set()
+
+        team_id_to_short = {t['id']: t['short_name'] for t in bootstrap.get('teams', [])}
+
+        # Get current GW fixtures
+        gw = config.CURRENT_GAMEWEEK
+        url = f"https://fantasy.premierleague.com/api/fixtures/?event={gw}"
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        fixtures = resp.json()
+
+        teams = set()
+        for fx in fixtures:
+            h, a = fx.get('team_h'), fx.get('team_a')
+            if h:
+                teams.add(team_id_to_short.get(h, ''))
+            if a:
+                teams.add(team_id_to_short.get(a, ''))
+
+        return teams
+    except Exception:
+        return set()
+
+
+def _is_ffp_data_current(ffp_df: pd.DataFrame) -> bool:
+    """
+    Check if FFP data is for the current gameweek by comparing fixtures.
+
+    Returns True if the FFP fixture data matches current GW teams.
+    """
+    if ffp_df is None or ffp_df.empty:
+        return False
+
+    if 'Fixture' not in ffp_df.columns:
+        return False
+
+    current_teams = _get_current_gw_teams()
+    if not current_teams:
+        # Can't determine, assume current
+        return True
+
+    # Extract team abbreviations from FFP fixtures (format: "ARS (H)" or "MUN (A)")
+    ffp_teams = set()
+    for fixture in ffp_df['Fixture'].dropna().unique():
+        # Extract team code (first 3 chars typically)
+        parts = str(fixture).split()
+        if parts:
+            team_code = parts[0].upper()
+            ffp_teams.add(team_code)
+
+    # Check overlap - if FFP teams mostly match current GW teams, data is current
+    if not ffp_teams:
+        return False
+
+    overlap = len(ffp_teams & current_teams)
+    # If at least 50% of FFP teams are in current GW, consider it current
+    return overlap >= len(ffp_teams) * 0.5
 
 
 # =============================================================================
@@ -384,8 +456,12 @@ def render_ffp_data():
         st.warning("Could not load FFP data. The data source may be temporarily unavailable.")
         return
 
-    # Note: FFP data may lag the current gameweek - data reflects their published sheets
     current_gw = config.CURRENT_GAMEWEEK
+
+    # Check if data is for current gameweek
+    if not _is_ffp_data_current(raw_df):
+        st.info(f"GW{current_gw} data is not yet available from Fantasy Football Pundit. Check back closer to the gameweek deadline.")
+        return
 
     # Check which columns actually have data (non-zero values)
     prediction_cols = ['Predicted', 'StartingPredicted', 'Next2GWs', 'Next3GWs', 'Next6GWs']
@@ -507,6 +583,13 @@ def render_goalscorer_odds():
         "https://www.fantasyfootballpundit.com/premier-league-goalscorer-assist-odds/"
     )
 
+    # First check if FFP data is current using the base projections data
+    raw_df = get_ffp_projections_data()
+    if raw_df is not None and not _is_ffp_data_current(raw_df):
+        current_gw = config.CURRENT_GAMEWEEK
+        st.info(f"GW{current_gw} data is not yet available from Fantasy Football Pundit. Check back closer to the gameweek deadline.")
+        return
+
     df = get_ffp_goalscorer_odds()
 
     if df is None or df.empty:
@@ -574,6 +657,13 @@ def render_clean_sheet_odds():
         "https://www.fantasyfootballpundit.com/premier-league-clean-sheet-odds/"
     )
 
+    # First check if FFP data is current using the base projections data
+    raw_df = get_ffp_projections_data()
+    if raw_df is not None and not _is_ffp_data_current(raw_df):
+        current_gw = config.CURRENT_GAMEWEEK
+        st.info(f"GW{current_gw} data is not yet available from Fantasy Football Pundit. Check back closer to the gameweek deadline.")
+        return
+
     df = get_ffp_clean_sheet_odds()
 
     if df is None or df.empty:
@@ -618,8 +708,20 @@ def render_clean_sheet_odds():
 # Match Odds Tab (The Odds API)
 # =============================================================================
 
+def _get_odds_color(pct: float) -> str:
+    """Get background color based on win probability."""
+    if pct >= 55:
+        return "#dcfce7"  # Light green - strong favorite
+    elif pct >= 40:
+        return "#fef9c3"  # Light yellow - slight favorite
+    elif pct >= 30:
+        return "#fef3c7"  # Light orange - competitive
+    else:
+        return "#fee2e2"  # Light red - underdog
+
+
 def _render_match_card_native(home_team: str, away_team: str, kickoff: str, home_pct: float, draw_pct: float, away_pct: float):
-    """Render a single match using Streamlit's native components."""
+    """Render a single match with color-coded odds visualization."""
     # Format kickoff time
     try:
         kickoff_dt = pd.to_datetime(kickoff)
@@ -627,25 +729,36 @@ def _render_match_card_native(home_team: str, away_team: str, kickoff: str, home
     except:
         kickoff_str = str(kickoff) if kickoff else ""
 
-    # Create a container with border styling
-    with st.container():
-        st.caption(f"{kickoff_str}")
+    # Get colors for each outcome
+    home_color = _get_odds_color(home_pct)
+    draw_color = _get_odds_color(draw_pct)
+    away_color = _get_odds_color(away_pct)
 
-        # 5-column layout: Home | Home% | Draw% | Away% | Away
-        c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 2])
+    # Determine favorite indicator
+    if home_pct > away_pct + 10:
+        home_indicator = " ⭐"
+        away_indicator = ""
+    elif away_pct > home_pct + 10:
+        home_indicator = ""
+        away_indicator = " ⭐"
+    else:
+        home_indicator = ""
+        away_indicator = ""
 
-        with c1:
-            st.markdown(f"**{home_team}**")
-        with c2:
-            st.metric("Home", f"{home_pct:.0f}%", label_visibility="collapsed")
-        with c3:
-            st.metric("Draw", f"{draw_pct:.0f}%", label_visibility="collapsed")
-        with c4:
-            st.metric("Away", f"{away_pct:.0f}%", label_visibility="collapsed")
-        with c5:
-            st.markdown(f"**{away_team}**")
-
-        st.divider()
+    # Build styled card using HTML
+    card_html = f'''
+    <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; margin-bottom: 12px; background: #ffffff;">
+        <div style="text-align: center; color: #6b7280; font-size: 12px; margin-bottom: 8px;">{kickoff_str}</div>
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div style="flex: 2; text-align: left; font-weight: 600; font-size: 14px;">{home_team}{home_indicator}</div>
+            <div style="flex: 1; text-align: center; padding: 6px 8px; border-radius: 4px; background: {home_color}; font-weight: 600;">{home_pct:.0f}%</div>
+            <div style="flex: 1; text-align: center; padding: 6px 8px; border-radius: 4px; background: {draw_color}; margin: 0 4px;">{draw_pct:.0f}%</div>
+            <div style="flex: 1; text-align: center; padding: 6px 8px; border-radius: 4px; background: {away_color}; font-weight: 600;">{away_pct:.0f}%</div>
+            <div style="flex: 2; text-align: right; font-weight: 600; font-size: 14px;">{away_indicator}{away_team}</div>
+        </div>
+    </div>
+    '''
+    st.markdown(card_html, unsafe_allow_html=True)
 
 
 def render_match_odds():
