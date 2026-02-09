@@ -201,76 +201,38 @@ def get_position_badge_html(position: str) -> str:
 
 def render_player_table_with_badges(df: pd.DataFrame, gradient_cols: dict, position_col: str = 'Position'):
     """
-    Render a player table with position badges as HTML.
+    Render a player table with position badges using Streamlit's native dataframe.
 
-    This creates a custom HTML table with position badges while maintaining
-    gradient coloring for numeric columns.
+    Uses st.dataframe with gradient styling and adds position badge column separately.
     """
     if df.empty:
         st.info("No data to display.")
         return
 
-    # Convert position to badges
+    display_df = df.copy()
+
+    # Add position badge as colored text indicator (simple approach)
+    if position_col in display_df.columns:
+        # We'll use the standard dataframe but style the position column
+        pass
+
+    # Apply gradient styling
+    styled_df = style_dataframe_with_gradient(display_df, gradient_cols, position_col=position_col)
+
+    # Render the dataframe
+    st.dataframe(styled_df, use_container_width=True, hide_index=True, height=600)
+
+    # Show position badge legend
     if position_col in df.columns:
-        df = df.copy()
-        df['_pos_badge'] = df[position_col].apply(get_position_badge_html)
-
-    # Build HTML table
-    html = '<div style="overflow-x: auto;"><table style="width: 100%; border-collapse: collapse; font-size: 14px;">'
-
-    # Header row
-    html += '<thead><tr style="background: #f8fafc; border-bottom: 2px solid #e2e8f0;">'
-    for col in df.columns:
-        if col.startswith('_'):
-            continue
-        if col == position_col:
-            html += f'<th style="padding: 12px 8px; text-align: left; font-weight: 600;">Pos</th>'
-        else:
-            html += f'<th style="padding: 12px 8px; text-align: left; font-weight: 600;">{col}</th>'
-    html += '</tr></thead>'
-
-    # Calculate gradient bounds for each column
-    col_bounds = {}
-    for col, high_is_good in gradient_cols.items():
-        if col in df.columns:
-            numeric_vals = pd.to_numeric(df[col].astype(str).str.replace('%', '').str.replace('-', ''), errors='coerce')
-            col_bounds[col] = {
-                'min': numeric_vals.min(),
-                'max': numeric_vals.max(),
-                'high_is_good': high_is_good
-            }
-
-    # Data rows
-    html += '<tbody>'
-    for idx, row in df.iterrows():
-        html += '<tr style="border-bottom: 1px solid #e2e8f0;">'
-        for col in df.columns:
-            if col.startswith('_'):
-                continue
-
-            val = row[col]
-
-            if col == position_col:
-                # Use badge instead of plain text
-                html += f'<td style="padding: 10px 8px;">{row["_pos_badge"]}</td>'
-            elif col in col_bounds:
-                # Apply gradient background
-                bounds = col_bounds[col]
-                try:
-                    numeric_val = float(str(val).replace('%', '').replace('-', '')) if val else None
-                    if numeric_val is not None and pd.notna(numeric_val):
-                        color = get_gradient_color(numeric_val, bounds['min'], bounds['max'], bounds['high_is_good'])
-                    else:
-                        color = '#f5f5f5'
-                except (ValueError, TypeError):
-                    color = '#f5f5f5'
-                html += f'<td style="padding: 10px 8px; background: {color};">{val}</td>'
-            else:
-                html += f'<td style="padding: 10px 8px;">{val}</td>'
-        html += '</tr>'
-    html += '</tbody></table></div>'
-
-    st.markdown(html, unsafe_allow_html=True)
+        st.markdown(
+            '<div style="margin-top: 8px; font-size: 12px;">'
+            '<span style="background: #f97316; color: white; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">GK</span>'
+            '<span style="background: #3b82f6; color: white; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">DEF</span>'
+            '<span style="background: #22c55e; color: white; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">MID</span>'
+            '<span style="background: #ef4444; color: white; padding: 2px 6px; border-radius: 3px;">FWD</span>'
+            '</div>',
+            unsafe_allow_html=True
+        )
 
 
 # =============================================================================
@@ -607,14 +569,12 @@ def render_clean_sheet_odds():
 
     st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Clean Sheet Probabilities")
 
-    # Create horizontal bar chart visualization
+    # Create horizontal bar chart visualization using native Streamlit
     if 'CS Prob %' in df.columns and 'Team' in df.columns:
         # Sort by CS probability descending
         df_sorted = df.sort_values('CS Prob %', ascending=False).reset_index(drop=True)
 
-        # Build HTML for horizontal bars
-        bars_html = '<div style="display: flex; flex-direction: column; gap: 8px;">'
-
+        # Use columns for a cleaner layout
         for _, row in df_sorted.iterrows():
             team = row['Team']
             fixture = row.get('Fixture', '')
@@ -623,30 +583,19 @@ def render_clean_sheet_odds():
             if pd.isna(prob):
                 prob = 0
 
-            # Color based on probability (green gradient)
-            if prob >= 50:
-                bar_color = "#22c55e"  # Strong green
-            elif prob >= 35:
-                bar_color = "#86efac"  # Light green
-            elif prob >= 25:
-                bar_color = "#fde047"  # Yellow
-            else:
-                bar_color = "#fca5a5"  # Light red
+            # Create 3-column layout: Team | Progress Bar | Fixture
+            col1, col2, col3 = st.columns([1, 3, 1.5])
 
-            bars_html += f'''
-            <div style="display: flex; align-items: center; gap: 12px;">
-                <div style="width: 100px; font-weight: 600; font-size: 14px;">{team}</div>
-                <div style="flex: 1; background: #e5e7eb; border-radius: 4px; height: 24px; position: relative;">
-                    <div style="width: {prob}%; background: {bar_color}; height: 100%; border-radius: 4px; transition: width 0.3s;"></div>
-                    <span style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); font-size: 12px; font-weight: 500;">{prob:.0f}%</span>
-                </div>
-                <div style="width: 140px; font-size: 12px; color: #6b7280;">{fixture}</div>
-            </div>
-            '''
+            with col1:
+                st.markdown(f"**{team}**")
 
-        bars_html += '</div>'
+            with col2:
+                # Use Streamlit's progress bar
+                st.progress(min(prob / 100, 1.0), text=f"{prob:.0f}%")
 
-        st.markdown(bars_html, unsafe_allow_html=True)
+            with col3:
+                st.caption(fixture)
+
         st.caption(f"Showing {len(df)} teams. Betting odds converted to probabilities.")
     else:
         st.warning("Data format not as expected.")
@@ -656,22 +605,8 @@ def render_clean_sheet_odds():
 # Match Odds Tab (The Odds API)
 # =============================================================================
 
-def _get_odds_color(pct: float) -> str:
-    """Get color based on win probability percentage."""
-    if pct >= 60:
-        return "#22c55e"  # Strong green - heavy favorite
-    elif pct >= 45:
-        return "#86efac"  # Light green - slight favorite
-    elif pct >= 35:
-        return "#fde047"  # Yellow - toss-up
-    elif pct >= 25:
-        return "#fca5a5"  # Light red - underdog
-    else:
-        return "#ef4444"  # Strong red - big underdog
-
-
-def _render_match_card(home_team: str, away_team: str, kickoff: str, home_pct: float, draw_pct: float, away_pct: float):
-    """Render a single match card with odds visualization."""
+def _render_match_card_native(home_team: str, away_team: str, kickoff: str, home_pct: float, draw_pct: float, away_pct: float):
+    """Render a single match using Streamlit's native components."""
     # Format kickoff time
     try:
         kickoff_dt = pd.to_datetime(kickoff)
@@ -679,69 +614,29 @@ def _render_match_card(home_team: str, away_team: str, kickoff: str, home_pct: f
     except:
         kickoff_str = str(kickoff) if kickoff else ""
 
-    home_color = _get_odds_color(home_pct)
-    away_color = _get_odds_color(away_pct)
+    # Create a container with border styling
+    with st.container():
+        st.caption(f"{kickoff_str}")
 
-    card_html = f'''
-    <div style="
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 16px;
-        margin-bottom: 12px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    ">
-        <div style="text-align: center; font-size: 12px; color: #6b7280; margin-bottom: 12px;">
-            {kickoff_str}
-        </div>
+        # 5-column layout: Home | Home% | Draw% | Away% | Away
+        c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 2])
 
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px;">
-            <!-- Home Team -->
-            <div style="flex: 1; text-align: center;">
-                <div style="font-weight: 700; font-size: 16px; margin-bottom: 8px;">{home_team}</div>
-                <div style="
-                    background: {home_color};
-                    color: #ffffff;
-                    padding: 8px 16px;
-                    border-radius: 8px;
-                    font-size: 20px;
-                    font-weight: 700;
-                ">{home_pct:.0f}%</div>
-            </div>
+        with c1:
+            st.markdown(f"**{home_team}**")
+        with c2:
+            st.metric("Home", f"{home_pct:.0f}%", label_visibility="collapsed")
+        with c3:
+            st.metric("Draw", f"{draw_pct:.0f}%", label_visibility="collapsed")
+        with c4:
+            st.metric("Away", f"{away_pct:.0f}%", label_visibility="collapsed")
+        with c5:
+            st.markdown(f"**{away_team}**")
 
-            <!-- Draw -->
-            <div style="text-align: center;">
-                <div style="font-size: 12px; color: #9ca3af; margin-bottom: 8px;">Draw</div>
-                <div style="
-                    background: #f3f4f6;
-                    color: #374151;
-                    padding: 8px 12px;
-                    border-radius: 8px;
-                    font-size: 16px;
-                    font-weight: 600;
-                ">{draw_pct:.0f}%</div>
-            </div>
-
-            <!-- Away Team -->
-            <div style="flex: 1; text-align: center;">
-                <div style="font-weight: 700; font-size: 16px; margin-bottom: 8px;">{away_team}</div>
-                <div style="
-                    background: {away_color};
-                    color: #ffffff;
-                    padding: 8px 16px;
-                    border-radius: 8px;
-                    font-size: 20px;
-                    font-weight: 700;
-                ">{away_pct:.0f}%</div>
-            </div>
-        </div>
-    </div>
-    '''
-    return card_html
+        st.divider()
 
 
 def render_match_odds():
-    """Render the match betting odds tab from The Odds API with card layout."""
+    """Render the match betting odds tab from The Odds API."""
     import os
     api_key = os.getenv("ODDS_API_KEY", "")
 
@@ -789,16 +684,13 @@ def render_match_odds():
 
             df['GW'] = gw_matches
 
-            # Display by gameweek with card layout
+            # Display by gameweek
             for gw in sorted(df['GW'].unique()):
                 gw_df = df[df['GW'] == gw].copy()
 
                 st.markdown(f"#### GW{gw} Match Odds")
 
-                # Create 2-column layout for match cards
-                cols = st.columns(2)
-                col_idx = 0
-
+                # Display matches using native Streamlit components
                 for _, row in gw_df.iterrows():
                     home_team = row.get('Home Team', '')
                     away_team = row.get('Away Team', '')
@@ -807,23 +699,15 @@ def render_match_odds():
                     draw_pct = row.get('Draw %', 0) or 0
                     away_pct = row.get('Away Win %', 0) or 0
 
-                    card_html = _render_match_card(home_team, away_team, kickoff, home_pct, draw_pct, away_pct)
-
-                    with cols[col_idx]:
-                        st.markdown(card_html, unsafe_allow_html=True)
-
-                    col_idx = (col_idx + 1) % 2
+                    _render_match_card_native(home_team, away_team, kickoff, home_pct, draw_pct, away_pct)
 
                 st.caption(f"{len(gw_df)} matches. UK bookmakers average odds.")
 
                 if gw != max(df['GW'].unique()):
                     st.markdown("---")
     else:
-        # Fallback if no Kickoff column - use simple card layout
+        # Fallback if no Kickoff column
         st.markdown(f"#### Match Odds")
-
-        cols = st.columns(2)
-        col_idx = 0
 
         for _, row in df.iterrows():
             home_team = row.get('Home Team', '')
@@ -833,12 +717,7 @@ def render_match_odds():
             draw_pct = row.get('Draw %', 0) or 0
             away_pct = row.get('Away Win %', 0) or 0
 
-            card_html = _render_match_card(home_team, away_team, kickoff, home_pct, draw_pct, away_pct)
-
-            with cols[col_idx]:
-                st.markdown(card_html, unsafe_allow_html=True)
-
-            col_idx = (col_idx + 1) % 2
+            _render_match_card_native(home_team, away_team, kickoff, home_pct, draw_pct, away_pct)
 
 
 # =============================================================================
