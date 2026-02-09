@@ -278,6 +278,15 @@ def render_rotowire_projections():
         st.info("No Rotowire URL available. Please configure one above.")
         return
 
+    # Extract GW from URL to detect stale data
+    import re
+    url_gw_match = re.search(r'gameweek-(\d+)', url.lower())
+    data_gw = int(url_gw_match.group(1)) if url_gw_match else None
+    current_gw = config.CURRENT_GAMEWEEK
+
+    if data_gw and data_gw != current_gw:
+        st.warning(f"Data is for GW{data_gw} (GW{current_gw} projections not yet available from Rotowire)")
+
     player_projections = get_rotowire_player_projections(url)
 
     if player_projections is None or player_projections.empty:
@@ -325,7 +334,8 @@ def render_rotowire_projections():
         result = result[result['Price'] <= price_filter]
 
     # Display with gradient coloring and position badges
-    st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Player Projections")
+    display_gw = data_gw if data_gw else config.CURRENT_GAMEWEEK
+    st.markdown(f"#### GW{display_gw} Player Projections")
 
     # Format numeric columns for display
     display_df = result.copy()
@@ -373,6 +383,9 @@ def render_ffp_data():
     if raw_df is None or raw_df.empty:
         st.warning("Could not load FFP data. The data source may be temporarily unavailable.")
         return
+
+    # Note: FFP data may lag the current gameweek - data reflects their published sheets
+    current_gw = config.CURRENT_GAMEWEEK
 
     # Check which columns actually have data (non-zero values)
     prediction_cols = ['Predicted', 'StartingPredicted', 'Next2GWs', 'Next3GWs', 'Next6GWs']
