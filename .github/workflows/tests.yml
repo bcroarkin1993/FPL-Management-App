@@ -1,0 +1,30 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          FPL_CURRENT_GAMEWEEK: "25"
+          ROTOWIRE_URL: "https://example.com/rotowire-test"
+          FPL_DRAFT_LEAGUE_ID: "12345"
+          FPL_DRAFT_TEAM_ID: "67890"
+          FPL_CLASSIC_TEAM_ID: "11111"
+          FPL_CLASSIC_LEAGUE_IDS: "99999:Test League"
+        run: pytest
