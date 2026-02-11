@@ -2,6 +2,8 @@
 #
 # Streamlit Settings page for configuring all alert types.
 
+import os
+import requests
 import streamlit as st
 from scripts.common.alert_config import load_settings, save_settings, DEFAULT_SETTINGS
 
@@ -160,6 +162,70 @@ def show_settings_page():
         st.caption(
             f"Last alerts sent: Rotowire GW {last_rw}, FFP GW {last_ffp}"
         )
+
+    # =================================================================
+    # Test Alerts
+    # =================================================================
+    st.header("Test Alerts")
+    st.caption(
+        "Send a test message to Discord for each alert type to verify your webhook and mention settings are working."
+    )
+
+    # Build mention string from current form values (unsaved is fine for testing)
+    test_mention = ""
+    if mention_user.strip():
+        test_mention += f"<@{mention_user.strip()}> "
+    if mention_role.strip():
+        test_mention += f"<@&{mention_role.strip()}> "
+
+    def _get_webhook() -> str:
+        import config  # triggers dotenv load
+        return os.getenv("DISCORD_WEBHOOK_URL", "")
+
+    def _send_test(msg: str) -> bool:
+        webhook = _get_webhook()
+        if not webhook:
+            st.error(
+                "No `DISCORD_WEBHOOK_URL` found. "
+                "Set it in your `.env` file or as a GitHub Actions secret."
+            )
+            return False
+        try:
+            resp = requests.post(webhook, json={"content": msg}, timeout=10)
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            st.error(f"Failed to send: {e}")
+            return False
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Test Draft Deadline", key="test_draft"):
+            msg = (
+                f"{test_mention}\U0001f514 **[TEST]** FPL **Draft** deadline alert is working! "
+                f"(offset: {draft_offset}h before kickoff)"
+            )
+            if _send_test(msg):
+                st.success("Draft deadline test alert sent!")
+
+        if st.button("Test Rotowire Alert", key="test_rotowire"):
+            msg = f"{test_mention}\U0001f4ca **[TEST]** Rotowire data source alert is working!"
+            if _send_test(msg):
+                st.success("Rotowire test alert sent!")
+
+    with col2:
+        if st.button("Test Classic Deadline", key="test_classic"):
+            msg = (
+                f"{test_mention}\u23f0 **[TEST]** FPL **Classic** deadline alert is working! "
+                f"(offset: {classic_offset}h before kickoff)"
+            )
+            if _send_test(msg):
+                st.success("Classic deadline test alert sent!")
+
+        if st.button("Test FFP Alert", key="test_ffp"):
+            msg = f"{test_mention}\U0001f4ca **[TEST]** Fantasy Football Pundit data source alert is working!"
+            if _send_test(msg):
+                st.success("FFP test alert sent!")
 
     # =================================================================
     # Save / Reset
