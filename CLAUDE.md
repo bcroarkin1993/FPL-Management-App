@@ -14,6 +14,7 @@ python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env  # Then edit with your league/team IDs
+git config core.hooksPath .githooks  # Enable pre-push test hook
 
 # Run the app
 streamlit run main.py
