@@ -175,7 +175,7 @@ def main():
                 "Projections Hub",
                 "Player Statistics",
                 "Player Injuries",
-                "Settings"
+                "Alert Settings"
             ],
         )
 
@@ -191,7 +191,7 @@ def main():
             show_player_stats_page()
         elif subpage == "Player Injuries":
             show_injuries_page()
-        elif subpage == "Settings":
+        elif subpage == "Alert Settings":
             show_settings_page()
 
     elif section == "Draft":
