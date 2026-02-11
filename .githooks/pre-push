@@ -1,0 +1,22 @@
+#!/bin/bash
+# Pre-push hook: run tests before pushing to main
+
+# Read the remote and URL
+remote="$1"
+url="$2"
+
+# Check if we're pushing to main
+while read local_ref local_sha remote_ref remote_sha; do
+    if echo "$remote_ref" | grep -q "refs/heads/main"; then
+        echo "Pushing to main — running tests first..."
+        pytest --tb=short -q
+        if [ $? -ne 0 ]; then
+            echo ""
+            echo "Tests failed. Push to main aborted."
+            exit 1
+        fi
+        echo "All tests passed."
+    fi
+done
+
+exit 0
