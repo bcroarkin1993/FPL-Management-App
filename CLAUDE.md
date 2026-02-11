@@ -20,6 +20,12 @@ streamlit run main.py
 
 # Run Discord waiver alerts (used by GitHub Actions)
 python -m scripts.common.waiver_alerts
+
+# Run tests
+pytest                        # All tests
+pytest tests/common/          # Unit tests only
+pytest tests/draft/ tests/classic/ tests/fpl/  # Smoke tests only
+pytest -x                     # Stop on first failure
 ```
 
 ## Architecture
@@ -156,7 +162,6 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Player Trade Analyzer | Not started | Evaluate potential trades between teams (Draft mode) |
 | Historical Data Analysis | Not started | Past season trends and performance analysis |
 | Split utils.py | In progress | Created `player_matching.py`; more modules could be extracted |
-| Add basic tests | Not started | No test infrastructure currently |
 
 ### Completed
 
@@ -175,3 +180,4 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Luck-Adjusted Standings (All-Play Record) | Replaced simplistic average-based model with industry-standard All-Play Record (every team vs every other each GW); fixed 0-score filter bug; shared `luck_analysis.py` module for Draft and Classic H2H; color-styled standings tables with auto-sized height; added toggle to Classic H2H standings |
 | Data Source Update Alerts | Discord notifications when Rotowire/FFP publish new GW data; unified Alert Settings page in FPL App Home with configurable alert windows, test buttons, and live data source status checks; JSON config (`alert_settings.json`) with GitHub Actions commit-back for state persistence |
 | Improve H2H Visuals | Better styling for H2H history sections with match history cards, icons, etc. |
+| Add basic tests | pytest framework with 136 tests: unit tests for pure functions (player matching, luck analysis, alert config, team analysis helpers, utils), integration tests for API wrappers (mocked HTTP), and smoke tests for all 19 Streamlit pages |

@@ -112,3 +112,4 @@ wsproto==1.2.0
 yarl==1.20.1
 zipp==3.23.0
 pulp
+pytest>=7.0
