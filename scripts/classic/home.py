@@ -12,11 +12,13 @@ import random
 import streamlit as st
 from typing import Optional, Dict, List
 
+from scripts.common.luck_analysis import extract_classic_h2h_gw_scores, calculate_all_play_standings, render_luck_adjusted_table, render_standings_table
 from scripts.common.utils import (
     get_league_standings,
     get_classic_team_history,
     get_entry_details,
     get_current_gameweek,
+    get_all_h2h_league_matches,
 )
 
 
@@ -127,6 +129,40 @@ def format_h2h_standings(standings_data: dict) -> pd.DataFrame:
         })
 
     return pd.DataFrame(rows)
+
+
+def get_classic_h2h_luck_adjusted(league_id: int, standings_data: dict) -> pd.DataFrame:
+    """
+    Calculate luck-adjusted standings for a Classic H2H league using All-Play Record.
+
+    Parameters:
+    - league_id: The H2H FPL league ID.
+    - standings_data: The standings dict from the league API (passed to avoid re-fetching).
+
+    Returns:
+    - DataFrame with All-Play standings.
+    """
+    matches = get_all_h2h_league_matches(league_id)
+    if not matches:
+        return pd.DataFrame()
+
+    gw_scores = extract_classic_h2h_gw_scores(matches)
+    if gw_scores.empty:
+        return pd.DataFrame()
+
+    # Build actual standings from formatted H2H standings
+    h2h_df = format_h2h_standings(standings_data)
+    if h2h_df.empty:
+        return calculate_all_play_standings(gw_scores)
+
+    actual_standings = h2h_df[['entry_id', 'Team', 'Rank', 'Pts']].rename(columns={
+        'entry_id': 'team_id',
+        'Team': 'team',
+        'Rank': 'actual_rank',
+        'Pts': 'actual_pts',
+    })
+
+    return calculate_all_play_standings(gw_scores, actual_standings)
 
 
 # ---------------------------
@@ -332,25 +368,22 @@ def show_classic_home_page():
         if df.empty:
             st.info("No standings data available yet.")
         else:
-            # Don't show entry_id in display
-            display_df = df.drop(columns=["entry_id"], errors="ignore")
-
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Rank": st.column_config.NumberColumn("Rank", width="small"),
-                    "Team": st.column_config.TextColumn("Team", width="medium"),
-                    "Manager": st.column_config.TextColumn("Manager", width="medium"),
-                    "W": st.column_config.NumberColumn("W", width="small"),
-                    "D": st.column_config.NumberColumn("D", width="small"),
-                    "L": st.column_config.NumberColumn("L", width="small"),
-                    "PF": st.column_config.NumberColumn("PF", width="small"),
-                    "PA": st.column_config.NumberColumn("PA", width="small"),
-                    "Pts": st.column_config.NumberColumn("Pts", width="small"),
-                }
+            show_luck = st.checkbox(
+                "Show Luck Adjusted Standings",
+                key=f"luck_{league_id}",
             )
+
+            if show_luck:
+                st.caption("**All-Play Record**: simulates every team playing every other team each gameweek. "
+                           "Luck +/- shows how much the actual schedule helped or hurt (positive = lucky).")
+                with st.spinner("Calculating all-play standings..."):
+                    luck_df = get_classic_h2h_luck_adjusted(league_id, standings)
+
+                render_luck_adjusted_table(luck_df)
+            else:
+                # Don't show entry_id in display
+                display_df = df.drop(columns=["entry_id"], errors="ignore")
+                render_standings_table(display_df, is_h2h=True)
     else:
         st.subheader("League Standings")
         df = format_classic_standings(standings)
@@ -360,19 +393,7 @@ def show_classic_home_page():
         else:
             # Don't show entry_id in display
             display_df = df.drop(columns=["entry_id"], errors="ignore")
-
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Rank": st.column_config.NumberColumn("Rank", width="small"),
-                    "Team": st.column_config.TextColumn("Team", width="medium"),
-                    "Manager": st.column_config.TextColumn("Manager", width="medium"),
-                    "GW Pts": st.column_config.NumberColumn("GW Pts", width="small"),
-                    "Total Pts": st.column_config.NumberColumn("Total Pts", width="small"),
-                }
-            )
+            render_standings_table(display_df, is_h2h=False)
 
     # Show pagination info
     has_next = standings.get("has_next", False)

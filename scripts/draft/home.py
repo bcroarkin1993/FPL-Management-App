@@ -4,6 +4,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 from scripts.common.error_helpers import get_logger, show_api_error
+from scripts.common.luck_analysis import extract_draft_gw_scores, calculate_all_play_standings, render_luck_adjusted_table, render_standings_table
 from scripts.common.utils import get_current_gameweek, get_draft_league_details
 
 _logger = get_logger("fpl_app.draft.home")
@@ -250,25 +251,28 @@ def show_fixture_results(draft_league_id, gameweek):
             team1_score = fixture['league_entry_1_points']
             team2_score = fixture['league_entry_2_points']
 
-            if (team1_score != 0) and (team2_score != 0):
-                # Determine match result
-                if team1_score > team2_score:
-                    team1_result = 'W'
-                    team2_result = 'L'
-                elif team1_score < team2_score:
-                    team1_result = 'L'
-                    team2_result = 'W'
-                else:
-                    team1_result = team2_result = 'D'
+            # Skip only if BOTH teams scored 0 (unplayed match)
+            if team1_score == 0 and team2_score == 0:
+                continue
 
-                fixtures_list.append({
-                    "Team 1": team1_name,
-                    "Team 1 Score": team1_score,
-                    "Team 1 Result": team1_result,
-                    "Team 2": team2_name,
-                    "Team 2 Score": team2_score,
-                    "Team 2 Result": team2_result,
-                })
+            # Determine match result
+            if team1_score > team2_score:
+                team1_result = 'W'
+                team2_result = 'L'
+            elif team1_score < team2_score:
+                team1_result = 'L'
+                team2_result = 'W'
+            else:
+                team1_result = team2_result = 'D'
+
+            fixtures_list.append({
+                "Team 1": team1_name,
+                "Team 1 Score": team1_score,
+                "Team 1 Result": team1_result,
+                "Team 2": team2_name,
+                "Team 2 Score": team2_score,
+                "Team 2 Result": team2_result,
+            })
 
     # Show the results or fallback message
     if fixtures_list:
@@ -280,111 +284,41 @@ def show_fixture_results(draft_league_id, gameweek):
 
 def get_luck_adjusted_league_standings(draft_league_id):
     """
-    Calculates the luck-adjusted league standings based on gameweek performance and fixture results.
+    Calculate luck-adjusted standings using the All-Play Record method.
+
+    For each gameweek, every team is compared against every other team.
+    This reveals true schedule luck by showing how teams would rank
+    if they played everyone each week instead of a single opponent.
 
     Parameters:
-    - fixtures_df: A DataFrame with the following columns:
-        - 'Team 1', 'Team 1 Score', 'Team 1 Result', 'Team 2', 'Team 2 Score', 'Team 2 Result'
+    - draft_league_id: The FPL Draft league ID.
 
     Returns:
-    - standings_df: A DataFrame showing the adjusted standings based on luck and average weekly rank.
+    - DataFrame with All-Play standings including Luck +/- column.
     """
-    # Use cached league details
     league_response = get_draft_league_details(draft_league_id)
     if not league_response:
         _logger.warning("Failed to fetch luck-adjusted standings")
         return pd.DataFrame()
 
-    # Extract the standings and league_entries sections of the JSON
-    fixtures = league_response.get('matches', [])
-    league_entries = league_response.get('league_entries', [])
-    # Create a dictionary mapping entry_ids to team names
-    team_names = {entry['id']: entry['entry_name'] for entry in league_entries}
+    # Extract GW scores using shared module
+    gw_scores = extract_draft_gw_scores(league_response)
+    if gw_scores.empty:
+        return pd.DataFrame()
 
-    # Create a list to hold fixture details
-    fixtures_list = []
+    # Build actual standings for Luck Delta calculation
+    actual_df = get_fpl_draft_league_standings(draft_league_id, show_luck_adjusted_stats=False)
+    if actual_df.empty:
+        return calculate_all_play_standings(gw_scores)
 
-    for fixture in fixtures:
-        gameweek = fixture['event']
-        team1_id = fixture['league_entry_1']
-        team2_id = fixture['league_entry_2']
-        team1_name = team_names.get(team1_id)
-        team2_name = team_names.get(team2_id)
-        team1_score = fixture['league_entry_1_points']
-        team2_score = fixture['league_entry_2_points']
+    # Convert actual standings to the format expected by calculate_all_play_standings
+    actual_standings = actual_df.reset_index()[['Rank', 'Team', 'Pts']].rename(columns={
+        'Rank': 'actual_rank',
+        'Pts': 'actual_pts',
+        'Team': 'team',
+    })
 
-        # Filter out games that have not been played yet
-        if (team1_score != 0) & (team2_score != 0):
-            fixtures_list.append({
-                "Gameweek": gameweek,
-                "Team 1": team1_name,
-                "Team 1 Score": team1_score,
-                "Team 2": team2_name,
-                "Team 2 Score": team2_score,
-            })
-
-    # Convert fixtures_list to dataframe
-    fixtures_df = pd.DataFrame(fixtures_list)
-
-    # Create a long-format dataframe with each team's score and result for the week
-    long_format_df = pd.concat([
-        fixtures_df[['Team 1', 'Team 1 Score', 'Gameweek']].rename(columns={'Team 1': 'Team', 'Team 1 Score': 'Score'}),
-        fixtures_df[['Team 2', 'Team 2 Score', 'Gameweek']].rename(columns={'Team 2': 'Team', 'Team 2 Score': 'Score'})
-    ])
-
-    # Sort by Gameweek for clarity
-    long_format_df = long_format_df.sort_values(by=["Gameweek"]).reset_index(drop=True)
-
-    # Calculate the average score per gameweek
-    avg_scores = long_format_df.groupby("Gameweek")["Score"].transform("mean")
-
-    # Assign result based on comparison to gameweek average
-    long_format_df["Result"] = long_format_df["Score"].apply(
-        lambda x: 'W' if x > avg_scores[long_format_df["Score"] == x].iloc[0]
-        else 'D' if x == avg_scores[long_format_df["Score"] == x].iloc[0]
-        else 'L')
-
-    # Calculate W/L/T counts per team
-    result_counts = pd.crosstab(long_format_df['Team'], long_format_df['Result']).reset_index()
-
-    # Ensure all result columns are present
-    for col in ['W', 'D', 'L']:
-        if col not in result_counts.columns:
-            result_counts[col] = 0
-
-    # Calculate the rank for each team in each week based on their score
-    long_format_df['GW_Rank'] = long_format_df.groupby("Gameweek")["Score"].rank(ascending=False, method='min').astype(
-        int)
-
-    # Calculate the actual results for each team based on their results (W, L, D)
-    long_format_df['Points'] = long_format_df['Result'].apply(lambda x: 3 if x == 'W' else (1 if x == 'D' else 0))
-
-    # Calculate the average weekly rank (Fair_Rank) and total points (actual standings) for each team
-    luck_adjusted_df = long_format_df.groupby('Team').agg(
-        Avg_GW_Rank=('GW_Rank', 'mean'),  # The "fair" rank based on average weekly score rank
-        Total_Points=('Points', 'sum'),  # The actual points based on match results
-        Avg_Score=('Score', 'mean')  # The average score across all weeks
-    ).reset_index()
-
-    # Merge luck_adjusted_df with result_counts
-    luck_adjusted_df = luck_adjusted_df.merge(result_counts[['Team', 'W', 'D', 'L']], on='Team', how='left')
-
-    # Create the adjusted standings by ranking teams based on Avg_Week_Rank
-    luck_adjusted_df['Fair_Rank'] = luck_adjusted_df['Avg_GW_Rank'].rank(ascending=True, method='min').astype(int)
-
-    # Sort by Fair_Rank to get the adjusted standings
-    luck_adjusted_df = luck_adjusted_df.sort_values(by='Fair_Rank')
-
-    # Format number values
-    luck_adjusted_df['Avg_GW_Rank'] = round(luck_adjusted_df['Avg_GW_Rank'], 2)
-    luck_adjusted_df['Avg_GW_Score'] = round(luck_adjusted_df['Avg_Score'], 2)
-    # Format final results
-    luck_adjusted_df = luck_adjusted_df[
-        ['Fair_Rank', 'Team', 'W', 'D', 'L', 'Avg_GW_Score', 'Avg_GW_Rank', 'Total_Points']]
-    # Set the index
-    luck_adjusted_df.set_index('Fair_Rank', inplace=True)
-
-    return luck_adjusted_df
+    return calculate_all_play_standings(gw_scores, actual_standings)
 
 def plot_league_points_over_time(draft_league_id):
     """
@@ -546,11 +480,17 @@ def show_home_page():
     st.subheader("FPL Draft League Table")
     # Toggle to show luck adjusted standing
     show_luck_adjusted_stats = st.checkbox("Show Luck Adjusted Standings")
+    if show_luck_adjusted_stats:
+        st.caption("**All-Play Record**: simulates every team playing every other team each gameweek. "
+                   "Luck +/- shows how much the actual schedule helped or hurt (positive = lucky).")
     # Fetch the league standings based on the toggle
     standings_df = get_fpl_draft_league_standings(config.FPL_DRAFT_LEAGUE_ID,
                                                   show_luck_adjusted_stats=show_luck_adjusted_stats)
     # Display the standings dataframe
-    st.dataframe(standings_df, use_container_width=True)
+    if show_luck_adjusted_stats:
+        render_luck_adjusted_table(standings_df)
+    else:
+        render_standings_table(standings_df, is_h2h=True)
 
     # Dropdown to select gameweek
     gameweek = st.selectbox("Select Gameweek to view results:", range(1, 39))  # Gameweeks 1 to 38
