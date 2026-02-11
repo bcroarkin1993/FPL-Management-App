@@ -66,6 +66,7 @@ def _check_and_send_alert(
     gw: int,
     alert_type: str,
     now_et: datetime,
+    alert_windows: list = None,
 ) -> bool:
     """
     Check if we're in an alert window and send notification if so.
@@ -77,24 +78,28 @@ def _check_and_send_alert(
         gw: Gameweek number
         alert_type: "Draft" or "Classic"
         now_et: Current time in ET
+        alert_windows: List of hours-before-deadline to fire alerts (e.g. [24, 6, 1])
 
     Returns:
         True if an alert was sent, False otherwise
     """
+    if alert_windows is None:
+        alert_windows = [24, 6, 1]
+
     hours_left = (deadline_et - now_et).total_seconds() / 3600
 
     # Log timing info
     print(f"[waiver_alerts:{alert_type}] Deadline: {deadline_et.strftime('%Y-%m-%d %H:%M %Z')}")
     print(f"[waiver_alerts:{alert_type}] Hours until deadline: {hours_left:.2f}")
+    print(f"[waiver_alerts:{alert_type}] Alert windows: {sorted(alert_windows, reverse=True)}")
 
     # Skip if deadline has passed
     if hours_left < 0:
         print(f"[waiver_alerts:{alert_type}] Deadline has passed, skipping")
         return False
 
-    # Fire at ~24h / 6h / 1h (tolerance ±30 min to accommodate GitHub Actions
-    # scheduling delays and fractional offset hours)
-    for target in (24, 6, 1):
+    # Tolerance ±30 min to accommodate GitHub Actions scheduling delays
+    for target in sorted(alert_windows, reverse=True):
         if abs(hours_left - target) <= 30/60:
             ts = deadline_et.strftime("%a %b %d • %I:%M %p %Z")
 
@@ -181,10 +186,10 @@ def main():
     classic_cfg = dl.get("classic", {})
 
     draft_enabled = draft_cfg.get("enabled", False) or os.getenv("FPL_DRAFT_ALERTS_ENABLED", "false").lower() in ("true", "1", "yes")
-    draft_offset = draft_cfg.get("offset_hours", None) or float(os.getenv("FPL_DEADLINE_OFFSET_HOURS", str(DRAFT_OFFSET_HOURS)))
+    draft_windows = draft_cfg.get("alert_windows", [24, 6, 1])
 
     classic_enabled = classic_cfg.get("enabled", False) or os.getenv("FPL_CLASSIC_ALERTS_ENABLED", "false").lower() in ("true", "1", "yes")
-    classic_offset = classic_cfg.get("offset_hours", None) or float(os.getenv("FPL_CLASSIC_DEADLINE_OFFSET_HOURS", str(CLASSIC_OFFSET_HOURS)))
+    classic_windows = classic_cfg.get("alert_windows", [24, 6, 1])
 
     # Data source alert settings (JSON only, no env var fallback)
     ds_settings = settings.get("data_source_alerts", {})
@@ -216,23 +221,23 @@ def main():
     print(f"[waiver_alerts] GW={gw}")
     print(f"[waiver_alerts] Now: {now_et.strftime('%Y-%m-%d %H:%M %Z')}")
     print(f"[waiver_alerts] Kickoff: {kickoff_et.strftime('%Y-%m-%d %H:%M %Z')}")
-    print(f"[waiver_alerts] Draft alerts: {'enabled' if draft_enabled else 'disabled'} (offset={draft_offset}h)")
-    print(f"[waiver_alerts] Classic alerts: {'enabled' if classic_enabled else 'disabled'} (offset={classic_offset}h)")
+    print(f"[waiver_alerts] Draft alerts: {'enabled' if draft_enabled else 'disabled'} (windows={draft_windows})")
+    print(f"[waiver_alerts] Classic alerts: {'enabled' if classic_enabled else 'disabled'} (windows={classic_windows})")
     print(f"[waiver_alerts] Rotowire data alerts: {'enabled' if rotowire_enabled else 'disabled'}")
     print(f"[waiver_alerts] FFP data alerts: {'enabled' if ffp_enabled else 'disabled'}")
 
     alerts_sent = 0
 
-    # Check Draft deadline
+    # Check Draft deadline (fixed at 25.5h before kickoff)
     if draft_enabled:
-        draft_deadline = kickoff_et - timedelta(hours=draft_offset)
-        if _check_and_send_alert(webhook, mention, draft_deadline, gw, "Draft", now_et):
+        draft_deadline = kickoff_et - timedelta(hours=DRAFT_OFFSET_HOURS)
+        if _check_and_send_alert(webhook, mention, draft_deadline, gw, "Draft", now_et, draft_windows):
             alerts_sent += 1
 
-    # Check Classic deadline
+    # Check Classic deadline (fixed at 1.5h before kickoff)
     if classic_enabled:
-        classic_deadline = kickoff_et - timedelta(hours=classic_offset)
-        if _check_and_send_alert(webhook, mention, classic_deadline, gw, "Classic", now_et):
+        classic_deadline = kickoff_et - timedelta(hours=CLASSIC_OFFSET_HOURS)
+        if _check_and_send_alert(webhook, mention, classic_deadline, gw, "Classic", now_et, classic_windows):
             alerts_sent += 1
 
     # Check data source alerts

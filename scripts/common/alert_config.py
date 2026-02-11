@@ -15,8 +15,8 @@ DEFAULT_SETTINGS = {
         "mention_role_id": "",
     },
     "deadline_alerts": {
-        "draft": {"enabled": False, "offset_hours": 25.5},
-        "classic": {"enabled": False, "offset_hours": 1.5},
+        "draft": {"enabled": False, "alert_windows": [24, 6, 1]},
+        "classic": {"enabled": False, "alert_windows": [24, 6, 1]},
     },
     "data_source_alerts": {
         "rotowire": {"enabled": False},

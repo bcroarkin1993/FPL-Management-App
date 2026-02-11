@@ -45,7 +45,12 @@ def show_settings_page():
     # Deadline Alerts
     # =================================================================
     st.header("Deadline Alerts")
-    st.caption("Get reminded at ~24h, ~6h, and ~1h before each deadline.")
+    st.caption(
+        "Choose when to get reminded before each deadline. "
+        "Draft waivers close 25.5h before the first kickoff; Classic transfers close 1.5h before."
+    )
+
+    all_window_options = [48, 24, 12, 6, 3, 1]
 
     dl = settings.get("deadline_alerts", {})
     draft_cfg = dl.get("draft", {})
@@ -54,36 +59,38 @@ def show_settings_page():
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Draft")
+        st.caption("Deadline: 25.5h before kickoff")
         draft_enabled = st.toggle(
             "Enable Draft deadline alerts",
             value=draft_cfg.get("enabled", False),
             key="draft_enabled",
         )
-        draft_offset = st.slider(
-            "Hours before kickoff",
-            min_value=1.0,
-            max_value=48.0,
-            value=float(draft_cfg.get("offset_hours", 25.5)),
-            step=0.5,
-            key="draft_offset",
-            help="Draft waiver/transaction deadline offset from the earliest GW kickoff",
+        saved_draft_windows = draft_cfg.get("alert_windows", [24, 6, 1])
+        draft_windows = st.multiselect(
+            "Alert me before deadline",
+            options=all_window_options,
+            default=[w for w in saved_draft_windows if w in all_window_options],
+            format_func=lambda h: f"{h}h before",
+            key="draft_windows",
+            help="Select which reminder intervals you want before the Draft deadline",
         )
 
     with col2:
         st.subheader("Classic")
+        st.caption("Deadline: 1.5h before kickoff")
         classic_enabled = st.toggle(
             "Enable Classic deadline alerts",
             value=classic_cfg.get("enabled", False),
             key="classic_enabled",
         )
-        classic_offset = st.slider(
-            "Hours before kickoff",
-            min_value=0.5,
-            max_value=48.0,
-            value=float(classic_cfg.get("offset_hours", 1.5)),
-            step=0.5,
-            key="classic_offset",
-            help="Classic transfer deadline offset from the earliest GW kickoff",
+        saved_classic_windows = classic_cfg.get("alert_windows", [24, 6, 1])
+        classic_windows = st.multiselect(
+            "Alert me before deadline",
+            options=all_window_options,
+            default=[w for w in saved_classic_windows if w in all_window_options],
+            format_func=lambda h: f"{h}h before",
+            key="classic_windows",
+            help="Select which reminder intervals you want before the Classic deadline",
         )
 
     # =================================================================
@@ -201,9 +208,10 @@ def show_settings_page():
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Test Draft Deadline", key="test_draft"):
+            windows_str = ", ".join(f"{w}h" for w in sorted(draft_windows, reverse=True)) if draft_windows else "none"
             msg = (
                 f"{test_mention}\U0001f514 **[TEST]** FPL **Draft** deadline alert is working! "
-                f"(offset: {draft_offset}h before kickoff)"
+                f"(reminders: {windows_str} before deadline)"
             )
             if _send_test(msg):
                 st.success("Draft deadline test alert sent!")
@@ -215,9 +223,10 @@ def show_settings_page():
 
     with col2:
         if st.button("Test Classic Deadline", key="test_classic"):
+            windows_str = ", ".join(f"{w}h" for w in sorted(classic_windows, reverse=True)) if classic_windows else "none"
             msg = (
                 f"{test_mention}\u23f0 **[TEST]** FPL **Classic** deadline alert is working! "
-                f"(offset: {classic_offset}h before kickoff)"
+                f"(reminders: {windows_str} before deadline)"
             )
             if _send_test(msg):
                 st.success("Classic deadline test alert sent!")
@@ -242,8 +251,8 @@ def show_settings_page():
                     "mention_role_id": mention_role.strip(),
                 },
                 "deadline_alerts": {
-                    "draft": {"enabled": draft_enabled, "offset_hours": draft_offset},
-                    "classic": {"enabled": classic_enabled, "offset_hours": classic_offset},
+                    "draft": {"enabled": draft_enabled, "alert_windows": sorted(draft_windows, reverse=True)},
+                    "classic": {"enabled": classic_enabled, "alert_windows": sorted(classic_windows, reverse=True)},
                 },
                 "data_source_alerts": {
                     "rotowire": {"enabled": rotowire_enabled},

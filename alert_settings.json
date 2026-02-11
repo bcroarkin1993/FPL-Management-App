@@ -5,12 +5,22 @@
     "mention_role_id": ""
   },
   "deadline_alerts": {
-    "draft": { "enabled": false, "offset_hours": 25.5 },
-    "classic": { "enabled": false, "offset_hours": 1.5 }
+    "draft": {
+      "enabled": true,
+      "alert_windows": [24, 6, 1]
+    },
+    "classic": {
+      "enabled": true,
+      "alert_windows": [24, 6, 1]
+    }
   },
   "data_source_alerts": {
-    "rotowire": { "enabled": false },
-    "ffp": { "enabled": false }
+    "rotowire": {
+      "enabled": true
+    },
+    "ffp": {
+      "enabled": true
+    }
   },
   "alert_state": {
     "last_rotowire_alert_gw": 0,
