@@ -153,7 +153,6 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Data Source Update Alerts | Not started | Discord notification when new GW data becomes available from Rotowire/FFP (detect fixture changes in data sources) |
 | Improve H2H Visuals | Not started | Better styling for H2H history sections (match history cards, icons, etc.) |
 | Player Trade Analyzer | Not started | Evaluate potential trades between teams (Draft mode) |
 | Historical Data Analysis | Not started | Past season trends and performance analysis |
@@ -175,3 +174,4 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Waiver Wire Transfer Suggestions | Top-3 position-locked swap suggestions with unified Player Value scoring, injury-aware hold logic, asymmetric add/drop weights, and styled suggestion cards |
 | Error logging & better error messages | Added `error_helpers.py` module with structured logging and user-facing error display; added `timeout=30` to ~12 unprotected `requests.get()` calls; added `_logger.warning()` to ~15 silent `except` blocks; replaced ~13 generic error messages with actionable hints |
 | Luck-Adjusted Standings (All-Play Record) | Replaced simplistic average-based model with industry-standard All-Play Record (every team vs every other each GW); fixed 0-score filter bug; shared `luck_analysis.py` module for Draft and Classic H2H; color-styled standings tables with auto-sized height; added toggle to Classic H2H standings |
+| Data Source Update Alerts | Discord notifications when Rotowire/FFP publish new GW data; unified Alert Settings page in FPL App Home with configurable alert windows, test buttons, and live data source status checks; JSON config (`alert_settings.json`) with GitHub Actions commit-back for state persistence |
