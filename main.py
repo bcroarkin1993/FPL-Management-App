@@ -24,6 +24,7 @@ from scripts.fpl.player_statistics import show_player_stats_page
 from scripts.fpl.player_projections import show_player_projections_page
 from scripts.fpl.projected_lineups import show_projected_lineups
 from scripts.fpl.injuries import show_injuries_page
+from scripts.fpl.settings import show_settings_page
 
 # --- Classic pages ---
 from scripts.classic.home import show_classic_home_page
@@ -173,7 +174,8 @@ def main():
                 "Projected Lineups",
                 "Projections Hub",
                 "Player Statistics",
-                "Player Injuries"
+                "Player Injuries",
+                "Settings"
             ],
         )
 
@@ -189,6 +191,8 @@ def main():
             show_player_stats_page()
         elif subpage == "Player Injuries":
             show_injuries_page()
+        elif subpage == "Settings":
+            show_settings_page()
 
     elif section == "Draft":
         subpage = st.sidebar.radio(

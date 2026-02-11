@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "discord": {
+    "mention_user_id": "",
+    "mention_role_id": ""
+  },
+  "deadline_alerts": {
+    "draft": { "enabled": false, "offset_hours": 25.5 },
+    "classic": { "enabled": false, "offset_hours": 1.5 }
+  },
+  "data_source_alerts": {
+    "rotowire": { "enabled": false },
+    "ffp": { "enabled": false }
+  },
+  "alert_state": {
+    "last_rotowire_alert_gw": 0,
+    "last_ffp_alert_gw": 0
+  }
+}

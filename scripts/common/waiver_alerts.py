@@ -1,13 +1,18 @@
-# scripts/waiver_alerts.py  (GitHub Actions-friendly; no config.py imports including from utils.py)
+# scripts/common/waiver_alerts.py  (GitHub Actions-friendly; no config.py imports including from utils.py)
 #
 # Supports both Draft and Classic FPL alerts:
 #   - Draft: 25.5h before kickoff (waiver/transaction deadline)
 #   - Classic: 1.5h before kickoff (transfer deadline)
+# Also supports data source alerts:
+#   - Rotowire: notifies when GW rankings article is published
+#   - FFP: notifies when Fantasy Football Pundit updates for current GW
 
 import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
+
+from scripts.common.alert_config import load_settings, update_alert_state
 
 TZ = ZoneInfo("America/New_York")
 
@@ -94,10 +99,10 @@ def _check_and_send_alert(
             ts = deadline_et.strftime("%a %b %d • %I:%M %p %Z")
 
             if alert_type == "Draft":
-                emoji = "🔔"
+                emoji = "\U0001f514"
                 desc = "Draft transactions"
             else:
-                emoji = "⏰"
+                emoji = "\u23f0"
                 desc = "Classic transfers"
 
             msg = f"{mention}{emoji} FPL **{alert_type}** deadline: {desc} for **GW {gw}** are due in ~**{target}h** (deadline **{ts}**)."
@@ -109,42 +114,102 @@ def _check_and_send_alert(
     return False
 
 
+def _check_data_source_alerts(webhook: str, mention: str, gw: int, settings: dict) -> int:
+    """
+    Check if Rotowire/FFP data is available for the current GW and send alerts.
+
+    Returns the number of alerts sent.
+    """
+    from scripts.common.data_source_checks import (
+        is_rotowire_available_for_gw,
+        is_ffp_available_for_gw,
+    )
+
+    ds_settings = settings.get("data_source_alerts", {})
+    state = settings.get("alert_state", {})
+    alerts_sent = 0
+
+    # Rotowire check
+    if ds_settings.get("rotowire", {}).get("enabled", False):
+        last_gw = state.get("last_rotowire_alert_gw", 0)
+        if last_gw < gw:
+            print(f"[waiver_alerts:Rotowire] Checking for GW {gw} data (last alert: GW {last_gw})")
+            if is_rotowire_available_for_gw(gw):
+                msg = f"{mention}\U0001f4ca **Rotowire** GW {gw} player rankings are now available!"
+                requests.post(webhook, json={"content": msg}, timeout=10)
+                update_alert_state("rotowire", gw)
+                print(f"[waiver_alerts:Rotowire] Sent GW {gw} data alert")
+                alerts_sent += 1
+            else:
+                print(f"[waiver_alerts:Rotowire] GW {gw} data not yet available")
+        else:
+            print(f"[waiver_alerts:Rotowire] Already alerted for GW {gw}")
+
+    # FFP check
+    if ds_settings.get("ffp", {}).get("enabled", False):
+        last_gw = state.get("last_ffp_alert_gw", 0)
+        if last_gw < gw:
+            print(f"[waiver_alerts:FFP] Checking for GW {gw} data (last alert: GW {last_gw})")
+            if is_ffp_available_for_gw(gw):
+                msg = f"{mention}\U0001f4ca **Fantasy Football Pundit** GW {gw} projections are now available!"
+                requests.post(webhook, json={"content": msg}, timeout=10)
+                update_alert_state("ffp", gw)
+                print(f"[waiver_alerts:FFP] Sent GW {gw} data alert")
+                alerts_sent += 1
+            else:
+                print(f"[waiver_alerts:FFP] GW {gw} data not yet available")
+        else:
+            print(f"[waiver_alerts:FFP] Already alerted for GW {gw}")
+
+    return alerts_sent
+
+
 def main():
     # ---- Secrets / env (all provided via GitHub Actions) ----
     webhook = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-    # Draft settings (disabled by default - opt-in via secrets)
-    draft_enabled = os.getenv("FPL_DRAFT_ALERTS_ENABLED", "false").lower() in ("true", "1", "yes")
-    draft_offset = float(os.getenv("FPL_DEADLINE_OFFSET_HOURS", str(DRAFT_OFFSET_HOURS)))
+    if not webhook:
+        print("[waiver_alerts] Missing DISCORD_WEBHOOK_URL")
+        return
 
-    # Classic settings (disabled by default - opt-in via secrets)
-    classic_enabled = os.getenv("FPL_CLASSIC_ALERTS_ENABLED", "false").lower() in ("true", "1", "yes")
-    classic_offset = float(os.getenv("FPL_CLASSIC_DEADLINE_OFFSET_HOURS", str(CLASSIC_OFFSET_HOURS)))
+    # Load JSON config (with defaults for missing keys)
+    settings = load_settings()
 
-    # Gameweek override
-    gw_env = os.getenv("FPL_CURRENT_GAMEWEEK")
-    gw = int(gw_env) if gw_env and gw_env.isdigit() else None
+    # Resolve settings: JSON config first, env var fallback
+    dl = settings.get("deadline_alerts", {})
+    draft_cfg = dl.get("draft", {})
+    classic_cfg = dl.get("classic", {})
 
-    # Optional mentions
-    mention_user = os.getenv("DISCORD_MENTION_USER_ID")   # e.g., "123456789012345678"
-    mention_role = os.getenv("DISCORD_MENTION_ROLE_ID")   # e.g., "987654321098765432"
+    draft_enabled = draft_cfg.get("enabled", False) or os.getenv("FPL_DRAFT_ALERTS_ENABLED", "false").lower() in ("true", "1", "yes")
+    draft_offset = draft_cfg.get("offset_hours", None) or float(os.getenv("FPL_DEADLINE_OFFSET_HOURS", str(DRAFT_OFFSET_HOURS)))
+
+    classic_enabled = classic_cfg.get("enabled", False) or os.getenv("FPL_CLASSIC_ALERTS_ENABLED", "false").lower() in ("true", "1", "yes")
+    classic_offset = classic_cfg.get("offset_hours", None) or float(os.getenv("FPL_CLASSIC_DEADLINE_OFFSET_HOURS", str(CLASSIC_OFFSET_HOURS)))
+
+    # Data source alert settings (JSON only, no env var fallback)
+    ds_settings = settings.get("data_source_alerts", {})
+    rotowire_enabled = ds_settings.get("rotowire", {}).get("enabled", False)
+    ffp_enabled = ds_settings.get("ffp", {}).get("enabled", False)
+
+    # Mention settings: JSON config first, env var fallback
+    discord_cfg = settings.get("discord", {})
+    mention_user = discord_cfg.get("mention_user_id", "") or os.getenv("DISCORD_MENTION_USER_ID", "")
+    mention_role = discord_cfg.get("mention_role_id", "") or os.getenv("DISCORD_MENTION_ROLE_ID", "")
     mention = ""
     if mention_user:
         mention += f"<@{mention_user}> "
     if mention_role:
         mention += f"<@&{mention_role}> "
 
-    if not webhook:
-        print("[waiver_alerts] Missing DISCORD_WEBHOOK_URL")
+    any_enabled = draft_enabled or classic_enabled or rotowire_enabled or ffp_enabled
+    if not any_enabled:
+        print("[waiver_alerts] All alerts are disabled")
         return
 
-    if not draft_enabled and not classic_enabled:
-        print("[waiver_alerts] Both Draft and Classic alerts are disabled")
-        return
+    # Gameweek override
+    gw_env = os.getenv("FPL_CURRENT_GAMEWEEK")
+    gw = int(gw_env) if gw_env and gw_env.isdigit() else _get_current_gameweek()
 
-    # Resolve gameweek and kickoff time once (shared between both alert types)
-    if gw is None:
-        gw = _get_current_gameweek()
     kickoff_et = _earliest_kickoff_et(gw)
     now_et = datetime.now(TZ)
 
@@ -153,6 +218,8 @@ def main():
     print(f"[waiver_alerts] Kickoff: {kickoff_et.strftime('%Y-%m-%d %H:%M %Z')}")
     print(f"[waiver_alerts] Draft alerts: {'enabled' if draft_enabled else 'disabled'} (offset={draft_offset}h)")
     print(f"[waiver_alerts] Classic alerts: {'enabled' if classic_enabled else 'disabled'} (offset={classic_offset}h)")
+    print(f"[waiver_alerts] Rotowire data alerts: {'enabled' if rotowire_enabled else 'disabled'}")
+    print(f"[waiver_alerts] FFP data alerts: {'enabled' if ffp_enabled else 'disabled'}")
 
     alerts_sent = 0
 
@@ -167,6 +234,10 @@ def main():
         classic_deadline = kickoff_et - timedelta(hours=classic_offset)
         if _check_and_send_alert(webhook, mention, classic_deadline, gw, "Classic", now_et):
             alerts_sent += 1
+
+    # Check data source alerts
+    if rotowire_enabled or ffp_enabled:
+        alerts_sent += _check_data_source_alerts(webhook, mention, gw, settings)
 
     if alerts_sent == 0:
         print("[waiver_alerts] No alerts sent this run")
