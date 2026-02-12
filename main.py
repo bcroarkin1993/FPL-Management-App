@@ -46,23 +46,40 @@ st.set_page_config(
 )
 
 # ------------------------------------------------------------
-# Optional: light CSS polish (keeps your existing palette)
+# FPL-themed CSS
 # ------------------------------------------------------------
 def apply_custom_styles():
     st.markdown(
         """
         <style>
-        /* Sidebar: background + font color */
+        /* Sidebar: FPL deep purple */
         [data-testid="stSidebar"] {
-            background-color: #00FFFF; /* Aqua */
+            background-color: #37003c;
         }
         [data-testid="stSidebar"] * {
-            color: #FF005F; /* Magenta */
+            color: #ffffff;
             font-size: 16px;
+        }
+        /* Nav link hover (FPL cyan) */
+        [data-testid="stSidebar"] a:hover {
+            color: #04f5ff !important;
+        }
+        /* Active nav link (FPL green) */
+        [data-testid="stSidebar"] [aria-selected="true"] {
+            color: #00ff87 !important;
+            font-weight: 600;
+        }
+        /* Section headers in sidebar */
+        [data-testid="stSidebar"] [data-testid="stSidebarNavSeparator"] {
+            color: #00ff87 !important;
+            font-weight: 700;
+            text-transform: uppercase;
+            font-size: 13px;
+            letter-spacing: 1px;
         }
         /* Headings in main area */
         .main h1, .main h2, .main h3 {
-            color: #3C005F; /* Dark Purple */
+            color: #37003c;
         }
         </style>
         """,
@@ -78,7 +95,7 @@ def render_app_home():
         """
         Welcome to your one-stop **FPL Manager** app covering both **Draft** and **Classic** formats.
 
-        **What you’ll find here:**
+        **What you'll find here:**
         - Cross-format tools (fixtures, projected lineups, player projections, player statistics)
         - Dedicated **Draft** and **Classic** hubs
         - Visuals, analytics, and utilities to help you dominate your leagues
@@ -92,25 +109,6 @@ def render_app_home():
             "Classic League ID": getattr(config, "FPL_CLASSIC_LEAGUE_ID", None),
             "My Team ID (Draft)": getattr(config, "FPL_TEAM_ID", None),
         })
-
-def render_classic_home():
-    st.title("Classic League — Home")
-    st.markdown(
-        """
-        This is your **Classic** hub. Here you'll soon find:
-        - **League table** & mini-leagues
-        - **Team analysis** (transfers, captaincy, bank, etc.)
-        - **Fixture projections** & **waiver/free transfers** helpers
-        - **Season-long charts**
-
-        *Note:* Some Classic-specific pages may still be under construction if you haven’t implemented
-        their data sources yet. The navigation is wired and ready for you to plug in.
-        """
-    )
-
-def render_placeholder(page_label: str):
-    st.header(page_label)
-    st.info("This section is coming soon. Wire in your Classic endpoints or reuse your Draft logic if applicable.")
 
 # ------------------------------------------------------------
 # Startup Preload - warm caches for faster page navigation
@@ -153,105 +151,44 @@ def main():
     # Preload data at startup for faster page navigation
     preload_app_data()
 
-    # Sidebar
-    st.sidebar.title("Navigation")
+    # Sidebar logo and title
+    st.sidebar.title("FPL Manager")
     logo_path = "images/fpl_logo1.jpeg"
     if os.path.exists(logo_path):
-        st.sidebar.image(logo_path, use_column_width=True)
+        st.sidebar.image(logo_path, use_container_width=True)
     apply_custom_styles()
 
-    # Top-level section
-    section = st.sidebar.selectbox(
-        "Choose Section",
-        ["FPL App Home", "Draft", "Classic"],
-        index=0
-    )
-
-    # Sub-navigation based on section
-    if section == "FPL App Home":
-        subpage = st.sidebar.radio(
-            "FPL App Pages",
-            [
-                "Home",
-                "Gameweek Fixtures",
-                "Projected Lineups",
-                "Projections Hub",
-                "Player Statistics",
-                "Player Injuries",
-                "Alert Settings"
-            ],
-        )
-
-        if subpage == "Home":
-            render_app_home()
-        elif subpage == "Gameweek Fixtures":
-            show_club_fixtures_section()
-        elif subpage == "Projected Lineups":
-            show_projected_lineups()
-        elif subpage == "Projections Hub":
-            show_player_projections_page()
-        elif subpage == "Player Statistics":
-            show_player_stats_page()
-        elif subpage == "Player Injuries":
-            show_injuries_page()
-        elif subpage == "Alert Settings":
-            show_settings_page()
-
-    elif section == "Draft":
-        subpage = st.sidebar.radio(
-            "Draft Pages",
-            [
-                "Home",
-                "Fixture Projections",
-                "Waiver Wire",
-                "Team Analysis",
-                "League Analysis",
-                "Draft Helper"
-            ],
-        )
-
-        if subpage == "Home":
-            # Your existing draft home
-            show_home_page()
-        elif subpage == "Fixture Projections":
-            show_fixtures_page()
-        elif subpage == "Waiver Wire":
-            show_waiver_wire_page()
-        elif subpage == "Team Analysis":
-            show_team_stats_page()
-        elif subpage == "League Analysis":
-            show_draft_league_analysis_page()
-        elif subpage == "Draft Helper":
-            show_draft_helper_page()
-
-    else:  # Classic
-        subpage = st.sidebar.radio(
-            "Classic Pages",
-            [
-                "Home",
-                "Fixture Projections",
-                "Transfer Suggestions",
-                "Free Hit Optimizer",
-                "Wildcard Optimizer",
-                "Team Analysis",
-                "League Analysis",
-            ],
-        )
-
-        if subpage == "Home":
-            show_classic_home_page()
-        elif subpage == "Fixture Projections":
-            show_classic_fixture_projections_page()
-        elif subpage == "Transfer Suggestions":
-            show_classic_transfers_page()
-        elif subpage == "Free Hit Optimizer":
-            show_free_hit_page()
-        elif subpage == "Wildcard Optimizer":
-            show_wildcard_page()
-        elif subpage == "Team Analysis":
-            show_classic_team_analysis_page()
-        elif subpage == "League Analysis":
-            show_classic_league_analysis_page()
+    # Navigation using st.navigation() with grouped sections
+    pages = {
+        "FPL App Home": [
+            st.Page(render_app_home, title="Home", icon="🏠"),
+            st.Page(show_club_fixtures_section, title="Gameweek Fixtures", icon="📅"),
+            st.Page(show_projected_lineups, title="Projected Lineups", icon="📋"),
+            st.Page(show_player_projections_page, title="Projections Hub", icon="📊"),
+            st.Page(show_player_stats_page, title="Player Statistics", icon="📈"),
+            st.Page(show_injuries_page, title="Player Injuries", icon="🏥"),
+            st.Page(show_settings_page, title="Alert Settings", icon="⚙️"),
+        ],
+        "Draft": [
+            st.Page(show_home_page, title="Home", icon="🏠"),
+            st.Page(show_fixtures_page, title="Fixture Projections", icon="📅"),
+            st.Page(show_waiver_wire_page, title="Waiver Wire", icon="🔄"),
+            st.Page(show_team_stats_page, title="Team Analysis", icon="👥"),
+            st.Page(show_draft_league_analysis_page, title="League Analysis", icon="🏆"),
+            st.Page(show_draft_helper_page, title="Draft Helper", icon="📝"),
+        ],
+        "Classic": [
+            st.Page(show_classic_home_page, title="Home", icon="🏠"),
+            st.Page(show_classic_fixture_projections_page, title="Fixture Projections", icon="📅"),
+            st.Page(show_classic_transfers_page, title="Transfer Suggestions", icon="🔄"),
+            st.Page(show_free_hit_page, title="Free Hit Optimizer", icon="⚡"),
+            st.Page(show_wildcard_page, title="Wildcard Optimizer", icon="🃏"),
+            st.Page(show_classic_team_analysis_page, title="Team Analysis", icon="👥"),
+            st.Page(show_classic_league_analysis_page, title="League Analysis", icon="🏆"),
+        ],
+    }
+    nav = st.navigation(pages)
+    nav.run()
 
 
 if __name__ == "__main__":

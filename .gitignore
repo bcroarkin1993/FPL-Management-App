@@ -9,10 +9,8 @@ venv/
 # Ignore .env files containing sensitive data
 .env
 
-# Streamlit-specific
-.streamlit/
-config.toml
-secrets.toml
+# Streamlit-specific (track config.toml for theming, ignore secrets)
+.streamlit/secrets.toml
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints
