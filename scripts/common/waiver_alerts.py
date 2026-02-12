@@ -119,9 +119,12 @@ def _check_and_send_alert(
     return False
 
 
-def _check_data_source_alerts(webhook: str, mention: str, gw: int, settings: dict) -> int:
+def _check_data_source_alerts(webhook: str, mention: str, gw: int, settings: dict, kickoff_et: datetime) -> int:
     """
     Check if Rotowire/FFP data is available for the current GW and send alerts.
+
+    Only sends alerts before the GW has started (before earliest kickoff).
+    Each source is alerted at most once per GW via persistent state.
 
     Returns the number of alerts sent.
     """
@@ -130,8 +133,17 @@ def _check_data_source_alerts(webhook: str, mention: str, gw: int, settings: dic
         is_ffp_available_for_gw,
     )
 
+    now_et = datetime.now(TZ)
+
+    # Never send data source alerts after the GW has started
+    if now_et >= kickoff_et:
+        print(f"[waiver_alerts:DataSource] GW {gw} has already started, skipping data source alerts")
+        return 0
+
     ds_settings = settings.get("data_source_alerts", {})
-    state = settings.get("alert_state", {})
+    # Re-read state from disk to avoid stale in-memory values
+    from scripts.common.alert_config import load_settings as _reload
+    state = _reload().get("alert_state", {})
     alerts_sent = 0
 
     # Rotowire check
@@ -242,7 +254,7 @@ def main():
 
     # Check data source alerts
     if rotowire_enabled or ffp_enabled:
-        alerts_sent += _check_data_source_alerts(webhook, mention, gw, settings)
+        alerts_sent += _check_data_source_alerts(webhook, mention, gw, settings, kickoff_et)
 
     if alerts_sent == 0:
         print("[waiver_alerts] No alerts sent this run")
