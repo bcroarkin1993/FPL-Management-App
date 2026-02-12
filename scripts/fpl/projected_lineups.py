@@ -614,7 +614,7 @@ def _build_lineup_card_html(home_team, away_team, home_players, away_players):
 
 
 def show_projected_lineups():
-    st.title("Projected Lineups")
+    st.title(f"Projected Lineups — GW {config.CURRENT_GAMEWEEK}")
     st.write("View projected starting lineups with player form and availability status.")
 
     # Scrape the EPL matchups from Rotowire

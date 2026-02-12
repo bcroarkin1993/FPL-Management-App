@@ -55,27 +55,28 @@ def apply_custom_styles():
         /* Sidebar: FPL deep purple */
         [data-testid="stSidebar"] {
             background-color: #37003c;
+            min-width: 260px;
         }
         [data-testid="stSidebar"] * {
             color: #ffffff;
             font-size: 16px;
         }
-        /* Nav link hover (FPL cyan) */
-        [data-testid="stSidebar"] a:hover {
+        /* Radio buttons in sidebar: remove default bullet styling */
+        [data-testid="stSidebar"] .stRadio label {
+            cursor: pointer;
+            padding: 2px 0;
+        }
+        [data-testid="stSidebar"] .stRadio label:hover {
             color: #04f5ff !important;
         }
-        /* Active nav link (FPL green) */
-        [data-testid="stSidebar"] [aria-selected="true"] {
+        /* Active/selected radio option (FPL green) */
+        [data-testid="stSidebar"] .stRadio [data-checked="true"] label {
             color: #00ff87 !important;
             font-weight: 600;
         }
-        /* Section headers in sidebar */
-        [data-testid="stSidebar"] [data-testid="stSidebarNavSeparator"] {
-            color: #00ff87 !important;
-            font-weight: 700;
-            text-transform: uppercase;
-            font-size: 13px;
-            letter-spacing: 1px;
+        /* Section dividers */
+        [data-testid="stSidebar"] hr {
+            border-color: rgba(255, 255, 255, 0.2);
         }
         /* Headings in main area */
         .main h1, .main h2, .main h3 {
@@ -109,6 +110,44 @@ def render_app_home():
             "Classic League ID": getattr(config, "FPL_CLASSIC_LEAGUE_ID", None),
             "My Team ID (Draft)": getattr(config, "FPL_TEAM_ID", None),
         })
+
+# ------------------------------------------------------------
+# Page routing tables (label → function)
+# ------------------------------------------------------------
+FPL_PAGES = {
+    "🏠  Home": render_app_home,
+    "📅  Gameweek Fixtures": show_club_fixtures_section,
+    "📋  Projected Lineups": show_projected_lineups,
+    "📊  Projections Hub": show_player_projections_page,
+    "📈  Player Statistics": show_player_stats_page,
+    "🏥  Player Injuries": show_injuries_page,
+    "⚙️  Alert Settings": show_settings_page,
+}
+
+DRAFT_PAGES = {
+    "🏠  Home": show_home_page,
+    "📅  Fixture Projections": show_fixtures_page,
+    "🔄  Waiver Wire": show_waiver_wire_page,
+    "👥  Team Analysis": show_team_stats_page,
+    "🏆  League Analysis": show_draft_league_analysis_page,
+    "📝  Draft Helper": show_draft_helper_page,
+}
+
+CLASSIC_PAGES = {
+    "🏠  Home": show_classic_home_page,
+    "📅  Fixture Projections": show_classic_fixture_projections_page,
+    "🔄  Transfer Suggestions": show_classic_transfers_page,
+    "⚡  Free Hit Optimizer": show_free_hit_page,
+    "🃏  Wildcard Optimizer": show_wildcard_page,
+    "👥  Team Analysis": show_classic_team_analysis_page,
+    "🏆  League Analysis": show_classic_league_analysis_page,
+}
+
+SECTIONS = {
+    "⚽  FPL App Home": FPL_PAGES,
+    "📋  Draft": DRAFT_PAGES,
+    "🏆  Classic": CLASSIC_PAGES,
+}
 
 # ------------------------------------------------------------
 # Startup Preload - warm caches for faster page navigation
@@ -151,44 +190,34 @@ def main():
     # Preload data at startup for faster page navigation
     preload_app_data()
 
-    # Sidebar logo and title
-    st.sidebar.title("FPL Manager")
+    # Sidebar: logo + title at the top
     logo_path = "images/fpl_logo1.jpeg"
     if os.path.exists(logo_path):
         st.sidebar.image(logo_path, use_column_width=True)
+    st.sidebar.title("FPL Manager")
     apply_custom_styles()
 
-    # Navigation using st.navigation() with grouped sections
-    pages = {
-        "FPL App Home": [
-            st.Page(render_app_home, title="Home", icon="🏠"),
-            st.Page(show_club_fixtures_section, title="Gameweek Fixtures", icon="📅"),
-            st.Page(show_projected_lineups, title="Projected Lineups", icon="📋"),
-            st.Page(show_player_projections_page, title="Projections Hub", icon="📊"),
-            st.Page(show_player_stats_page, title="Player Statistics", icon="📈"),
-            st.Page(show_injuries_page, title="Player Injuries", icon="🏥"),
-            st.Page(show_settings_page, title="Alert Settings", icon="⚙️"),
-        ],
-        "Draft": [
-            st.Page(show_home_page, title="Home", icon="🏠"),
-            st.Page(show_fixtures_page, title="Fixture Projections", icon="📅"),
-            st.Page(show_waiver_wire_page, title="Waiver Wire", icon="🔄"),
-            st.Page(show_team_stats_page, title="Team Analysis", icon="👥"),
-            st.Page(show_draft_league_analysis_page, title="League Analysis", icon="🏆"),
-            st.Page(show_draft_helper_page, title="Draft Helper", icon="📝"),
-        ],
-        "Classic": [
-            st.Page(show_classic_home_page, title="Home", icon="🏠"),
-            st.Page(show_classic_fixture_projections_page, title="Fixture Projections", icon="📅"),
-            st.Page(show_classic_transfers_page, title="Transfer Suggestions", icon="🔄"),
-            st.Page(show_free_hit_page, title="Free Hit Optimizer", icon="⚡"),
-            st.Page(show_wildcard_page, title="Wildcard Optimizer", icon="🃏"),
-            st.Page(show_classic_team_analysis_page, title="Team Analysis", icon="👥"),
-            st.Page(show_classic_league_analysis_page, title="League Analysis", icon="🏆"),
-        ],
-    }
-    nav = st.navigation(pages)
-    nav.run()
+    st.sidebar.divider()
+
+    # Section selector
+    section = st.sidebar.radio(
+        "Section",
+        list(SECTIONS.keys()),
+        label_visibility="collapsed",
+    )
+
+    st.sidebar.divider()
+
+    # Page selector for the active section
+    pages = SECTIONS[section]
+    page = st.sidebar.radio(
+        "Page",
+        list(pages.keys()),
+        label_visibility="collapsed",
+    )
+
+    # Route to the selected page
+    pages[page]()
 
 
 if __name__ == "__main__":
