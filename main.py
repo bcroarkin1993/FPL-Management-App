@@ -1,4 +1,5 @@
 # main.py
+import os
 import streamlit as st
 import config
 
@@ -154,7 +155,9 @@ def main():
 
     # Sidebar
     st.sidebar.title("Navigation")
-    st.sidebar.image("images/fpl_logo1.jpeg", use_column_width=True)
+    logo_path = "images/fpl_logo1.jpeg"
+    if os.path.exists(logo_path):
+        st.sidebar.image(logo_path, use_column_width=True)
     apply_custom_styles()
 
     # Top-level section

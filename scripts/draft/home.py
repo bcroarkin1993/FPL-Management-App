@@ -443,7 +443,7 @@ def plot_team_points_over_time(draft_league_id):
     # Step 6: Process each match and accumulate points by gameweek, ignoring future matches
     for match in matches:
         gameweek = match['event']
-        if gameweek >= current_gameweek:  # Ignore future matches
+        if gameweek > current_gameweek:  # Ignore future matches
             continue
 
         team1_id = match['league_entry_1']

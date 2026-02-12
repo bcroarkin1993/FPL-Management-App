@@ -136,8 +136,8 @@ def show_settings_page():
             with st.spinner("Checking Rotowire..."):
                 try:
                     from scripts.common.data_source_checks import is_rotowire_available_for_gw
-                    from scripts.common.waiver_alerts import _get_current_gameweek
-                    gw = _get_current_gameweek()
+                    from scripts.common.utils import get_current_gameweek
+                    gw = get_current_gameweek()
                     available = is_rotowire_available_for_gw(gw)
                     if available:
                         st.success(f"Rotowire GW {gw} rankings are available!")
@@ -151,8 +151,8 @@ def show_settings_page():
             with st.spinner("Checking FFP..."):
                 try:
                     from scripts.common.data_source_checks import is_ffp_available_for_gw
-                    from scripts.common.waiver_alerts import _get_current_gameweek
-                    gw = _get_current_gameweek()
+                    from scripts.common.utils import get_current_gameweek
+                    gw = get_current_gameweek()
                     available = is_ffp_available_for_gw(gw)
                     if available:
                         st.success(f"FFP GW {gw} projections are available!")

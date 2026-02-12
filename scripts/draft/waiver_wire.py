@@ -562,7 +562,8 @@ def _add_fdr_and_form(
     df: pd.DataFrame,
     fpl_player_statistics_df: pd.DataFrame,
     current_gw: int,
-    weeks: int
+    weeks: int,
+    form_weeks: int = None,
 ) -> pd.DataFrame:
     """
     Join AvgFDRNextN and Form onto df.
@@ -709,12 +710,13 @@ def _add_fdr_and_form(
     base["AvgFDRNextN"] = pd.to_numeric(base["AvgFDRNextN"], errors="coerce")
 
     # Robust Form calculation with fallbacks
+    _form_n = form_weeks if form_weeks is not None else config.FORM_LOOKBACK_WEEKS
     def _safe_form(pid, fallback_form, fallback_ppg):
         # element-summary average of last N
         val = None
         if pd.notna(pid):
             try:
-                val = _avg_form_last_n(int(pid), config.FORM_LOOKBACK_WEEKS)
+                val = _avg_form_last_n(int(pid), _form_n)
             except Exception:
                 val = None
         if val is None or (isinstance(val, float) and np.isnan(val)):
@@ -1606,9 +1608,7 @@ def show_waiver_wire_page():
         st.stop()
 
     # Add FDR, Form, Injury data, and Season_Points to available players
-    global FORM_LOOKBACK_WEEKS
-    FORM_LOOKBACK_WEEKS = form_weeks
-    avail_all = _add_fdr_and_form(avail_all, fpl_stats, current_gw, lookahead)
+    avail_all = _add_fdr_and_form(avail_all, fpl_stats, current_gw, lookahead, form_weeks=form_weeks)
     avail_all = _add_injury_data(avail_all, fpl_stats)
 
     # Add Season_Points to available players via Player_ID

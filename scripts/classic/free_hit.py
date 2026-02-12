@@ -478,9 +478,13 @@ def show_free_hit_page():
         bench = squad_df[~squad_df['Is_Starter']].copy()
 
         # Find captain (highest projected points)
-        cap_idx = starters['Points'].idxmax()
-        cap_name = starters.loc[cap_idx, 'Player']
-        cap_points = starters.loc[cap_idx, 'Points']
+        if starters.empty or starters['Points'].isna().all():
+            cap_name = "N/A"
+            cap_points = 0.0
+        else:
+            cap_idx = starters['Points'].idxmax()
+            cap_name = starters.loc[cap_idx, 'Player']
+            cap_points = starters.loc[cap_idx, 'Points']
 
         # Calculate totals
         starter_points = starters['Points'].sum()
