@@ -155,7 +155,7 @@ def main():
     st.sidebar.title("FPL Manager")
     logo_path = "images/fpl_logo1.jpeg"
     if os.path.exists(logo_path):
-        st.sidebar.image(logo_path, use_container_width=True)
+        st.sidebar.image(logo_path, use_column_width=True)
     apply_custom_styles()
 
     # Navigation using st.navigation() with grouped sections
