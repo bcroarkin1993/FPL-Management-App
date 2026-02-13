@@ -9,12 +9,14 @@ url="$2"
 while read local_ref local_sha remote_ref remote_sha; do
     if echo "$remote_ref" | grep -q "refs/heads/main"; then
         echo "Pushing to main — running tests first..."
-        # Activate venv if available so all dependencies are on PATH
+        # Use venv's Python directly, clearing conda env vars to avoid conflicts
         REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-        if [ -f "$REPO_DIR/venv/bin/activate" ]; then
-            source "$REPO_DIR/venv/bin/activate"
+        if [ -f "$REPO_DIR/venv/bin/python" ]; then
+            unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL PYTHONPATH
+            "$REPO_DIR/venv/bin/python" -m pytest --tb=short -q
+        else
+            pytest --tb=short -q
         fi
-        pytest --tb=short -q
         if [ $? -ne 0 ]; then
             echo ""
             echo "Tests failed. Push to main aborted."
