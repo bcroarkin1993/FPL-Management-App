@@ -9,7 +9,13 @@ url="$2"
 while read local_ref local_sha remote_ref remote_sha; do
     if echo "$remote_ref" | grep -q "refs/heads/main"; then
         echo "Pushing to main — running tests first..."
-        pytest --tb=short -q
+        # Use the venv's pytest if available
+        SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+        if [ -f "$SCRIPT_DIR/venv/bin/pytest" ]; then
+            "$SCRIPT_DIR/venv/bin/pytest" --tb=short -q
+        else
+            pytest --tb=short -q
+        fi
         if [ $? -ne 0 ]; then
             echo ""
             echo "Tests failed. Push to main aborted."
