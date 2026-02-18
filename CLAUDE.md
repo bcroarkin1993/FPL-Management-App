@@ -162,7 +162,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 |------|--------|-------|
 | Player Trade Analyzer | Not started | Evaluate potential trades between teams (Draft mode) |
 | Historical Data Analysis | Not started | Past season trends and performance analysis |
-| Split utils.py | In progress | Created `player_matching.py`; more modules could be extracted |
+| Split utils.py | Completed | Split into 7 focused modules (`text_helpers`, `fpl_draft_api`, `fpl_classic_api`, `scraping`, `fixture_helpers`, `analytics`, `optimization`); merged matching functions into `player_matching.py`; `utils.py` is now a thin re-export shim |
 
 ### Completed
 
