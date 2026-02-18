@@ -7,11 +7,19 @@
   "deadline_alerts": {
     "draft": {
       "enabled": true,
-      "alert_windows": [24, 6, 1]
+      "alert_windows": [
+        24,
+        6,
+        1
+      ]
     },
     "classic": {
       "enabled": true,
-      "alert_windows": [24, 6, 1]
+      "alert_windows": [
+        24,
+        6,
+        1
+      ]
     }
   },
   "data_source_alerts": {
@@ -23,7 +31,7 @@
     }
   },
   "alert_state": {
-    "last_rotowire_alert_gw": 0,
+    "last_rotowire_alert_gw": 27,
     "last_ffp_alert_gw": 0
   }
 }
