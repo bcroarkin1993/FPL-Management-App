@@ -453,6 +453,46 @@ def show_classic_team_analysis_page():
 
     st.markdown("---")
 
+    # ---------------------------
+    # SEASON HISTORY
+    # ---------------------------
+    past_seasons = history.get("past", [])
+    if past_seasons:
+        st.markdown("### Season History")
+
+        past_df = pd.DataFrame(past_seasons)
+        past_df = past_df.rename(columns={
+            "season_name": "Season",
+            "total_points": "Points",
+            "rank": "Rank",
+        })
+
+        # Overall Rank chart (inverted y-axis so lower rank = higher on chart)
+        fig = px.line(
+            past_df,
+            x="Season",
+            y="Rank",
+            markers=True,
+            title="Overall Rank by Season",
+        )
+        fig.update_yaxes(autorange="reversed", title="Overall Rank")
+        fig.update_xaxes(title="Season")
+        fig.update_layout(height=400)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Data table
+        display_df = past_df[["Season", "Points", "Rank"]].copy()
+        display_df["Points"] = display_df["Points"].apply(lambda x: f"{x:,}" if pd.notna(x) else "N/A")
+        display_df["Rank"] = display_df["Rank"].apply(lambda x: f"{x:,}" if pd.notna(x) and x else "N/A")
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True,
+            height=38 + len(display_df) * 35,
+        )
+
+        st.markdown("---")
+
     # Build squad dataframe
     squad_df = _build_squad_dataframe(picks, bootstrap)
 
@@ -646,19 +686,3 @@ def show_classic_team_analysis_page():
         else:
             st.info("No chips used yet this season.")
 
-    # Past Seasons Section
-    past_seasons = history.get("past", [])
-    if past_seasons:
-        with st.expander("Past Seasons"):
-            past_df = pd.DataFrame(past_seasons)
-            past_df = past_df.rename(columns={
-                "season_name": "Season",
-                "total_points": "Points",
-                "rank": "Rank"
-            })
-            past_df["Rank"] = past_df["Rank"].apply(lambda x: f"{x:,}" if x else "N/A")
-            st.dataframe(
-                past_df[["Season", "Points", "Rank"]],
-                use_container_width=True,
-                hide_index=True,
-            )

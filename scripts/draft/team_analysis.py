@@ -13,6 +13,7 @@ from scripts.common.utils import (
     get_draft_points_by_position,
     get_draft_team_players_with_points,
     get_classic_bootstrap_static,
+    get_draft_league_details,
 )
 from scripts.common.team_analysis_helpers import render_season_highlights
 
@@ -65,6 +66,51 @@ def show_team_stats_page():
     render_season_highlights(team_players, bootstrap_data=bootstrap, is_classic=False)
 
     st.divider()
+
+    # ---------------------------
+    # LEAGUE STANDING
+    # ---------------------------
+    league_details = get_draft_league_details(config.FPL_DRAFT_LEAGUE_ID)
+    if league_details:
+        standings = league_details.get("standings", [])
+        league_entries = league_details.get("league_entries", [])
+
+        # Build entry_id → id mapping (get_team_id_by_name returns entry_id,
+        # but standings use league_entry which maps to id in league_entries)
+        entry_id_to_id = {e["entry_id"]: e["id"] for e in league_entries if "entry_id" in e and "id" in e}
+        league_entry_id = entry_id_to_id.get(team_id)
+
+        # Find this team's standing
+        team_standing = None
+        if league_entry_id is not None:
+            for s in standings:
+                if s.get("league_entry") == league_entry_id:
+                    team_standing = s
+                    break
+
+        if team_standing:
+            st.header("League Standing")
+
+            total_teams = len(standings)
+            rank = team_standing.get("rank", "?")
+            wins = team_standing.get("matches_won", 0)
+            draws = team_standing.get("matches_drawn", 0)
+            losses = team_standing.get("matches_lost", 0)
+            points_for = team_standing.get("points_for", 0)
+            points_against = team_standing.get("points_against", 0)
+            league_points = team_standing.get("total", 0)
+
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("League Position", f"{rank} / {total_teams}")
+            with col2:
+                st.metric("Record", f"{wins}W - {draws}D - {losses}L")
+            with col3:
+                st.metric("Points For / Against", f"{points_for} / {points_against}")
+            with col4:
+                st.metric("League Points", league_points)
+
+            st.divider()
 
     # ---------------------------
     # PROJECTED STATS (Current GW)
