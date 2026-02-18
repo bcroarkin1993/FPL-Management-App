@@ -467,18 +467,33 @@ def show_classic_team_analysis_page():
             "rank": "Rank",
         })
 
-        # Overall Rank chart (inverted y-axis so lower rank = higher on chart)
-        fig = px.line(
-            past_df,
-            x="Season",
-            y="Rank",
-            markers=True,
-            title="Overall Rank by Season",
-        )
-        fig.update_yaxes(autorange="reversed", title="Overall Rank")
-        fig.update_xaxes(title="Season")
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
+        tab_rank, tab_points = st.tabs(["Overall Rank", "Total Points"])
+
+        with tab_rank:
+            fig_rank = px.line(
+                past_df,
+                x="Season",
+                y="Rank",
+                markers=True,
+                title="Overall Rank by Season",
+            )
+            fig_rank.update_yaxes(autorange="reversed", title="Overall Rank")
+            fig_rank.update_xaxes(title="Season")
+            fig_rank.update_layout(height=400)
+            st.plotly_chart(fig_rank, use_container_width=True)
+
+        with tab_points:
+            fig_pts = px.line(
+                past_df,
+                x="Season",
+                y="Points",
+                markers=True,
+                title="Total Points by Season",
+            )
+            fig_pts.update_xaxes(title="Season")
+            fig_pts.update_yaxes(title="Total Points")
+            fig_pts.update_layout(height=400)
+            st.plotly_chart(fig_pts, use_container_width=True)
 
         # Data table
         display_df = past_df[["Season", "Points", "Rank"]].copy()
