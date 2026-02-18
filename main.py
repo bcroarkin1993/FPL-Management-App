@@ -711,7 +711,7 @@ def main():
     preload_app_data()
 
     # Sidebar: logo + title at the top
-    logo_path = "images/fpl_logo1.jpeg"
+    logo_path = "static/fpl_logo1.jpeg"
     if os.path.exists(logo_path):
         st.sidebar.image(logo_path, use_column_width=True)
     st.sidebar.title("FPL Manager")

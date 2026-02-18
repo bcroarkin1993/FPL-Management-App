@@ -12,8 +12,9 @@ venv/
 # Streamlit-specific (track config.toml for theming, ignore secrets)
 .streamlit/secrets.toml
 
-# Jupyter Notebook checkpoints
+# Jupyter Notebook checkpoints and notebooks
 .ipynb_checkpoints
+*.ipynb
 
 # IDE-specific files
 .idea/
