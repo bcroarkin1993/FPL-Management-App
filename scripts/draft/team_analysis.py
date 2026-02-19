@@ -16,6 +16,7 @@ from scripts.common.utils import (
     get_draft_league_details,
 )
 from scripts.common.team_analysis_helpers import render_season_highlights
+from scripts.common.styled_tables import render_styled_table
 
 
 def show_team_projections(team_id, fpl_player_projections, gameweek):
@@ -117,10 +118,10 @@ def show_team_stats_page():
     # ---------------------------
     st.header(f"Gameweek {config.CURRENT_GAMEWEEK} Projections")
 
-    st.dataframe(
+    render_styled_table(
         show_team_projections(team_id, player_projections, config.CURRENT_GAMEWEEK),
-        use_container_width=True,
-        height=400
+        col_formats={"Points": "{:.1f}"},
+        max_height=400,
     )
 
     st.divider()
@@ -172,20 +173,11 @@ def show_team_stats_page():
             for r in h2h_records
         ])
 
-        st.dataframe(
+        h2h_df = h2h_df.rename(columns={"Diff": "+/-"})
+        render_styled_table(
             h2h_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Opponent": st.column_config.TextColumn("Opponent"),
-                "W": st.column_config.NumberColumn("W", width="small"),
-                "D": st.column_config.NumberColumn("D", width="small"),
-                "L": st.column_config.NumberColumn("L", width="small"),
-                "Record": st.column_config.TextColumn("Record"),
-                "PF": st.column_config.NumberColumn("PF", help="Points For"),
-                "PA": st.column_config.NumberColumn("PA", help="Points Against"),
-                "Diff": st.column_config.NumberColumn("+/-", help="Point Differential"),
-            }
+            text_align={"W": "center", "D": "center", "L": "center", "Record": "center"},
+            positive_color_cols=["+/-"],
         )
     else:
         st.info("No head-to-head data available yet. The season may not have started.")
@@ -255,16 +247,9 @@ def show_team_stats_page():
                 ["_pos_order", "Total Points"], ascending=[True, False]
             ).drop(columns=["_pos_order"])
 
-            st.dataframe(
+            render_styled_table(
                 players_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Player": st.column_config.TextColumn("Player"),
-                    "Position": st.column_config.TextColumn("Pos"),
-                    "Total Points": st.column_config.NumberColumn("Points"),
-                    "Team": st.column_config.TextColumn("Team"),
-                }
+                positive_color_cols=["Total Points"],
             )
     else:
         st.info("No position data available for this team.")

@@ -18,6 +18,7 @@ from typing import Optional, Dict, List, Tuple
 import config
 from scripts.common.error_helpers import get_logger, show_api_error
 from scripts.common.utils import get_current_gameweek, get_draft_points_by_position
+from scripts.common.styled_tables import render_styled_table
 
 _logger = get_logger("fpl_app.draft.league_analysis")
 
@@ -584,14 +585,14 @@ def show_draft_league_analysis_page():
             h2h_matrix = build_h2h_matrix(matches_df, team_names)
             if not h2h_matrix.empty:
                 st.caption("Each cell shows the row team's record (W-D-L) against the column team")
-                st.dataframe(h2h_matrix, use_container_width=True)
+                render_styled_table(h2h_matrix.reset_index(), text_align={col: "center" for col in h2h_matrix.columns})
             else:
                 st.info("Not enough data to build head-to-head matrix.")
         else:
             h2h_pts_matrix = build_h2h_points_matrix(matches_df)
             if not h2h_pts_matrix.empty:
                 st.caption("Each cell shows total points the row team scored against the column team")
-                st.dataframe(h2h_pts_matrix, use_container_width=True)
+                render_styled_table(h2h_pts_matrix.reset_index(), text_align={col: "center" for col in h2h_pts_matrix.columns})
             else:
                 st.info("Not enough data to build points matrix.")
 
@@ -604,20 +605,12 @@ def show_draft_league_analysis_page():
         if not scoring_stats.empty:
             # Display stats table
             display_cols = ["Team", "Games", "Total_Pts", "Avg_Pts", "Std_Dev", "Min_Pts", "Max_Pts", "Consistency"]
-            st.dataframe(
-                scoring_stats[display_cols],
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Team": st.column_config.TextColumn("Team"),
-                    "Games": st.column_config.NumberColumn("GP"),
-                    "Total_Pts": st.column_config.NumberColumn("Total"),
-                    "Avg_Pts": st.column_config.NumberColumn("Avg"),
-                    "Std_Dev": st.column_config.NumberColumn("Std Dev"),
-                    "Min_Pts": st.column_config.NumberColumn("Min"),
-                    "Max_Pts": st.column_config.NumberColumn("Max"),
-                    "Consistency": st.column_config.NumberColumn("Consistency", help="Higher = more consistent (Avg/StdDev)"),
-                }
+            stats_display = scoring_stats[display_cols].copy()
+            stats_display.columns = ["Team", "GP", "Total", "Avg", "Std Dev", "Min", "Max", "Consistency"]
+            render_styled_table(
+                stats_display,
+                col_formats={"Avg": "{:.1f}", "Std Dev": "{:.1f}", "Consistency": "{:.2f}"},
+                positive_color_cols=["Total", "Avg", "Consistency"],
             )
 
             st.divider()
@@ -667,17 +660,16 @@ def show_draft_league_analysis_page():
         if not sos_df.empty:
             st.caption("Based on average points scored by opponents throughout the season")
 
-            st.dataframe(
-                sos_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Team": st.column_config.TextColumn("Team"),
-                    "SOS_Rank": st.column_config.NumberColumn("SOS Rank", help="1 = hardest schedule"),
-                    "Opp_Avg_Season": st.column_config.NumberColumn("Opp Season Avg", help="Average GW points of opponents"),
-                    "Opp_Avg_vs_Team": st.column_config.NumberColumn("Opp Avg vs Team", help="Avg points opponents scored against this team"),
-                    "Difficulty_Delta": st.column_config.NumberColumn("Delta", help="+ means opponents scored more vs you than their average"),
-                }
+            sos_display = sos_df.rename(columns={
+                "SOS_Rank": "SOS Rank",
+                "Opp_Avg_Season": "Opp Season Avg",
+                "Opp_Avg_vs_Team": "Opp Avg vs Team",
+                "Difficulty_Delta": "Delta",
+            })
+            render_styled_table(
+                sos_display,
+                col_formats={"Opp Season Avg": "{:.1f}", "Opp Avg vs Team": "{:.1f}", "Delta": "{:+.1f}"},
+                negative_color_cols=["Delta"],
             )
 
             st.markdown("""
@@ -741,16 +733,16 @@ def show_draft_league_analysis_page():
         streaks_df = calculate_streaks(weekly_scores)
 
         if not streaks_df.empty:
-            st.dataframe(
-                streaks_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Team": st.column_config.TextColumn("Team"),
-                    "Current_Streak": st.column_config.TextColumn("Current", help="W=Win, L=Loss, D=Draw"),
-                    "Longest_Win_Streak": st.column_config.NumberColumn("Best Win Streak"),
-                    "Longest_Loss_Streak": st.column_config.NumberColumn("Worst Loss Streak"),
-                }
+            streaks_display = streaks_df.rename(columns={
+                "Current_Streak": "Current",
+                "Longest_Win_Streak": "Best Win Streak",
+                "Longest_Loss_Streak": "Worst Loss Streak",
+            })
+            render_styled_table(
+                streaks_display,
+                text_align={"Current": "center", "Best Win Streak": "center", "Worst Loss Streak": "center"},
+                positive_color_cols=["Best Win Streak"],
+                negative_color_cols=["Worst Loss Streak"],
             )
         else:
             st.info("Not enough data for streak analysis.")

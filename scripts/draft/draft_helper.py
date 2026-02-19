@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import config
 from scripts.common.utils import get_rotowire_season_rankings
+from scripts.common.styled_tables import render_styled_table
 
 def _ensure_session():
     if "draft_taken_keys" not in st.session_state:
@@ -156,7 +157,7 @@ def show_draft_helper_page():
         with st.expander("📋 My Picks (selected as Mine)"):
             mine_df = rankings[rankings["key"].isin(st.session_state.draft_mine_keys)]
             mine_df = mine_df.sort_values("Rank", na_position="last")[["Rank", "Player", "Team", "Position"]]
-            st.dataframe(mine_df, hide_index=True, use_container_width=True)
+            render_styled_table(mine_df)
 
     # Summary footer
     total_players = len(rankings)

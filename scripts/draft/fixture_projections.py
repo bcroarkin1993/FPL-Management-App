@@ -10,6 +10,7 @@ from scripts.common.utils import (
     get_draft_h2h_record, get_live_gameweek_stats, is_gameweek_live, get_fpl_player_mapping,
     get_team_actual_lineup
 )
+from scripts.common.styled_tables import render_styled_table
 
 def _blend_live_with_projections(team_df: pd.DataFrame, live_stats: dict, player_mapping: dict) -> pd.DataFrame:
     """
@@ -913,8 +914,7 @@ def show_fixtures_page():
                                 format_team_name(team2_name): m["opp_pts"],
                                 "Result": m["outcome"]
                             })
-                        st.dataframe(
+                        render_styled_table(
                             pd.DataFrame(match_data),
-                            use_container_width=True,
-                            hide_index=True
+                            text_align={"Gameweek": "center", "Result": "center"},
                         )

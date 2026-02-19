@@ -6,6 +6,7 @@ import streamlit as st
 from scripts.common.error_helpers import get_logger, show_api_error
 from scripts.common.luck_analysis import extract_draft_gw_scores, calculate_all_play_standings, render_luck_adjusted_table, render_standings_table
 from scripts.common.utils import get_current_gameweek, get_draft_league_details
+from scripts.common.styled_tables import render_styled_table
 
 _logger = get_logger("fpl_app.draft.home")
 
@@ -277,8 +278,12 @@ def show_fixture_results(draft_league_id, gameweek):
     # Show the results or fallback message
     if fixtures_list:
         fixtures_df = pd.DataFrame(fixtures_list)
-        st.write(f"Results for Gameweek {gameweek}:")
-        st.dataframe(fixtures_df, use_container_width=True)
+        render_styled_table(
+            fixtures_df,
+            title=f"Results for Gameweek {gameweek}",
+            text_align={"Team 1 Score": "center", "Team 2 Score": "center",
+                         "Team 1 Result": "center", "Team 2 Result": "center"},
+        )
     else:
         st.warning(f"No results available for Gameweek {gameweek}.")
 
