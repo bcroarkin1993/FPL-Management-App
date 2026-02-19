@@ -25,6 +25,7 @@ from scripts.common.fixture_helpers import *       # noqa: F401,F403
 from scripts.common.player_matching import *       # noqa: F401,F403
 from scripts.common.analytics import *             # noqa: F401,F403
 from scripts.common.optimization import *          # noqa: F401,F403
+from scripts.common.styled_tables import *         # noqa: F401,F403
 
 # Explicitly re-export underscore-prefixed helpers used by tests/consumers.
 from scripts.common.text_helpers import (          # noqa: F401
