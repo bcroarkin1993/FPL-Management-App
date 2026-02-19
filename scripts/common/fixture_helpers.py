@@ -156,11 +156,21 @@ def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame) -> str:
     }
 
     def _fdr_text_color(val: float) -> str:
-        """Continuous color interpolation for Avg FDR text (1.0=green → 5.0=red)."""
-        # Clamp to [1, 5]
+        """Continuous color interpolation for Avg FDR text (1.0=green → 5.0=red).
+
+        Uses a power curve to concentrate color change around 3.0 so that
+        values in the typical 2.5-3.3 range show visible differentiation
+        instead of all mapping to yellow.
+        """
+        import math
         v = max(1.0, min(5.0, val))
-        # Normalize to [0, 1] where 0=easiest, 1=hardest
-        t = (v - 1.0) / 4.0
+        # Center at 3.0, normalize to [-1, 1]
+        norm = (v - 3.0) / 2.0
+        # Power curve (exp < 1) stretches values away from center
+        sign = 1 if norm >= 0 else -1
+        expanded = sign * (abs(norm) ** 0.55)
+        # Map back to [0, 1] for color interpolation
+        t = max(0.0, min(1.0, (expanded + 1) / 2))
         if t <= 0.5:
             # Green (#4ade80) to Yellow (#facc15)
             s = t / 0.5
@@ -211,7 +221,7 @@ def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame) -> str:
                 txt = _fdr_text_color(fdr_val)
                 parts.append(
                     f'<td style="padding:8px 12px;color:{txt};'
-                    f'font-weight:800;font-size:16px;text-align:right;border-bottom:1px solid #333;">'
+                    f'font-weight:800;font-size:16px;text-align:center;border-bottom:1px solid #333;">'
                     f'{fdr_val:.1f}</td>'
                 )
             else:

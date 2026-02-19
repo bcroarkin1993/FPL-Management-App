@@ -280,7 +280,12 @@ def _render_text_schedule_two_cols(fixtures_df: pd.DataFrame):
 
     df = df.sort_values(["event","KickoffDT"])
     for gw, chunk in df.groupby("event", sort=False):
-        st.markdown(f"<div style='font-size:1.5rem;font-weight:800;margin:0.4rem 0 0.6rem'>Gameweek {int(gw)}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="font-size:1.4rem;font-weight:800;color:#00ff87;margin:0.6rem 0 0.5rem;'
+            f'padding:8px 14px;background:linear-gradient(135deg,#37003c,#5a0060);'
+            f'border-radius:8px;display:inline-block;">Gameweek {int(gw)}</div>',
+            unsafe_allow_html=True,
+        )
         chunk["DayKey"] = chunk["KickoffDT"].dt.date
         day_keys = list(dict.fromkeys(chunk.sort_values("KickoffDT")["DayKey"].tolist()))
         for i in range(0, len(day_keys), 2):
@@ -291,16 +296,35 @@ def _render_text_schedule_two_cols(fixtures_df: pd.DataFrame):
                 if day_block.empty:
                     continue
                 date_hdr = pd.Timestamp(day).strftime("%A %d %B %Y")
-                col.markdown(f"<div style='font-size:1.05rem;font-weight:700;margin:0.3rem 0'>{date_hdr}</div>", unsafe_allow_html=True)
+                # Build a single card for each day's fixtures
+                card_lines = (
+                    f'<div style="border:1px solid #333;border-radius:8px;padding:12px 14px;'
+                    f'background:#1a1a2e;margin-bottom:8px;">'
+                    f'<div style="font-size:0.95rem;font-weight:700;color:#e0e0e0;'
+                    f'margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #333;">{date_hdr}</div>'
+                )
                 for _, r in day_block.iterrows():
                     t = r["KickoffDT"].strftime("%I:%M %p")
                     home = id_to_team.get(r["team_h"], f"Team {r['team_h']}")
                     away = id_to_team.get(r["team_a"], f"Team {r['team_a']}")
                     if pd.notna(r.get("team_h_score")) and pd.notna(r.get("team_a_score")):
-                        line = f"<div style='font-size:0.95rem'> <b>{home}</b> <b>{int(r['team_h_score'])} - {int(r['team_a_score'])}</b> <b>{away}</b> · {t}</div>"
+                        score = f'<span style="color:#00ff87;font-weight:800;">{int(r["team_h_score"])} - {int(r["team_a_score"])}</span>'
+                        line = (
+                            f'<div style="font-size:0.92rem;padding:4px 0;color:#e0e0e0;display:flex;'
+                            f'align-items:center;justify-content:space-between;">'
+                            f'<span><b>{home}</b> {score} <b>{away}</b></span>'
+                            f'<span style="color:#9ca3af;font-size:0.82rem;">{t}</span></div>'
+                        )
                     else:
-                        line = f"<div style='font-size:0.95rem'> <b>{home}</b> vs <b>{away}</b> · {t}</div>"
-                    col.markdown(line, unsafe_allow_html=True)
+                        line = (
+                            f'<div style="font-size:0.92rem;padding:4px 0;color:#e0e0e0;display:flex;'
+                            f'align-items:center;justify-content:space-between;">'
+                            f'<span><b>{home}</b> <span style="color:#9ca3af;">vs</span> <b>{away}</b></span>'
+                            f'<span style="color:#9ca3af;font-size:0.82rem;">{t}</span></div>'
+                        )
+                    card_lines += line
+                card_lines += '</div>'
+                col.markdown(card_lines, unsafe_allow_html=True)
         st.markdown("---")
 
 # ============== MAIN SECTION (filters at top, text fixtures at bottom) ==============

@@ -134,7 +134,7 @@ def _dashboard_css():
         50% { box-shadow: 0 0 12px rgba(0,255,135,0.6); }
     }
     /* Section headers */
-    .section-header { display: flex; align-items: center; gap: 6px; margin: 0.3rem 0 0.6rem 0; font-size: 1.1rem; font-weight: 700; color: #37003c; }
+    .section-header { display: flex; align-items: center; gap: 6px; margin: 0.3rem 0 0.6rem 0; font-size: 1.1rem; font-weight: 700; color: #ffffff; }
     .section-icon { font-size: 1.2rem; }
     /* Fixture cards */
     .fixture-card {
@@ -142,9 +142,9 @@ def _dashboard_css():
         border-radius: 8px; padding: 8px 12px; margin-bottom: 5px;
         border-left: 4px solid transparent;
     }
-    .fixture-ft { background: #f0f0f0; border-left-color: #bbb; }
-    .fixture-live { background: linear-gradient(135deg, rgba(0,255,135,0.08), rgba(0,255,135,0.03)); border-left-color: #00cc6a; }
-    .fixture-upcoming-card { background: #fff; border: 1px solid #e8e8e8; border-left: 4px solid #37003c; }
+    .fixture-ft { background: #16213e; border-left-color: #555; }
+    .fixture-live { background: linear-gradient(135deg, rgba(0,255,135,0.12), rgba(0,255,135,0.05)); border-left-color: #00cc6a; }
+    .fixture-upcoming-card { background: #1a1a2e; border: 1px solid #333; border-left: 4px solid #5a0060; }
     .fixture-side { display: flex; flex-direction: column; justify-content: flex-start; flex: 1; }
     .fixture-side-home { align-items: flex-end; text-align: right; }
     .fixture-side-away { align-items: flex-start; text-align: left; }
@@ -153,38 +153,38 @@ def _dashboard_css():
     .fixture-side-away .fixture-team-row { justify-content: flex-start; }
     .fixture-team { font-weight: 700; font-size: 0.88rem; }
     .fixture-badge-img { width: 18px; height: 18px; object-fit: contain; }
-    .fixture-win { color: #1a8a41; }
-    .fixture-loss { color: #d32f2f; }
-    .fixture-draw { color: #999; }
-    .fixture-upcoming { color: #333; }
-    .fixture-scorers { font-size: 0.72rem; color: #888; min-height: 16px; }
+    .fixture-win { color: #4ade80; }
+    .fixture-loss { color: #f87171; }
+    .fixture-draw { color: #9ca3af; }
+    .fixture-upcoming { color: #e0e0e0; }
+    .fixture-scorers { font-size: 0.72rem; color: #9ca3af; min-height: 16px; }
     .fixture-center { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; min-width: 65px; padding: 0 6px; }
     .fixture-score { font-weight: 800; font-size: 0.9rem; padding: 3px 10px; border-radius: 6px; text-align: center; }
     .score-live { background: linear-gradient(135deg, #00ff87, #02efaa); color: #37003c; }
-    .score-vs { background: #37003c; color: #ffffff; }
-    .score-ft { background: #ddd; color: #333; }
+    .score-vs { background: #5a0060; color: #ffffff; }
+    .score-ft { background: #333; color: #e0e0e0; }
     .fixture-status { font-size: 0.6rem; font-weight: 700; text-transform: uppercase; margin-top: 2px; letter-spacing: 0.5px; }
-    .status-ft { color: #999; }
-    .status-live { color: #00a858; }
-    .status-upcoming { color: #37003c; }
+    .status-ft { color: #9ca3af; }
+    .status-live { color: #00ff87; }
+    .status-upcoming { color: #c0c0c0; }
     /* League cards */
-    .league-card { background: #fff; border: 1px solid #e0e0e0; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; box-shadow: 0 1px 4px rgba(55,0,60,0.04); }
-    .league-card-header { font-weight: 700; font-size: 0.95rem; color: #37003c; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 2px solid rgba(55,0,60,0.08); }
-    .standings-row { display: flex; align-items: center; padding: 7px 12px; border-radius: 8px; margin-bottom: 5px; border: 1px solid #e8e8e8; }
-    .standings-row-1 { background: linear-gradient(135deg, rgba(255,215,0,0.12), rgba(255,215,0,0.05)); border-color: rgba(255,215,0,0.3); }
-    .standings-row-2 { background: linear-gradient(135deg, rgba(192,192,192,0.12), rgba(192,192,192,0.05)); border-color: rgba(192,192,192,0.3); }
-    .standings-row-3 { background: linear-gradient(135deg, rgba(205,127,50,0.12), rgba(205,127,50,0.05)); border-color: rgba(205,127,50,0.3); }
-    .my-team-row { background: linear-gradient(135deg, rgba(0,255,135,0.12), rgba(0,255,135,0.05)) !important; border: 2px solid rgba(0,255,135,0.5) !important; }
-    .my-team-row .standings-name::after { content: ' ★'; color: #00cc6a; }
-    .league-separator { text-align: center; color: #bbb; font-size: 0.8rem; padding: 1px 0; letter-spacing: 3px; }
+    .league-card { background: #1a1a2e; border: 1px solid #333; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+    .league-card-header { font-weight: 700; font-size: 0.95rem; color: #00ff87; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 2px solid rgba(0,255,135,0.2); }
+    .standings-row { display: flex; align-items: center; padding: 7px 12px; border-radius: 8px; margin-bottom: 5px; border: 1px solid #333; }
+    .standings-row-1 { background: linear-gradient(135deg, rgba(255,215,0,0.15), rgba(255,215,0,0.05)); border-color: rgba(255,215,0,0.3); }
+    .standings-row-2 { background: linear-gradient(135deg, rgba(192,192,192,0.12), rgba(192,192,192,0.05)); border-color: rgba(192,192,192,0.25); }
+    .standings-row-3 { background: linear-gradient(135deg, rgba(205,127,50,0.12), rgba(205,127,50,0.05)); border-color: rgba(205,127,50,0.25); }
+    .my-team-row { background: linear-gradient(135deg, rgba(0,255,135,0.15), rgba(0,255,135,0.05)) !important; border: 2px solid rgba(0,255,135,0.5) !important; }
+    .my-team-row .standings-name::after { content: ' ★'; color: #00ff87; }
+    .league-separator { text-align: center; color: #555; font-size: 0.8rem; padding: 1px 0; letter-spacing: 3px; }
     .standings-rank { font-size: 1.05rem; min-width: 28px; text-align: center; }
-    .standings-name { flex: 1; font-weight: 600; color: #37003c; font-size: 0.85rem; }
-    .standings-record { color: #666; font-size: 0.75rem; margin-right: 8px; }
-    .standings-pts { font-weight: 800; color: #37003c; font-size: 0.88rem; background: rgba(0,255,135,0.15); padding: 2px 8px; border-radius: 10px; }
+    .standings-name { flex: 1; font-weight: 600; color: #e0e0e0; font-size: 0.85rem; }
+    .standings-record { color: #9ca3af; font-size: 0.75rem; margin-right: 8px; }
+    .standings-pts { font-weight: 800; color: #00ff87; font-size: 0.88rem; background: rgba(0,255,135,0.15); padding: 2px 8px; border-radius: 10px; }
     /* In-form players */
-    .performer-row { display: flex; align-items: center; padding: 5px 10px; border-radius: 8px; margin-bottom: 4px; background: #fafafa; border: 1px solid #e8e8e8; }
-    .performer-rank { font-weight: 800; color: #37003c; min-width: 24px; font-size: 0.9rem; }
-    .performer-name { flex: 1; font-weight: 600; color: #37003c; font-size: 0.88rem; }
+    .performer-row { display: flex; align-items: center; padding: 5px 10px; border-radius: 8px; margin-bottom: 4px; background: #16213e; border: 1px solid #333; }
+    .performer-rank { font-weight: 800; color: #00ff87; min-width: 24px; font-size: 0.9rem; }
+    .performer-name { flex: 1; font-weight: 600; color: #e0e0e0; font-size: 0.88rem; }
     .pos-badge { display: inline-block; padding: 1px 6px; border-radius: 5px; font-size: 0.7rem; font-weight: 700; margin-right: 8px; min-width: 32px; text-align: center; }
     .pos-gk  { background: #f0c040; color: #333; }
     .pos-def { background: #4caf50; color: white; }
@@ -194,17 +194,17 @@ def _dashboard_css():
     .form-hot  { background: linear-gradient(135deg, #ff6b35, #ff4500); color: white; }
     .form-warm { background: linear-gradient(135deg, #ffa726, #ff9800); color: white; }
     .form-ok   { background: #e0e0e0; color: #333; }
-    .team-badge { color: #888; font-size: 0.78rem; margin-right: 8px; min-width: 32px; }
-    .pts-label { color: #888; font-size: 0.78rem; margin-left: 8px; }
+    .team-badge { color: #9ca3af; font-size: 0.78rem; margin-right: 8px; min-width: 32px; }
+    .pts-label { color: #9ca3af; font-size: 0.78rem; margin-left: 8px; }
     /* Injury watchlist */
-    .injury-row { display: flex; align-items: center; padding: 5px 10px; border-radius: 8px; margin-bottom: 4px; border: 1px solid #e8e8e8; }
-    .injury-out { background: rgba(244,67,54,0.06); border-color: rgba(244,67,54,0.2); }
-    .injury-doubtful { background: rgba(255,152,0,0.06); border-color: rgba(255,152,0,0.2); }
-    .injury-name { flex: 1; font-weight: 600; color: #37003c; font-size: 0.88rem; }
+    .injury-row { display: flex; align-items: center; padding: 5px 10px; border-radius: 8px; margin-bottom: 4px; border: 1px solid #333; }
+    .injury-out { background: rgba(244,67,54,0.12); border-color: rgba(244,67,54,0.3); }
+    .injury-doubtful { background: rgba(255,152,0,0.12); border-color: rgba(255,152,0,0.3); }
+    .injury-name { flex: 1; font-weight: 600; color: #e0e0e0; font-size: 0.88rem; }
     .status-badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 0.72rem; font-weight: 700; }
     .status-out { background: #f44336; color: white; }
     .status-doubtful { background: #ff9800; color: white; }
-    .injury-news { color: #888; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .injury-news { color: #9ca3af; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .injury-info { display: flex; flex-direction: column; justify-content: center; flex: 1; }
     .injury-meta { display: flex; align-items: center; gap: 6px; }
     </style>
