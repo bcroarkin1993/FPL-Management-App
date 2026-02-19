@@ -433,7 +433,7 @@ def show_club_fixtures_section():
 
     render_styled_table(
         match_tbl.reset_index(drop=True),
-        col_formats={"Home FDR": "{:.1f}", "Away FDR": "{:.1f}"},
+        col_formats={"Home FDR": "{:.0f}", "Away FDR": "{:.0f}"},
         negative_color_cols=["Home FDR", "Away FDR"],
     )
 

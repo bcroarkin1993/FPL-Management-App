@@ -140,7 +140,7 @@ def _dashboard_css():
     .fixture-card {
         display: flex; align-items: stretch; justify-content: space-between;
         border-radius: 8px; padding: 8px 12px; margin-bottom: 5px;
-        border-left: 4px solid transparent;
+        border-left: 4px solid transparent; color: #e0e0e0;
     }
     .fixture-ft { background: #16213e; border-left-color: #555; }
     .fixture-live { background: linear-gradient(135deg, rgba(0,255,135,0.12), rgba(0,255,135,0.05)); border-left-color: #00cc6a; }
@@ -168,7 +168,7 @@ def _dashboard_css():
     .status-live { color: #00ff87; }
     .status-upcoming { color: #c0c0c0; }
     /* League cards */
-    .league-card { background: #1a1a2e; border: 1px solid #333; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+    .league-card { background: #1a1a2e; border: 1px solid #333; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; color: #e0e0e0; }
     .league-card-header { font-weight: 700; font-size: 0.95rem; color: #00ff87; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 2px solid rgba(0,255,135,0.2); }
     .standings-row { display: flex; align-items: center; padding: 7px 12px; border-radius: 8px; margin-bottom: 5px; border: 1px solid #333; }
     .standings-row-1 { background: linear-gradient(135deg, rgba(255,215,0,0.15), rgba(255,215,0,0.05)); border-color: rgba(255,215,0,0.3); }
@@ -177,7 +177,7 @@ def _dashboard_css():
     .my-team-row { background: linear-gradient(135deg, rgba(0,255,135,0.15), rgba(0,255,135,0.05)) !important; border: 2px solid rgba(0,255,135,0.5) !important; }
     .my-team-row .standings-name::after { content: ' ★'; color: #00ff87; }
     .league-separator { text-align: center; color: #555; font-size: 0.8rem; padding: 1px 0; letter-spacing: 3px; }
-    .standings-rank { font-size: 1.05rem; min-width: 28px; text-align: center; }
+    .standings-rank { font-size: 1.05rem; min-width: 28px; text-align: center; color: #e0e0e0; }
     .standings-name { flex: 1; font-weight: 600; color: #e0e0e0; font-size: 0.85rem; }
     .standings-record { color: #9ca3af; font-size: 0.75rem; margin-right: 8px; }
     .standings-pts { font-weight: 800; color: #00ff87; font-size: 0.88rem; background: rgba(0,255,135,0.15); padding: 2px 8px; border-radius: 10px; }

@@ -169,6 +169,16 @@ def get_classic_h2h_luck_adjusted(league_id: int, standings_data: dict) -> pd.Da
 # CHART FUNCTIONS
 # ---------------------------
 
+_DARK_CHART_LAYOUT = dict(
+    paper_bgcolor="#1a1a2e",
+    plot_bgcolor="#1a1a2e",
+    font=dict(color="#ffffff", size=14),
+    title=dict(font=dict(size=22, color="#ffffff"), x=0.5, xanchor="center"),
+    xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+    yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
+)
+
 @st.cache_data(ttl=600)
 def fetch_team_histories(team_ids: List[int], team_names: Dict[int, str]) -> pd.DataFrame:
     """
@@ -219,7 +229,7 @@ def plot_total_points_over_time(history_df: pd.DataFrame) -> Optional[px.line]:
         xaxis_title="Gameweek",
         yaxis_title="Total Points",
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
+        **_DARK_CHART_LAYOUT,
     )
 
     return fig
@@ -247,7 +257,7 @@ def plot_gw_points_over_time(history_df: pd.DataFrame) -> Optional[px.line]:
         xaxis_title="Gameweek",
         yaxis_title="GW Points",
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
+        **_DARK_CHART_LAYOUT,
     )
 
     return fig
@@ -284,10 +294,10 @@ def plot_rank_progression(history_df: pd.DataFrame, use_overall_rank: bool = Fal
     fig.update_layout(
         xaxis_title="Gameweek",
         yaxis_title=y_label,
-        yaxis=dict(autorange="reversed"),
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
+        **_DARK_CHART_LAYOUT,
     )
+    fig.update_yaxes(autorange="reversed")
 
     return fig
 
