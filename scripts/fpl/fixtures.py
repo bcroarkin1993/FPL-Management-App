@@ -320,7 +320,7 @@ def show_club_fixtures_section():
     with st.expander("Fixture Difficulty Grid (overview)", expanded=True):
         weeks = st.slider("Horizon (GWs)", 3, 12, 6, 1, key="fdr_horizon")
         disp, diffs, avg = get_fixture_difficulty_grid(weeks=weeks)
-        st.markdown(style_fixture_difficulty(disp, diffs).to_html(), unsafe_allow_html=True)
+        st.markdown(style_fixture_difficulty(disp, diffs), unsafe_allow_html=True)
         st.caption(
             "Rows = Team; cells = that team's own fixtures (H/A) colored by FPL difficulty (1 easy → 5 hard). Sorted by average difficulty over the horizon.")
     # ------------------------------------

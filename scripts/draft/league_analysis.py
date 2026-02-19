@@ -290,57 +290,105 @@ def plot_points_vs_against(scoring_stats: pd.DataFrame) -> Optional[go.Figure]:
 # WEEKLY TRENDS
 # ---------------------------
 
+_DARK_CHART_LAYOUT = dict(
+    paper_bgcolor="#1a1a2e",
+    plot_bgcolor="#1a1a2e",
+    font=dict(color="#ffffff", size=13),
+    xaxis=dict(gridcolor="#333", zerolinecolor="#333"),
+    yaxis=dict(gridcolor="#333", zerolinecolor="#333"),
+    legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5),
+    hovermode="x unified",
+)
+
+
 def plot_weekly_rank_trends(weekly_scores: pd.DataFrame) -> Optional[go.Figure]:
-    """Plot weekly rank trends for all teams."""
+    """Plot weekly rank trends using a 3-GW rolling average for readability."""
     if weekly_scores.empty:
         return None
 
-    # Calculate weekly rank
     weekly_scores = weekly_scores.copy()
     weekly_scores["GW_Rank"] = weekly_scores.groupby("Gameweek")["Points"].rank(
         ascending=False, method="min"
     ).astype(int)
 
-    fig = px.line(
-        weekly_scores,
-        x="Gameweek",
-        y="GW_Rank",
-        color="Team",
-        title="Weekly Rank Trends",
-        labels={"GW_Rank": "Gameweek Rank", "Gameweek": "Gameweek"}
+    # Calculate rolling average (3-GW window) per team for smoother lines
+    weekly_scores = weekly_scores.sort_values(["Team", "Gameweek"])
+    weekly_scores["Rank_Smooth"] = (
+        weekly_scores.groupby("Team")["GW_Rank"]
+        .transform(lambda x: x.rolling(3, min_periods=1).mean())
     )
 
+    fig = go.Figure()
+
+    for team in weekly_scores["Team"].unique():
+        team_data = weekly_scores[weekly_scores["Team"] == team].sort_values("Gameweek")
+        # Smoothed trend line
+        fig.add_trace(go.Scatter(
+            x=team_data["Gameweek"],
+            y=team_data["Rank_Smooth"],
+            mode="lines+markers",
+            name=team,
+            line=dict(width=3),
+            marker=dict(size=5),
+            hovertemplate=f"<b>{team}</b><br>GW %{{x}}<br>Rank: %{{customdata}}<br>Avg: %{{y:.1f}}<extra></extra>",
+            customdata=team_data["GW_Rank"],
+        ))
+
     fig.update_layout(
-        yaxis=dict(autorange="reversed"),
-        yaxis_title="Rank (1 = Best)",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
+        title=dict(text="Weekly Rank Trends (3-GW Rolling Avg)", font=dict(size=20, color="#ffffff"), x=0.5, xanchor="center"),
+        yaxis=dict(autorange="reversed", title="Rank (1 = Best)"),
+        xaxis_title="Gameweek",
+        **_DARK_CHART_LAYOUT,
     )
 
     return fig
 
 
 def plot_cumulative_points(weekly_scores: pd.DataFrame) -> Optional[go.Figure]:
-    """Plot cumulative points over time."""
+    """Plot cumulative points with markers and end-of-line labels."""
     if weekly_scores.empty:
         return None
 
-    # Calculate cumulative points
     weekly_scores = weekly_scores.copy().sort_values(["Team", "Gameweek"])
     weekly_scores["Cumulative_Pts"] = weekly_scores.groupby("Team")["Points"].cumsum()
 
-    fig = px.line(
-        weekly_scores,
-        x="Gameweek",
-        y="Cumulative_Pts",
-        color="Team",
-        title="Cumulative Points Over Season",
-        labels={"Cumulative_Pts": "Total Points", "Gameweek": "Gameweek"}
-    )
+    fig = go.Figure()
 
+    teams = weekly_scores["Team"].unique()
+    for team in teams:
+        team_data = weekly_scores[weekly_scores["Team"] == team].sort_values("Gameweek")
+        fig.add_trace(go.Scatter(
+            x=team_data["Gameweek"],
+            y=team_data["Cumulative_Pts"],
+            mode="lines+markers",
+            name=team,
+            line=dict(width=3),
+            marker=dict(size=5),
+            hovertemplate=f"<b>{team}</b><br>GW %{{x}}<br>Total: %{{y}}<extra></extra>",
+        ))
+
+        # End-of-line annotation with team name + total
+        last = team_data.iloc[-1]
+        fig.add_annotation(
+            x=last["Gameweek"],
+            y=last["Cumulative_Pts"],
+            text=f"  {team} ({int(last['Cumulative_Pts'])})",
+            showarrow=False,
+            xanchor="left",
+            font=dict(size=11, color="#ffffff"),
+        )
+
+    # Add a bit of right margin for annotations
+    max_gw = weekly_scores["Gameweek"].max()
     fig.update_layout(
+        title=dict(text="Cumulative Points Over Season", font=dict(size=20, color="#ffffff"), x=0.5, xanchor="center"),
+        xaxis=dict(range=[1, max_gw + 2], title="Gameweek", gridcolor="#333", zerolinecolor="#333"),
+        yaxis=dict(title="Total Points", gridcolor="#333", zerolinecolor="#333"),
+        paper_bgcolor="#1a1a2e",
+        plot_bgcolor="#1a1a2e",
+        font=dict(color="#ffffff", size=13),
+        legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5),
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
     )
 
     return fig

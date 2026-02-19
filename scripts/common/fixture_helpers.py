@@ -119,7 +119,7 @@ def get_fixture_difficulty_grid(weeks: int = 6):
     # Add sticky Team column for Y-axis labels
     disp = disp_core.copy()
     disp.insert(0, "Team", disp.index)
-    disp["Avg FDR"] = avg.round(2)
+    disp["Avg FDR"] = avg.round(1)
     return disp, diffs, avg
 
 
@@ -138,39 +138,72 @@ def get_next_transaction_deadline(offset_hours: int, gw: int):
     return kickoff_et - timedelta(hours=offset_hours), gw
 
 
-def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame):
+def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame) -> str:
     """
-    Return a Styler with colors per difficulty.
-    'Team' column is left uncolored (acts as row labels).
+    Build a dark-themed HTML table for the FDR grid.
+
+    Returns an HTML string (not a Styler) to render via st.markdown.
+    'Team' column acts as row labels; GW cells are colored by difficulty.
     """
-    PALETTE = {1: "#86efac", 2: "#bbf7d0", 3: "#e5e7eb", 4: "#fecaca", 5: "#b91c1c"}
-    gw_cols = [c for c in disp.columns if c not in ("Team", "Avg FDR")]  # only color GW cells
+    # FDR palette: 1=easy(green) -> 5=hard(red), dark-theme friendly
+    PALETTE = {
+        1: ("#166534", "#86efac"),  # (bg, text) dark green bg, light green text
+        2: ("#14532d", "#bbf7d0"),  # slightly lighter green
+        3: ("#1a1a2e", "#e0e0e0"),  # neutral dark bg
+        4: ("#7f1d1d", "#fecaca"),  # dark red bg, light red text
+        5: ("#991b1b", "#fca5a5"),  # darker red bg
+    }
+    gw_cols = [c for c in disp.columns if c not in ("Team", "Avg FDR")]
 
-    def _cell_styles(_):
-        S = pd.DataFrame("", index=disp.index, columns=disp.columns)
-        for r in disp.index:
-            for c in gw_cols:
-                d = diffs.at[r, c]
-                k = 3 if pd.isna(d) else max(1, min(5, int(round(float(d)))))
-                color = PALETTE[k]
-                txt = "#ffffff" if k == 5 else "#111111"
-                S.at[r, c] = f"background-color:{color};color:{txt};text-align:center;font-weight:600;"
-        # keep Team column readable
-        S["Team"] = "font-weight:700;text-align:left;"
-        return S
-
-    sty = (
-        disp.style
-            .apply(_cell_styles, axis=None)
-            .set_properties(subset=gw_cols,
-                            **{"border": "1px solid #ddd", "white-space": "nowrap", "font-size": "0.9rem"})
-            .set_properties(subset=["Team"],
-                            **{"border": "1px solid #ddd", "position": "sticky", "left": "0", "background": "#fff",
-                               "font-weight": "700", "text-align": "left"})
-            .set_properties(subset=["Avg FDR"],
-                            **{"border": "1px solid #ddd", "font-weight": "700", "text-align": "right"})
-            .set_table_styles(
-            [{"selector": "th", "props": [("position", "sticky"), ("top", "0"), ("background", "#fff")]}])
-            .set_table_attributes('class="fdr-table" style="width:100%;"')
+    # Header style
+    th_style = (
+        "background:linear-gradient(135deg,#37003c,#5a0060);color:#00ff87;"
+        "font-weight:600;font-size:13px;padding:10px 12px;border-bottom:2px solid #00ff87;"
+        "text-align:center;position:sticky;top:0;z-index:1;"
     )
-    return sty
+    team_th_style = th_style.replace("text-align:center", "text-align:left")
+
+    parts = [
+        '<div style="border:1px solid #333;border-radius:10px;overflow:hidden;margin-bottom:1rem;">',
+        '<table style="width:100%;border-collapse:collapse;font-size:14px;background:#1a1a2e;">',
+        "<thead><tr>",
+    ]
+
+    for col in disp.columns:
+        s = team_th_style if col == "Team" else th_style
+        parts.append(f'<th style="{s}">{col}</th>')
+    parts.append("</tr></thead><tbody>")
+
+    for row_idx, (idx, row) in enumerate(disp.iterrows()):
+        row_bg = "background:rgba(255,255,255,0.03);" if row_idx % 2 == 1 else "background:#1a1a2e;"
+        parts.append(f'<tr style="{row_bg}">')
+        for col in disp.columns:
+            val = row[col]
+            if col == "Team":
+                parts.append(
+                    f'<td style="padding:8px 12px;color:#00ff87;font-weight:700;'
+                    f'border-bottom:1px solid #333;white-space:nowrap;">{val}</td>'
+                )
+            elif col == "Avg FDR":
+                # Color Avg FDR by value (lower = greener)
+                fdr_val = float(val) if pd.notna(val) else 3.0
+                k = max(1, min(5, int(round(fdr_val))))
+                bg, txt = PALETTE[k]
+                parts.append(
+                    f'<td style="padding:8px 12px;background:{bg};color:{txt};'
+                    f'font-weight:700;text-align:right;border-bottom:1px solid #333;">'
+                    f'{fdr_val:.1f}</td>'
+                )
+            else:
+                d = diffs.at[idx, col] if col in diffs.columns else np.nan
+                k = 3 if pd.isna(d) else max(1, min(5, int(round(float(d)))))
+                bg, txt = PALETTE[k]
+                parts.append(
+                    f'<td style="padding:8px 12px;background:{bg};color:{txt};'
+                    f'font-weight:600;text-align:center;border-bottom:1px solid #333;'
+                    f'white-space:nowrap;">{val}</td>'
+                )
+        parts.append("</tr>")
+
+    parts.append("</tbody></table></div>")
+    return "".join(parts)

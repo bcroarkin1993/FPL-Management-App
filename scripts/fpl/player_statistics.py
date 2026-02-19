@@ -9,6 +9,7 @@ from scripts.common.utils import (
     get_rotowire_player_projections,
     pull_fpl_player_stats,
 )
+from scripts.common.styled_tables import render_styled_table
 
 # -----------------------------------------------------------------------------
 # Column Configuration for Advanced Stats Table
@@ -108,33 +109,6 @@ def get_team_fdr_avg(team_short: str, fdr_avg_dict: dict) -> float:
     return fdr_avg_dict.get(team_short, 3.0)  # 3.0 = neutral default
 
 
-def get_gradient_color(value, col_min, col_max, high_is_good):
-    """Return RGB color on green-white-red scale."""
-    if pd.isna(value) or col_max == col_min:
-        return "#f5f5f5"  # neutral gray
-
-    # Normalize to 0-1
-    normalized = (value - col_min) / (col_max - col_min)
-
-    # Invert if low is good
-    if not high_is_good:
-        normalized = 1 - normalized
-
-    # Red (#f8696b) -> White (#ffffff) -> Green (#63be7b)
-    if normalized >= 0.5:
-        t = (normalized - 0.5) * 2
-        r = int(255 - t * (255 - 99))
-        g = int(255 - t * (255 - 190))
-        b = int(255 - t * (255 - 123))
-    else:
-        t = normalized * 2
-        r = int(248 - t * (248 - 255))
-        g = int(105 + t * (255 - 105))
-        b = int(107 + t * (255 - 107))
-
-    return f"rgb({r},{g},{b})"
-
-
 def prepare_advanced_stats_df(player_df: pd.DataFrame, min_minutes: int = 90) -> pd.DataFrame:
     """
     Prepare the advanced stats DataFrame with all calculated columns.
@@ -218,76 +192,47 @@ def prepare_advanced_stats_df(player_df: pd.DataFrame, min_minutes: int = 90) ->
     return df
 
 
-def style_stats_table(df: pd.DataFrame, selected_columns: list):
+def build_stats_display(df: pd.DataFrame, selected_columns: list):
     """
-    Apply color gradient styling to the stats table.
+    Prepare display DataFrame and color column lists for the stats table.
+
+    Returns (display_df, col_formats, positive_color_cols, negative_color_cols).
     """
-    # Create a copy for display with renamed columns
     display_df = df[selected_columns].copy()
 
     # Rename columns to display names
     rename_map = {col: STAT_COLUMNS[col][0] for col in selected_columns if col in STAT_COLUMNS}
     display_df = display_df.rename(columns=rename_map)
 
-    def apply_gradient(col):
-        """Apply gradient coloring to a column."""
-        # Get the original column name
-        original_col = None
-        for k, v in rename_map.items():
-            if v == col.name:
-                original_col = k
-                break
+    # Build format dict and color column lists
+    col_formats = {}
+    positive_cols = []
+    negative_cols = []
 
-        if original_col is None or original_col not in STAT_COLUMNS:
-            return [''] * len(col)
-
-        _, high_is_good, _, _ = STAT_COLUMNS[original_col]
-
-        # No coloring for info columns
-        if high_is_good is None:
-            return [''] * len(col)
-
-        # Get min/max for normalization
-        numeric_col = pd.to_numeric(col, errors='coerce')
-        col_min = numeric_col.min()
-        col_max = numeric_col.max()
-
-        styles = []
-        for val in col:
-            try:
-                num_val = float(val) if not pd.isna(val) else np.nan
-            except (ValueError, TypeError):
-                num_val = np.nan
-
-            color = get_gradient_color(num_val, col_min, col_max, high_is_good)
-            styles.append(f'background-color: {color}')
-
-        return styles
-
-    # Apply styling
-    styled = display_df.style.apply(apply_gradient, axis=0)
-
-    # Format numeric columns
-    format_dict = {}
     for col in selected_columns:
-        if col in STAT_COLUMNS:
-            display_name = STAT_COLUMNS[col][0]
-            fmt = STAT_COLUMNS[col][2]
-            if fmt == "text":
-                continue
-            elif fmt == "price":
-                format_dict[display_name] = "£{:.1f}m"
-            elif fmt == ",d":
-                format_dict[display_name] = "{:,.0f}"
-            elif fmt.startswith("+"):
-                # Signed format (e.g., "+.2f" shows +1.23 or -1.23)
-                format_dict[display_name] = "{:" + fmt + "}"
-            elif fmt.startswith("."):
-                format_dict[display_name] = "{:" + fmt + "}"
+        if col not in STAT_COLUMNS:
+            continue
+        display_name, high_is_good, fmt, _ = STAT_COLUMNS[col]
 
-    styled = styled.format(format_dict, na_rep="-")
+        # Format spec
+        if fmt == "text":
+            pass
+        elif fmt == "price":
+            col_formats[display_name] = "£{:.1f}m"
+        elif fmt == ",d":
+            col_formats[display_name] = "{:,.0f}"
+        elif fmt.startswith("+"):
+            col_formats[display_name] = "{:" + fmt + "}"
+        elif fmt.startswith("."):
+            col_formats[display_name] = "{:" + fmt + "}"
 
-    return styled
+        # Color direction
+        if high_is_good is True:
+            positive_cols.append(display_name)
+        elif high_is_good is False:
+            negative_cols.append(display_name)
+
+    return display_df, col_formats, positive_cols, negative_cols
 
 
 PRESET_DESCRIPTIONS = {
@@ -380,14 +325,15 @@ def display_advanced_stats_table(player_df: pd.DataFrame):
         st.info("No players match the current filters.")
         return
 
-    # Style and display the table
-    styled_df = style_stats_table(filtered_df, selected_columns)
+    # Build display table and render with styled dark theme
+    display_df, col_formats, positive_cols, negative_cols = build_stats_display(filtered_df, selected_columns)
 
-    st.dataframe(
-        styled_df,
-        use_container_width=True,
-        height=600,
-        hide_index=True
+    render_styled_table(
+        display_df,
+        col_formats=col_formats,
+        positive_color_cols=positive_cols,
+        negative_color_cols=negative_cols,
+        max_height=600,
     )
 
 def display_top_goal_scorers(player_statistics, position_filter, top_n=10):
