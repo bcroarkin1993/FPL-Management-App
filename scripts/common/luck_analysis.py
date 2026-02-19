@@ -11,6 +11,7 @@ Provides:
 import pandas as pd
 import streamlit as st
 from typing import Optional
+from scripts.common.styled_tables import render_styled_table
 
 
 def extract_draft_gw_scores(league_response: dict) -> pd.DataFrame:
@@ -225,107 +226,49 @@ def calculate_all_play_standings(
     return result_df
 
 
-def _color_luck(val):
-    """Color Luck +/- values: green for negative (unlucky rank), red for positive (lucky rank)."""
-    if pd.isna(val) or val == 0:
-        return ''
-    # Positive = actual rank worse than fair rank = unlucky (red)
-    # Negative = actual rank better than fair rank = lucky (green)
-    if val > 0:
-        intensity = min(abs(val) * 25, 80)
-        return f'background-color: rgba(220, 53, 69, {intensity / 100}); color: white'
-    else:
-        intensity = min(abs(val) * 25, 80)
-        return f'background-color: rgba(40, 167, 69, {intensity / 100}); color: white'
-
-
 def render_luck_adjusted_table(df: pd.DataFrame):
     """
-    Render a luck-adjusted standings DataFrame with color styling and full height.
+    Render a luck-adjusted standings DataFrame with text color styling.
 
-    Applies:
-    - Green gradient on AP Win% (higher = greener)
-    - Green gradient on Avg Score (higher = greener)
-    - Reverse green gradient on Avg GW Rank (lower = greener, since rank 1 is best)
-    - Diverging red/green on Luck +/- column
-    - Bold Team column
-    - Auto-calculated height to show all rows without scrolling
+    Applies text color gradients:
+    - Green for higher AP Win%, Avg Score, AP W (positive)
+    - Red for higher Avg GW Rank, AP L (negative — lower is better)
+    - Diverging on Luck +/- (positive = unlucky = red, negative = lucky = green)
     """
     if df.empty:
         st.warning("Not enough match data to calculate luck-adjusted standings.")
         return
 
-    # Reset index to avoid non-unique index issues with Styler
+    # Reset index to avoid issues
     if df.index.name:
         df = df.reset_index()
 
-    # Build style
-    styler = df.style
+    positive_cols = [c for c in ['AP W', 'AP Win%', 'Avg Score'] if c in df.columns]
+    negative_cols = [c for c in ['AP L', 'Avg GW Rank'] if c in df.columns]
 
-    # AP Win% - green gradient
-    styler = styler.background_gradient(
-        subset=['AP Win%'],
-        cmap='Greens',
-        vmin=0,
-        vmax=100,
-    )
-
-    # Avg Score - green gradient
-    styler = styler.background_gradient(
-        subset=['Avg Score'],
-        cmap='Greens',
-    )
-
-    # Avg GW Rank - reversed green (low rank = good = green)
-    styler = styler.background_gradient(
-        subset=['Avg GW Rank'],
-        cmap='RdYlGn_r',
-    )
-
-    # AP W - light green gradient
-    styler = styler.background_gradient(
-        subset=['AP W'],
-        cmap='Greens',
-        vmin=0,
-    )
-
-    # AP L - light red gradient
-    styler = styler.background_gradient(
-        subset=['AP L'],
-        cmap='Reds',
-        vmin=0,
-    )
-
-    # Luck +/- diverging color (if column exists)
+    # Luck +/- : positive = unlucky (red), negative = lucky (green) → negative_color_cols
     if 'Luck +/-' in df.columns:
-        styler = styler.map(_color_luck, subset=['Luck +/-'])
+        negative_cols.append('Luck +/-')
 
-    # Format numbers
-    format_dict = {
-        'AP Win%': '{:.1f}%',
-        'Avg Score': '{:.1f}',
-        'Avg GW Rank': '{:.2f}',
-    }
-    # Only format columns that exist
-    format_dict = {k: v for k, v in format_dict.items() if k in df.columns}
-    styler = styler.format(format_dict)
+    col_fmts = {}
+    if 'AP Win%' in df.columns:
+        col_fmts['AP Win%'] = '{:.1f}%'
+    if 'Avg Score' in df.columns:
+        col_fmts['Avg Score'] = '{:.1f}'
+    if 'Avg GW Rank' in df.columns:
+        col_fmts['Avg GW Rank'] = '{:.2f}'
 
-    # Calculate height: ~35px per row + 38px header
-    table_height = 38 + len(df) * 35
-
-    st.dataframe(
-        styler,
-        use_container_width=True,
-        height=table_height,
+    render_styled_table(
+        df,
+        col_formats=col_fmts,
+        positive_color_cols=positive_cols,
+        negative_color_cols=negative_cols,
     )
 
 
 def render_standings_table(df: pd.DataFrame, is_h2h: bool = True):
     """
-    Render a regular league standings DataFrame with color styling and full height.
-
-    Applies color gradients to numeric columns (W, Pts, PF, etc.) and
-    auto-sizes height to show all rows without scrolling.
+    Render a regular league standings DataFrame with text color styling.
 
     Parameters:
     - df: Standings DataFrame (already formatted for display, no internal IDs).
@@ -335,29 +278,19 @@ def render_standings_table(df: pd.DataFrame, is_h2h: bool = True):
         st.info("No standings data available yet.")
         return
 
-    # Reset index to avoid non-unique index issues with Styler
+    # Reset index to avoid non-unique index issues
     if df.index.name:
         df = df.reset_index()
 
-    styler = df.style
-
     if is_h2h:
-        styler = styler.background_gradient(subset=['W'], cmap='Greens', vmin=0)
-        styler = styler.background_gradient(subset=['L'], cmap='Reds', vmin=0)
-        styler = styler.background_gradient(subset=['PF'], cmap='Greens')
-        styler = styler.background_gradient(subset=['Pts'], cmap='Greens', vmin=0)
+        positive_cols = [c for c in ['W', 'PF', 'Pts'] if c in df.columns]
+        negative_cols = [c for c in ['L'] if c in df.columns]
     else:
-        if 'Total Pts' in df.columns:
-            styler = styler.background_gradient(subset=['Total Pts'], cmap='Greens')
-        if 'GW Pts' in df.columns:
-            styler = styler.background_gradient(subset=['GW Pts'], cmap='Greens')
+        positive_cols = [c for c in ['Total Pts', 'GW Pts'] if c in df.columns]
+        negative_cols = []
 
-    # Calculate height: ~35px per row + 38px header
-    table_height = 38 + len(df) * 35
-
-    st.dataframe(
-        styler,
-        use_container_width=True,
-        hide_index=True,
-        height=table_height,
+    render_styled_table(
+        df,
+        positive_color_cols=positive_cols,
+        negative_color_cols=negative_cols,
     )
