@@ -898,7 +898,6 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
             display_1,
             title=f"{selected['team1_name']}{chip_text}{predicted_text}",
             col_formats={"Points": "{:.1f}"},
-            max_height=422,
         )
         st.markdown(f"**Projected Score: {score_1:.2f}**")
 
@@ -909,7 +908,6 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
             display_2,
             title=f"{selected['team2_name']}{chip_text}{predicted_text}",
             col_formats={"Points": "{:.1f}"},
-            max_height=422,
         )
         st.markdown(f"**Projected Score: {score_2:.2f}**")
 

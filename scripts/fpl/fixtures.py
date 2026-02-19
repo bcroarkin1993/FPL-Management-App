@@ -429,8 +429,12 @@ def show_club_fixtures_section():
                         .sort_values("KickoffDT")
                         .drop(columns=["KickoffDT"])
                         .reset_index(drop=True))
-            styled_team_tbl = _styler_hide_index(team_tbl.style.map(_fdr_bg, subset=["FDR"]))
-            st.write(styled_team_tbl, unsafe_allow_html=True)
+            team_tbl["FDR"] = pd.to_numeric(team_tbl["FDR"], errors="coerce")
+            render_styled_table(
+                team_tbl,
+                col_formats={"FDR": "{:.1f}"},
+                negative_color_cols=["FDR"],
+            )
         else:
             st.info("No team fixtures in the selected window.")
 
@@ -452,15 +456,11 @@ def show_club_fixtures_section():
         # sort by the numeric column
         fdr_summary = fdr_summary.sort_values("Avg_FDR", ascending=True).reset_index(drop=True)
 
-        # style: apply background & enforce 1-decimal display
-        styled_summary = (
-            fdr_summary.style
-                .format({"Avg_FDR": "{:.1f}"})  # <-- enforce display rounding
-                .applymap(_fdr_bg, subset=["Avg_FDR"])  # keep your color gradient
+        render_styled_table(
+            fdr_summary,
+            col_formats={"Avg_FDR": "{:.1f}"},
+            negative_color_cols=["Avg_FDR"],
         )
-        styled_summary = _styler_hide_index(styled_summary)
-
-        st.write(styled_summary, unsafe_allow_html=True)
 
     # ---- Text Fixtures (BOTTOM) ----
     st.subheader("🗓️ Fixtures (Text View)")

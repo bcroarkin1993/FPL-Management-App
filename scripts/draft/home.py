@@ -399,8 +399,18 @@ def plot_league_points_over_time(draft_league_id):
                   labels={"Total League Points": "Total League Points", "Gameweek": "Gameweek", "Team": "Team"},
                   title="Team Total League Points Over Time (Gameweek)")
 
-    # Customize the layout
-    fig.update_layout(xaxis_title="Gameweek", yaxis_title="Total League Points", hovermode="x unified")
+    # Customize the layout with dark theme
+    fig.update_layout(
+        xaxis_title="Gameweek",
+        yaxis_title="Total League Points",
+        hovermode="x unified",
+        paper_bgcolor="#1a1a2e",
+        plot_bgcolor="#1a1a2e",
+        font=dict(color="#e0e0e0"),
+        xaxis=dict(gridcolor="#333", zerolinecolor="#333"),
+        yaxis=dict(gridcolor="#333", zerolinecolor="#333"),
+        legend=dict(bgcolor="rgba(0,0,0,0)"),
+    )
 
     # Return the figure
     return(fig)
@@ -472,8 +482,18 @@ def plot_team_points_over_time(draft_league_id):
                   labels={"Total Points": "Total Points", "Gameweek": "Gameweek", "Team": "Team"},
                   title="Team Total Points Over Time (Gameweek)")
 
-    # Customize the layout
-    fig.update_layout(xaxis_title="Gameweek", yaxis_title="Total Points", hovermode="x unified")
+    # Customize the layout with dark theme
+    fig.update_layout(
+        xaxis_title="Gameweek",
+        yaxis_title="Total Points",
+        hovermode="x unified",
+        paper_bgcolor="#1a1a2e",
+        plot_bgcolor="#1a1a2e",
+        font=dict(color="#e0e0e0"),
+        xaxis=dict(gridcolor="#333", zerolinecolor="#333"),
+        yaxis=dict(gridcolor="#333", zerolinecolor="#333"),
+        legend=dict(bgcolor="rgba(0,0,0,0)"),
+    )
 
     # Return the figure
     return(fig)
