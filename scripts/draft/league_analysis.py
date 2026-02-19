@@ -336,10 +336,10 @@ def plot_weekly_rank_trends(weekly_scores: pd.DataFrame) -> Optional[go.Figure]:
 
     fig.update_layout(
         title=dict(text="Weekly Rank Trends (3-GW Rolling Avg)", font=dict(size=20, color="#ffffff"), x=0.5, xanchor="center"),
-        yaxis=dict(autorange="reversed", title="Rank (1 = Best)"),
         xaxis_title="Gameweek",
         **_DARK_CHART_LAYOUT,
     )
+    fig.update_yaxes(autorange="reversed", title="Rank (1 = Best)")
 
     return fig
 

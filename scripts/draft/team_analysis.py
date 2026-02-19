@@ -101,15 +101,25 @@ def show_team_stats_page():
             points_against = team_standing.get("points_against", 0)
             league_points = team_standing.get("total", 0)
 
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("League Position", f"{rank} / {total_teams}")
-            with col2:
-                st.metric("Record", f"{wins}W - {draws}D - {losses}L")
-            with col3:
-                st.metric("Points For / Against", f"{points_for} / {points_against}")
-            with col4:
-                st.metric("League Points", league_points)
+            def _standing_card(label: str, value: str) -> str:
+                return (
+                    f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
+                    f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);text-align:center;">'
+                    f'<div style="color:#9ca3af;font-size:12px;text-transform:uppercase;'
+                    f'letter-spacing:0.5px;margin-bottom:6px;">{label}</div>'
+                    f'<div style="color:#00ff87;font-size:22px;font-weight:700;">{value}</div>'
+                    f'</div>'
+                )
+
+            cols = st.columns(4)
+            with cols[0]:
+                st.markdown(_standing_card("League Position", f"{rank} / {total_teams}"), unsafe_allow_html=True)
+            with cols[1]:
+                st.markdown(_standing_card("Record", f"{wins}W - {draws}D - {losses}L"), unsafe_allow_html=True)
+            with cols[2]:
+                st.markdown(_standing_card("Points For / Against", f"{points_for} / {points_against}"), unsafe_allow_html=True)
+            with cols[3]:
+                st.markdown(_standing_card("League Points", str(league_points)), unsafe_allow_html=True)
 
             st.divider()
 
