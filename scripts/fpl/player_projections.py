@@ -525,76 +525,68 @@ def render_clean_sheet_odds():
 # Match Odds Tab (The Odds API)
 # =============================================================================
 
-def _get_odds_color(pct: float) -> str:
-    """Get background color based on win probability."""
-    if pct >= 55:
-        return "#dcfce7"  # Light green - strong favorite
-    elif pct >= 40:
-        return "#fef9c3"  # Light yellow - slight favorite
-    elif pct >= 30:
-        return "#fef3c7"  # Light orange - competitive
-    else:
-        return "#fee2e2"  # Light red - underdog
-
-
 def _render_match_card_native(home_team: str, away_team: str, kickoff: str, home_pct: float, draw_pct: float, away_pct: float):
-    """Render a single match with color-coded odds visualization."""
+    """Render a single match card with dark theme and proportional probability bar."""
     from zoneinfo import ZoneInfo
 
     # Format kickoff time in EST with full format
     try:
         kickoff_dt = pd.to_datetime(kickoff)
-        # Convert UTC to EST
         if kickoff_dt.tzinfo is None:
             kickoff_dt = kickoff_dt.replace(tzinfo=ZoneInfo('UTC'))
         kickoff_est = kickoff_dt.astimezone(ZoneInfo('America/New_York'))
 
-        # Format: "Tuesday, February 10th, 2:30pm EST"
         day_name = kickoff_est.strftime("%A")
         month = kickoff_est.strftime("%B")
         day = kickoff_est.day
-        # Add ordinal suffix
         if 10 <= day % 100 <= 20:
             suffix = 'th'
         else:
             suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(day % 10, 'th')
         time_str = kickoff_est.strftime("%I:%M%p").lstrip('0').lower()
         kickoff_str = f"{day_name}, {month} {day}{suffix}, {time_str} EST"
-    except:
+    except Exception:
         kickoff_str = str(kickoff) if kickoff else ""
 
-    # Get colors for each outcome
-    home_color = _get_odds_color(home_pct)
-    draw_color = _get_odds_color(draw_pct)
-    away_color = _get_odds_color(away_pct)
+    # Ensure percentages sum to ~100 and are positive
+    total = max(home_pct + draw_pct + away_pct, 1)
+    h_w = home_pct / total * 100
+    d_w = draw_pct / total * 100
+    a_w = away_pct / total * 100
 
-    # Determine favorite indicator (star = heavy favorite with 10%+ advantage)
-    if home_pct > away_pct + 10:
-        home_indicator = " ⭐"
-        away_indicator = ""
-    elif away_pct > home_pct + 10:
-        home_indicator = ""
-        away_indicator = " ⭐"
-    else:
-        home_indicator = ""
-        away_indicator = ""
+    # Bar segment colors: home=emerald, draw=slate, away=indigo
+    home_bar_color = "#10b981"
+    draw_bar_color = "#64748b"
+    away_bar_color = "#6366f1"
 
-    # Build styled card using HTML with larger team names and Home/Away labels
+    # Font size: smaller for narrow segments
+    h_font = "11px" if h_w < 18 else "14px"
+    d_font = "11px" if d_w < 18 else "13px"
+    a_font = "11px" if a_w < 18 else "14px"
+
     card_html = f'''
-    <div style="border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; margin-bottom: 14px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.08);">
-        <div style="text-align: center; color: #6b7280; font-size: 13px; margin-bottom: 12px;">{kickoff_str}</div>
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-            <div style="flex: 2; text-align: left;">
-                <div style="font-size: 10px; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px;">Home</div>
-                <div style="font-weight: 700; font-size: 17px;">{home_team}{home_indicator}</div>
+    <div style="border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:14px;background:#1a1a2e;">
+        <div style="text-align:center;color:#9ca3af;font-size:12px;margin-bottom:10px;">{kickoff_str}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <div>
+                <div style="font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.5px;">Home</div>
+                <div style="font-weight:700;font-size:17px;color:#ffffff;">{home_team}</div>
             </div>
-            <div style="flex: 1; text-align: center; padding: 8px 10px; border-radius: 6px; background: {home_color}; font-weight: 700; font-size: 16px;">{home_pct:.0f}%</div>
-            <div style="flex: 1; text-align: center; padding: 8px 10px; border-radius: 6px; background: {draw_color}; margin: 0 4px; font-size: 14px; color: #4b5563;">Draw<br><strong>{draw_pct:.0f}%</strong></div>
-            <div style="flex: 1; text-align: center; padding: 8px 10px; border-radius: 6px; background: {away_color}; font-weight: 700; font-size: 16px;">{away_pct:.0f}%</div>
-            <div style="flex: 2; text-align: right;">
-                <div style="font-size: 10px; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px;">Away</div>
-                <div style="font-weight: 700; font-size: 17px;">{away_indicator}{away_team}</div>
+            <div style="color:#555;font-size:12px;">vs</div>
+            <div style="text-align:right;">
+                <div style="font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.5px;">Away</div>
+                <div style="font-weight:700;font-size:17px;color:#ffffff;">{away_team}</div>
             </div>
+        </div>
+        <div style="display:flex;border-radius:6px;overflow:hidden;height:30px;">
+            <div style="width:{h_w:.1f}%;background:{home_bar_color};display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:{h_font};">{home_pct:.0f}%</div>
+            <div style="width:{d_w:.1f}%;background:{draw_bar_color};display:flex;align-items:center;justify-content:center;color:#fff;font-size:{d_font};">{draw_pct:.0f}%</div>
+            <div style="width:{a_w:.1f}%;background:{away_bar_color};display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:{a_font};">{away_pct:.0f}%</div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:#6b7280;margin-top:4px;">
+            <span style="color:{home_bar_color};">Home</span>
+            <span style="color:{draw_bar_color};">Draw</span>
+            <span style="color:{away_bar_color};">Away</span>
         </div>
     </div>
     '''
@@ -744,11 +736,9 @@ def show_player_projections_page():
 
         Each match card displays:
         - **Home team** (left) and **Away team** (right) with clear labels
-        - **Win probabilities** with color-coded backgrounds:
-          - 🟢 Green (55%+) = Strong favorite
-          - 🟡 Yellow (40-55%) = Slight favorite
-          - 🟠 Orange (30-40%) = Competitive match
-          - 🔴 Red (<30%) = Underdog
-        - **⭐ Star indicator** = Heavy favorite (10%+ win probability advantage over opponent)
+        - **Proportional probability bar** where segment width = likelihood:
+          - Green = Home win probability
+          - Grey = Draw probability
+          - Purple = Away win probability
         - **Kickoff times** shown in Eastern Time (EST/EDT)
         """)

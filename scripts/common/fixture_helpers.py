@@ -146,21 +146,34 @@ def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame) -> str:
     'Team' column acts as row labels; GW cells are colored by difficulty.
     """
     # FDR palette: 1=easy(green) -> 5=hard(red), high-contrast dark-theme
+    # Key: backgrounds must be clearly distinguishable between adjacent levels
     PALETTE = {
-        1: ("#0f5132", "#4ade80"),  # deep green bg, bright green text
-        2: ("#1a4731", "#86efac"),  # medium green bg, light green text
-        3: ("#2a2a3e", "#c0c0c0"),  # neutral dark bg, grey text
-        4: ("#6b1a1a", "#fca5a5"),  # dark red bg, light red text
-        5: ("#7f1d1d", "#f87171"),  # deeper red bg, bright red text
+        1: ("#047857", "#ecfdf5"),  # bright emerald bg, near-white text
+        2: ("#1a3a2e", "#86efac"),  # dark muted green bg, green text
+        3: ("#2a2a3e", "#9ca3af"),  # neutral dark bg, grey text
+        4: ("#5f2121", "#fecaca"),  # muted dark red bg, pink text
+        5: ("#b91c1c", "#fef2f2"),  # bright red bg, near-white text
     }
-    # FDR text-only colors for Avg FDR column (no background, just text color)
-    FDR_TEXT = {
-        1: "#4ade80",  # bright green
-        2: "#86efac",  # light green
-        3: "#c0c0c0",  # neutral grey
-        4: "#fca5a5",  # light red
-        5: "#f87171",  # bright red
-    }
+
+    def _fdr_text_color(val: float) -> str:
+        """Continuous color interpolation for Avg FDR text (1.0=green → 5.0=red)."""
+        # Clamp to [1, 5]
+        v = max(1.0, min(5.0, val))
+        # Normalize to [0, 1] where 0=easiest, 1=hardest
+        t = (v - 1.0) / 4.0
+        if t <= 0.5:
+            # Green (#4ade80) to Yellow (#facc15)
+            s = t / 0.5
+            r = int(74 + (250 - 74) * s)
+            g = int(222 + (204 - 222) * s)
+            b = int(128 + (21 - 128) * s)
+        else:
+            # Yellow (#facc15) to Red (#ef4444)
+            s = (t - 0.5) / 0.5
+            r = int(250 + (239 - 250) * s)
+            g = int(204 + (68 - 204) * s)
+            b = int(21 + (68 - 21) * s)
+        return f"rgb({r},{g},{b})"
     gw_cols = [c for c in disp.columns if c not in ("Team", "Avg FDR")]
 
     # Header style
@@ -193,10 +206,9 @@ def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame) -> str:
                     f'border-bottom:1px solid #333;white-space:nowrap;">{val}</td>'
                 )
             elif col == "Avg FDR":
-                # Text-only coloring for Avg FDR (no background, stands out from grid)
+                # Text-only coloring with continuous interpolation (green→yellow→red)
                 fdr_val = float(val) if pd.notna(val) else 3.0
-                k = max(1, min(5, int(round(fdr_val))))
-                txt = FDR_TEXT[k]
+                txt = _fdr_text_color(fdr_val)
                 parts.append(
                     f'<td style="padding:8px 12px;color:{txt};'
                     f'font-weight:800;font-size:16px;text-align:right;border-bottom:1px solid #333;">'

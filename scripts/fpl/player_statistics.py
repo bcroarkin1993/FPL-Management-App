@@ -391,10 +391,8 @@ def display_top_goal_scorers(player_statistics, position_filter, top_n=10):
     )
 
     # Reverse the order so the highest scorer is at the top
-    fig.update_layout(
-        yaxis=dict(categoryorder='total ascending'),
-        **_DARK_LAYOUT,
-    )
+    fig.update_layout(**_DARK_LAYOUT)
+    fig.update_yaxes(categoryorder='total ascending')
 
     # Display chart in Streamlit
     st.plotly_chart(fig, use_container_width=True)
@@ -439,10 +437,8 @@ def display_top_assisters(player_statistics, position_filter, top_n=10):
     )
 
     # Reverse the order so the highest scorer is at the top
-    fig.update_layout(
-        yaxis=dict(categoryorder='total ascending'),
-        **_DARK_LAYOUT,
-    )
+    fig.update_layout(**_DARK_LAYOUT)
+    fig.update_yaxes(categoryorder='total ascending')
 
     # Display chart in Streamlit
     st.plotly_chart(fig, use_container_width=True)
@@ -488,10 +484,8 @@ def display_top_clean_sheets(player_statistics, clean_sheets_filter, top_n=10):
     )
 
     # Reverse the order so the highest scorer is at the top
-    fig.update_layout(
-        yaxis=dict(categoryorder='total ascending'),
-        **_DARK_LAYOUT,
-    )
+    fig.update_layout(**_DARK_LAYOUT)
+    fig.update_yaxes(categoryorder='total ascending')
 
     # Display chart in Streamlit
     st.plotly_chart(fig, use_container_width=True)
@@ -550,22 +544,14 @@ def display_expected_vs_actual_goals(player_statistics, position_filter, team_fi
     fig.update_traces(hovertemplate="%{customdata[0]}", marker=dict(opacity=0.8))
 
     # Update x-axis to ensure ascending order and consistent intervals
+    fig.update_layout(**_DARK_LAYOUT)
     fig.update_layout(
         xaxis_title="Expected Goal Involvements (xGI)",
         yaxis_title="Actual Goal Involvements (Goals + Assists)",
         legend_title="Position",
-        xaxis=dict(
-            tickmode="linear",
-            dtick=5,
-            showgrid=True,
-            zeroline=True,
-        ),
-        yaxis=dict(
-            showgrid=True,
-            zeroline=True,
-        ),
-        **_DARK_LAYOUT,
     )
+    fig.update_xaxes(tickmode="linear", dtick=5, showgrid=True, zeroline=True)
+    fig.update_yaxes(showgrid=True, zeroline=True)
 
     # Display chart in Streamlit
     st.plotly_chart(fig, use_container_width=True)
