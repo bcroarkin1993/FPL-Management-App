@@ -1397,7 +1397,7 @@ def _build_transfer_history_table(
         if added:
             try:
                 dt = datetime.fromisoformat(added.replace('Z', '+00:00'))
-                date_str = dt.strftime('%Y-%m-%d %H:%M')
+                date_str = dt.strftime('%Y-%m-%d')
             except Exception:
                 date_str = added[:10] if len(added) >= 10 else added
         else:
@@ -1741,18 +1741,32 @@ def show_waiver_wire_page():
         # Build summary for chart
         summary_df = _build_transfer_activity_summary(transactions_df, team_names, player_map)
 
-        # Render the stacked bar chart
-        _render_transfer_activity_chart(summary_df)
-
-        # Summary stats
+        # Summary stats as styled cards (above chart)
         total_free = summary_df['Free Transfers'].sum()
         total_waivers = summary_df['Accepted Waivers'].sum()
         total_failed = summary_df['Failed Waivers'].sum()
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Free Transfers", total_free)
-        col2.metric("Accepted Waivers", total_waivers)
-        col3.metric("Failed Waivers", total_failed)
+        def _stat_card(label, value, color, icon):
+            return (
+                f'<div style="flex:1;text-align:center;padding:16px 12px;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);'
+                f'border:1px solid #333;border-radius:10px;margin:0 6px;">'
+                f'<div style="font-size:1.4em;margin-bottom:4px;">{icon}</div>'
+                f'<div style="color:{color};font-size:1.8em;font-weight:bold;">{value}</div>'
+                f'<div style="color:#888;font-size:0.85em;margin-top:4px;">{label}</div>'
+                f'</div>'
+            )
+
+        cards_html = (
+            '<div style="display:flex;margin-bottom:1rem;">'
+            + _stat_card("Free Transfers", total_free, "#4ecca3", "🔄")
+            + _stat_card("Accepted Waivers", total_waivers, "#3498db", "✅")
+            + _stat_card("Failed Waivers", total_failed, "#e74c3c", "❌")
+            + '</div>'
+        )
+        st.markdown(cards_html, unsafe_allow_html=True)
+
+        # Render the stacked bar chart
+        _render_transfer_activity_chart(summary_df)
 
         # Build and display transfer history table
         st.subheader("Transfer History")

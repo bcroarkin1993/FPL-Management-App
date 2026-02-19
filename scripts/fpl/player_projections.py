@@ -12,8 +12,6 @@ Each data source is displayed in its own tab with clear attribution.
 """
 
 import config
-from datetime import datetime
-import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -26,6 +24,7 @@ from scripts.common.utils import (
     get_odds_api_match_odds,
     get_classic_bootstrap_static,
 )
+from scripts.common.styled_tables import render_styled_table
 
 
 # =============================================================================
@@ -98,135 +97,6 @@ def _is_ffp_data_current(ffp_df: pd.DataFrame) -> bool:
     return overlap >= len(ffp_teams) * 0.5
 
 
-# =============================================================================
-# Color Gradient Styling
-# =============================================================================
-
-def get_gradient_color(value, col_min, col_max, high_is_good=True):
-    """Return RGB color on green-white-red scale."""
-    if pd.isna(value) or col_max == col_min:
-        return "#f5f5f5"  # neutral gray
-
-    # Normalize to 0-1
-    normalized = (value - col_min) / (col_max - col_min)
-
-    # Invert if low is good
-    if not high_is_good:
-        normalized = 1 - normalized
-
-    # Red (#f8696b) -> White (#ffffff) -> Green (#63be7b)
-    if normalized >= 0.5:
-        t = (normalized - 0.5) * 2
-        r = int(255 - t * (255 - 99))
-        g = int(255 - t * (255 - 190))
-        b = int(255 - t * (255 - 123))
-    else:
-        t = normalized * 2
-        r = int(248 - t * (248 - 255))
-        g = int(105 + t * (255 - 105))
-        b = int(107 + t * (255 - 107))
-
-    return f"rgb({r},{g},{b})"
-
-
-def style_dataframe_with_gradient(df: pd.DataFrame, gradient_cols: dict, position_col: str = None):
-    """
-    Apply gradient coloring to specified columns.
-
-    Args:
-        df: DataFrame to style
-        gradient_cols: dict of {column_name: high_is_good} for gradient coloring
-        position_col: if set, apply Pos Rank gradient within each position group
-
-    Returns:
-        Styled DataFrame
-    """
-    def apply_gradient(col):
-        col_name = col.name
-        if col_name not in gradient_cols:
-            return [''] * len(col)
-
-        high_is_good = gradient_cols[col_name]
-
-        # Convert to numeric, handling both string and numeric inputs
-        def to_numeric_value(val):
-            if pd.isna(val):
-                return np.nan
-            if isinstance(val, (int, float)):
-                return float(val)
-            if isinstance(val, str):
-                cleaned = val.replace('%', '').replace('-', '').strip()
-                if not cleaned:
-                    return np.nan
-                try:
-                    return float(cleaned)
-                except ValueError:
-                    return np.nan
-            return np.nan
-
-        numeric_values = [to_numeric_value(v) for v in col]
-        numeric_series = pd.Series(numeric_values)
-        col_min = numeric_series.min()
-        col_max = numeric_series.max()
-
-        styles = []
-        for num_val in numeric_values:
-            color = get_gradient_color(num_val, col_min, col_max, high_is_good)
-            styles.append(f'background-color: {color}')
-
-        return styles
-
-    def apply_gradient_by_position(col):
-        """Apply gradient for Pos Rank within each position group."""
-        col_name = col.name
-        if col_name != 'Pos Rank' or position_col is None or position_col not in df.columns:
-            return apply_gradient(col)
-
-        styles = [''] * len(col)
-        positions = df[position_col].values
-
-        for pos in df[position_col].unique():
-            if pd.isna(pos):
-                continue
-            mask = positions == pos
-            indices = np.where(mask)[0]
-
-            if len(indices) == 0:
-                continue
-
-            pos_values = []
-            for idx in indices:
-                val = col.iloc[idx]
-                if pd.isna(val):
-                    pos_values.append(np.nan)
-                elif isinstance(val, (int, float)):
-                    pos_values.append(float(val))
-                else:
-                    pos_values.append(np.nan)
-
-            pos_series = pd.Series(pos_values)
-            col_min = pos_series.min()
-            col_max = pos_series.max()
-
-            for i, idx in enumerate(indices):
-                color = get_gradient_color(pos_values[i], col_min, col_max, False)  # Low rank is good
-                styles[idx] = f'background-color: {color}'
-
-        return styles
-
-    # Use position-aware gradient for Pos Rank if position_col is provided
-    if position_col and 'Pos Rank' in gradient_cols:
-        # Apply regular gradient to non-Pos Rank columns
-        other_cols = {k: v for k, v in gradient_cols.items() if k != 'Pos Rank'}
-        styled = df.style.apply(apply_gradient, axis=0, subset=list(other_cols.keys()) if other_cols else None)
-        # Apply position-aware gradient to Pos Rank
-        if 'Pos Rank' in df.columns:
-            styled = styled.apply(apply_gradient_by_position, axis=0, subset=['Pos Rank'])
-        return styled
-    else:
-        return df.style.apply(apply_gradient, axis=0)
-
-
 def _render_source_banner(source: str, description: str, bg_color: str, border_color: str, url: str = None):
     """Render a styled data source attribution banner."""
     link_html = f'<a href="{url}" target="_blank" style="color: {border_color}; font-weight: 600;">{source}</a>' if url else f'<strong>{source}</strong>'
@@ -236,84 +106,6 @@ def _render_source_banner(source: str, description: str, bg_color: str, border_c
         <small style="opacity: 0.85;">{description}</small>
     </div>
     """, unsafe_allow_html=True)
-
-
-# =============================================================================
-# Position Badges
-# =============================================================================
-
-# Position badge colors
-POSITION_COLORS = {
-    'GK': {'bg': '#f97316', 'text': '#ffffff'},   # Orange
-    'GKP': {'bg': '#f97316', 'text': '#ffffff'},  # Orange (alternate name)
-    'DEF': {'bg': '#3b82f6', 'text': '#ffffff'},  # Blue
-    'MID': {'bg': '#22c55e', 'text': '#ffffff'},  # Green
-    'FWD': {'bg': '#ef4444', 'text': '#ffffff'},  # Red
-}
-
-
-def get_position_badge_html(position: str) -> str:
-    """Generate HTML for a colored position badge."""
-    if pd.isna(position):
-        return ""
-
-    pos = str(position).strip().upper()
-    colors = POSITION_COLORS.get(pos, {'bg': '#6b7280', 'text': '#ffffff'})
-
-    return f'''<span style="
-        background: {colors['bg']};
-        color: {colors['text']};
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.5px;
-    ">{pos}</span>'''
-
-
-def render_player_table_with_badges(df: pd.DataFrame, gradient_cols: dict, position_col: str = 'Position'):
-    """
-    Render a player table with position badges using Streamlit's native dataframe.
-
-    Uses st.dataframe with gradient styling and adds position badge column separately.
-    """
-    if df.empty:
-        st.info("No data to display.")
-        return
-
-    display_df = df.copy()
-
-    # Format numeric columns with proper decimal places
-    format_dict = {}
-    for col in display_df.columns:
-        if col in ['Points', 'Price', 'TSB %']:
-            format_dict[col] = '{:.1f}'
-        elif col == 'Value':
-            format_dict[col] = '{:.2f}'
-        elif col == 'Pos Rank':
-            format_dict[col] = '{:.0f}'
-
-    # Apply gradient styling with formatting
-    styled_df = style_dataframe_with_gradient(display_df, gradient_cols, position_col=position_col)
-
-    # Apply number formatting
-    if format_dict:
-        styled_df = styled_df.format(format_dict, na_rep='-')
-
-    # Render the dataframe
-    st.dataframe(styled_df, use_container_width=True, hide_index=True, height=600)
-
-    # Show position badge legend
-    if position_col in df.columns:
-        st.markdown(
-            '<div style="margin-top: 8px; font-size: 12px;">'
-            '<span style="background: #f97316; color: white; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">GK</span>'
-            '<span style="background: #3b82f6; color: white; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">DEF</span>'
-            '<span style="background: #22c55e; color: white; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">MID</span>'
-            '<span style="background: #ef4444; color: white; padding: 2px 6px; border-radius: 3px;">FWD</span>'
-            '</div>',
-            unsafe_allow_html=True
-        )
 
 
 # =============================================================================
@@ -431,20 +223,17 @@ def render_rotowire_projections():
     if 'TSB %' in display_df.columns:
         display_df['TSB %'] = pd.to_numeric(display_df['TSB %'], errors='coerce').round(1)
 
-    # Define which columns get gradient coloring
-    gradient_cols = {
-        'Points': True,      # High is good
-        'Value': True,       # High is good
-        'Pos Rank': False,   # Low is good (rank 1 is best) - will be by position
-        'TSB %': True,       # High ownership = popular pick
-        'Price': False,      # Lower price = better value potential
-    }
+    # Define which columns get color scaling
+    positive_cols = [c for c in ['Points', 'Value', 'TSB %'] if c in display_df.columns]
+    negative_cols = [c for c in ['Pos Rank', 'Price'] if c in display_df.columns]
 
-    # Only apply gradient to columns that exist
-    active_gradient = {k: v for k, v in gradient_cols.items() if k in display_df.columns}
-
-    # Render with position badges
-    render_player_table_with_badges(display_df, active_gradient, position_col='Position')
+    render_styled_table(
+        display_df,
+        col_formats={'Points': '{:.1f}', 'Value': '{:.2f}', 'Price': '{:.1f}', 'TSB %': '{:.1f}'},
+        positive_color_cols=positive_cols,
+        negative_color_cols=negative_cols,
+        max_height=600,
+    )
     st.caption(f"Showing {len(result)} of {len(df)} players. Data from Rotowire.")
 
 
@@ -564,20 +353,33 @@ def render_ffp_data():
         if col in display_df.columns:
             display_df[col] = pd.to_numeric(display_df[col], errors='coerce').round(1)
 
-    # Format percentage columns
+    # Keep percentage columns numeric for color scaling
     pct_cols = [c for c in display_df.columns if '%' in c]
     for col in pct_cols:
         if col in display_df.columns:
-            display_df[col] = display_df[col].apply(lambda x: f"{x:.0f}%" if pd.notna(x) and x != 0 else "-")
+            display_df[col] = pd.to_numeric(display_df[col], errors='coerce')
 
-    # Display with gradient and position badges
+    # Display with styled table
     st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Player Data")
 
-    # Apply gradient only to existing columns
-    active_gradient = {k: v for k, v in gradient_cols.items() if k in display_df.columns}
+    # Determine color columns based on available data
+    positive_cols = [c for c in gradient_cols.keys() if gradient_cols.get(c, True) and c in display_df.columns]
 
-    # Render with position badges
-    render_player_table_with_badges(display_df, active_gradient, position_col='Position')
+    # Build col_formats with % suffix for percentage columns
+    col_fmts = {'Price': '{:.1f}'}
+    for col in pct_cols:
+        if col in display_df.columns:
+            col_fmts[col] = '{:.0f}%'
+    for col in pred_cols:
+        if col in display_df.columns:
+            col_fmts[col] = '{:.1f}'
+
+    render_styled_table(
+        display_df,
+        col_formats=col_fmts,
+        positive_color_cols=positive_cols,
+        max_height=600,
+    )
     st.caption(f"Showing {len(result)} of {len(df)} players. Data from Fantasy Football Pundit.")
 
 
@@ -638,20 +440,24 @@ def render_goalscorer_odds():
     if team_filter and 'Team' in result.columns:
         result = result[result['Team'].isin(team_filter)]
 
-    # Format percentages for display
+    # Keep percentages numeric for color scaling
     display_df = result.copy()
     for col in ['Goal %', 'Assist %', 'Return %', 'Start %']:
         if col in display_df.columns:
-            display_df[col] = display_df[col].apply(lambda x: f"{x:.0f}%" if pd.notna(x) else "-")
+            display_df[col] = pd.to_numeric(display_df[col], errors='coerce')
 
-    # Display with gradient and position badges
+    # Display with styled table
     st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Goalscorer & Assist Probabilities")
 
-    gradient_cols = {'Goal %': True, 'Assist %': True, 'Return %': True, 'Start %': True}
-    active_gradient = {k: v for k, v in gradient_cols.items() if k in display_df.columns}
+    positive_cols = [c for c in ['Goal %', 'Assist %', 'Return %', 'Start %'] if c in display_df.columns]
+    col_fmts = {col: '{:.0f}%' for col in positive_cols}
 
-    # Render with position badges
-    render_player_table_with_badges(display_df, active_gradient, position_col='Position')
+    render_styled_table(
+        display_df,
+        col_formats=col_fmts,
+        positive_color_cols=positive_cols,
+        max_height=600,
+    )
     st.caption(f"Showing {len(result)} of {len(df)} players. Betting odds converted to probabilities.")
 
 
@@ -929,20 +735,10 @@ def show_player_projections_page():
 
         ### Color Scale
 
-        Tables use a **green-white-red** gradient where:
-        - **Green** = Good values (high points, high odds, low rank)
-        - **White** = Average values
-        - **Red** = Poor values
-
-        **Pos Rank** is colored within each position group (so GK rank 1 and MID rank 1 both show as green).
-
-        ### Position Badges
-
-        Player positions are displayed with color-coded badges:
-        - **GK** (Orange) - Goalkeepers
-        - **DEF** (Blue) - Defenders
-        - **MID** (Green) - Midfielders
-        - **FWD** (Red) - Forwards
+        Tables use a **red-to-green text color** gradient where:
+        - **Green text** = Good values (high points, high odds, low rank)
+        - **Yellow text** = Average values
+        - **Red text** = Poor values
 
         ### Match Odds Visual Guide
 

@@ -118,10 +118,15 @@ def show_team_stats_page():
     # ---------------------------
     st.header(f"Gameweek {config.CURRENT_GAMEWEEK} Projections")
 
+    proj_df = show_team_projections(team_id, player_projections, config.CURRENT_GAMEWEEK)
+    if not proj_df.empty:
+        _pos_sort = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
+        proj_df["_pos_order"] = proj_df["Position"].map(_pos_sort)
+        proj_df["_pts"] = pd.to_numeric(proj_df["Points"], errors="coerce").fillna(0)
+        proj_df = proj_df.sort_values(["_pos_order", "_pts"], ascending=[True, False]).drop(columns=["_pos_order", "_pts"])
     render_styled_table(
-        show_team_projections(team_id, player_projections, config.CURRENT_GAMEWEEK),
+        proj_df,
         col_formats={"Points": "{:.1f}"},
-        max_height=400,
     )
 
     st.divider()
