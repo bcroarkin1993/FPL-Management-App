@@ -13,72 +13,17 @@ from typing import Callable, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
-# CSS (injected once per session)
+# Inline styles (applied directly to each table element — no CSS class deps)
 # ---------------------------------------------------------------------------
-_CSS_KEY = "_styled_tables_css_injected"
-
-_TABLE_CSS = """
-<style>
-.styled-tbl-wrap {
-    border: 1px solid #333;
-    border-radius: 10px;
-    overflow: hidden;
-    margin-bottom: 1rem;
-}
-.styled-tbl-wrap.scroll {
-    overflow-y: auto;
-}
-.styled-tbl-title {
-    background: linear-gradient(135deg, #37003c 0%, #5a0060 100%);
-    color: #00ff87;
-    font-weight: 700;
-    font-size: 1.05rem;
-    padding: 10px 16px;
-    margin: 0;
-}
-table.styled-tbl {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 14px;
-    background: #1a1a2e;
-}
-table.styled-tbl thead th {
-    background: linear-gradient(135deg, #37003c, #5a0060);
-    color: #00ff87;
-    font-weight: 600;
-    font-size: 13px;
-    padding: 10px 12px;
-    border-bottom: 2px solid #00ff87;
-    position: sticky;
-    top: 0;
-    z-index: 1;
-}
-table.styled-tbl tbody td {
-    padding: 8px 12px;
-    color: #e0e0e0;
-    border-bottom: 1px solid #333;
-}
-table.styled-tbl tbody tr {
-    background: #1a1a2e;
-}
-table.styled-tbl tbody tr:nth-child(even) {
-    background: rgba(255,255,255,0.03);
-}
-table.styled-tbl tbody tr:hover {
-    background: rgba(0,255,135,0.05);
-}
-table.styled-tbl tbody tr.highlight-row {
-    border-left: 3px solid #00ff87;
-}
-</style>
-"""
-
-
-def _inject_css():
-    """Inject table CSS once per Streamlit session."""
-    if not st.session_state.get(_CSS_KEY):
-        st.markdown(_TABLE_CSS, unsafe_allow_html=True)
-        st.session_state[_CSS_KEY] = True
+_WRAP_STYLE = "border:1px solid #333;border-radius:10px;overflow:hidden;margin-bottom:1rem;"
+_WRAP_SCROLL = "overflow-y:auto;"
+_TITLE_STYLE = "background:linear-gradient(135deg,#37003c 0%,#5a0060 100%);color:#00ff87;font-weight:700;font-size:1.05rem;padding:10px 16px;margin:0;"
+_TABLE_STYLE = "width:100%;border-collapse:collapse;font-size:14px;background:#1a1a2e;"
+_TH_STYLE = "background:linear-gradient(135deg,#37003c,#5a0060);color:#00ff87;font-weight:600;font-size:13px;padding:10px 12px;border-bottom:2px solid #00ff87;position:sticky;top:0;z-index:1;"
+_TD_STYLE = "padding:8px 12px;color:#e0e0e0;border-bottom:1px solid #333;"
+_TR_EVEN_BG = "background:rgba(255,255,255,0.03);"
+_TR_ODD_BG = "background:#1a1a2e;"
+_TR_HIGHLIGHT = "border-left:3px solid #00ff87;"
 
 
 # ---------------------------------------------------------------------------
@@ -135,8 +80,6 @@ def render_styled_table(
     negative_color_cols : Columns where higher values are redder.
     max_height : Optional max-height in px (enables vertical scroll).
     """
-    _inject_css()
-
     if df is None or df.empty:
         st.info("No data to display.")
         return
@@ -161,34 +104,36 @@ def render_styled_table(
             return "right"
         return "left"
 
-    # Build HTML
+    # Build HTML with fully inline styles (no CSS class dependencies)
     parts = []
 
-    # Wrapper open
-    scroll_class = " scroll" if max_height else ""
-    max_h_style = f"max-height:{max_height}px;" if max_height else ""
-    parts.append(f'<div class="styled-tbl-wrap{scroll_class}" style="{max_h_style}">')
+    # Wrapper
+    wrap_style = _WRAP_STYLE
+    if max_height:
+        wrap_style += _WRAP_SCROLL + f"max-height:{max_height}px;"
+    parts.append(f'<div style="{wrap_style}">')
 
     # Title
     if title:
-        parts.append(f'<div class="styled-tbl-title">{title}</div>')
+        parts.append(f'<div style="{_TITLE_STYLE}">{title}</div>')
 
-    parts.append('<table class="styled-tbl">')
+    parts.append(f'<table style="{_TABLE_STYLE}">')
 
     # Header
     parts.append("<thead><tr>")
     for col in df.columns:
         align = _align(col)
-        parts.append(f'<th style="text-align:{align};">{col}</th>')
+        parts.append(f'<th style="{_TH_STYLE}text-align:{align};">{col}</th>')
     parts.append("</tr></thead>")
 
     # Body
     parts.append("<tbody>")
-    for _, row in df.iterrows():
-        row_class = ""
+    for row_idx, (_, row) in enumerate(df.iterrows()):
+        row_bg = _TR_EVEN_BG if row_idx % 2 == 1 else _TR_ODD_BG
+        row_extra = ""
         if highlight_row and highlight_row(row):
-            row_class = ' class="highlight-row"'
-        parts.append(f"<tr{row_class}>")
+            row_extra = _TR_HIGHLIGHT
+        parts.append(f'<tr style="{row_bg}{row_extra}">')
 
         for col in df.columns:
             val = row[col]
@@ -218,7 +163,7 @@ def render_styled_table(
                 extra_style = _color_scale(float(val), cmin, cmax, "negative")
 
             parts.append(
-                f'<td style="text-align:{align};{extra_style}">{display_val}</td>'
+                f'<td style="{_TD_STYLE}text-align:{align};{extra_style}">{display_val}</td>'
             )
 
         parts.append("</tr>")

@@ -1692,12 +1692,7 @@ def show_waiver_wire_page():
     st.subheader("Available Players (ranked)")
     display_cols_avail = ["Player", "Team", "Position", "Points", "Form", "AvgFDRNextN", "Season_Points", "Waiver Score"]
     display_cols_avail = [c for c in display_cols_avail if c in _display_avail.columns]
-    render_styled_table(
-        _display_avail[display_cols_avail],
-        col_formats={"Points": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}", "Waiver Score": "{:.2f}"},
-        positive_color_cols=["Waiver Score"],
-        max_height=500,
-    )
+    st.dataframe(_display_avail[display_cols_avail], use_container_width=True)
 
     # Keep Score for roster
     if not my_roster.empty:
@@ -1784,4 +1779,4 @@ def show_waiver_wire_page():
         if selected_result != 'All':
             filtered_history = filtered_history[filtered_history['Result'] == selected_result]
 
-        render_styled_table(filtered_history, max_height=400)
+        st.dataframe(filtered_history, use_container_width=True, height=400)
