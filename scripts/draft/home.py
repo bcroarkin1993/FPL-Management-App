@@ -406,11 +406,11 @@ def plot_league_points_over_time(draft_league_id):
         hovermode="x unified",
         paper_bgcolor="#1a1a2e",
         plot_bgcolor="#1a1a2e",
-        font=dict(color="#ffffff", size=13),
-        title=dict(font=dict(size=20, color="#ffffff"), x=0.5, xanchor="center"),
-        xaxis=dict(gridcolor="#333", zerolinecolor="#333"),
-        yaxis=dict(gridcolor="#333", zerolinecolor="#333"),
-        legend=dict(bgcolor="rgba(0,0,0,0)"),
+        font=dict(color="#ffffff", size=14),
+        title=dict(font=dict(size=22, color="#ffffff"), x=0.5, xanchor="center"),
+        xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+        yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
     )
 
     # Return the figure
@@ -490,11 +490,11 @@ def plot_team_points_over_time(draft_league_id):
         hovermode="x unified",
         paper_bgcolor="#1a1a2e",
         plot_bgcolor="#1a1a2e",
-        font=dict(color="#ffffff", size=13),
-        title=dict(font=dict(size=20, color="#ffffff"), x=0.5, xanchor="center"),
-        xaxis=dict(gridcolor="#333", zerolinecolor="#333"),
-        yaxis=dict(gridcolor="#333", zerolinecolor="#333"),
-        legend=dict(bgcolor="rgba(0,0,0,0)"),
+        font=dict(color="#ffffff", size=14),
+        title=dict(font=dict(size=22, color="#ffffff"), x=0.5, xanchor="center"),
+        xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+        yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
     )
 
     # Return the figure

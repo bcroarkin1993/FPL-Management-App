@@ -145,13 +145,21 @@ def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame) -> str:
     Returns an HTML string (not a Styler) to render via st.markdown.
     'Team' column acts as row labels; GW cells are colored by difficulty.
     """
-    # FDR palette: 1=easy(green) -> 5=hard(red), dark-theme friendly
+    # FDR palette: 1=easy(green) -> 5=hard(red), high-contrast dark-theme
     PALETTE = {
-        1: ("#166534", "#86efac"),  # (bg, text) dark green bg, light green text
-        2: ("#14532d", "#bbf7d0"),  # slightly lighter green
-        3: ("#1a1a2e", "#e0e0e0"),  # neutral dark bg
-        4: ("#7f1d1d", "#fecaca"),  # dark red bg, light red text
-        5: ("#991b1b", "#fca5a5"),  # darker red bg
+        1: ("#0f5132", "#4ade80"),  # deep green bg, bright green text
+        2: ("#1a4731", "#86efac"),  # medium green bg, light green text
+        3: ("#2a2a3e", "#c0c0c0"),  # neutral dark bg, grey text
+        4: ("#6b1a1a", "#fca5a5"),  # dark red bg, light red text
+        5: ("#7f1d1d", "#f87171"),  # deeper red bg, bright red text
+    }
+    # FDR text-only colors for Avg FDR column (no background, just text color)
+    FDR_TEXT = {
+        1: "#4ade80",  # bright green
+        2: "#86efac",  # light green
+        3: "#c0c0c0",  # neutral grey
+        4: "#fca5a5",  # light red
+        5: "#f87171",  # bright red
     }
     gw_cols = [c for c in disp.columns if c not in ("Team", "Avg FDR")]
 
@@ -185,13 +193,13 @@ def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame) -> str:
                     f'border-bottom:1px solid #333;white-space:nowrap;">{val}</td>'
                 )
             elif col == "Avg FDR":
-                # Color Avg FDR by value (lower = greener)
+                # Text-only coloring for Avg FDR (no background, stands out from grid)
                 fdr_val = float(val) if pd.notna(val) else 3.0
                 k = max(1, min(5, int(round(fdr_val))))
-                bg, txt = PALETTE[k]
+                txt = FDR_TEXT[k]
                 parts.append(
-                    f'<td style="padding:8px 12px;background:{bg};color:{txt};'
-                    f'font-weight:700;text-align:right;border-bottom:1px solid #333;">'
+                    f'<td style="padding:8px 12px;color:{txt};'
+                    f'font-weight:800;font-size:16px;text-align:right;border-bottom:1px solid #333;">'
                     f'{fdr_val:.1f}</td>'
                 )
             else:

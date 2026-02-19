@@ -235,6 +235,18 @@ def build_stats_display(df: pd.DataFrame, selected_columns: list):
     return display_df, col_formats, positive_cols, negative_cols
 
 
+# Dark theme layout for Plotly charts
+_DARK_LAYOUT = dict(
+    paper_bgcolor="#1a1a2e",
+    plot_bgcolor="#1a1a2e",
+    font=dict(color="#ffffff", size=14),
+    title=dict(font=dict(size=20, color="#ffffff"), x=0.5, xanchor="center"),
+    xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=12)),
+    yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=12)),
+    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=12)),
+)
+
+
 PRESET_DESCRIPTIONS = {
     "Essential": "Core stats: Points, Minutes, Goals, Assists, Clean Sheets",
     "Attacking": "Offensive output: Goals, Assists, xG, xA with per-90 rates",
@@ -370,6 +382,7 @@ def display_top_goal_scorers(player_statistics, position_filter, top_n=10):
     fig.update_traces(
         texttemplate='%{x}',
         textposition='outside',
+        textfont=dict(color="#ffffff"),
         hovertemplate='<b>Player</b> = %{y}<br>' +
                       '<b>Team</b> = %{customdata[0]}<br>' +
                       '<b>Goals</b> = %{x}<extra></extra>',
@@ -379,7 +392,8 @@ def display_top_goal_scorers(player_statistics, position_filter, top_n=10):
 
     # Reverse the order so the highest scorer is at the top
     fig.update_layout(
-        yaxis=dict(categoryorder='total ascending')  # Ensures correct descending order
+        yaxis=dict(categoryorder='total ascending'),
+        **_DARK_LAYOUT,
     )
 
     # Display chart in Streamlit
@@ -416,6 +430,7 @@ def display_top_assisters(player_statistics, position_filter, top_n=10):
     fig.update_traces(
         texttemplate='%{x}',
         textposition='outside',
+        textfont=dict(color="#ffffff"),
         hovertemplate='<b>Player</b> = %{y}<br>' +
                       '<b>Team</b> = %{customdata[0]}<br>' +
                       '<b>Assists</b> = %{x}<extra></extra>',
@@ -425,7 +440,8 @@ def display_top_assisters(player_statistics, position_filter, top_n=10):
 
     # Reverse the order so the highest scorer is at the top
     fig.update_layout(
-        yaxis=dict(categoryorder='total ascending')  # Ensures correct descending order
+        yaxis=dict(categoryorder='total ascending'),
+        **_DARK_LAYOUT,
     )
 
     # Display chart in Streamlit
@@ -463,6 +479,7 @@ def display_top_clean_sheets(player_statistics, clean_sheets_filter, top_n=10):
     fig.update_traces(
         texttemplate='%{x}',
         textposition='outside',
+        textfont=dict(color="#ffffff"),
         hovertemplate='<b>Player</b> = %{y}<br>' +
                       '<b>Team</b> = %{customdata[0]}<br>' +
                       '<b>Clean Sheets</b> = %{x}<extra></extra>',
@@ -472,7 +489,8 @@ def display_top_clean_sheets(player_statistics, clean_sheets_filter, top_n=10):
 
     # Reverse the order so the highest scorer is at the top
     fig.update_layout(
-        yaxis=dict(categoryorder='total ascending')  # Ensures correct descending order
+        yaxis=dict(categoryorder='total ascending'),
+        **_DARK_LAYOUT,
     )
 
     # Display chart in Streamlit
@@ -536,10 +554,9 @@ def display_expected_vs_actual_goals(player_statistics, position_filter, team_fi
         xaxis_title="Expected Goal Involvements (xGI)",
         yaxis_title="Actual Goal Involvements (Goals + Assists)",
         legend_title="Position",
-        template="plotly_dark",
         xaxis=dict(
             tickmode="linear",
-            dtick=5,  # Adjust tick intervals for readability
+            dtick=5,
             showgrid=True,
             zeroline=True,
         ),
@@ -547,6 +564,7 @@ def display_expected_vs_actual_goals(player_statistics, position_filter, team_fi
             showgrid=True,
             zeroline=True,
         ),
+        **_DARK_LAYOUT,
     )
 
     # Display chart in Streamlit
@@ -577,12 +595,12 @@ def display_boxplot_point_distribution(player_statistics, position_filter, team_
         hover_data=['player', 'team_name']
     )
 
-    # Update layout for better readability
+    # Update layout with dark theme
     fig.update_layout(
         xaxis_title="Player Position",
         yaxis_title="Total Points",
-        boxmode="group",  # Groups positions together
-        template="plotly_white"
+        boxmode="group",
+        **_DARK_LAYOUT,
     )
 
     # Display chart in Streamlit
