@@ -24,6 +24,7 @@ from scripts.common.utils import (
     position_converter,
 )
 from fuzzywuzzy import fuzz
+from scripts.common.styled_tables import render_styled_table
 
 
 # ---------------------------
@@ -704,22 +705,12 @@ def show_wildcard_page():
 
         starters_display = pd.DataFrame(starter_rows)
 
-        # Column config for display
-        col_config = {
-            "Player": st.column_config.TextColumn("Player", width="medium"),
-            "Team": st.column_config.TextColumn("Team", width="small"),
-            "Pos": st.column_config.TextColumn("Pos", width="small"),
-            "Price": st.column_config.TextColumn("Price", width="small"),
-            "Total": st.column_config.NumberColumn("Total", format="%.1f"),
-        }
-        for col in gw_cols:
-            col_config[col] = st.column_config.NumberColumn(col, format="%.1f")
-
-        st.dataframe(
+        gw_formats = {col: "{:.1f}" for col in gw_cols}
+        gw_formats["Total"] = "{:.1f}"
+        render_styled_table(
             starters_display,
-            use_container_width=True,
-            hide_index=True,
-            column_config=col_config
+            col_formats=gw_formats,
+            positive_color_cols=["Total"],
         )
 
         st.markdown("---")
@@ -750,22 +741,11 @@ def show_wildcard_page():
 
         bench_display = pd.DataFrame(bench_rows)
 
-        bench_col_config = {
-            "Order": st.column_config.NumberColumn("Order", width="small"),
-            "Player": st.column_config.TextColumn("Player", width="medium"),
-            "Team": st.column_config.TextColumn("Team", width="small"),
-            "Pos": st.column_config.TextColumn("Pos", width="small"),
-            "Price": st.column_config.TextColumn("Price", width="small"),
-            "Total": st.column_config.NumberColumn("Total", format="%.1f"),
-        }
-        for col in gw_cols:
-            bench_col_config[col] = st.column_config.NumberColumn(col, format="%.1f")
-
-        st.dataframe(
+        bench_gw_formats = {col: "{:.1f}" for col in gw_cols}
+        bench_gw_formats["Total"] = "{:.1f}"
+        render_styled_table(
             bench_display,
-            use_container_width=True,
-            hide_index=True,
-            column_config=bench_col_config
+            col_formats=bench_gw_formats,
         )
 
         st.markdown("---")
@@ -792,7 +772,7 @@ def show_wildcard_page():
             })
             team_counts['Total Cost'] = team_counts['Total Cost'].apply(lambda x: f"£{x:.1f}m")
             team_counts['Total Proj Pts'] = team_counts['Total Proj Pts'].round(1)
-            st.dataframe(team_counts, use_container_width=True)
+            render_styled_table(team_counts.reset_index())
 
         # Position breakdown
         with st.expander("Position Breakdown"):
@@ -807,7 +787,7 @@ def show_wildcard_page():
             })
             pos_breakdown['Total Cost'] = pos_breakdown['Total Cost'].apply(lambda x: f"£{x:.1f}m")
             pos_breakdown['Total Proj Pts'] = pos_breakdown['Total Proj Pts'].round(1)
-            st.dataframe(pos_breakdown, use_container_width=True)
+            render_styled_table(pos_breakdown.reset_index())
 
         # Tips
         st.markdown("---")

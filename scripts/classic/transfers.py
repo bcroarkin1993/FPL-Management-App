@@ -23,6 +23,7 @@ from scripts.common.utils import (
     get_classic_transfers,
     position_converter,
 )
+from scripts.common.styled_tables import render_styled_table
 
 
 # ---------------------------
@@ -550,23 +551,11 @@ def show_classic_transfers_page():
         "Keep_Score": "Keep Score"
     })
 
-    st.dataframe(
+    render_styled_table(
         squad_show[["Player", "Team", "Position", "Price", "Form", "Season Pts",
                     "Proj Pts", "Avg FDR", "Keep Score", "Status"]],
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Player": st.column_config.TextColumn("Player", width="medium"),
-            "Team": st.column_config.TextColumn("Team", width="small"),
-            "Position": st.column_config.TextColumn("Pos", width="small"),
-            "Price": st.column_config.TextColumn("Price", width="small"),
-            "Form": st.column_config.NumberColumn("Form", format="%.1f", width="small"),
-            "Season Pts": st.column_config.NumberColumn("Season", width="small"),
-            "Proj Pts": st.column_config.TextColumn("Proj", width="small"),
-            "Avg FDR": st.column_config.NumberColumn("FDR", format="%.2f", width="small"),
-            "Keep Score": st.column_config.NumberColumn("Keep", format="%.3f", width="small"),
-            "Status": st.column_config.TextColumn("Status", width="medium"),
-        }
+        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "Keep Score": "{:.3f}"},
+        positive_color_cols=["Keep Score"],
     )
 
     # Show suggested transfers out
@@ -638,25 +627,12 @@ def show_classic_transfers_page():
         "Price_Change": "Δ"
     })
 
-    st.dataframe(
+    render_styled_table(
         targets_show[["Player", "Team", "Position", "Price", "Δ", "Form",
                       "Season Pts", "Proj Pts", "Ownership", "Avg FDR", "Score", "Status"]],
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Player": st.column_config.TextColumn("Player", width="medium"),
-            "Team": st.column_config.TextColumn("Team", width="small"),
-            "Position": st.column_config.TextColumn("Pos", width="small"),
-            "Price": st.column_config.TextColumn("Price", width="small"),
-            "Δ": st.column_config.TextColumn("Δ", width="small"),
-            "Form": st.column_config.NumberColumn("Form", format="%.1f", width="small"),
-            "Season Pts": st.column_config.NumberColumn("Season", width="small"),
-            "Proj Pts": st.column_config.TextColumn("Proj", width="small"),
-            "Ownership": st.column_config.TextColumn("Own%", width="small"),
-            "Avg FDR": st.column_config.NumberColumn("FDR", format="%.2f", width="small"),
-            "Score": st.column_config.NumberColumn("Score", format="%.3f", width="small"),
-            "Status": st.column_config.TextColumn("Status", width="medium"),
-        }
+        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "Score": "{:.3f}"},
+        positive_color_cols=["Score"],
+        max_height=500,
     )
 
     st.markdown("---")
@@ -697,22 +673,17 @@ def show_classic_transfers_page():
             pos_show["Projected_Points"] = pos_show["Projected_Points"].fillna("-")
             pos_show["Own%"] = pos_show["selected_by_percent"].apply(lambda x: f"{x:.1f}%")
 
-            st.dataframe(
-                pos_show[["Player", "Team", "Price", "form", "total_points",
-                          "Projected_Points", "Own%", "AvgFDR", "Transfer_Score"]],
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Player": st.column_config.TextColumn("Player", width="medium"),
-                    "Team": st.column_config.TextColumn("Team", width="small"),
-                    "Price": st.column_config.TextColumn("Price", width="small"),
-                    "form": st.column_config.NumberColumn("Form", format="%.1f"),
-                    "total_points": st.column_config.NumberColumn("Season Pts"),
-                    "Projected_Points": st.column_config.TextColumn("Proj Pts"),
-                    "Own%": st.column_config.TextColumn("Own%", width="small"),
-                    "AvgFDR": st.column_config.NumberColumn("Avg FDR", format="%.2f"),
-                    "Transfer_Score": st.column_config.NumberColumn("Score", format="%.3f"),
-                }
+            pos_display = pos_show[["Player", "Team", "Price", "form", "total_points",
+                          "Projected_Points", "Own%", "AvgFDR", "Transfer_Score"]].copy()
+            pos_display = pos_display.rename(columns={
+                "form": "Form", "total_points": "Season Pts",
+                "Projected_Points": "Proj Pts", "AvgFDR": "Avg FDR",
+                "Transfer_Score": "Score",
+            })
+            render_styled_table(
+                pos_display,
+                col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "Score": "{:.3f}"},
+                positive_color_cols=["Score"],
             )
 
     st.markdown("---")
@@ -819,6 +790,6 @@ def show_classic_transfers_page():
             })
 
         transfers_df = pd.DataFrame(transfer_rows)
-        st.dataframe(transfers_df, use_container_width=True, hide_index=True)
+        render_styled_table(transfers_df, text_align={"GW": "center"})
     else:
         st.info("No transfers found for this season.")

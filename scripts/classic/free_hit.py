@@ -23,6 +23,7 @@ from scripts.common.utils import (
     position_converter,
 )
 from fuzzywuzzy import fuzz
+from scripts.common.styled_tables import render_styled_table
 
 
 # ---------------------------
@@ -534,18 +535,9 @@ def show_free_hit_page():
 
         starters_display = pd.DataFrame(starter_rows)
 
-        st.dataframe(
+        render_styled_table(
             starters_display,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Player": st.column_config.TextColumn("Player", width="medium"),
-                "Team": st.column_config.TextColumn("Team", width="small"),
-                "Pos": st.column_config.TextColumn("Pos", width="small"),
-                "Price": st.column_config.TextColumn("Price", width="small"),
-                "Proj Pts": st.column_config.NumberColumn("Proj Pts", format="%.1f"),
-                "Fixture": st.column_config.TextColumn("Fixture", width="medium"),
-            }
+            col_formats={"Proj Pts": "{:.1f}"},
         )
 
         st.markdown("---")
@@ -566,17 +558,9 @@ def show_free_hit_page():
 
         bench_display = pd.DataFrame(bench_rows)
 
-        st.dataframe(
+        render_styled_table(
             bench_display,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Player": st.column_config.TextColumn("Player", width="medium"),
-                "Team": st.column_config.TextColumn("Team", width="small"),
-                "Pos": st.column_config.TextColumn("Pos", width="small"),
-                "Price": st.column_config.TextColumn("Price", width="small"),
-                "Proj Pts": st.column_config.NumberColumn("Proj Pts", format="%.1f"),
-            }
+            col_formats={"Proj Pts": "{:.1f}"},
         )
 
         st.markdown("---")
@@ -594,7 +578,7 @@ def show_free_hit_page():
             })
             team_counts['Total Cost'] = team_counts['Total Cost'].apply(lambda x: f"£{x:.1f}m")
             team_counts['Total Proj Pts'] = team_counts['Total Proj Pts'].round(1)
-            st.dataframe(team_counts, use_container_width=True)
+            render_styled_table(team_counts.reset_index())
 
         # Position breakdown
         with st.expander("Position Breakdown"):
@@ -609,7 +593,7 @@ def show_free_hit_page():
             })
             pos_breakdown['Total Cost'] = pos_breakdown['Total Cost'].apply(lambda x: f"£{x:.1f}m")
             pos_breakdown['Total Proj Pts'] = pos_breakdown['Total Proj Pts'].round(1)
-            st.dataframe(pos_breakdown, use_container_width=True)
+            render_styled_table(pos_breakdown.reset_index())
 
         # Tips
         st.markdown("---")

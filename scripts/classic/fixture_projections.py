@@ -28,6 +28,7 @@ from scripts.common.utils import (
     get_rotowire_player_projections,
     position_converter,
 )
+from scripts.common.styled_tables import render_styled_table
 
 
 # =============================================================================
@@ -853,10 +854,9 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
                         selected["team2_name"]: m["opp_pts"],
                         "Result": m["outcome"]
                     })
-                st.dataframe(
+                render_styled_table(
                     pd.DataFrame(match_data),
-                    use_container_width=True,
-                    hide_index=True
+                    text_align={"Gameweek": "center", "Result": "center"},
                 )
 
     # Side-by-side team displays
@@ -894,22 +894,22 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
     with col1:
         chip_text = f" ({chip_1.upper()})" if chip_1 else ""
         predicted_text = " [Predicted]" if predicted_1 else ""
-        st.markdown(f"**{selected['team1_name']}{chip_text}{predicted_text}**")
-        st.dataframe(
-            display_1.set_index("Player"),
-            use_container_width=True,
-            height=422
+        render_styled_table(
+            display_1,
+            title=f"{selected['team1_name']}{chip_text}{predicted_text}",
+            col_formats={"Points": "{:.1f}"},
+            max_height=422,
         )
         st.markdown(f"**Projected Score: {score_1:.2f}**")
 
     with col2:
         chip_text = f" ({chip_2.upper()})" if chip_2 else ""
         predicted_text = " [Predicted]" if predicted_2 else ""
-        st.markdown(f"**{selected['team2_name']}{chip_text}{predicted_text}**")
-        st.dataframe(
-            display_2.set_index("Player"),
-            use_container_width=True,
-            height=422
+        render_styled_table(
+            display_2,
+            title=f"{selected['team2_name']}{chip_text}{predicted_text}",
+            col_formats={"Points": "{:.1f}"},
+            max_height=422,
         )
         st.markdown(f"**Projected Score: {score_2:.2f}**")
 
@@ -1061,21 +1061,9 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
     st.markdown("---")
 
     # Display the table
-    st.dataframe(
+    render_styled_table(
         display_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Rank": st.column_config.NumberColumn("Rank", width="small"),
-            "Team": st.column_config.TextColumn("Team", width="medium"),
-            "Manager": st.column_config.TextColumn("Manager", width="medium"),
-            "Current": st.column_config.NumberColumn("Current", width="small"),
-            "Proj GW": st.column_config.TextColumn("Proj GW", width="small"),
-            "Proj Total": st.column_config.TextColumn("Proj Total", width="small"),
-            "Proj Rank": st.column_config.NumberColumn("Proj Rank", width="small"),
-            "Movement": st.column_config.TextColumn("Movement", width="small"),
-            "Chip": st.column_config.TextColumn("Chip", width="small"),
-        }
+        text_align={"Rank": "center", "Proj Rank": "center", "Movement": "center", "Chip": "center"},
     )
 
     # Legend

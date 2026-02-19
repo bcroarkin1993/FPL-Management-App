@@ -21,6 +21,7 @@ from scripts.common.utils import (
     position_converter,
 )
 from scripts.common.team_analysis_helpers import render_season_highlights
+from scripts.common.styled_tables import render_styled_table
 from fuzzywuzzy import fuzz
 
 
@@ -499,12 +500,7 @@ def show_classic_team_analysis_page():
         display_df = past_df[["Season", "Points", "Rank"]].copy()
         display_df["Points"] = display_df["Points"].apply(lambda x: f"{x:,}" if pd.notna(x) else "N/A")
         display_df["Rank"] = display_df["Rank"].apply(lambda x: f"{x:,}" if pd.notna(x) and x else "N/A")
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True,
-            height=38 + len(display_df) * 35,
-        )
+        render_styled_table(display_df)
 
         st.markdown("---")
 
@@ -568,18 +564,9 @@ def show_classic_team_analysis_page():
 
     starting_display = starting_display.rename(columns={"Display Name": "Player"})
 
-    # Style the dataframe
-    st.dataframe(
+    render_styled_table(
         starting_display,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Player": st.column_config.TextColumn("Player", width="large"),
-            "Team": st.column_config.TextColumn("Team", width="small"),
-            "Position": st.column_config.TextColumn("Pos", width="small"),
-            "Proj Pts": st.column_config.NumberColumn("Proj", format="%.1f", width="small"),
-            "Pos Rank": st.column_config.TextColumn("Rank", width="small"),
-        },
+        col_formats={"Proj Pts": "{:.1f}"},
     )
 
     st.markdown("---")
@@ -595,17 +582,9 @@ def show_classic_team_analysis_page():
 
     bench_display = bench_display.rename(columns={"Display Name": "Player"})
 
-    st.dataframe(
+    render_styled_table(
         bench_display,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Player": st.column_config.TextColumn("Player", width="large"),
-            "Team": st.column_config.TextColumn("Team", width="small"),
-            "Position": st.column_config.TextColumn("Pos", width="small"),
-            "Proj Pts": st.column_config.NumberColumn("Proj", format="%.1f", width="small"),
-            "Priority": st.column_config.TextColumn("Sub Order", width="small"),
-        },
+        col_formats={"Proj Pts": "{:.1f}"},
     )
 
     st.markdown("---")
@@ -670,16 +649,9 @@ def show_classic_team_analysis_page():
                     ["_pos_order", "Total Points"], ascending=[True, False]
                 ).drop(columns=["_pos_order"])
 
-                st.dataframe(
+                render_styled_table(
                     players_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Player": st.column_config.TextColumn("Player"),
-                        "Position": st.column_config.TextColumn("Pos"),
-                        "Total Points": st.column_config.NumberColumn("Points"),
-                        "Team": st.column_config.TextColumn("Team"),
-                    }
+                    positive_color_cols=["Total Points"],
                 )
         else:
             st.info("No position data available yet (season may not have started).")

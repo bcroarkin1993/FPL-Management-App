@@ -23,6 +23,7 @@ from scripts.common.utils import (
     get_classic_bootstrap_static,
     get_classic_team_position_data,
 )
+from scripts.common.styled_tables import render_styled_table
 
 
 # ---------------------------
@@ -555,18 +556,11 @@ def show_classic_league_analysis_page():
         chip_df = analyze_chip_usage(team_histories, team_names)
 
         if not chip_df.empty:
-            st.dataframe(
+            render_styled_table(
                 chip_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Team": st.column_config.TextColumn("Team"),
-                    "Wildcard": st.column_config.TextColumn("Wildcard"),
-                    "Free Hit": st.column_config.TextColumn("Free Hit"),
-                    "Bench Boost": st.column_config.TextColumn("Bench Boost"),
-                    "Triple Captain": st.column_config.TextColumn("Triple Captain"),
-                    "Total Used": st.column_config.NumberColumn("Total Used"),
-                }
+                text_align={"Wildcard": "center", "Free Hit": "center",
+                             "Bench Boost": "center", "Triple Captain": "center",
+                             "Total Used": "center"},
             )
 
             st.divider()
@@ -647,10 +641,10 @@ def show_classic_league_analysis_page():
             display_latest = latest_df[["Team", "Total_Points", "Points_Behind"]].copy()
             display_latest.columns = ["Team", "Total Points", "Behind Leader"]
 
-            st.dataframe(
+            render_styled_table(
                 display_latest,
-                use_container_width=True,
-                hide_index=True
+                col_formats={"Total Points": "{:,.0f}", "Behind Leader": "{:,.0f}"},
+                negative_color_cols=["Behind Leader"],
             )
 
             st.divider()
@@ -670,17 +664,11 @@ def show_classic_league_analysis_page():
         value_df = analyze_team_values(team_histories, team_names)
 
         if not value_df.empty:
-            st.dataframe(
+            render_styled_table(
                 value_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Team": st.column_config.TextColumn("Team"),
-                    "Squad Value": st.column_config.NumberColumn("Squad Value", format="%.1f"),
-                    "Bank": st.column_config.NumberColumn("Bank", format="%.1f"),
-                    "Total Value": st.column_config.NumberColumn("Total", format="%.1f"),
-                    "Value Gain": st.column_config.NumberColumn("Gain", format="+%.1f", help="Value gained since GW1"),
-                }
+                col_formats={"Squad Value": "£{:.1f}m", "Bank": "£{:.1f}m",
+                              "Total Value": "£{:.1f}m", "Value Gain": "{:+.1f}"},
+                positive_color_cols=["Value Gain"],
             )
 
             st.divider()
@@ -700,19 +688,14 @@ def show_classic_league_analysis_page():
         perf_df = analyze_gameweek_performance(team_histories, team_names)
 
         if not perf_df.empty:
-            st.dataframe(
-                perf_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Team": st.column_config.TextColumn("Team"),
-                    "Games": st.column_config.NumberColumn("GP"),
-                    "Total_Points": st.column_config.NumberColumn("Total"),
-                    "Avg_Points": st.column_config.NumberColumn("Avg/GW"),
-                    "Best_GW": st.column_config.NumberColumn("Best"),
-                    "Worst_GW": st.column_config.NumberColumn("Worst"),
-                    "Std_Dev": st.column_config.NumberColumn("Std Dev", help="Lower = more consistent"),
-                }
+            perf_display = perf_df.rename(columns={
+                "Games": "GP", "Total_Points": "Total", "Avg_Points": "Avg/GW",
+                "Best_GW": "Best", "Worst_GW": "Worst", "Std_Dev": "Std Dev",
+            })
+            render_styled_table(
+                perf_display,
+                col_formats={"Avg/GW": "{:.1f}", "Std Dev": "{:.1f}"},
+                positive_color_cols=["Total", "Avg/GW"],
             )
 
             st.divider()
