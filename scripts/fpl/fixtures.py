@@ -6,6 +6,7 @@ import requests
 import streamlit as st
 from typing import Tuple
 from scripts.common.utils import get_current_gameweek, get_fixture_difficulty_grid, style_fixture_difficulty
+from scripts.common.styled_tables import render_styled_table
 
 # ---------- optional local tz (EST) ----------
 try:
@@ -406,18 +407,10 @@ def show_club_fixtures_section():
     match_tbl["Home FDR"] = pd.to_numeric(match_tbl["Home FDR"], errors="coerce")
     match_tbl["Away FDR"] = pd.to_numeric(match_tbl["Away FDR"], errors="coerce")
 
-    st.dataframe(
+    render_styled_table(
         match_tbl.reset_index(drop=True),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Home FDR": st.column_config.ProgressColumn(
-                "Home FDR", min_value=1.0, max_value=5.0, format="%.1f"
-            ),
-            "Away FDR": st.column_config.ProgressColumn(
-                "Away FDR", min_value=1.0, max_value=5.0, format="%.1f"
-            ),
-        },
+        col_formats={"Home FDR": "{:.1f}", "Away FDR": "{:.1f}"},
+        negative_color_cols=["Home FDR", "Away FDR"],
     )
 
     # ---- Text Fixtures Table (MIDDLE) ----

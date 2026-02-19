@@ -2,6 +2,7 @@
 import requests
 import pandas as pd
 import streamlit as st
+from scripts.common.styled_tables import render_styled_table
 
 # FPL element_type -> position letter
 _POS_LETTER = {1:"G", 2:"D", 3:"M", 4:"F"}
@@ -93,7 +94,8 @@ def show_injuries_page():
     show = show[["Player","Web_Name","Team","Position","PlayPct","StatusBucket","News","News_Added"]].copy()
     show["PlayPct"] = show["PlayPct"].round(0).astype("Int64")
 
-    st.dataframe(show, use_container_width=True)
-
-    # Tip: color by PlayPct using st.data_editor (optional)
-    st.caption("Tip: Use st.data_editor with a progress column if you want in-cell color bars.")
+    render_styled_table(
+        show,
+        positive_color_cols=["PlayPct"],
+        max_height=500,
+    )
