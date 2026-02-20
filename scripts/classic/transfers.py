@@ -417,19 +417,32 @@ def show_classic_transfers_page():
     entry_history = picks_data.get("entry_history", {})
 
     # Display bank and value
+    def _stat_card(label: str, value: str, accent: str = "#00ff87") -> str:
+        return (
+            f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
+            f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);text-align:center;">'
+            f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+            f'letter-spacing:0.5px;margin-bottom:6px;">{label}</div>'
+            f'<div style="color:{accent};font-size:22px;font-weight:700;">{value}</div>'
+            f'</div>'
+        )
+
+    bank = entry_history.get("bank", 0)
+    squad_value = entry_history.get("value", 0)
+    transfers_made = entry_history.get("event_transfers", 0)
+    transfer_cost = entry_history.get("event_transfers_cost", 0)
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        bank = entry_history.get("bank", 0)
-        st.metric("Bank", _format_money(bank))
+        st.markdown(_stat_card("Bank", _format_money(bank)), unsafe_allow_html=True)
     with col2:
-        squad_value = entry_history.get("value", 0)
-        st.metric("Squad Value", _format_money(squad_value))
+        st.markdown(_stat_card("Squad Value", _format_money(squad_value)), unsafe_allow_html=True)
     with col3:
-        transfers_made = entry_history.get("event_transfers", 0)
-        st.metric("Transfers Made", transfers_made)
+        st.markdown(_stat_card("Transfers Made", str(transfers_made)), unsafe_allow_html=True)
     with col4:
-        transfer_cost = entry_history.get("event_transfers_cost", 0)
-        st.metric("Transfer Cost", f"-{transfer_cost} pts" if transfer_cost else "0 pts")
+        cost_text = f"-{transfer_cost} pts" if transfer_cost else "0 pts"
+        cost_color = "#f87171" if transfer_cost else "#00ff87"
+        st.markdown(_stat_card("Transfer Cost", cost_text, accent=cost_color), unsafe_allow_html=True)
 
     st.markdown("---")
 

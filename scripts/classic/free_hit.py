@@ -495,17 +495,29 @@ def show_free_hit_page():
         total_cost = starter_cost + bench_cost
 
         # Summary metrics
+        def _score_card(label: str, value: str, accent: str = "#00ff87") -> str:
+            return (
+                f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
+                f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);text-align:center;">'
+                f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+                f'letter-spacing:0.5px;margin-bottom:6px;">{label}</div>'
+                f'<div style="color:{accent};font-size:22px;font-weight:700;">{value}</div>'
+                f'</div>'
+            )
+
         st.markdown("### Projected Score")
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            st.metric("Starting XI Points", f"{starter_points:.1f}")
+            st.markdown(_score_card("Starting XI Points", f"{starter_points:.1f}"), unsafe_allow_html=True)
         with col2:
-            st.metric("With Captain Bonus", f"{total_with_captain:.1f}")
+            st.markdown(_score_card("With Captain Bonus", f"{total_with_captain:.1f}"), unsafe_allow_html=True)
         with col3:
-            st.metric("Total Cost", _format_money(total_cost))
+            st.markdown(_score_card("Total Cost", _format_money(total_cost), accent="#e0e0e0"), unsafe_allow_html=True)
         with col4:
-            st.metric("Remaining Budget", _format_money(budget - total_cost))
+            remaining = budget - total_cost
+            budget_color = "#00ff87" if remaining >= 0 else "#f87171"
+            st.markdown(_score_card("Remaining Budget", _format_money(remaining), accent=budget_color), unsafe_allow_html=True)
 
         st.markdown("---")
 
