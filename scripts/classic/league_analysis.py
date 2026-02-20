@@ -25,6 +25,29 @@ from scripts.common.utils import (
 )
 from scripts.common.styled_tables import render_styled_table
 
+_DARK_CHART_LAYOUT = dict(
+    paper_bgcolor="#1a1a2e",
+    plot_bgcolor="#1a1a2e",
+    font=dict(color="#ffffff", size=14),
+    title=dict(font=dict(size=20, color="#ffffff"), x=0.5, xanchor="center"),
+    xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+    yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
+)
+
+
+def _stat_card(label: str, value: str, detail: str = "", accent: str = "#00ff87") -> str:
+    detail_html = f'<div style="color:#9ca3af;font-size:12px;margin-top:2px;">{detail}</div>' if detail else ""
+    return (
+        f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
+        f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);text-align:center;">'
+        f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+        f'letter-spacing:0.5px;margin-bottom:6px;">{label}</div>'
+        f'<div style="color:{accent};font-size:22px;font-weight:700;">{value}</div>'
+        f'{detail_html}'
+        f'</div>'
+    )
+
 
 # ---------------------------
 # DATA FETCHING
@@ -162,11 +185,12 @@ def plot_chip_timing(team_histories: Dict[int, dict], team_names: Dict[int, str]
 
     fig.update_traces(marker=dict(size=15))
     fig.update_layout(
+        **_DARK_CHART_LAYOUT,
         xaxis_title="Gameweek",
-        yaxis_title="",
         legend_title="Chip",
-        height=max(400, len(df["Team"].unique()) * 30)
+        height=max(400, len(df["Team"].unique()) * 30),
     )
+    fig.update_yaxes(title="")
 
     return fig
 
@@ -233,11 +257,10 @@ def plot_rank_progression(rank_df: pd.DataFrame) -> Optional[go.Figure]:
     )
 
     fig.update_layout(
-        yaxis=dict(autorange="reversed"),
-        yaxis_title="Overall Rank (lower = better)",
+        **_DARK_CHART_LAYOUT,
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
     )
+    fig.update_yaxes(autorange="reversed", title="Overall Rank (lower = better)")
 
     return fig
 
@@ -296,10 +319,10 @@ def plot_points_behind_leader(points_df: pd.DataFrame) -> Optional[go.Figure]:
     )
 
     fig.update_layout(
-        yaxis_title="Points Behind Leader",
+        **_DARK_CHART_LAYOUT,
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
     )
+    fig.update_yaxes(title="Points Behind Leader")
 
     return fig
 
@@ -359,13 +382,13 @@ def plot_value_comparison(value_df: pd.DataFrame) -> Optional[go.Figure]:
     ))
 
     fig.update_layout(
+        **_DARK_CHART_LAYOUT,
         title="Team Value Breakdown",
         barmode="stack",
-        xaxis_title="",
-        yaxis_title="Value (millions)",
         xaxis_tickangle=-45,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
+    fig.update_xaxes(title="")
+    fig.update_yaxes(title="Value (millions)")
 
     return fig
 
@@ -439,10 +462,11 @@ def plot_scoring_distribution(weekly_scores: pd.DataFrame) -> Optional[go.Figure
     )
 
     fig.update_layout(
+        **_DARK_CHART_LAYOUT,
         showlegend=False,
         xaxis_tickangle=-45,
-        yaxis_title="Gameweek Points"
     )
+    fig.update_yaxes(title="Gameweek Points")
 
     return fig
 
@@ -596,10 +620,10 @@ def show_classic_league_analysis_page():
                     for _, row in top_movers.iterrows():
                         change = row["Rank_Change"]
                         arrow = "+" if change > 0 else ""
-                        st.metric(
-                            row["Team"],
-                            f"#{row['Current_Rank']:,}",
-                            f"{arrow}{change:,} places"
+                        st.markdown(
+                            _stat_card(row["Team"], f"#{row['Current_Rank']:,}",
+                                       detail=f"{arrow}{change:,} places"),
+                            unsafe_allow_html=True,
                         )
 
                 with col2:
@@ -608,11 +632,10 @@ def show_classic_league_analysis_page():
                     for _, row in bottom_movers.iterrows():
                         change = row["Rank_Change"]
                         arrow = "+" if change > 0 else ""
-                        st.metric(
-                            row["Team"],
-                            f"#{row['Current_Rank']:,}",
-                            f"{arrow}{change:,} places",
-                            delta_color="inverse"
+                        st.markdown(
+                            _stat_card(row["Team"], f"#{row['Current_Rank']:,}",
+                                       detail=f"{arrow}{change:,} places", accent="#f87171"),
+                            unsafe_allow_html=True,
                         )
 
             st.divider()
@@ -848,17 +871,17 @@ def show_classic_league_analysis_page():
                     x="Team",
                     y="Points",
                     color="Position",
-                    title="Points Distribution by Position",
+                    title="Points by Position (Team Breakdown)",
                     barmode="stack",
                     color_discrete_map=POSITION_COLORS,
                     category_orders={"Position": pos_cols}
                 )
                 fig_bar.update_layout(
-                    xaxis_title="",
-                    yaxis_title="Total Points",
+                    **_DARK_CHART_LAYOUT,
                     xaxis_tickangle=-45,
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
+                fig_bar.update_xaxes(title="")
+                fig_bar.update_yaxes(title="Total Points")
                 st.plotly_chart(fig_bar, use_container_width=True)
 
                 # League-wide pie chart
@@ -877,4 +900,9 @@ def show_classic_league_analysis_page():
                     color_discrete_map=POSITION_COLORS,
                 )
                 fig_pie.update_traces(textinfo="percent+label")
+                fig_pie.update_layout(
+                    paper_bgcolor="#1a1a2e",
+                    font=dict(color="#ffffff", size=14),
+                    title=dict(font=dict(size=20, color="#ffffff"), x=0.5, xanchor="center"),
+                )
                 st.plotly_chart(fig_pie, use_container_width=True)

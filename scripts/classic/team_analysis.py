@@ -151,60 +151,30 @@ def _style_rank_change(val):
     return ""
 
 
+_DARK_CHART_LAYOUT = dict(
+    paper_bgcolor="#1a1a2e",
+    plot_bgcolor="#1a1a2e",
+    font=dict(color="#ffffff", size=14),
+    title=dict(font=dict(size=20, color="#ffffff"), x=0.5, xanchor="center"),
+    xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+    yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
+)
+
+
+def _stat_card(label: str, value: str, accent: str = "#00ff87") -> str:
+    return (
+        f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
+        f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);text-align:center;">'
+        f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+        f'letter-spacing:0.5px;margin-bottom:6px;">{label}</div>'
+        f'<div style="color:{accent};font-size:22px;font-weight:700;">{value}</div>'
+        f'</div>'
+    )
+
+
 def show_classic_team_analysis_page():
     """Display Classic FPL My Team page with squad, projections, and metrics."""
-
-    # Custom CSS for better styling
-    st.markdown("""
-    <style>
-    .team-header {
-        background: linear-gradient(135deg, #37003c 0%, #00ff87 100%);
-        padding: 20px;
-        border-radius: 10px;
-        margin-bottom: 20px;
-    }
-    .metric-card {
-        background-color: #f8f9fa;
-        border-radius: 8px;
-        padding: 15px;
-        text-align: center;
-        border-left: 4px solid #37003c;
-    }
-    .starting-xi-header {
-        background-color: #37003c;
-        color: white;
-        padding: 10px 15px;
-        border-radius: 8px 8px 0 0;
-        margin-top: 20px;
-    }
-    .bench-header {
-        background-color: #6c757d;
-        color: white;
-        padding: 10px 15px;
-        border-radius: 8px 8px 0 0;
-        margin-top: 20px;
-    }
-    .captain-badge {
-        background-color: #ffd700;
-        color: #000;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-weight: bold;
-        font-size: 0.8em;
-    }
-    .vice-captain-badge {
-        background-color: #c0c0c0;
-        color: #000;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-weight: bold;
-        font-size: 0.8em;
-    }
-    .trend-up { color: #00c853; font-weight: bold; }
-    .trend-down { color: #ff5252; font-weight: bold; }
-    .trend-neutral { color: #757575; }
-    </style>
-    """, unsafe_allow_html=True)
 
     st.title("My Classic FPL Team")
 
@@ -242,9 +212,9 @@ def show_classic_team_analysis_page():
         overall_rank = entry.get("summary_overall_rank")
         total_points = entry.get("summary_overall_points")
         if overall_rank:
-            st.metric("Overall Rank", f"{overall_rank:,}")
+            st.markdown(_stat_card("Overall Rank", f"{overall_rank:,}", accent="#e0e0e0"), unsafe_allow_html=True)
         if total_points:
-            st.metric("Total Points", f"{total_points:,}")
+            st.markdown(_stat_card("Total Points", f"{total_points:,}"), unsafe_allow_html=True)
 
     st.markdown("---")
 
@@ -292,23 +262,20 @@ def show_classic_team_analysis_page():
 
     # GW Metrics in styled cards
     st.markdown("#### Gameweek Performance")
+    gw_points = entry_history.get("points", "N/A")
+    gw_rank = entry_history.get("rank")
+    squad_value = entry_history.get("value")
+    bank = entry_history.get("bank")
+
     col1, col2, col3, col4 = st.columns(4)
-
     with col1:
-        gw_points = entry_history.get("points", "N/A")
-        st.metric("GW Points", gw_points)
-
+        st.markdown(_stat_card("GW Points", str(gw_points)), unsafe_allow_html=True)
     with col2:
-        gw_rank = entry_history.get("rank")
-        st.metric("GW Rank", f"{gw_rank:,}" if gw_rank else "N/A")
-
+        st.markdown(_stat_card("GW Rank", f"{gw_rank:,}" if gw_rank else "N/A", accent="#e0e0e0"), unsafe_allow_html=True)
     with col3:
-        squad_value = entry_history.get("value")
-        st.metric("Squad Value", _format_money(squad_value))
-
+        st.markdown(_stat_card("Squad Value", _format_money(squad_value), accent="#e0e0e0"), unsafe_allow_html=True)
     with col4:
-        bank = entry_history.get("bank")
-        st.metric("Bank", _format_money(bank))
+        st.markdown(_stat_card("Bank", _format_money(bank)), unsafe_allow_html=True)
 
     st.markdown("---")
 
@@ -352,11 +319,11 @@ def show_classic_team_analysis_page():
             tab1, tab2, tab3, tab4 = st.tabs(["GW Points", "Total Points", "Rank", "Value"])
 
             with tab1:
-                st.markdown("**Gameweek Points vs Average**")
-                points_df = trend_df.set_index("GW")[["Your Points", "Average Points"]].copy()
-                st.line_chart(points_df)
+                fig = px.line(trend_df, x="GW", y=["Your Points", "Average Points"],
+                              markers=True, title="Gameweek Points vs Average")
+                fig.update_layout(**_DARK_CHART_LAYOUT)
+                st.plotly_chart(fig, use_container_width=True)
 
-                # Show points above/below average
                 trend_df["vs Avg"] = trend_df["Your Points"] - trend_df["Average Points"]
                 total_vs_avg = trend_df["vs Avg"].sum()
                 if total_vs_avg > 0:
@@ -367,11 +334,11 @@ def show_classic_team_analysis_page():
                     st.info("Exactly average this season")
 
             with tab2:
-                st.markdown("**Cumulative Total Points vs Average**")
-                total_df = trend_df.set_index("GW")[["Your Total", "Average Total"]].copy()
-                st.line_chart(total_df)
+                fig = px.line(trend_df, x="GW", y=["Your Total", "Average Total"],
+                              markers=True, title="Cumulative Total Points vs Average")
+                fig.update_layout(**_DARK_CHART_LAYOUT)
+                st.plotly_chart(fig, use_container_width=True)
 
-                # Show current difference
                 latest = trend_df.iloc[-1]
                 diff = latest["Your Total"] - latest["Average Total"]
                 if diff > 0:
@@ -380,15 +347,17 @@ def show_classic_team_analysis_page():
                     st.error(f"**{abs(diff):.0f}** points behind average manager")
 
             with tab3:
-                st.markdown("**Overall Rank Progression**")
-                rank_df = trend_df.set_index("GW")[["Overall Rank"]].copy()
-                st.line_chart(rank_df)
-                st.caption("Lower rank = better position")
+                fig = px.line(trend_df, x="GW", y="Overall Rank",
+                              markers=True, title="Overall Rank Progression")
+                fig.update_layout(**_DARK_CHART_LAYOUT)
+                fig.update_yaxes(autorange="reversed", title="Overall Rank (lower = better)")
+                st.plotly_chart(fig, use_container_width=True)
 
             with tab4:
-                st.markdown("**Squad Value & Bank**")
-                value_df = trend_df.set_index("GW")[["Value", "Bank"]].copy()
-                st.line_chart(value_df)
+                fig = px.line(trend_df, x="GW", y=["Value", "Bank"],
+                              markers=True, title="Squad Value & Bank")
+                fig.update_layout(**_DARK_CHART_LAYOUT)
+                st.plotly_chart(fig, use_container_width=True)
 
             # Summary stats
             st.markdown("#### Season Summary")
@@ -400,19 +369,20 @@ def show_classic_team_analysis_page():
                     if points_col.notna().any():
                         best_idx = points_col.idxmax()
                         best_gw = trend_df.loc[best_idx]
-                        st.metric("Best GW", f"GW{int(best_gw['GW'])} ({int(best_gw['Your Points'])} pts)")
+                        st.markdown(_stat_card("Best GW", f"GW{int(best_gw['GW'])} ({int(best_gw['Your Points'])} pts)"), unsafe_allow_html=True)
                     else:
-                        st.metric("Best GW", "N/A")
+                        st.markdown(_stat_card("Best GW", "N/A", accent="#9ca3af"), unsafe_allow_html=True)
                 except Exception:
-                    st.metric("Best GW", "N/A")
+                    st.markdown(_stat_card("Best GW", "N/A", accent="#9ca3af"), unsafe_allow_html=True)
 
             with sum_col2:
                 total_transfers = trend_df["Transfers"].sum()
-                st.metric("Total Transfers", int(total_transfers))
+                st.markdown(_stat_card("Total Transfers", str(int(total_transfers)), accent="#e0e0e0"), unsafe_allow_html=True)
 
             with sum_col3:
                 total_hits = trend_df["Hits"].sum()
-                st.metric("Total Hits", f"-{int(total_hits)} pts")
+                hits_color = "#f87171" if total_hits > 0 else "#00ff87"
+                st.markdown(_stat_card("Total Hits", f"-{int(total_hits)} pts", accent=hits_color), unsafe_allow_html=True)
 
             with sum_col4:
                 if len(trend_df) >= 2:
@@ -421,11 +391,11 @@ def show_classic_team_analysis_page():
                     if start_rank and end_rank:
                         rank_change = int(start_rank - end_rank)
                         if rank_change > 0:
-                            st.metric("Rank Change", f"↑ {rank_change:,}", delta=f"{rank_change:,}")
+                            st.markdown(_stat_card("Rank Change", f"↑ {rank_change:,}"), unsafe_allow_html=True)
                         elif rank_change < 0:
-                            st.metric("Rank Change", f"↓ {abs(rank_change):,}", delta=f"{rank_change:,}")
+                            st.markdown(_stat_card("Rank Change", f"↓ {abs(rank_change):,}", accent="#f87171"), unsafe_allow_html=True)
                         else:
-                            st.metric("Rank Change", "→ 0")
+                            st.markdown(_stat_card("Rank Change", "→ 0", accent="#9ca3af"), unsafe_allow_html=True)
 
     st.markdown("---")
 
@@ -472,28 +442,22 @@ def show_classic_team_analysis_page():
 
         with tab_rank:
             fig_rank = px.line(
-                past_df,
-                x="Season",
-                y="Rank",
-                markers=True,
-                title="Overall Rank by Season",
+                past_df, x="Season", y="Rank",
+                markers=True, title="Overall Rank by Season",
             )
+            fig_rank.update_layout(**_DARK_CHART_LAYOUT, height=400)
             fig_rank.update_yaxes(autorange="reversed", title="Overall Rank")
             fig_rank.update_xaxes(title="Season")
-            fig_rank.update_layout(height=400)
             st.plotly_chart(fig_rank, use_container_width=True)
 
         with tab_points:
             fig_pts = px.line(
-                past_df,
-                x="Season",
-                y="Points",
-                markers=True,
-                title="Total Points by Season",
+                past_df, x="Season", y="Points",
+                markers=True, title="Total Points by Season",
             )
+            fig_pts.update_layout(**_DARK_CHART_LAYOUT, height=400)
             fig_pts.update_xaxes(title="Season")
             fig_pts.update_yaxes(title="Total Points")
-            fig_pts.update_layout(height=400)
             st.plotly_chart(fig_pts, use_container_width=True)
 
         # Data table
@@ -628,6 +592,8 @@ def show_classic_team_analysis_page():
                     showlegend=False,
                     margin=dict(t=10, b=10, l=10, r=10),
                     height=300,
+                    paper_bgcolor="#1a1a2e",
+                    font=dict(color="#ffffff"),
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -635,7 +601,7 @@ def show_classic_team_analysis_page():
                 for pos in pos_cols:
                     pts = team_pos[pos]
                     pct = f"{pts / total * 100:.1f}%" if total > 0 else "0%"
-                    st.metric(pos, f"{pts} pts ({pct})")
+                    st.markdown(_stat_card(pos, f"{pts} pts ({pct})", accent=POSITION_COLORS.get(pos, "#00ff87")), unsafe_allow_html=True)
 
             # Player detail table
             if player_list:
