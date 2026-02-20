@@ -212,6 +212,17 @@ def render_rotowire_projections():
     display_gw = data_gw if data_gw else config.CURRENT_GAMEWEEK
     st.markdown(f"#### GW{display_gw} Player Projections")
 
+    # Sort controls
+    sortable_cols = [c for c in result.columns if c != 'Player']
+    sort_col1, sort_col2 = st.columns([2, 1])
+    with sort_col1:
+        default_sort = 'Points' if 'Points' in sortable_cols else sortable_cols[0]
+        sort_by = st.selectbox("Sort by", sortable_cols, index=sortable_cols.index(default_sort), key="rw_sort_col")
+    with sort_col2:
+        sort_order = st.selectbox("Order", ["Descending", "Ascending"], key="rw_sort_order")
+
+    result = result.sort_values(sort_by, ascending=(sort_order == "Ascending"), na_position="last")
+
     # Format numeric columns for display
     display_df = result.copy()
     if 'Points' in display_df.columns:

@@ -23,8 +23,27 @@ def show_draft_helper_page():
     - Persists selections with st.session_state
     - Filters to show only available (default) or all, with search and position filter
     """
-    st.title("🧠 Draft Helper — Season Rankings")
-    st.caption("Mark draftees as **Taken** or **Mine** to keep your live board clean during the draft.")
+    # Dark theme CSS for Draft Helper
+    st.markdown("""
+    <style>
+    /* Draft Helper dark theme */
+    .draft-title {
+        background: linear-gradient(135deg, #37003c, #5a0060);
+        padding: 16px 20px; border-radius: 10px; margin-bottom: 0.5rem;
+    }
+    .draft-title h2 { color: #00ff87; margin: 0; font-size: 1.5rem; }
+    .draft-title p { color: rgba(255,255,255,0.8); margin: 4px 0 0 0; font-size: 0.9rem; }
+    .draft-summary {
+        background: #1a1a2e; border: 1px solid #333; border-radius: 8px;
+        padding: 12px 16px; color: #e0e0e0; margin-top: 0.5rem;
+    }
+    .draft-summary .num { color: #00ff87; font-weight: 700; }
+    </style>
+    <div class="draft-title">
+        <h2>🧠 Draft Helper — Season Rankings</h2>
+        <p>Mark draftees as <strong>Taken</strong> or <strong>Mine</strong> to keep your live board clean during the draft.</p>
+    </div>
+    """, unsafe_allow_html=True)
 
     # Guard: require configured URL
     if not getattr(config, "ROTOWIRE_SEASON_RANKINGS_URL", None):
@@ -101,7 +120,12 @@ def show_draft_helper_page():
     # Display columns (keep it compact & useful)
     display_cols = ["Rank", "Player", "Team", "Position", "Points", "PP/90", "Pos Rank", "Taken", "Mine"]
 
-    st.write("#### Rankings")
+    st.markdown(
+        '<div style="background:linear-gradient(135deg,#37003c,#5a0060);padding:10px 16px;'
+        'border-radius:8px;margin:0.5rem 0;color:#00ff87;font-weight:700;font-size:1.1rem;">'
+        '📋 Rankings</div>',
+        unsafe_allow_html=True,
+    )
     st.caption("Tip: Uncheck **Show only available** if you need to mark players as taken.")
 
     edited = st.data_editor(
@@ -163,4 +187,11 @@ def show_draft_helper_page():
     total_players = len(rankings)
     taken = len(st.session_state.draft_taken_keys)
     available = total_players - taken
-    st.caption(f"**Available:** {available}   •   **Taken:** {taken}   •   **Total:** {total_players}")
+    st.markdown(
+        f'<div class="draft-summary">'
+        f'<span class="num">{available}</span> Available &nbsp;&bull;&nbsp; '
+        f'<span class="num">{taken}</span> Taken &nbsp;&bull;&nbsp; '
+        f'<span class="num">{total_players}</span> Total'
+        f'</div>',
+        unsafe_allow_html=True,
+    )

@@ -134,7 +134,7 @@ def _dashboard_css():
         50% { box-shadow: 0 0 12px rgba(0,255,135,0.6); }
     }
     /* Section headers */
-    .section-header { display: flex; align-items: center; gap: 6px; margin: 0.3rem 0 0.6rem 0; font-size: 1.1rem; font-weight: 700; color: #ffffff; }
+    .section-header { display: flex; align-items: center; gap: 8px; margin: 0.3rem 0 0.6rem 0; font-size: 1.1rem; font-weight: 700; color: #00ff87; background: linear-gradient(135deg, #37003c, #5a0060); padding: 10px 16px; border-radius: 8px; }
     .section-icon { font-size: 1.2rem; }
     /* Fixture cards */
     .fixture-card {
