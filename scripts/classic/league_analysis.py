@@ -819,43 +819,63 @@ def show_classic_league_analysis_page():
                 avg_df_row = pd.DataFrame([avg_row])
                 table_df = pd.concat([display_df, avg_df_row], ignore_index=True)
 
-                # Style: gradient red-white-green based on distance from average
-                def gradient_vs_avg(row):
-                    styles = [""] * len(row)
-                    if row["Team"] == "League Average":
-                        styles = ["font-weight: bold; background-color: #f0f0f0"] * len(row)
-                    else:
-                        for i, col in enumerate(row.index):
-                            if col in pos_cols:
-                                avg_val = avg_row[col]
-                                col_vals = table_df[table_df["Team"] != "League Average"][col]
-                                col_min = col_vals.min()
-                                col_max = col_vals.max()
-                                val = row[col]
-
-                                if val > avg_val and col_max > avg_val:
-                                    t = min((val - avg_val) / (col_max - avg_val), 1.0)
-                                    r = int(255 - t * (255 - 72))
-                                    g = int(255 - t * (255 - 199))
-                                    b = int(255 - t * (255 - 142))
-                                    styles[i] = f"background-color: rgb({r},{g},{b})"
-                                elif val < avg_val and col_min < avg_val:
-                                    t = min((avg_val - val) / (avg_val - col_min), 1.0)
-                                    r = int(255 - t * (255 - 248))
-                                    g = int(255 - t * (255 - 105))
-                                    b = int(255 - t * (255 - 107))
-                                    styles[i] = f"background-color: rgb({r},{g},{b})"
-                    return styles
-
-                styled = table_df.style.apply(gradient_vs_avg, axis=1)
-
+                # Build dark-themed HTML table with green/red text coloring
                 suffix = "%" if view_mode == "Percentage" else " pts"
-                styled = styled.format(
-                    {col: f"{{:.1f}}{suffix}" for col in pos_cols + ["Total"]},
-                    subset=pos_cols + ["Total"]
-                )
 
-                st.dataframe(styled, use_container_width=True, hide_index=True)
+                def _pos_text_color(val, col):
+                    """Green for above avg, red for below avg, grey for average."""
+                    avg_val = avg_row[col]
+                    col_vals = table_df[table_df["Team"] != "League Average"][col]
+                    col_min, col_max = col_vals.min(), col_vals.max()
+                    if val > avg_val and col_max > avg_val:
+                        t = min((val - avg_val) / (col_max - avg_val), 1.0)
+                        r = int(156 + t * (74 - 156))
+                        g = int(163 + t * (222 - 163))
+                        b = int(175 + t * (128 - 175))
+                        return f"rgb({r},{g},{b})"
+                    elif val < avg_val and col_min < avg_val:
+                        t = min((avg_val - val) / (avg_val - col_min), 1.0)
+                        r = int(156 + t * (248 - 156))
+                        g = int(163 + t * (113 - 163))
+                        b = int(175 + t * (113 - 175))
+                        return f"rgb({r},{g},{b})"
+                    return "#9ca3af"
+
+                th_style = ("background:linear-gradient(135deg,#37003c,#5a0060);color:#00ff87;"
+                            "font-weight:600;font-size:13px;padding:10px 12px;border-bottom:2px solid #00ff87;"
+                            "text-align:center;")
+                team_th = th_style.replace("text-align:center", "text-align:left")
+
+                parts = ['<div style="border:1px solid #333;border-radius:10px;overflow:hidden;margin-bottom:1rem;">',
+                          '<table style="width:100%;border-collapse:collapse;font-size:14px;background:#1a1a2e;">',
+                          "<thead><tr>"]
+                for c in table_df.columns:
+                    s = team_th if c == "Team" else th_style
+                    parts.append(f'<th style="{s}">{c}</th>')
+                parts.append("</tr></thead><tbody>")
+
+                for row_idx, (_, row) in enumerate(table_df.iterrows()):
+                    is_avg = row["Team"] == "League Average"
+                    row_bg = "background:rgba(255,255,255,0.03);" if row_idx % 2 == 1 else "background:#1a1a2e;"
+                    if is_avg:
+                        row_bg = "background:#16213e;border-top:2px solid #00ff87;"
+                    parts.append(f'<tr style="{row_bg}">')
+                    for c in table_df.columns:
+                        val = row[c]
+                        if c == "Team":
+                            fw = "font-weight:800;" if is_avg else "font-weight:600;"
+                            color = "#00ff87" if is_avg else "#e0e0e0"
+                            parts.append(f'<td style="padding:8px 12px;color:{color};{fw}border-bottom:1px solid #333;">{val}</td>')
+                        elif c in pos_cols or c == "Total":
+                            txt_color = "#00ff87" if is_avg else _pos_text_color(float(val), c) if c in pos_cols else "#e0e0e0"
+                            fw = "font-weight:700;" if is_avg else "font-weight:600;"
+                            formatted = f"{float(val):.1f}{suffix}"
+                            parts.append(f'<td style="padding:8px 12px;color:{txt_color};{fw}text-align:center;border-bottom:1px solid #333;">{formatted}</td>')
+                        else:
+                            parts.append(f'<td style="padding:8px 12px;color:#e0e0e0;text-align:center;border-bottom:1px solid #333;">{val}</td>')
+                    parts.append("</tr>")
+                parts.append("</tbody></table></div>")
+                st.markdown("".join(parts), unsafe_allow_html=True)
 
                 st.divider()
 
@@ -880,30 +900,39 @@ def show_classic_league_analysis_page():
                 fig_bar.update_layout(
                     **_DARK_CHART_LAYOUT,
                     xaxis_tickangle=-45,
+                    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13),
+                                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    margin=dict(b=80),
                 )
                 fig_bar.update_xaxes(title="")
                 fig_bar.update_yaxes(title="Total Points")
                 st.plotly_chart(fig_bar, use_container_width=True)
 
-                # League-wide pie chart
+                # League-wide pie chart — constrained width with columns
                 league_totals = {col: pos_df[col].sum() for col in pos_cols}
                 pie_df = pd.DataFrame({
                     "Position": list(league_totals.keys()),
                     "Points": list(league_totals.values())
                 })
 
-                fig_pie = px.pie(
-                    pie_df,
-                    values="Points",
-                    names="Position",
-                    title="League-Wide Points Distribution",
-                    color="Position",
-                    color_discrete_map=POSITION_COLORS,
-                )
-                fig_pie.update_traces(textinfo="percent+label")
-                fig_pie.update_layout(
-                    paper_bgcolor="#1a1a2e",
-                    font=dict(color="#ffffff", size=14),
-                    title=dict(font=dict(size=20, color="#ffffff"), x=0.5, xanchor="center"),
-                )
-                st.plotly_chart(fig_pie, use_container_width=True)
+                _, pie_center, _ = st.columns([1, 2, 1])
+                with pie_center:
+                    fig_pie = px.pie(
+                        pie_df,
+                        values="Points",
+                        names="Position",
+                        title="League-Wide Points Distribution",
+                        color="Position",
+                        color_discrete_map=POSITION_COLORS,
+                    )
+                    fig_pie.update_traces(textinfo="percent+label")
+                    fig_pie.update_layout(
+                        paper_bgcolor="#1a1a2e",
+                        font=dict(color="#ffffff", size=14),
+                        title_font=dict(size=20, color="#ffffff"),
+                        title_x=0.5,
+                        title_xanchor="center",
+                        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
+                        height=400,
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
