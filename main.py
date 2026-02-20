@@ -197,13 +197,13 @@ def _dashboard_css():
     .team-badge { color: #9ca3af; font-size: 0.78rem; margin-right: 8px; min-width: 32px; }
     .pts-label { color: #9ca3af; font-size: 0.78rem; margin-left: 8px; }
     /* Injury watchlist */
-    .injury-row { display: flex; align-items: center; padding: 5px 10px; border-radius: 8px; margin-bottom: 4px; border: 1px solid #333; }
-    .injury-out { background: rgba(244,67,54,0.25); border-color: rgba(244,67,54,0.5); }
-    .injury-doubtful { background: rgba(255,152,0,0.25); border-color: rgba(255,152,0,0.5); }
-    .injury-name { flex: 1; font-weight: 700; color: #ffffff; font-size: 0.88rem; }
+    .injury-row { display: flex; align-items: center; padding: 5px 10px; border-radius: 8px; margin-bottom: 4px; border: 1px solid #333; background: #1a1a2e; }
+    .injury-out { border-left: 3px solid #b91c1c; }
+    .injury-doubtful { border-left: 3px solid #b45309; }
+    .injury-name { flex: 1; font-weight: 700; color: #e0e0e0; font-size: 0.88rem; }
     .status-badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 0.72rem; font-weight: 700; }
-    .status-out { background: #f44336; color: white; }
-    .status-doubtful { background: #ff9800; color: white; }
+    .status-out { background: #5f2121; color: #fca5a5; }
+    .status-doubtful { background: #4a3728; color: #fbbf24; }
     .injury-news { color: #9ca3af; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .injury-info { display: flex; flex-direction: column; justify-content: center; flex: 1; }
     .injury-meta { display: flex; align-items: center; gap: 6px; }
