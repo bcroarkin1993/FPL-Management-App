@@ -205,18 +205,27 @@ def show_classic_team_analysis_page():
     manager_first = entry.get("player_first_name", "")
     manager_last = entry.get("player_last_name", "")
     manager_name = f"{manager_first} {manager_last}".strip() or "Unknown Manager"
+    overall_rank = entry.get("summary_overall_rank")
+    total_points = entry.get("summary_overall_points")
 
-    col1, col2 = st.columns([2, 1])
+    def _header_card(team: str, manager: str) -> str:
+        return (
+            f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
+            f'background:linear-gradient(135deg,#37003c 0%,#5a0060 100%);">'
+            f'<div style="color:#00ff87;font-size:22px;font-weight:800;margin-bottom:4px;">{team}</div>'
+            f'<div style="color:rgba(255,255,255,0.8);font-size:14px;">Manager: {manager}</div>'
+            f'</div>'
+        )
+
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown(f"### {team_name}")
-        st.markdown(f"**Manager:** {manager_name}")
+        st.markdown(_header_card(team_name, manager_name), unsafe_allow_html=True)
     with col2:
-        overall_rank = entry.get("summary_overall_rank")
-        total_points = entry.get("summary_overall_points")
-        if overall_rank:
-            st.markdown(_stat_card("Overall Rank", f"{overall_rank:,}", accent="#e0e0e0"), unsafe_allow_html=True)
-        if total_points:
-            st.markdown(_stat_card("Total Points", f"{total_points:,}"), unsafe_allow_html=True)
+        rank_val = f"{overall_rank:,}" if overall_rank else "N/A"
+        st.markdown(_stat_card("Overall Rank", rank_val, accent="#e0e0e0"), unsafe_allow_html=True)
+    with col3:
+        pts_val = f"{total_points:,}" if total_points else "N/A"
+        st.markdown(_stat_card("Total Points", pts_val), unsafe_allow_html=True)
 
     st.markdown("---")
 
