@@ -29,7 +29,9 @@ _DARK_CHART_LAYOUT = dict(
     paper_bgcolor="#1a1a2e",
     plot_bgcolor="#1a1a2e",
     font=dict(color="#ffffff", size=14),
-    title=dict(font=dict(size=20, color="#ffffff"), x=0.5, xanchor="center"),
+    title_font=dict(size=20, color="#ffffff"),
+    title_x=0.5,
+    title_xanchor="center",
     xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
     yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
     legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
@@ -383,7 +385,6 @@ def plot_value_comparison(value_df: pd.DataFrame) -> Optional[go.Figure]:
 
     fig.update_layout(
         **_DARK_CHART_LAYOUT,
-        title="Team Value Breakdown",
         barmode="stack",
         xaxis_tickangle=-45,
     )
