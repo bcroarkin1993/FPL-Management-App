@@ -198,9 +198,9 @@ def _dashboard_css():
     .pts-label { color: #9ca3af; font-size: 0.78rem; margin-left: 8px; }
     /* Injury watchlist */
     .injury-row { display: flex; align-items: center; padding: 5px 10px; border-radius: 8px; margin-bottom: 4px; border: 1px solid #333; }
-    .injury-out { background: rgba(244,67,54,0.12); border-color: rgba(244,67,54,0.3); }
-    .injury-doubtful { background: rgba(255,152,0,0.12); border-color: rgba(255,152,0,0.3); }
-    .injury-name { flex: 1; font-weight: 600; color: #e0e0e0; font-size: 0.88rem; }
+    .injury-out { background: rgba(244,67,54,0.25); border-color: rgba(244,67,54,0.5); }
+    .injury-doubtful { background: rgba(255,152,0,0.25); border-color: rgba(255,152,0,0.5); }
+    .injury-name { flex: 1; font-weight: 700; color: #ffffff; font-size: 0.88rem; }
     .status-badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 0.72rem; font-weight: 700; }
     .status-out { background: #f44336; color: white; }
     .status-doubtful { background: #ff9800; color: white; }

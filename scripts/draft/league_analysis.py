@@ -737,42 +737,51 @@ def show_draft_league_analysis_page():
 
         records = calculate_records(matches_df, weekly_scores)
 
+        def _record_card(title: str, value: str, subtitle: str, detail: str, accent: str = "#00ff87") -> str:
+            return (
+                f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
+                f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);">'
+                f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+                f'letter-spacing:0.5px;margin-bottom:4px;">{title}</div>'
+                f'<div style="color:{accent};font-size:24px;font-weight:800;margin-bottom:4px;">{value}</div>'
+                f'<div style="color:#e0e0e0;font-size:13px;font-weight:600;">{subtitle}</div>'
+                f'<div style="color:#9ca3af;font-size:12px;margin-top:2px;">{detail}</div>'
+                f'</div>'
+            )
+
         if records:
             col1, col2 = st.columns(2)
 
             with col1:
-                st.markdown("**Highest Single GW Score**")
                 r = records["highest_score"]
-                st.metric(
-                    label=f"{r['team']} (GW{r['gameweek']})",
-                    value=f"{r['points']} pts",
-                    delta=f"vs {r['opponent']}"
+                st.markdown(
+                    _record_card("Highest Single GW Score", f"{r['points']} pts",
+                                 f"{r['team']} (GW{r['gameweek']})", f"vs {r['opponent']}"),
+                    unsafe_allow_html=True,
                 )
-
-                st.markdown("**Biggest Win**")
                 r = records["biggest_win"]
-                st.metric(
-                    label=f"{r['winner']} (GW{r['gameweek']})",
-                    value=r["score"],
-                    delta=f"+{r['margin']} margin vs {r['loser']}"
+                st.markdown(
+                    _record_card("Biggest Win", r["score"],
+                                 f"{r['winner']} (GW{r['gameweek']})",
+                                 f"+{r['margin']} margin vs {r['loser']}"),
+                    unsafe_allow_html=True,
                 )
 
             with col2:
-                st.markdown("**Lowest Single GW Score**")
                 r = records["lowest_score"]
-                st.metric(
-                    label=f"{r['team']} (GW{r['gameweek']})",
-                    value=f"{r['points']} pts",
-                    delta=f"vs {r['opponent']}",
-                    delta_color="inverse"
+                st.markdown(
+                    _record_card("Lowest Single GW Score", f"{r['points']} pts",
+                                 f"{r['team']} (GW{r['gameweek']})", f"vs {r['opponent']}",
+                                 accent="#f87171"),
+                    unsafe_allow_html=True,
                 )
-
-                st.markdown("**Closest Match**")
                 r = records["closest_match"]
-                st.metric(
-                    label=f"GW{r['gameweek']}",
-                    value=r["score"],
-                    delta=f"{r['team1']} vs {r['team2']} ({r['margin']} pt margin)"
+                st.markdown(
+                    _record_card("Closest Match", r["score"],
+                                 f"GW{r['gameweek']}",
+                                 f"{r['team1']} vs {r['team2']} ({r['margin']} pt margin)",
+                                 accent="#facc15"),
+                    unsafe_allow_html=True,
                 )
 
         st.divider()

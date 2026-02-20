@@ -330,15 +330,28 @@ def display_advanced_stats_table(player_df: pd.DataFrame):
     # Filter by minimum minutes
     filtered_df = filtered_df[filtered_df['minutes'] >= min_minutes]
 
-    # Sort by total points by default
-    filtered_df = filtered_df.sort_values('total_points', ascending=False)
-
     if filtered_df.empty:
         st.info("No players match the current filters.")
         return
 
     # Build display table and render with styled dark theme
     display_df, col_formats, positive_cols, negative_cols = build_stats_display(filtered_df, selected_columns)
+
+    # Sort controls
+    sortable_cols = [c for c in display_df.columns if c not in ("Player", "Team", "Pos")]
+    sort_col1, sort_col2 = st.columns([2, 1])
+    with sort_col1:
+        default_sort = "Pts" if "Pts" in sortable_cols else sortable_cols[0] if sortable_cols else None
+        if default_sort:
+            sort_by = st.selectbox("Sort by", sortable_cols, index=sortable_cols.index(default_sort), key="adv_sort_col")
+        else:
+            sort_by = None
+    with sort_col2:
+        sort_order = st.selectbox("Order", ["Descending", "Ascending"], key="adv_sort_order")
+
+    if sort_by:
+        display_df[sort_by] = pd.to_numeric(display_df[sort_by], errors='coerce')
+        display_df = display_df.sort_values(sort_by, ascending=(sort_order == "Ascending"), na_position="last")
 
     render_styled_table(
         display_df,
