@@ -19,6 +19,17 @@ from scripts.common.team_analysis_helpers import render_season_highlights
 from scripts.common.styled_tables import render_styled_table
 
 
+def _stat_card(label: str, value: str, accent: str = "#00ff87") -> str:
+    return (
+        f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
+        f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);text-align:center;">'
+        f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+        f'letter-spacing:0.5px;margin-bottom:6px;">{label}</div>'
+        f'<div style="color:{accent};font-size:22px;font-weight:700;">{value}</div>'
+        f'</div>'
+    )
+
+
 def show_team_projections(team_id, fpl_player_projections, gameweek):
     # Get the team composition for the team in the current gameweek
     team_composition_df = get_team_composition_for_gameweek(config.FPL_DRAFT_LEAGUE_ID, team_id, gameweek)
@@ -157,19 +168,17 @@ def show_team_stats_page():
         total_pa = sum(r["points_against"] for r in h2h_records)
 
         # Display overall record
-        st.markdown(f"**Overall Record: {total_wins}-{total_draws}-{total_losses}**")
-
         col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
-            st.metric("Wins", total_wins)
+            st.markdown(_stat_card("Wins", str(total_wins)), unsafe_allow_html=True)
         with col2:
-            st.metric("Draws", total_draws)
+            st.markdown(_stat_card("Draws", str(total_draws), accent="#9ca3af"), unsafe_allow_html=True)
         with col3:
-            st.metric("Losses", total_losses)
+            st.markdown(_stat_card("Losses", str(total_losses), accent="#f87171"), unsafe_allow_html=True)
         with col4:
-            st.metric("Points For", total_pf)
+            st.markdown(_stat_card("Points For", str(total_pf)), unsafe_allow_html=True)
         with col5:
-            st.metric("Points Against", total_pa)
+            st.markdown(_stat_card("Points Against", str(total_pa), accent="#f87171"), unsafe_allow_html=True)
 
         st.markdown("")  # Spacer
 
@@ -240,6 +249,8 @@ def show_team_stats_page():
                 showlegend=False,
                 margin=dict(t=10, b=10, l=10, r=10),
                 height=300,
+                paper_bgcolor="#1a1a2e",
+                font=dict(color="#ffffff"),
             )
             st.plotly_chart(fig, use_container_width=True)
 
@@ -247,7 +258,7 @@ def show_team_stats_page():
             for pos in pos_cols:
                 pts = int(row[pos])
                 pct = f"{pts / total * 100:.1f}%" if total > 0 else "0%"
-                st.metric(pos, f"{pts} pts ({pct})")
+                st.markdown(_stat_card(pos, f"{pts} pts ({pct})", accent=POSITION_COLORS.get(pos, "#00ff87")), unsafe_allow_html=True)
 
         # Player detail table
         if team_players:

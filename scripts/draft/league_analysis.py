@@ -919,17 +919,17 @@ def show_draft_league_analysis_page():
                 x="Team",
                 y="Points",
                 color="Position",
-                title="Points Distribution by Position",
+                title="Points by Position (Team Breakdown)",
                 barmode="stack",
                 color_discrete_map=POSITION_COLORS,
                 category_orders={"Position": pos_cols}
             )
             fig_bar.update_layout(
-                xaxis_title="",
-                yaxis_title="Total Points",
+                **_DARK_CHART_LAYOUT,
                 xaxis_tickangle=-45,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
+            fig_bar.update_xaxes(title="")
+            fig_bar.update_yaxes(title="Total Points")
             st.plotly_chart(fig_bar, use_container_width=True)
 
             # League-wide pie chart
@@ -948,4 +948,11 @@ def show_draft_league_analysis_page():
                 color_discrete_map=POSITION_COLORS,
             )
             fig_pie.update_traces(textinfo="percent+label")
+            fig_pie.update_layout(
+                paper_bgcolor="#1a1a2e",
+                font=dict(color="#ffffff", size=14),
+                title_font=dict(size=20, color="#ffffff"),
+                title_x=0.5,
+                title_xanchor="center",
+            )
             st.plotly_chart(fig_pie, use_container_width=True)
