@@ -879,7 +879,7 @@ def show_classic_league_analysis_page():
 
                 st.divider()
 
-                # Stacked bar chart
+                # Charts side-by-side: bar chart + pie chart
                 bar_df = pos_df.melt(
                     id_vars=["Team"],
                     value_vars=pos_cols,
@@ -887,54 +887,46 @@ def show_classic_league_analysis_page():
                     value_name="Points"
                 )
 
-                fig_bar = px.bar(
-                    bar_df,
-                    x="Team",
-                    y="Points",
-                    color="Position",
-                    title="Points by Position (Team Breakdown)",
-                    barmode="stack",
-                    color_discrete_map=POSITION_COLORS,
-                    category_orders={"Position": pos_cols}
-                )
-                fig_bar.update_layout(
-                    **_DARK_CHART_LAYOUT,
-                    xaxis_tickangle=-45,
-                    margin=dict(b=80),
-                )
-                fig_bar.update_layout(
-                    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13),
-                                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                )
-                fig_bar.update_xaxes(title="")
-                fig_bar.update_yaxes(title="Total Points")
-                st.plotly_chart(fig_bar, use_container_width=True)
-
-                # League-wide pie chart — constrained width with columns
                 league_totals = {col: pos_df[col].sum() for col in pos_cols}
                 pie_df = pd.DataFrame({
                     "Position": list(league_totals.keys()),
                     "Points": list(league_totals.values())
                 })
 
-                _, pie_center, _ = st.columns([1, 2, 1])
-                with pie_center:
+                col_bar, col_pie = st.columns([3, 2])
+
+                with col_bar:
+                    fig_bar = px.bar(
+                        bar_df, x="Team", y="Points", color="Position",
+                        title="Points by Position (Team Breakdown)",
+                        barmode="stack", color_discrete_map=POSITION_COLORS,
+                        category_orders={"Position": pos_cols}
+                    )
+                    fig_bar.update_layout(
+                        **_DARK_CHART_LAYOUT,
+                        xaxis_tickangle=-45,
+                        margin=dict(b=80),
+                        showlegend=False,
+                        height=450,
+                    )
+                    fig_bar.update_xaxes(title="")
+                    fig_bar.update_yaxes(title="Total Points")
+                    st.plotly_chart(fig_bar, use_container_width=True)
+
+                with col_pie:
                     fig_pie = px.pie(
-                        pie_df,
-                        values="Points",
-                        names="Position",
-                        title="League-Wide Points Distribution",
-                        color="Position",
-                        color_discrete_map=POSITION_COLORS,
+                        pie_df, values="Points", names="Position",
+                        title="League-Wide Distribution",
+                        color="Position", color_discrete_map=POSITION_COLORS,
                     )
                     fig_pie.update_traces(textinfo="percent+label")
                     fig_pie.update_layout(
                         paper_bgcolor="#1a1a2e",
                         font=dict(color="#ffffff", size=14),
-                        title_font=dict(size=20, color="#ffffff"),
-                        title_x=0.5,
-                        title_xanchor="center",
+                        title_font=dict(size=18, color="#ffffff"),
+                        title_x=0.5, title_xanchor="center",
                         legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
-                        height=400,
+                        height=450,
+                        margin=dict(t=60, b=20),
                     )
                     st.plotly_chart(fig_pie, use_container_width=True)
