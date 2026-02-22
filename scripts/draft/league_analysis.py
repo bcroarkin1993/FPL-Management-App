@@ -953,8 +953,11 @@ def show_draft_league_analysis_page():
                     **_DARK_CHART_LAYOUT,
                     xaxis_tickangle=-45,
                     margin=dict(b=80),
-                    showlegend=False,
                     height=450,
+                )
+                fig_bar.update_layout(
+                    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13),
+                                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 )
                 fig_bar.update_xaxes(title="")
                 fig_bar.update_yaxes(title="Total Points")
@@ -972,8 +975,8 @@ def show_draft_league_analysis_page():
                     font=dict(color="#ffffff", size=14),
                     title_font=dict(size=18, color="#ffffff"),
                     title_x=0.5, title_xanchor="center",
-                    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
+                    showlegend=False,
                     height=450,
-                    margin=dict(t=60, b=20),
+                    margin=dict(t=60, b=20, l=20, r=20),
                 )
                 st.plotly_chart(fig_pie, use_container_width=True)
