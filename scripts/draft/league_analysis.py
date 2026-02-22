@@ -947,9 +947,11 @@ def show_draft_league_analysis_page():
             fig_bar.update_layout(
                 **_DARK_CHART_LAYOUT,
                 xaxis_tickangle=-45,
+                margin=dict(b=80),
+            )
+            fig_bar.update_layout(
                 legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13),
                             orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                margin=dict(b=80),
             )
             fig_bar.update_xaxes(title="")
             fig_bar.update_yaxes(title="Total Points")
