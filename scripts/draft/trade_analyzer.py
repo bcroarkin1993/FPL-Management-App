@@ -650,6 +650,12 @@ def _score_proposal(
     )
     acceptance = min(max(acceptance, 0), 1)
 
+    # Drop suggestion for uneven trades or cross-position
+    # (computed before score so we can penalize trades requiring a drop)
+    drop_suggestion = _get_drop_suggestion(
+        my_team_id, opp_id, send_players, recv_players, rosters
+    )
+
     # Overall trade score
     # Normalize components to [0,1]
     pos_gain_norm = min(max(my_pos_gain, 0), 1)
@@ -661,6 +667,11 @@ def _score_proposal(
         0.25 * acceptance +
         0.15 * fairness
     )
+
+    # Penalize trades that require dropping a player — these are less
+    # desirable since you lose roster value
+    if drop_suggestion:
+        trade_score *= 0.7
 
     # Determine trade type
     n_send = len(send_players)
@@ -679,11 +690,6 @@ def _score_proposal(
         accept_label = "Medium"
     else:
         accept_label = "Low"
-
-    # Drop suggestion for uneven trades or cross-position
-    drop_suggestion = _get_drop_suggestion(
-        my_team_id, opp_id, send_players, recv_players, rosters
-    )
 
     # Generate human-readable description
     description = _generate_trade_description(
