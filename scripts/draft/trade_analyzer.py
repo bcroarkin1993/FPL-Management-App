@@ -785,11 +785,11 @@ def _render_positional_profile(team_id: int, rosters: Dict, pos_ranks: Dict, nee
     ))
     fig.update_layout(
         barmode="group",
-        title="Points by Position: You vs League Average",
         height=350,
         margin=dict(t=60, b=40),
         **_DARK_CHART_LAYOUT,
     )
+    fig.update_layout(title="Points by Position: You vs League Average")
     st.plotly_chart(fig, use_container_width=True)
 
 
