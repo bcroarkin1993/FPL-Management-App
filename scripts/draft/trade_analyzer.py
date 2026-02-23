@@ -412,6 +412,9 @@ def _find_2_for_2_trades(
     my_roster = rosters[my_team_id]["players"]
     my_needs = needs[my_team_id]
     _MIN_CALIBER = 0.10  # skip replacement-level players
+    # GK excluded from sweetener role — only 20 starting GKs makes them
+    # too scarce to use as trade filler
+    _SWEETENER_POSITIONS = ["DEF", "MID", "FWD"]
 
     for opp_id, opp_data in rosters.items():
         if opp_id == my_team_id:
@@ -421,7 +424,7 @@ def _find_2_for_2_trades(
 
         # For each pair of positions (upgrade_pos, sweetener_pos)
         for upgrade_pos in ["GK", "DEF", "MID", "FWD"]:
-            for sweetener_pos in ["GK", "DEF", "MID", "FWD"]:
+            for sweetener_pos in _SWEETENER_POSITIONS:
                 if upgrade_pos == sweetener_pos:
                     continue
 
@@ -516,6 +519,8 @@ def _find_2_for_1_trades(
     my_roster = rosters[my_team_id]["players"]
     my_needs = needs[my_team_id]
     _MIN_CALIBER = 0.12  # both players on "2" side must be above this
+    # GK excluded from filler roles — positional scarcity (only 20 starters)
+    _FILLER_POSITIONS = ["DEF", "MID", "FWD"]
 
     for opp_id, opp_data in rosters.items():
         if opp_id == my_team_id:
@@ -546,7 +551,7 @@ def _find_2_for_1_trades(
                         continue
 
                     # Find a sweetener from another position they need
-                    for sweet_pos in ["GK", "DEF", "MID", "FWD"]:
+                    for sweet_pos in _FILLER_POSITIONS:
                         if sweet_pos == anchor_pos:
                             continue
                         if opp_needs.get(sweet_pos, 0) < 0.3:
@@ -597,7 +602,7 @@ def _find_2_for_1_trades(
                         continue
 
                     # Find a bonus player at a position I need
-                    for bonus_pos in ["GK", "DEF", "MID", "FWD"]:
+                    for bonus_pos in _FILLER_POSITIONS:
                         if bonus_pos == anchor_pos:
                             continue
                         if my_needs.get(bonus_pos, 0) < 0.3:
