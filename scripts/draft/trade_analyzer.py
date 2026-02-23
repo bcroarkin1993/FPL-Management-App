@@ -100,11 +100,15 @@ def _load_all_rosters(league_id: int) -> Dict[int, Dict]:
                     if canonical_normalize(p_info.get("Player", "")) == norm_name:
                         pid = p_id
                         break
+                # Use FPL web_name (e.g., "Beto") for display when available
+                p_info = player_map.get(pid, {}) if pid else {}
+                web_name = p_info.get("Web_Name")  # None when same as full name
                 players.append({
                     "name": name,
+                    "display_name": web_name or name,
                     "position": pos_display,
                     "pos_short": pos_short,
-                    "team": player_map.get(pid, {}).get("Team", "???") if pid else "???",
+                    "team": p_info.get("Team", "???"),
                     "player_id": pid,
                     "total_points": 0,  # filled later
                 })
@@ -460,12 +464,18 @@ def _find_2_for_2_trades(
                 # Try multiple player combinations (top 2 from each position)
                 for s1 in my_sends_1[:2]:
                     for s2 in my_sends_2[:2]:
+                        # Skip if same player on both send slots
+                        if s1["name"] == s2["name"]:
+                            continue
                         for r1 in their_1[:2]:
                             for r2 in their_2[:2]:
+                                # Skip if same player on both receive slots
+                                if r1["name"] == r2["name"]:
+                                    continue
                                 send_players = [s1, s2]
                                 recv_players = [r1, r2]
 
-                                # Ensure no overlap
+                                # Ensure no overlap between send and receive
                                 send_names = {p["name"] for p in send_players}
                                 recv_names = {p["name"] for p in recv_players}
                                 if send_names & recv_names:
@@ -517,10 +527,12 @@ def _find_2_for_1_trades(
                 [p for p in my_roster if p.get("trade_value", 0) < target.get("trade_value", 0)],
                 key=lambda x: x.get("trade_value", 0), reverse=True,
             )
-            # Try pairs
+            # Try pairs (i < j ensures no duplicates)
             for i in range(min(4, len(my_weak))):
                 for j in range(i + 1, min(5, len(my_weak))):
                     p1, p2 = my_weak[i], my_weak[j]
+                    if p1["name"] == p2["name"]:
+                        continue
                     combined = p1.get("trade_value", 0) + p2.get("trade_value", 0)
                     # Combined should be reasonably close to target
                     if combined < target.get("trade_value", 0) * 0.7:
@@ -557,6 +569,8 @@ def _find_2_for_1_trades(
             for i in range(min(3, len(their_available))):
                 for j in range(i + 1, min(4, len(their_available))):
                     r1, r2 = their_available[i], their_available[j]
+                    if r1["name"] == r2["name"]:
+                        continue
                     combined = r1.get("trade_value", 0) + r2.get("trade_value", 0)
                     if combined < to_send.get("trade_value", 0) * 0.7:
                         continue
@@ -671,6 +685,12 @@ def _score_proposal(
         my_team_id, opp_id, send_players, recv_players, rosters
     )
 
+    # Generate human-readable description
+    description = _generate_trade_description(
+        send_players, recv_players, my_needs, opp_needs,
+        rosters[opp_id]["team_name"],
+    )
+
     return {
         "trade_type": trade_type,
         "opp_id": opp_id,
@@ -686,7 +706,67 @@ def _score_proposal(
         "my_pos_gain": round(my_pos_gain, 3),
         "net_value": round(net_value, 3),
         "drop_suggestion": drop_suggestion,
+        "description": description,
     }
+
+
+def _generate_trade_description(
+    send_players: List[Dict],
+    recv_players: List[Dict],
+    my_needs: Dict[str, float],
+    opp_needs: Dict[str, float],
+    opp_name: str,
+) -> str:
+    """Generate a human-readable description of why this trade is beneficial."""
+    parts = []
+
+    # Identify positions being strengthened
+    recv_positions = set(p.get("position", "") for p in recv_players)
+    send_positions = set(p.get("position", "") for p in send_players)
+
+    # Which received positions are weak spots for me?
+    weak_recv = [pos for pos in recv_positions if my_needs.get(pos, 0) >= 0.5]
+    strong_send = [pos for pos in send_positions if my_needs.get(pos, 0) <= 0.4]
+
+    if weak_recv and strong_send:
+        weak_str = " + ".join(weak_recv)
+        strong_str = " + ".join(strong_send)
+        parts.append(f"Boosts your weak {weak_str} by trading from your strong {strong_str}.")
+    elif weak_recv:
+        weak_str = " + ".join(weak_recv)
+        parts.append(f"Strengthens your weak {weak_str} position.")
+    elif strong_send:
+        strong_str = " + ".join(strong_send)
+        parts.append(f"Moves surplus {strong_str} depth to {opp_name}.")
+
+    # Check for regression buy-low opportunities
+    buy_low_names = []
+    for p in recv_players:
+        if p.get("gi_minus_xgi", 0) < -0.5:
+            buy_low_names.append(p.get("display_name", p["name"]))
+    if buy_low_names:
+        names_str = " and ".join(buy_low_names)
+        parts.append(f"Buy-low: {names_str} underperforming xGI, due for positive regression.")
+
+    # Check for sell-high opportunities
+    sell_high_names = []
+    for p in send_players:
+        if p.get("gi_minus_xgi", 0) > 0.5:
+            sell_high_names.append(p.get("display_name", p["name"]))
+    if sell_high_names:
+        names_str = " and ".join(sell_high_names)
+        parts.append(f"Sell-high: {names_str} overperforming, may regress.")
+
+    # Check if opponent also benefits (makes acceptance likely)
+    opp_weak_recv = [pos for pos in send_positions if opp_needs.get(pos, 0) >= 0.5]
+    if opp_weak_recv:
+        opp_str = " + ".join(opp_weak_recv)
+        parts.append(f"{opp_name} also needs {opp_str}, making acceptance more likely.")
+
+    if not parts:
+        parts.append("Balanced swap that improves overall roster composition.")
+
+    return " ".join(parts)
 
 
 def _get_drop_suggestion(
@@ -728,7 +808,7 @@ def _get_drop_suggestion(
         remaining.extend(recv_players)
         if remaining:
             worst = min(remaining, key=lambda x: x.get("trade_value", 0))
-            return f"Drop {worst['name']} ({worst.get('position', '?')}, Trade Value: {worst.get('trade_value', 0):.2f})"
+            return f"Drop {worst.get('display_name', worst['name'])} ({worst.get('position', '?')}, Trade Value: {worst.get('trade_value', 0):.2f})"
 
     # Check for position overflow
     for pos, limit in _SQUAD_LIMITS.items():
@@ -742,7 +822,7 @@ def _get_drop_suggestion(
             all_at_pos = remaining_at_pos + recv_at_pos
             if all_at_pos:
                 worst = min(all_at_pos, key=lambda x: x.get("trade_value", 0))
-                return f"Drop {worst['name']} ({pos}, Trade Value: {worst.get('trade_value', 0):.2f}) — exceeds {pos} limit"
+                return f"Drop {worst.get('display_name', worst['name'])} ({pos}, Trade Value: {worst.get('trade_value', 0):.2f}) — exceeds {pos} limit"
 
     return None
 
@@ -816,11 +896,18 @@ def _render_positional_profile(team_id: int, rosters: Dict, pos_ranks: Dict,
     ))
     fig.update_layout(
         barmode="group",
-        height=350,
-        margin=dict(t=60, b=40),
+        height=400,
+        margin=dict(t=80, b=40, l=70, r=20),
         **_DARK_CHART_LAYOUT,
     )
-    fig.update_layout(title="Points by Position: You vs League Average")
+    fig.update_layout(title=dict(
+        text="Points by Position: You vs League Average",
+        font=dict(size=20, color="#ffffff"),
+        x=0.5,
+        xanchor="center",
+        y=0.95,
+    ))
+    fig.update_yaxes(automargin=True)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -847,10 +934,18 @@ def _render_trade_card(proposal: Dict, idx: int):
         f'<div style="display:flex;align-items:center;gap:8px;">'
         f'<span style="background:{accept_bg_color};color:{accept_color};padding:3px 10px;'
         f'border-radius:12px;font-size:0.8em;font-weight:bold;">{accept_label} Acceptance</span>'
-        f'<span style="background:#1a472a;color:#4ecca3;padding:3px 10px;border-radius:12px;'
-        f'font-size:0.8em;font-weight:bold;">Score: {proposal["trade_score"]:.2f}</span>'
         f'</div></div>'
     )
+
+    # Trade description
+    description = proposal.get("description", "")
+    if description:
+        card_html += (
+            f'<div style="color:#b0b0b0;font-size:0.85em;font-style:italic;'
+            f'margin-bottom:12px;padding:6px 8px;border-left:3px solid #4ecca3;'
+            f'background:rgba(78,204,163,0.05);">'
+            f'{description}</div>'
+        )
 
     # Trade details: SEND -> RECEIVE
     card_html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;">'
@@ -863,7 +958,7 @@ def _render_trade_card(proposal: Dict, idx: int):
         gi_color = "#e74c3c" if gi > 0.5 else "#4ecca3" if gi < -0.5 else "#999"
         card_html += (
             f'<div style="background:#0d1117;border-radius:8px;padding:8px 10px;margin-bottom:4px;">'
-            f'<div style="font-weight:700;color:#e0e0e0;">{p["name"]}</div>'
+            f'<div style="font-weight:700;color:#e0e0e0;">{p.get("display_name", p["name"])}</div>'
             f'<div style="font-size:0.8em;color:#999;">'
             f'{p.get("position", "?")} &bull; {p.get("team", "?")} &bull; '
             f'Trade Value: {p.get("trade_value", 0):.2f} &bull; Form: {p.get("form", 0):.1f} &bull; '
@@ -883,7 +978,7 @@ def _render_trade_card(proposal: Dict, idx: int):
         gi_color = "#e74c3c" if gi > 0.5 else "#4ecca3" if gi < -0.5 else "#999"
         card_html += (
             f'<div style="background:#0d1117;border-radius:8px;padding:8px 10px;margin-bottom:4px;text-align:right;">'
-            f'<div style="font-weight:700;color:#e0e0e0;">{p["name"]}</div>'
+            f'<div style="font-weight:700;color:#e0e0e0;">{p.get("display_name", p["name"])}</div>'
             f'<div style="font-size:0.8em;color:#999;">'
             f'{p.get("position", "?")} &bull; {p.get("team", "?")} &bull; '
             f'Trade Value: {p.get("trade_value", 0):.2f} &bull; Form: {p.get("form", 0):.1f} &bull; '
@@ -892,10 +987,8 @@ def _render_trade_card(proposal: Dict, idx: int):
         )
     card_html += '</div></div>'
 
-    # Footer: net value, fairness, drop suggestion
+    # Footer: fairness + drop suggestion (removed confusing "net value" metric)
     footer_parts = [
-        f'Net Value: <span style="color:{"#4ecca3" if proposal["net_value"] >= 0 else "#e74c3c"}">'
-        f'{proposal["net_value"]:+.3f}</span>',
         f'Fairness: {proposal["fairness"]:.0%}',
     ]
     if proposal.get("drop_suggestion"):
@@ -967,7 +1060,7 @@ def _render_explore_tab(my_team_id: int, rosters: Dict, needs: Dict):
                     rows = []
                     for p in pos_players:
                         rows.append({
-                            "Player": p["name"],
+                            "Player": p.get("display_name", p["name"]),
                             "Club": p.get("team", "?"),
                             "Pts": p.get("total_points", 0),
                             "Trade Value": p.get("trade_value", 0),
@@ -1006,7 +1099,7 @@ def _render_regression_tab(my_team_id: int, rosters: Dict):
 
     if buy_low:
         rows = [{
-            "Player": p["name"],
+            "Player": p.get("display_name", p["name"]),
             "Owner": p["owner"],
             "Pos": p.get("position", "?"),
             "Club": p.get("team", "?"),
@@ -1040,7 +1133,7 @@ def _render_regression_tab(my_team_id: int, rosters: Dict):
 
     if sell_high:
         rows = [{
-            "Player": p["name"],
+            "Player": p.get("display_name", p["name"]),
             "Pos": p.get("position", "?"),
             "Club": p.get("team", "?"),
             "Pts": p.get("total_points", 0),
