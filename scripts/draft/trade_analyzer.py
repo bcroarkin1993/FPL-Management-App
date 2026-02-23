@@ -673,12 +673,15 @@ def _score_proposal(
     if drop_suggestion:
         trade_score *= 0.7
 
-    # Boost 2-for-2 trades — balanced multi-player swaps are more likely
-    # to be accepted since both sides clearly improve a weak position
+    # Boost multi-player trades — balanced swaps where both sides
+    # strengthen a weak position are more likely to be accepted than
+    # 1-for-1 trades where subjective player valuations dominate
     n_send = len(send_players)
     n_recv = len(recv_players)
     if n_send == 2 and n_recv == 2:
-        trade_score *= 1.3
+        trade_score *= 2.0
+    elif n_send + n_recv == 3:  # 2-for-1 in either direction
+        trade_score *= 1.5
     if n_send == 1 and n_recv == 1:
         trade_type = "1-for-1"
     elif n_send == 2 and n_recv == 2:
@@ -1304,7 +1307,7 @@ def show_trade_analyzer_page():
 
         # Sort by trade_score descending, take top 10
         unique_proposals.sort(key=lambda x: x["trade_score"], reverse=True)
-        top_proposals = unique_proposals[:10]
+        top_proposals = unique_proposals[:15]
 
         if top_proposals:
             st.caption(f"Showing top {len(top_proposals)} of {len(unique_proposals)} proposals found.")
