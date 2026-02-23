@@ -673,9 +673,12 @@ def _score_proposal(
     if drop_suggestion:
         trade_score *= 0.7
 
-    # Determine trade type
+    # Boost 2-for-2 trades — balanced multi-player swaps are more likely
+    # to be accepted since both sides clearly improve a weak position
     n_send = len(send_players)
     n_recv = len(recv_players)
+    if n_send == 2 and n_recv == 2:
+        trade_score *= 1.3
     if n_send == 1 and n_recv == 1:
         trade_type = "1-for-1"
     elif n_send == 2 and n_recv == 2:
