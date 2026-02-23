@@ -671,7 +671,7 @@ def _score_proposal(
     # Penalize trades that require dropping a player — these are less
     # desirable since you lose roster value
     if drop_suggestion:
-        trade_score *= 0.7
+        trade_score *= 0.4
 
     # Boost multi-player trades — balanced swaps where both sides
     # strengthen a weak position are more likely to be accepted than
