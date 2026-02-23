@@ -130,7 +130,9 @@ def _enrich_with_stats(rosters: Dict, stats_df: pd.DataFrame, current_gw: int,
             stats_by_id[int(pid)] = row
 
     # Prepare advanced stats for regression metrics
-    adv_df = prepare_advanced_stats_df(stats_df, min_minutes=0)
+    # min_minutes=1 to avoid ZeroDivisionError in calculate_per_90 for
+    # players with 0 minutes (0 < 0 is False, so the guard doesn't catch it)
+    adv_df = prepare_advanced_stats_df(stats_df, min_minutes=1)
     adv_by_id = {}
     for _, row in adv_df.iterrows():
         pid = row.get("id")
