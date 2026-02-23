@@ -233,14 +233,39 @@ def _compute_trade_values(rosters: Dict, weights: Dict):
 # POSITIONAL NEEDS
 # ============================================================================
 
-def _compute_positional_needs(rosters: Dict) -> Dict[int, Dict[str, float]]:
+def _build_pos_pts_from_api(league_id: int, rosters: Dict) -> Dict[int, Dict[str, int]]:
     """
-    For each team+position, compute a need score (0-1).
-    High need = weak position relative to league.
+    Build {team_id: {"GK": pts, "DEF": pts, ...}} using the accurate
+    GW-by-GW position data from get_draft_points_by_position() — the same
+    source as the League Analysis page. This correctly attributes points
+    to the team that owned each player at the time they scored.
 
-    Returns: {team_id: {"GK": 0.8, "DEF": 0.3, ...}}
+    Falls back to summing current roster total_points if the API call fails.
     """
-    # Sum total_points per position per team
+    try:
+        pos_df = get_draft_points_by_position(league_id)
+        if pos_df is not None and not pos_df.empty:
+            # Map team_name -> team_id via rosters
+            name_to_id = {data["team_name"]: tid for tid, data in rosters.items()}
+            team_pos_pts = {}
+            for _, row in pos_df.iterrows():
+                tid = name_to_id.get(row["Team"])
+                if tid is not None:
+                    team_pos_pts[tid] = {
+                        "GK": int(row.get("GK", 0)),
+                        "DEF": int(row.get("DEF", 0)),
+                        "MID": int(row.get("MID", 0)),
+                        "FWD": int(row.get("FWD", 0)),
+                    }
+            # Fill any teams missing from the API response
+            for tid in rosters:
+                if tid not in team_pos_pts:
+                    team_pos_pts[tid] = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
+            return team_pos_pts
+    except Exception:
+        _logger.warning("Failed to load position data from API, falling back to roster stats", exc_info=True)
+
+    # Fallback: sum from current roster (less accurate for traded players)
     team_pos_pts = {}
     for team_id, team_data in rosters.items():
         pos_pts = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
@@ -249,10 +274,20 @@ def _compute_positional_needs(rosters: Dict) -> Dict[int, Dict[str, float]]:
             if pos in pos_pts:
                 pos_pts[pos] += p.get("total_points", 0)
         team_pos_pts[team_id] = pos_pts
+    return team_pos_pts
 
-    # For each position, compute league percentile for each team
+
+def _compute_positional_needs(
+    team_pos_pts: Dict[int, Dict[str, int]],
+) -> Dict[int, Dict[str, float]]:
+    """
+    For each team+position, compute a need score (0-1).
+    High need = weak position relative to league.
+
+    Returns: {team_id: {"GK": 0.8, "DEF": 0.3, ...}}
+    """
     needs = {}
-    for team_id in rosters:
+    for team_id in team_pos_pts:
         needs[team_id] = {}
         for pos in ["GK", "DEF", "MID", "FWD"]:
             my_pts = team_pos_pts[team_id][pos]
@@ -260,29 +295,21 @@ def _compute_positional_needs(rosters: Dict) -> Dict[int, Dict[str, float]]:
             if not all_pts or max(all_pts) == min(all_pts):
                 needs[team_id][pos] = 0.5
             else:
-                # Percentile: fraction of teams with fewer points at this position
                 below = sum(1 for p in all_pts if p < my_pts)
                 percentile = below / len(all_pts)
-                needs[team_id][pos] = round(1.0 - percentile, 2)  # high need = low percentile
+                needs[team_id][pos] = round(1.0 - percentile, 2)
     return needs
 
 
-def _get_positional_rank(rosters: Dict) -> Dict[int, Dict[str, Tuple[int, int]]]:
+def _get_positional_rank(
+    team_pos_pts: Dict[int, Dict[str, int]],
+) -> Dict[int, Dict[str, Tuple[int, int]]]:
     """
     For each team+position, compute (points, rank).
     Returns: {team_id: {"GK": (pts, rank), "DEF": (pts, rank), ...}}
     """
-    team_pos_pts = {}
-    for team_id, team_data in rosters.items():
-        pos_pts = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
-        for p in team_data["players"]:
-            pos = p.get("position", "")
-            if pos in pos_pts:
-                pos_pts[pos] += p.get("total_points", 0)
-        team_pos_pts[team_id] = pos_pts
-
     result = {}
-    for team_id in rosters:
+    for team_id in team_pos_pts:
         result[team_id] = {}
         for pos in ["GK", "DEF", "MID", "FWD"]:
             my_pts = team_pos_pts[team_id][pos]
@@ -379,19 +406,19 @@ def _find_2_for_2_trades(
         opp_roster = opp_data["players"]
         opp_needs = needs[opp_id]
 
-        # Find two complementary position pairs
+        # Find two complementary position pairs (relaxed thresholds for more results)
         position_pairs = []
         for my_weak_pos in ["GK", "DEF", "MID", "FWD"]:
-            if my_needs[my_weak_pos] < 0.4:
+            if my_needs[my_weak_pos] < 0.3:
                 continue  # Not a real need
             for my_strong_pos in ["GK", "DEF", "MID", "FWD"]:
                 if my_strong_pos == my_weak_pos:
                     continue
-                if my_needs[my_strong_pos] > 0.5:
+                if my_needs[my_strong_pos] > 0.6:
                     continue  # Can't afford to weaken
 
                 # Check if opponent benefits from receiving my_strong_pos
-                if opp_needs[my_strong_pos] < 0.3:
+                if opp_needs[my_strong_pos] < 0.2:
                     continue
 
                 # Get candidates
@@ -430,21 +457,26 @@ def _find_2_for_2_trades(
                 if not (my_sends_1 and my_sends_2 and their_1 and their_2):
                     continue
 
-                send_players = [my_sends_1[0], my_sends_2[0]]
-                recv_players = [their_1[0], their_2[0]]
+                # Try multiple player combinations (top 2 from each position)
+                for s1 in my_sends_1[:2]:
+                    for s2 in my_sends_2[:2]:
+                        for r1 in their_1[:2]:
+                            for r2 in their_2[:2]:
+                                send_players = [s1, s2]
+                                recv_players = [r1, r2]
 
-                # Ensure we're not sending and receiving the same player
-                send_names = {p["name"] for p in send_players}
-                recv_names = {p["name"] for p in recv_players}
-                if send_names & recv_names:
-                    continue
+                                # Ensure no overlap
+                                send_names = {p["name"] for p in send_players}
+                                recv_names = {p["name"] for p in recv_players}
+                                if send_names & recv_names:
+                                    continue
 
-                proposal = _score_proposal(
-                    my_team_id, opp_id, send_players, recv_players,
-                    rosters, needs, num_teams,
-                )
-                if proposal and proposal["trade_score"] > 0.05:
-                    proposals.append(proposal)
+                                proposal = _score_proposal(
+                                    my_team_id, opp_id, send_players, recv_players,
+                                    rosters, needs, num_teams,
+                                )
+                                if proposal and proposal["trade_score"] > 0.03:
+                                    proposals.append(proposal)
 
     return proposals
 
@@ -696,7 +728,7 @@ def _get_drop_suggestion(
         remaining.extend(recv_players)
         if remaining:
             worst = min(remaining, key=lambda x: x.get("trade_value", 0))
-            return f"Drop {worst['name']} ({worst.get('position', '?')}, TV: {worst.get('trade_value', 0):.2f})"
+            return f"Drop {worst['name']} ({worst.get('position', '?')}, Trade Value: {worst.get('trade_value', 0):.2f})"
 
     # Check for position overflow
     for pos, limit in _SQUAD_LIMITS.items():
@@ -710,7 +742,7 @@ def _get_drop_suggestion(
             all_at_pos = remaining_at_pos + recv_at_pos
             if all_at_pos:
                 worst = min(all_at_pos, key=lambda x: x.get("trade_value", 0))
-                return f"Drop {worst['name']} ({pos}, TV: {worst.get('trade_value', 0):.2f}) — exceeds {pos} limit"
+                return f"Drop {worst['name']} ({pos}, Trade Value: {worst.get('trade_value', 0):.2f}) — exceeds {pos} limit"
 
     return None
 
@@ -719,21 +751,20 @@ def _get_drop_suggestion(
 # UI RENDERING
 # ============================================================================
 
-def _render_positional_profile(team_id: int, rosters: Dict, pos_ranks: Dict, needs: Dict):
+def _render_positional_profile(team_id: int, rosters: Dict, pos_ranks: Dict,
+                               needs: Dict, team_pos_pts: Dict):
     """Render positional strength cards and bar chart."""
     my_ranks = pos_ranks.get(team_id, {})
     my_needs_data = needs.get(team_id, {})
     num_teams = len(rosters)
 
-    # Compute league averages
+    # Compute league averages from API-sourced position points
     league_avg = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
-    for tid, data in rosters.items():
-        for p in data["players"]:
-            pos = p.get("position", "")
-            if pos in league_avg:
-                league_avg[pos] += p.get("total_points", 0)
+    for tid, pos_pts in team_pos_pts.items():
+        for pos in league_avg:
+            league_avg[pos] += pos_pts.get(pos, 0)
     for pos in league_avg:
-        league_avg[pos] = league_avg[pos] / max(len(rosters), 1)
+        league_avg[pos] = league_avg[pos] / max(len(team_pos_pts), 1)
 
     # Position cards
     pos_colors = {"GK": "#f0c040", "DEF": "#4caf50", "MID": "#2196f3", "FWD": "#e91e63"}
@@ -835,7 +866,7 @@ def _render_trade_card(proposal: Dict, idx: int):
             f'<div style="font-weight:700;color:#e0e0e0;">{p["name"]}</div>'
             f'<div style="font-size:0.8em;color:#999;">'
             f'{p.get("position", "?")} &bull; {p.get("team", "?")} &bull; '
-            f'TV: {p.get("trade_value", 0):.2f} &bull; Form: {p.get("form", 0):.1f} &bull; '
+            f'Trade Value: {p.get("trade_value", 0):.2f} &bull; Form: {p.get("form", 0):.1f} &bull; '
             f'<span style="color:{gi_color}">GI-xGI: {gi:+.1f}</span>'
             f'</div></div>'
         )
@@ -855,7 +886,7 @@ def _render_trade_card(proposal: Dict, idx: int):
             f'<div style="font-weight:700;color:#e0e0e0;">{p["name"]}</div>'
             f'<div style="font-size:0.8em;color:#999;">'
             f'{p.get("position", "?")} &bull; {p.get("team", "?")} &bull; '
-            f'TV: {p.get("trade_value", 0):.2f} &bull; Form: {p.get("form", 0):.1f} &bull; '
+            f'Trade Value: {p.get("trade_value", 0):.2f} &bull; Form: {p.get("form", 0):.1f} &bull; '
             f'<span style="color:{gi_color}">GI-xGI: {gi:+.1f}</span>'
             f'</div></div>'
         )
@@ -939,15 +970,15 @@ def _render_explore_tab(my_team_id: int, rosters: Dict, needs: Dict):
                             "Player": p["name"],
                             "Club": p.get("team", "?"),
                             "Pts": p.get("total_points", 0),
-                            "TV": p.get("trade_value", 0),
+                            "Trade Value": p.get("trade_value", 0),
                             "Form": p.get("form", 0),
                             "GI-xGI": p.get("gi_minus_xgi", 0),
                         })
                     df = pd.DataFrame(rows)
                     render_styled_table(
                         df,
-                        col_formats={"TV": "{:.2f}", "Form": "{:.1f}", "GI-xGI": "{:+.1f}"},
-                        positive_color_cols=["TV", "Form"],
+                        col_formats={"Trade Value": "{:.2f}", "Form": "{:.1f}", "GI-xGI": "{:+.1f}"},
+                        positive_color_cols=["Trade Value", "Form"],
                     )
 
 
@@ -984,16 +1015,16 @@ def _render_regression_tab(my_team_id: int, rosters: Dict):
             "G-xG": p.get("g_minus_xg", 0),
             "A-xA": p.get("a_minus_xa", 0),
             "Form": p.get("form", 0),
-            "TV": p.get("trade_value", 0),
+            "Trade Value": p.get("trade_value", 0),
         } for p in buy_low]
         df = pd.DataFrame(rows)
         render_styled_table(
             df,
             col_formats={
                 "GI-xGI": "{:+.1f}", "G-xG": "{:+.1f}", "A-xA": "{:+.1f}",
-                "Form": "{:.1f}", "TV": "{:.2f}",
+                "Form": "{:.1f}", "Trade Value": "{:.2f}",
             },
-            positive_color_cols=["TV"],
+            positive_color_cols=["Trade Value"],
         )
     else:
         st.info("No significant underperformers found among opponents' players.")
@@ -1017,16 +1048,16 @@ def _render_regression_tab(my_team_id: int, rosters: Dict):
             "G-xG": p.get("g_minus_xg", 0),
             "A-xA": p.get("a_minus_xa", 0),
             "Form": p.get("form", 0),
-            "TV": p.get("trade_value", 0),
+            "Trade Value": p.get("trade_value", 0),
         } for p in sell_high]
         df = pd.DataFrame(rows)
         render_styled_table(
             df,
             col_formats={
                 "GI-xGI": "{:+.1f}", "G-xG": "{:+.1f}", "A-xA": "{:+.1f}",
-                "Form": "{:.1f}", "TV": "{:.2f}",
+                "Form": "{:.1f}", "Trade Value": "{:.2f}",
             },
-            positive_color_cols=["TV"],
+            positive_color_cols=["Trade Value"],
         )
     else:
         st.info("None of your players are significantly overperforming.")
@@ -1126,13 +1157,14 @@ def show_trade_analyzer_page():
     # Enrich rosters with stats and compute trade values
     rosters = _enrich_with_stats(rosters, stats_df, current_gw, fdr_weeks, weights)
 
-    # Compute positional needs
-    needs = _compute_positional_needs(rosters)
-    pos_ranks = _get_positional_rank(rosters)
+    # Compute positional needs (using accurate GW-by-GW API data)
+    team_pos_pts = _build_pos_pts_from_api(league_id, rosters)
+    needs = _compute_positional_needs(team_pos_pts)
+    pos_ranks = _get_positional_rank(team_pos_pts)
 
     # Positional profile
     st.subheader("Your Positional Profile")
-    _render_positional_profile(my_team_id, rosters, pos_ranks, needs)
+    _render_positional_profile(my_team_id, rosters, pos_ranks, needs, team_pos_pts)
 
     # Tabs
     tab_recommended, tab_explore, tab_regression = st.tabs([

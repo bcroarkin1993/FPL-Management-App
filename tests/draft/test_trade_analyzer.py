@@ -115,17 +115,11 @@ class TestComputePositionalNeeds:
         """Teams with different point totals get different need scores."""
         from scripts.draft.trade_analyzer import _compute_positional_needs
 
-        rosters = {
-            1: {"team_name": "Strong", "players": [
-                {"position": "MID", "total_points": 200},
-                {"position": "DEF", "total_points": 50},
-            ]},
-            2: {"team_name": "Weak", "players": [
-                {"position": "MID", "total_points": 50},
-                {"position": "DEF", "total_points": 200},
-            ]},
+        team_pos_pts = {
+            1: {"GK": 0, "DEF": 50, "MID": 200, "FWD": 0},
+            2: {"GK": 0, "DEF": 200, "MID": 50, "FWD": 0},
         }
-        needs = _compute_positional_needs(rosters)
+        needs = _compute_positional_needs(team_pos_pts)
         # Team 1 is strong at MID (low need) and weak at DEF (high need)
         assert needs[1]["MID"] < needs[1]["DEF"]
         # Team 2 is the opposite
