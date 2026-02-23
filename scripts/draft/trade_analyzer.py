@@ -671,7 +671,7 @@ def _score_proposal(
     # Penalize trades that require dropping a player — these are less
     # desirable since you lose roster value
     if drop_suggestion:
-        trade_score *= 0.4
+        trade_score *= 0.2
 
     # Determine trade type
     n_send = len(send_players)
