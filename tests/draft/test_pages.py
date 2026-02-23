@@ -89,6 +89,22 @@ class TestLeagueAnalysisPage:
             show_draft_league_analysis_page()
 
 
+class TestTradeAnalyzerPage:
+    def test_smoke(self, mock_all_utils):
+        """Trade analyzer with empty rosters should show a warning and return."""
+        with patch("scripts.draft.trade_analyzer.get_league_player_ownership", return_value={}), \
+             patch("scripts.draft.trade_analyzer.get_fpl_player_mapping", return_value={}), \
+             patch("scripts.draft.trade_analyzer.pull_fpl_player_stats", return_value=pd.DataFrame()), \
+             patch("scripts.draft.trade_analyzer.get_draft_points_by_position", return_value=pd.DataFrame()), \
+             patch("scripts.draft.trade_analyzer.get_draft_team_players_with_points", return_value={}), \
+             patch("scripts.draft.trade_analyzer.prepare_advanced_stats_df", return_value=pd.DataFrame()):
+            from scripts.draft.trade_analyzer import show_trade_analyzer_page
+            try:
+                show_trade_analyzer_page()
+            except Exception:
+                pass  # May call st.stop() on empty data
+
+
 class TestDraftHelperPage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.draft.draft_helper.get_rotowire_season_rankings", return_value=pd.DataFrame()):

@@ -160,7 +160,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Player Trade Analyzer | Not started | Evaluate potential trades between teams (Draft mode) |
+| Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2/2-for-1 trade discovery, acceptance likelihood scoring, Explore Teams comparison, Regression Watch (buy-low/sell-high) |
 | Historical Data Analysis | Completed | Season History section on Classic Team Analysis (rank chart, points chart, data table); League Standing metrics on Draft Team Analysis |
 | Split utils.py | Completed | Split into 7 focused modules (`text_helpers`, `fpl_draft_api`, `fpl_classic_api`, `scraping`, `fixture_helpers`, `analytics`, `optimization`); merged matching functions into `player_matching.py`; `utils.py` is now a thin re-export shim |
 

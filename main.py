@@ -27,6 +27,7 @@ from scripts.draft.team_analysis import show_team_stats_page
 from scripts.draft.waiver_wire import show_waiver_wire_page
 from scripts.draft.draft_helper import show_draft_helper_page
 from scripts.draft.league_analysis import show_draft_league_analysis_page
+from scripts.draft.trade_analyzer import show_trade_analyzer_page
 
 # --- FPL cross-format pages ---
 from scripts.fpl.fixtures import show_club_fixtures_section
@@ -648,6 +649,7 @@ DRAFT_PAGES = {
     "🏠  Home": show_home_page,
     "📅  Fixture Projections": show_fixtures_page,
     "🔄  Waiver Wire": show_waiver_wire_page,
+    "🔀  Trade Analyzer": show_trade_analyzer_page,
     "👥  Team Analysis": show_team_stats_page,
     "🏆  League Analysis": show_draft_league_analysis_page,
     "📝  Draft Helper": show_draft_helper_page,
