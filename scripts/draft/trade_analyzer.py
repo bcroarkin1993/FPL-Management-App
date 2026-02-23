@@ -656,15 +656,22 @@ def _score_proposal(
         my_team_id, opp_id, send_players, recv_players, rosters
     )
 
+    # Player caliber premium — trades involving top players are more
+    # impactful than swapping waiver-wire-level players
+    all_involved = send_players + recv_players
+    avg_caliber = np.mean([p.get("trade_value", 0) for p in all_involved]) if all_involved else 0
+    caliber_norm = min(avg_caliber / 0.6, 1.0)  # 0.6 TV ≈ top-tier player
+
     # Overall trade score
     # Normalize components to [0,1]
     pos_gain_norm = min(max(my_pos_gain, 0), 1)
     net_value_norm = min(max((net_value + 0.5) / 1.0, 0), 1)
 
     trade_score = (
-        0.35 * pos_gain_norm +
-        0.25 * net_value_norm +
-        0.25 * acceptance +
+        0.30 * pos_gain_norm +
+        0.20 * net_value_norm +
+        0.20 * acceptance +
+        0.15 * caliber_norm +
         0.15 * fairness
     )
 
@@ -775,6 +782,53 @@ def _generate_trade_description(
     return " ".join(parts)
 
 
+def _check_team_drop(roster: List[Dict], outgoing: List[Dict],
+                     incoming: List[Dict], team_label: str) -> Optional[str]:
+    """Check if a team needs to drop a player after a trade."""
+    n_out = len(outgoing)
+    n_in = len(incoming)
+
+    # Position counts after trade
+    pos_counts = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
+    for p in roster:
+        pos = p.get("position", "")
+        if pos in pos_counts:
+            pos_counts[pos] += 1
+    for p in outgoing:
+        pos = p.get("position", "")
+        if pos in pos_counts:
+            pos_counts[pos] -= 1
+    for p in incoming:
+        pos = p.get("position", "")
+        if pos in pos_counts:
+            pos_counts[pos] += 1
+
+    # Roster size overflow (receives more than sends)
+    if n_in > n_out:
+        remaining = [p for p in roster if p["name"] not in {s["name"] for s in outgoing}]
+        remaining.extend(incoming)
+        if remaining:
+            worst = min(remaining, key=lambda x: x.get("trade_value", 0))
+            return (f"{team_label} drops {worst.get('display_name', worst['name'])} "
+                    f"({worst.get('position', '?')}, Trade Value: {worst.get('trade_value', 0):.2f})")
+
+    # Position overflow
+    for pos, limit in _SQUAD_LIMITS.items():
+        if pos_counts.get(pos, 0) > limit:
+            remaining_at_pos = [
+                p for p in roster
+                if p["position"] == pos and p["name"] not in {s["name"] for s in outgoing}
+            ]
+            recv_at_pos = [p for p in incoming if p["position"] == pos]
+            all_at_pos = remaining_at_pos + recv_at_pos
+            if all_at_pos:
+                worst = min(all_at_pos, key=lambda x: x.get("trade_value", 0))
+                return (f"{team_label} drops {worst.get('display_name', worst['name'])} "
+                        f"({pos}, Trade Value: {worst.get('trade_value', 0):.2f}) — exceeds {pos} limit")
+
+    return None
+
+
 def _get_drop_suggestion(
     my_team_id: int,
     opp_id: int,
@@ -783,54 +837,26 @@ def _get_drop_suggestion(
     rosters: Dict,
 ) -> Optional[str]:
     """
-    If the trade creates a roster imbalance (cross-position or uneven),
-    suggest who to drop.
+    If the trade creates a roster imbalance for EITHER side
+    (cross-position or uneven), suggest who to drop.
     """
-    n_send = len(send_players)
-    n_recv = len(recv_players)
-
-    # Check if position counts change for my team
     my_roster = rosters[my_team_id]["players"]
-    pos_counts = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
-    for p in my_roster:
-        pos = p.get("position", "")
-        if pos in pos_counts:
-            pos_counts[pos] += 1
+    opp_roster = rosters[opp_id]["players"]
 
-    # Apply trade
-    for p in send_players:
-        pos = p.get("position", "")
-        if pos in pos_counts:
-            pos_counts[pos] -= 1
-    for p in recv_players:
-        pos = p.get("position", "")
-        if pos in pos_counts:
-            pos_counts[pos] += 1
+    drops = []
 
-    # Check for excess (n_recv > n_send means I get more players)
-    if n_recv > n_send:
-        # Need to drop someone — find lowest trade value player on my resulting roster
-        remaining = [p for p in my_roster if p["name"] not in {s["name"] for s in send_players}]
-        remaining.extend(recv_players)
-        if remaining:
-            worst = min(remaining, key=lambda x: x.get("trade_value", 0))
-            return f"Drop {worst.get('display_name', worst['name'])} ({worst.get('position', '?')}, Trade Value: {worst.get('trade_value', 0):.2f})"
+    # Check my side: I send outgoing, receive incoming
+    my_drop = _check_team_drop(my_roster, send_players, recv_players, "You")
+    if my_drop:
+        drops.append(my_drop)
 
-    # Check for position overflow
-    for pos, limit in _SQUAD_LIMITS.items():
-        if pos_counts.get(pos, 0) > limit:
-            # Find lowest TV at that position after trade
-            remaining_at_pos = [
-                p for p in my_roster
-                if p["position"] == pos and p["name"] not in {s["name"] for s in send_players}
-            ]
-            recv_at_pos = [p for p in recv_players if p["position"] == pos]
-            all_at_pos = remaining_at_pos + recv_at_pos
-            if all_at_pos:
-                worst = min(all_at_pos, key=lambda x: x.get("trade_value", 0))
-                return f"Drop {worst.get('display_name', worst['name'])} ({pos}, Trade Value: {worst.get('trade_value', 0):.2f}) — exceeds {pos} limit"
+    # Check opponent side: they send recv_players, receive send_players
+    opp_name = rosters[opp_id]["team_name"]
+    opp_drop = _check_team_drop(opp_roster, recv_players, send_players, opp_name)
+    if opp_drop:
+        drops.append(opp_drop)
 
-    return None
+    return " | ".join(drops) if drops else None
 
 
 # ============================================================================
