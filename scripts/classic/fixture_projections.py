@@ -23,9 +23,12 @@ from scripts.common.utils import (
     get_classic_transfers,
     get_current_gameweek,
     get_entry_details,
+    get_fpl_player_mapping,
     get_h2h_league_matches,
     get_league_standings,
+    get_live_gameweek_stats,
     get_rotowire_player_projections,
+    is_gameweek_live,
     position_converter,
 )
 from scripts.common.styled_tables import render_styled_table
@@ -67,6 +70,38 @@ def _is_gameweek_started(gw: int, bootstrap: dict) -> bool:
         return now >= deadline
     except Exception:
         return False
+
+
+def _blend_live_with_squad(squad_df: pd.DataFrame, live_stats: dict) -> pd.DataFrame:
+    """
+    Blend live points with projections using element_id lookup.
+
+    For each player:
+    - If they have played (has_played is True): use actual live points
+    - If they haven't played yet: use projected points
+
+    Parameters:
+    - squad_df: DataFrame with 'element_id' and 'Points' columns.
+    - live_stats: Dict of {element_id: {points, minutes, has_played}} from get_live_gameweek_stats().
+
+    Returns:
+    - DataFrame with additional columns: Live_Points, Has_Played, Blended_Points.
+    """
+    result = squad_df.copy()
+    result['Live_Points'] = 0
+    result['Has_Played'] = False
+    result['Blended_Points'] = pd.to_numeric(result['Points'], errors='coerce').fillna(0.0)
+
+    for idx, row in result.iterrows():
+        eid = row.get('element_id')
+        if eid and eid in live_stats:
+            stats = live_stats[eid]
+            result.at[idx, 'Live_Points'] = stats.get('points', 0)
+            result.at[idx, 'Has_Played'] = stats.get('has_played', False)
+            if stats.get('has_played', False):
+                result.at[idx, 'Blended_Points'] = stats.get('points', 0)
+
+    return result
 
 
 def _get_team_current_squad(team_id: int, target_gw: int, bootstrap: dict) -> list:
@@ -236,6 +271,143 @@ def _render_winprob_bar(team1_name: str, team2_name: str, p_team1: float):
     st.markdown(html, unsafe_allow_html=True)
 
 
+def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live: bool = False, active_chip: str = None):
+    """
+    Render a styled team lineup with player cards grouped by position.
+    Shows live points, projected points, and played/upcoming indicators.
+
+    Parameters:
+    - squad_df: DataFrame with player data (including Live_Points, Has_Played, Blended_Points if live).
+    - team_name: Display name for the team.
+    - is_live: Whether the gameweek is live.
+    - active_chip: Active chip for the GW.
+    """
+    pos_config = {
+        'G': {'name': 'Goalkeeper', 'color': '#f39c12'},
+        'D': {'name': 'Defenders', 'color': '#3498db'},
+        'M': {'name': 'Midfielders', 'color': '#2ecc71'},
+        'F': {'name': 'Forwards', 'color': '#e74c3c'},
+    }
+
+    # Filter to starting XI (or all for bench boost)
+    if active_chip == "bboost":
+        display_df = squad_df.copy()
+    else:
+        display_df = squad_df[squad_df["squad_position"] <= 11].copy()
+
+    html = """
+    <style>
+        .lineup-container { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        .pos-group { margin-bottom: 12px; }
+        .pos-header {
+            font-size: 11px; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.5px; padding: 6px 10px; border-radius: 4px;
+            margin-bottom: 6px; color: white;
+        }
+        .player-card {
+            display: flex; align-items: center; justify-content: space-between;
+            background: #f8f9fa; border-radius: 6px; padding: 8px 12px;
+            margin-bottom: 4px; border-left: 3px solid #ddd;
+        }
+        .player-card.played { border-left-color: #28a745; background: #f0fff4; }
+        .player-card.upcoming { border-left-color: #6c757d; }
+        .player-info { flex: 1; min-width: 0; }
+        .player-name { font-weight: 600; font-size: 13px; color: #1a1a2e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .player-team { font-size: 10px; color: #888; text-transform: uppercase; }
+        .player-points { text-align: right; min-width: 70px; }
+        .live-pts { font-size: 18px; font-weight: 700; color: #28a745; }
+        .proj-pts { font-size: 12px; color: #666; }
+        .proj-only { font-size: 16px; font-weight: 600; color: #555; }
+        .perf-indicator { font-size: 10px; margin-top: 2px; }
+        .perf-up { color: #28a745; }
+        .perf-down { color: #dc3545; }
+        .status-badge {
+            font-size: 9px; padding: 2px 6px; border-radius: 3px;
+            text-transform: uppercase; font-weight: 600; margin-left: 8px;
+        }
+        .status-played { background: #d4edda; color: #155724; }
+        .status-upcoming { background: #e2e3e5; color: #383d41; }
+        .captain-badge { background: #fff3cd; color: #856404; }
+    </style>
+    <div class="lineup-container">
+    """
+
+    for pos_code in ['G', 'D', 'M', 'F']:
+        pos_info = pos_config.get(pos_code, {'name': pos_code, 'color': '#888'})
+        pos_players = display_df[display_df['Position'] == pos_code]
+
+        if pos_players.empty:
+            continue
+
+        html += f"""
+        <div class="pos-group">
+            <div class="pos-header" style="background: {pos_info['color']};">{pos_info['name']}</div>
+        """
+
+        for _, row in pos_players.iterrows():
+            player_name = row.get("Player", "Unknown")
+            team = row.get("Team", "")
+            proj_pts = pd.to_numeric(row.get("Points", 0), errors="coerce") or 0
+            is_captain = row.get("is_captain", False)
+
+            captain_html = '<span class="status-badge captain-badge">C</span>' if is_captain else ""
+
+            if is_live and "Has_Played" in row.index:
+                live_pts = row.get("Live_Points", 0) or 0
+                has_played = row.get("Has_Played", False)
+
+                if is_captain:
+                    captain_mult = 3 if active_chip == "3xc" else 2
+                    live_display = live_pts * captain_mult if has_played else live_pts
+                    proj_display = proj_pts * captain_mult
+                else:
+                    live_display = live_pts
+                    proj_display = proj_pts
+
+                if has_played:
+                    diff = live_display - proj_display
+                    diff_sign = "+" if diff > 0 else ""
+                    diff_class = "perf-up" if diff > 0 else "perf-down" if diff < 0 else ""
+
+                    points_html = f"""
+                        <div class="live-pts">{live_display:.0f}</div>
+                        <div class="perf-indicator {diff_class}">proj: {proj_display:.1f} ({diff_sign}{diff:.1f})</div>
+                    """
+                    card_class = "player-card played"
+                    status_html = '<span class="status-badge status-played">Played</span>'
+                else:
+                    points_html = f"""
+                        <div class="proj-only">{proj_display:.1f}</div>
+                        <div class="proj-pts">projected</div>
+                    """
+                    card_class = "player-card upcoming"
+                    status_html = '<span class="status-badge status-upcoming">Upcoming</span>'
+            else:
+                proj_display = proj_pts * (3 if active_chip == "3xc" else 2) if is_captain else proj_pts
+                points_html = f'<div class="proj-only">{proj_display:.1f}</div>'
+                card_class = "player-card"
+                status_html = ""
+
+            html += f"""
+            <div class="{card_class}">
+                <div class="player-info">
+                    <div class="player-name">{player_name}{captain_html}{status_html}</div>
+                    <div class="player-team">{team}</div>
+                </div>
+                <div class="player-points">{points_html}</div>
+            </div>
+            """
+
+        html += "</div>"
+
+    html += "</div>"
+
+    player_count = len(display_df)
+    pos_groups = display_df['Position'].nunique() if 'Position' in display_df.columns else 4
+    height = 40 + (player_count * 56) + (pos_groups * 32)
+    components.html(html, height=height, scrolling=False)
+
+
 def _lookup_projection(player_name: str, team: str, position: str, projections_df: pd.DataFrame) -> dict:
     """Look up projection for a player using fuzzy matching."""
     if projections_df is None or projections_df.empty:
@@ -314,13 +486,18 @@ def _add_projections_to_squad(squad_df: pd.DataFrame, projections_df: pd.DataFra
     return squad_df
 
 
-def _calculate_projected_score(squad_df: pd.DataFrame, active_chip: str = None) -> float:
+def _calculate_projected_score(squad_df: pd.DataFrame, active_chip: str = None, use_blended: bool = False) -> float:
     """
     Calculate total projected score for a squad.
 
     - Starting XI (positions 1-11) count normally
     - Captain gets 2x (or 3x for Triple Captain)
     - Bench Boost: all 15 players count
+
+    Parameters:
+    - squad_df: DataFrame with player data.
+    - active_chip: Active chip for the GW (e.g., 'bboost', '3xc').
+    - use_blended: If True, use 'Blended_Points' column (live + projected) instead of 'Points'.
     """
     if squad_df.empty:
         return 0.0
@@ -333,15 +510,18 @@ def _calculate_projected_score(squad_df: pd.DataFrame, active_chip: str = None) 
         # Normal: only starting XI (positions 1-11)
         active_players = squad_df[squad_df["squad_position"] <= 11].copy()
 
+    # Choose points column
+    pts_col = "Blended_Points" if use_blended and "Blended_Points" in active_players.columns else "Points"
+
     # Calculate base points
-    active_players["Points"] = pd.to_numeric(active_players["Points"], errors="coerce").fillna(0.0)
+    active_players[pts_col] = pd.to_numeric(active_players[pts_col], errors="coerce").fillna(0.0)
 
     # Apply captain multiplier
     captain_mult = 3 if active_chip == "3xc" else 2
 
     total = 0.0
     for _, row in active_players.iterrows():
-        pts = row["Points"]
+        pts = row[pts_col]
         if row.get("is_captain", False):
             pts *= captain_mult
         total += pts
@@ -518,18 +698,23 @@ def _render_h2h_fixtures_overview(
     bootstrap: dict,
     projections_df: pd.DataFrame,
     gw_started: bool,
-    sigma: float = 15.0
+    sigma: float = 15.0,
+    live_stats: dict = None,
+    gw_is_live: bool = False,
 ):
     """
     Render an overview table showing all H2H fixtures with projected scores and win probabilities.
+    When gw_is_live, shows live scores blended with projections for remaining players.
     """
     if not fixture_options:
         return
 
+    live_stats = live_stats or {}
     overview_data = []
     denom = math.sqrt(2.0 * (sigma ** 2)) if sigma > 0 else 1.0
 
-    progress_bar = st.progress(0, text="Calculating projections for all fixtures...")
+    spinner_msg = "Calculating live scores..." if gw_is_live else "Calculating projections for all fixtures..."
+    progress_bar = st.progress(0, text=spinner_msg)
 
     for i, fixture in enumerate(fixture_options):
         try:
@@ -544,20 +729,38 @@ def _render_h2h_fixtures_overview(
             if squad_1.empty or squad_2.empty:
                 continue
 
-            score_1 = _calculate_projected_score(squad_1, chip_1)
-            score_2 = _calculate_projected_score(squad_2, chip_2)
+            orig_1 = _calculate_projected_score(squad_1, chip_1)
+            orig_2 = _calculate_projected_score(squad_2, chip_2)
 
-            # Calculate win probability
-            z = (score_1 - score_2) / denom
+            # Blend live data if available
+            if gw_is_live and live_stats:
+                squad_1 = _blend_live_with_squad(squad_1, live_stats)
+                squad_2 = _blend_live_with_squad(squad_2, live_stats)
+                blended_1 = _calculate_projected_score(squad_1, chip_1, use_blended=True)
+                blended_2 = _calculate_projected_score(squad_2, chip_2, use_blended=True)
+                live_1 = squad_1[squad_1["squad_position"] <= 11]["Live_Points"].sum() if chip_1 != "bboost" else squad_1["Live_Points"].sum()
+                live_2 = squad_2[squad_2["squad_position"] <= 11]["Live_Points"].sum() if chip_2 != "bboost" else squad_2["Live_Points"].sum()
+            else:
+                blended_1 = orig_1
+                blended_2 = orig_2
+                live_1 = None
+                live_2 = None
+
+            # Calculate win probability using blended scores
+            z = (blended_1 - blended_2) / denom
             p_team1 = _normal_cdf(z)
             p_team2 = 1.0 - p_team1
 
             overview_data.append({
                 "team1": fixture["team1_name"],
-                "proj1": score_1,
+                "blended1": blended_1,
+                "live1": live_1,
+                "orig1": orig_1,
                 "pct1": p_team1 * 100,
                 "pct2": p_team2 * 100,
-                "proj2": score_2,
+                "blended2": blended_2,
+                "live2": live_2,
+                "orig2": orig_2,
                 "team2": fixture["team2_name"],
             })
         except Exception:
@@ -571,122 +774,150 @@ def _render_h2h_fixtures_overview(
         st.warning("Could not calculate projections for fixtures.")
         return
 
-    # Build HTML table with fancy styling
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: transparent;
-        }
-        .fixtures-table {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
-            margin: 10px 0;
-        }
-        .fixtures-table th {
-            background: linear-gradient(135deg, #37003c 0%, #5a0050 100%);
-            color: white;
-            padding: 14px 12px;
-            text-align: center;
-            font-weight: 600;
-            font-size: 13px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .fixtures-table th:first-child {
-            border-radius: 10px 0 0 0;
-        }
-        .fixtures-table th:last-child {
-            border-radius: 0 10px 0 0;
-        }
-        .fixtures-table td {
-            padding: 14px 12px;
-            text-align: center;
-            border-bottom: 1px solid #e0e0e0;
-            font-size: 14px;
-        }
-        .fixtures-table tr:last-child td:first-child {
-            border-radius: 0 0 0 10px;
-        }
-        .fixtures-table tr:last-child td:last-child {
-            border-radius: 0 0 10px 0;
-        }
-        .fixtures-table tr:hover td {
-            background-color: #f8f4f9;
-        }
-        .team-name {
-            font-weight: 600;
-            color: #1a1a2e;
-            min-width: 140px;
-        }
-        .team-left {
-            text-align: right !important;
-            padding-right: 20px !important;
-        }
-        .team-right {
-            text-align: left !important;
-            padding-left: 20px !important;
-        }
-        .proj-score {
-            font-weight: 500;
-            color: #444;
-            min-width: 55px;
-        }
-        .win-pct {
-            font-weight: 700;
-            font-size: 15px;
-            min-width: 65px;
-            padding: 8px 12px !important;
-            border-radius: 6px;
-        }
-        .vs-cell {
-            color: #888;
-            font-weight: 500;
-            font-size: 12px;
-            min-width: 40px;
-        }
-    </style>
-    </head>
-    <body>
-    <table class="fixtures-table">
-    <thead>
-        <tr>
-            <th>Team</th>
-            <th>Proj</th>
-            <th>Win %</th>
-            <th></th>
-            <th>Win %</th>
-            <th>Proj</th>
-            <th>Team</th>
-        </tr>
-    </thead>
-    <tbody>
-    """
-
-    for row in overview_data:
-        color1 = _get_win_pct_color(row["pct1"])
-        color2 = _get_win_pct_color(row["pct2"])
-
-        html += f"""
-        <tr>
-            <td class="team-name team-left">{row["team1"]}</td>
-            <td class="proj-score">{row["proj1"]:.1f}</td>
-            <td class="win-pct" style="background: {color1}; color: white;">{row["pct1"]:.0f}%</td>
-            <td class="vs-cell">vs</td>
-            <td class="win-pct" style="background: {color2}; color: white;">{row["pct2"]:.0f}%</td>
-            <td class="proj-score">{row["proj2"]:.1f}</td>
-            <td class="team-name team-right">{row["team2"]}</td>
-        </tr>
+    # Build HTML table - different layout for live vs pre-match
+    if gw_is_live:
+        # Live layout: Team | Live / Proj | Win % | vs | Win % | Live / Proj | Team
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: transparent; }
+            .fixtures-table { width: 100%; border-collapse: separate; border-spacing: 0; margin: 10px 0; }
+            .fixtures-table th {
+                background: linear-gradient(135deg, #37003c 0%, #5a0050 100%);
+                color: white; padding: 12px 8px; text-align: center;
+                font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+            }
+            .fixtures-table th:first-child { border-radius: 10px 0 0 0; }
+            .fixtures-table th:last-child { border-radius: 0 10px 0 0; }
+            .fixtures-table td { padding: 12px 8px; text-align: center; border-bottom: 1px solid #e0e0e0; font-size: 13px; vertical-align: middle; }
+            .fixtures-table tr:last-child td:first-child { border-radius: 0 0 0 10px; }
+            .fixtures-table tr:last-child td:last-child { border-radius: 0 0 10px 0; }
+            .fixtures-table tr:hover td { background-color: #f8f4f9; }
+            .team-name { font-weight: 600; color: #1a1a2e; min-width: 120px; }
+            .team-left { text-align: right !important; padding-right: 12px !important; }
+            .team-right { text-align: left !important; padding-left: 12px !important; }
+            .score-cell { min-width: 90px; }
+            .live-score { font-size: 22px; font-weight: 700; color: #e74c3c; }
+            .blended-score { font-size: 13px; color: #555; margin-top: 2px; }
+            .orig-proj { font-size: 10px; color: #999; margin-top: 1px; }
+            .perf-up { color: #28a745; }
+            .perf-down { color: #dc3545; }
+            .win-pct { font-weight: 700; font-size: 14px; min-width: 55px; padding: 6px 10px !important; border-radius: 6px; }
+            .vs-cell { color: #888; font-weight: 500; font-size: 12px; min-width: 30px; }
+        </style>
+        </head>
+        <body>
+        <table class="fixtures-table">
+        <thead>
+            <tr>
+                <th>Team</th>
+                <th>Live / Proj</th>
+                <th>Win %</th>
+                <th></th>
+                <th>Win %</th>
+                <th>Live / Proj</th>
+                <th>Team</th>
+            </tr>
+        </thead>
+        <tbody>
         """
+
+        for row in overview_data:
+            color1 = _get_win_pct_color(row["pct1"])
+            color2 = _get_win_pct_color(row["pct2"])
+
+            diff1 = row["blended1"] - row["orig1"]
+            diff2 = row["blended2"] - row["orig2"]
+            diff1_class = "perf-up" if diff1 > 0 else "perf-down" if diff1 < 0 else ""
+            diff2_class = "perf-up" if diff2 > 0 else "perf-down" if diff2 < 0 else ""
+            diff1_sign = "+" if diff1 > 0 else ""
+            diff2_sign = "+" if diff2 > 0 else ""
+
+            score1_html = f'''
+                <div class="live-score">{row["live1"]:.0f}</div>
+                <div class="blended-score">&rarr; {row["blended1"]:.1f} proj</div>
+                <div class="orig-proj">orig: {row["orig1"]:.1f} <span class="{diff1_class}">({diff1_sign}{diff1:.1f})</span></div>
+            '''
+            score2_html = f'''
+                <div class="live-score">{row["live2"]:.0f}</div>
+                <div class="blended-score">&rarr; {row["blended2"]:.1f} proj</div>
+                <div class="orig-proj">orig: {row["orig2"]:.1f} <span class="{diff2_class}">({diff2_sign}{diff2:.1f})</span></div>
+            '''
+
+            html += f"""
+            <tr>
+                <td class="team-name team-left">{row["team1"]}</td>
+                <td class="score-cell">{score1_html}</td>
+                <td class="win-pct" style="background: {color1}; color: white;">{row["pct1"]:.0f}%</td>
+                <td class="vs-cell">vs</td>
+                <td class="win-pct" style="background: {color2}; color: white;">{row["pct2"]:.0f}%</td>
+                <td class="score-cell">{score2_html}</td>
+                <td class="team-name team-right">{row["team2"]}</td>
+            </tr>
+            """
+    else:
+        # Pre-match layout: Team | Proj | Win % | vs | Win % | Proj | Team
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif; background: transparent; }
+            .fixtures-table { width: 100%; border-collapse: separate; border-spacing: 0; margin: 10px 0; }
+            .fixtures-table th {
+                background: linear-gradient(135deg, #37003c 0%, #5a0050 100%);
+                color: white; padding: 14px 12px; text-align: center;
+                font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;
+            }
+            .fixtures-table th:first-child { border-radius: 10px 0 0 0; }
+            .fixtures-table th:last-child { border-radius: 0 10px 0 0; }
+            .fixtures-table td { padding: 14px 12px; text-align: center; border-bottom: 1px solid #e0e0e0; font-size: 14px; }
+            .fixtures-table tr:last-child td:first-child { border-radius: 0 0 0 10px; }
+            .fixtures-table tr:last-child td:last-child { border-radius: 0 0 10px 0; }
+            .fixtures-table tr:hover td { background-color: #f8f4f9; }
+            .team-name { font-weight: 600; color: #1a1a2e; min-width: 140px; }
+            .team-left { text-align: right !important; padding-right: 20px !important; }
+            .team-right { text-align: left !important; padding-left: 20px !important; }
+            .proj-score { font-weight: 500; color: #444; min-width: 55px; }
+            .win-pct { font-weight: 700; font-size: 15px; min-width: 65px; padding: 8px 12px !important; border-radius: 6px; }
+            .vs-cell { color: #888; font-weight: 500; font-size: 12px; min-width: 40px; }
+        </style>
+        </head>
+        <body>
+        <table class="fixtures-table">
+        <thead>
+            <tr>
+                <th>Team</th>
+                <th>Proj</th>
+                <th>Win %</th>
+                <th></th>
+                <th>Win %</th>
+                <th>Proj</th>
+                <th>Team</th>
+            </tr>
+        </thead>
+        <tbody>
+        """
+
+        for row in overview_data:
+            color1 = _get_win_pct_color(row["pct1"])
+            color2 = _get_win_pct_color(row["pct2"])
+
+            html += f"""
+            <tr>
+                <td class="team-name team-left">{row["team1"]}</td>
+                <td class="proj-score">{row["blended1"]:.1f}</td>
+                <td class="win-pct" style="background: {color1}; color: white;">{row["pct1"]:.0f}%</td>
+                <td class="vs-cell">vs</td>
+                <td class="win-pct" style="background: {color2}; color: white;">{row["pct2"]:.0f}%</td>
+                <td class="proj-score">{row["blended2"]:.1f}</td>
+                <td class="team-name team-right">{row["team2"]}</td>
+            </tr>
+            """
 
     html += """
     </tbody>
@@ -695,15 +926,14 @@ def _render_h2h_fixtures_overview(
     </html>
     """
 
-    # Calculate height based on number of fixtures
-    table_height = 60 + (len(overview_data) * 52)
+    # Calculate height based on number of fixtures (taller rows for live view with 3 lines of text)
+    row_height = 90 if gw_is_live else 52
+    table_height = 60 + (len(overview_data) * row_height)
     components.html(html, height=table_height, scrolling=False)
 
 
 def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: int):
     """Display H2H fixture projections with matchups and win probability."""
-
-    st.subheader(f"Gameweek {current_gw} H2H Fixtures Overview")
 
     # Load bootstrap data first (needed for deadline check)
     bootstrap = get_classic_bootstrap_static()
@@ -711,14 +941,24 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
         show_api_error("loading player data for fixture projections")
         return
 
-    # Check if GW has started
+    # Check if GW has started and if it's live
     gw_started = _is_gameweek_started(current_gw, bootstrap)
+    gw_is_live = gw_started and is_gameweek_live(current_gw)
+
+    # Header with live indicator
+    if gw_is_live:
+        st.subheader(f"🔴 LIVE - Gameweek {current_gw} H2H Fixtures")
+    else:
+        st.subheader(f"Gameweek {current_gw} H2H Fixtures Overview")
 
     if not gw_started:
         st.info(
             f"**Pre-deadline mode:** Gameweek {current_gw} hasn't started yet. "
             "Showing predicted optimal lineups based on current squads."
         )
+
+    # Get live stats if gameweek is live
+    live_stats = get_live_gameweek_stats(current_gw) if gw_is_live else {}
 
     # Fetch H2H matches for current gameweek
     matches_data = get_h2h_league_matches(league_id, event=current_gw)
@@ -771,9 +1011,15 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
 
     # Render fixtures overview table
     sigma = 15.0
-    _render_h2h_fixtures_overview(fixture_options, current_gw, bootstrap, projections_df, gw_started, sigma)
+    _render_h2h_fixtures_overview(
+        fixture_options, current_gw, bootstrap, projections_df, gw_started, sigma,
+        live_stats=live_stats, gw_is_live=gw_is_live,
+    )
 
-    st.caption(f"Win probability model: P(A>B) = Φ((μA−μB)/√(2σ²)); σ≈{sigma:.2f} (default)")
+    if gw_is_live:
+        st.caption("🔴 **LIVE**: Scores update as players finish. Projected points shown for players yet to play.")
+    else:
+        st.caption(f"Win probability model: P(A>B) = Φ((μA−μB)/√(2σ²)); σ≈{sigma:.2f} (default)")
 
     # Divider before detailed view
     st.divider()
@@ -795,7 +1041,8 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
         return
 
     # Fetch data for both teams
-    with st.spinner("Loading detailed team data..."):
+    spinner_msg = "Loading live team data..." if gw_is_live else "Loading detailed team data..."
+    with st.spinner(spinner_msg):
         # Get squad and lineup for both teams
         squad_1, chip_1, predicted_1 = _get_team_squad_and_lineup(
             selected["team1_id"], current_gw, bootstrap, projections_df, gw_started
@@ -808,9 +1055,25 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
             show_api_error("loading team data")
             return
 
-        # Calculate projected scores
-        score_1 = _calculate_projected_score(squad_1, chip_1)
-        score_2 = _calculate_projected_score(squad_2, chip_2)
+        # Blend live data if available
+        if gw_is_live and live_stats:
+            squad_1 = _blend_live_with_squad(squad_1, live_stats)
+            squad_2 = _blend_live_with_squad(squad_2, live_stats)
+
+        # Calculate scores (use blended if live)
+        orig_score_1 = _calculate_projected_score(squad_1, chip_1)
+        orig_score_2 = _calculate_projected_score(squad_2, chip_2)
+
+        if gw_is_live and live_stats:
+            score_1 = _calculate_projected_score(squad_1, chip_1, use_blended=True)
+            score_2 = _calculate_projected_score(squad_2, chip_2, use_blended=True)
+            live_1 = squad_1[squad_1["squad_position"] <= 11]["Live_Points"].sum() if chip_1 != "bboost" else squad_1["Live_Points"].sum()
+            live_2 = squad_2[squad_2["squad_position"] <= 11]["Live_Points"].sum() if chip_2 != "bboost" else squad_2["Live_Points"].sum()
+        else:
+            score_1 = orig_score_1
+            score_2 = orig_score_2
+            live_1 = None
+            live_2 = None
 
     # Win probability calculation
     denom = math.sqrt(2.0 * (sigma ** 2)) if sigma > 0 else 1.0
@@ -860,56 +1123,68 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
                 )
 
     # Side-by-side team displays
+    st.subheader("Team Lineups")
     col1, col2 = st.columns(2)
-
-    # Prepare display DataFrames (starting XI only for display)
-    def prepare_display_df(squad_df, chip, is_predicted):
-        if chip == "bboost":
-            df = squad_df.copy()
-        else:
-            df = squad_df[squad_df["squad_position"] <= 11].copy()
-
-        # Add captain indicator
-        def format_name(row):
-            name = row["Player"]
-            if row.get("is_captain"):
-                suffix = " (C*)" if is_predicted else " (C)"
-                return f"{name}{suffix}"
-            elif row.get("is_vice_captain"):
-                return f"{name} (V)"
-            return name
-
-        df["Player"] = df.apply(format_name, axis=1)
-
-        # Sort by position
-        position_order = ['G', 'D', 'M', 'F']
-        df['Position'] = pd.Categorical(df['Position'], categories=position_order, ordered=True)
-        df = df.sort_values(by=['Position', 'Points'], ascending=[True, False])
-
-        return df[["Player", "Team", "Position", "Points", "Pos Rank"]]
-
-    display_1 = prepare_display_df(squad_1, chip_1, predicted_1)
-    display_2 = prepare_display_df(squad_2, chip_2, predicted_2)
 
     with col1:
         chip_text = f" ({chip_1.upper()})" if chip_1 else ""
         predicted_text = " [Predicted]" if predicted_1 else ""
-        render_styled_table(
-            display_1,
-            title=f"{selected['team1_name']}{chip_text}{predicted_text}",
-            col_formats={"Points": "{:.1f}"},
-        )
-        st.markdown(f"**Projected Score: {score_1:.2f}**")
+
+        if gw_is_live and live_1 is not None:
+            diff1 = score_1 - orig_score_1
+            diff1_sign = "+" if diff1 > 0 else ""
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #37003c 0%, #5a0050 100%); padding: 16px; border-radius: 10px; margin-bottom: 12px;">
+                <div style="color: white; font-size: 14px; font-weight: 500; margin-bottom: 4px;">{selected['team1_name']}{chip_text}{predicted_text}</div>
+                <div style="display: flex; align-items: baseline; gap: 12px;">
+                    <span style="color: #00ff87; font-size: 32px; font-weight: 700;">{live_1:.0f}</span>
+                    <span style="color: rgba(255,255,255,0.7); font-size: 16px;">&rarr; {score_1:.1f} proj</span>
+                </div>
+                <div style="color: rgba(255,255,255,0.6); font-size: 12px; margin-top: 4px;">
+                    Pre-match: {orig_score_1:.1f} <span style="color: {'#00ff87' if diff1 > 0 else '#ff6b6b' if diff1 < 0 else 'rgba(255,255,255,0.6)'};">({diff1_sign}{diff1:.1f})</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #37003c 0%, #5a0050 100%); padding: 16px; border-radius: 10px; margin-bottom: 12px;">
+                <div style="color: white; font-size: 14px; font-weight: 500; margin-bottom: 4px;">{selected['team1_name']}{chip_text}{predicted_text}</div>
+                <div style="color: #00ff87; font-size: 32px; font-weight: 700;">{score_1:.1f}</div>
+                <div style="color: rgba(255,255,255,0.6); font-size: 12px;">Projected Points</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        _render_classic_team_lineup(squad_1, selected['team1_name'], is_live=gw_is_live, active_chip=chip_1)
 
     with col2:
         chip_text = f" ({chip_2.upper()})" if chip_2 else ""
         predicted_text = " [Predicted]" if predicted_2 else ""
-        render_styled_table(
-            display_2,
-            title=f"{selected['team2_name']}{chip_text}{predicted_text}",
-            col_formats={"Points": "{:.1f}"},
-        )
-        st.markdown(f"**Projected Score: {score_2:.2f}**")
+
+        if gw_is_live and live_2 is not None:
+            diff2 = score_2 - orig_score_2
+            diff2_sign = "+" if diff2 > 0 else ""
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #37003c 0%, #5a0050 100%); padding: 16px; border-radius: 10px; margin-bottom: 12px;">
+                <div style="color: white; font-size: 14px; font-weight: 500; margin-bottom: 4px;">{selected['team2_name']}{chip_text}{predicted_text}</div>
+                <div style="display: flex; align-items: baseline; gap: 12px;">
+                    <span style="color: #00ff87; font-size: 32px; font-weight: 700;">{live_2:.0f}</span>
+                    <span style="color: rgba(255,255,255,0.7); font-size: 16px;">&rarr; {score_2:.1f} proj</span>
+                </div>
+                <div style="color: rgba(255,255,255,0.6); font-size: 12px; margin-top: 4px;">
+                    Pre-match: {orig_score_2:.1f} <span style="color: {'#00ff87' if diff2 > 0 else '#ff6b6b' if diff2 < 0 else 'rgba(255,255,255,0.6)'};">({diff2_sign}{diff2:.1f})</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #37003c 0%, #5a0050 100%); padding: 16px; border-radius: 10px; margin-bottom: 12px;">
+                <div style="color: white; font-size: 14px; font-weight: 500; margin-bottom: 4px;">{selected['team2_name']}{chip_text}{predicted_text}</div>
+                <div style="color: #00ff87; font-size: 32px; font-weight: 700;">{score_2:.1f}</div>
+                <div style="color: rgba(255,255,255,0.6); font-size: 12px;">Projected Points</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        _render_classic_team_lineup(squad_2, selected['team2_name'], is_live=gw_is_live, active_chip=chip_2)
 
     # Show prediction disclaimer if applicable
     if predicted_1 or predicted_2:
@@ -926,14 +1201,26 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
 def _show_classic_leaderboard_projections(league_id: int, league_name: str, current_gw: int, standings_data: dict):
     """Display projected leaderboard with standings movement for Classic scoring leagues."""
 
-    st.subheader(f"Gameweek {current_gw} Projected Standings")
-
     standings = standings_data.get("standings", {})
     results = standings.get("results", [])
 
     if not results:
         st.warning("No standings data available.")
         return
+
+    # Load bootstrap first (needed for deadline check and live detection)
+    bootstrap = get_classic_bootstrap_static()
+    if not bootstrap:
+        show_api_error("loading player data")
+        return
+
+    gw_started = _is_gameweek_started(current_gw, bootstrap)
+    gw_is_live = gw_started and is_gameweek_live(current_gw)
+
+    if gw_is_live:
+        st.subheader(f"🔴 LIVE - Gameweek {current_gw} Projected Standings")
+    else:
+        st.subheader(f"Gameweek {current_gw} Projected Standings")
 
     # Team limit slider
     max_teams = len(results)
@@ -955,16 +1242,8 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
         if entry:
             my_team_name = entry.get("name")
 
-    # Load bootstrap and projections
+    # Load projections and live data
     with st.spinner("Loading player data and projections..."):
-        bootstrap = get_classic_bootstrap_static()
-        if not bootstrap:
-            show_api_error("loading player data")
-            return
-
-        # Check if GW has started
-        gw_started = _is_gameweek_started(current_gw, bootstrap)
-
         if not gw_started:
             st.info(
                 f"**Pre-deadline mode:** Gameweek {current_gw} hasn't started yet. "
@@ -985,11 +1264,15 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
         if not projections_available:
             st.warning("Rotowire projections unavailable. Projected GW points will show 0.")
 
+        # Get live stats if gameweek is live
+        live_stats = get_live_gameweek_stats(current_gw) if gw_is_live else {}
+
     # Process each team
     projection_data = []
     any_predicted = False
 
-    progress_bar = st.progress(0, text="Calculating projections...")
+    spinner_msg = "Calculating live scores..." if gw_is_live else "Calculating projections..."
+    progress_bar = st.progress(0, text=spinner_msg)
 
     for i, entry in enumerate(results[:num_teams]):
         team_id = entry.get("entry")
@@ -1007,10 +1290,24 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
             any_predicted = True
 
         projected_gw = 0.0
+        live_gw = 0
+        blended_gw = 0.0
+
         if not squad_df.empty:
             projected_gw = _calculate_projected_score(squad_df, active_chip)
 
-        projected_total = current_total + projected_gw
+            if gw_is_live and live_stats:
+                squad_df = _blend_live_with_squad(squad_df, live_stats)
+                blended_gw = _calculate_projected_score(squad_df, active_chip, use_blended=True)
+                # Sum raw live points for starting XI (or all for bench boost)
+                if active_chip == "bboost":
+                    live_gw = int(squad_df["Live_Points"].sum())
+                else:
+                    live_gw = int(squad_df[squad_df["squad_position"] <= 11]["Live_Points"].sum())
+            else:
+                blended_gw = projected_gw
+
+        projected_total = current_total + blended_gw
 
         projection_data.append({
             "team_id": team_id,
@@ -1018,7 +1315,9 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
             "Manager": manager_name,
             "Current Rank": current_rank,
             "Current Total": current_total,
+            "Live GW": live_gw,
             "Proj GW": projected_gw,
+            "Blended GW": blended_gw,
             "Proj Total": projected_total,
             "Chip": active_chip.upper() if active_chip else "",
             "Predicted": is_predicted,
@@ -1044,27 +1343,46 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
     # Sort back by current rank for display
     df = df.sort_values("Current Rank").reset_index(drop=True)
 
-    # Prepare display DataFrame
-    display_df = df[[
-        "Current Rank", "Team", "Manager", "Current Total",
-        "Proj GW", "Proj Total", "Proj Rank", "Movement", "Chip"
-    ]].copy()
+    # Prepare display DataFrame - include Live GW column when live
+    if gw_is_live:
+        display_df = df[[
+            "Current Rank", "Team", "Manager", "Current Total",
+            "Live GW", "Blended GW", "Proj GW", "Proj Total", "Proj Rank", "Movement", "Chip"
+        ]].copy()
 
-    display_df.columns = ["Rank", "Team", "Manager", "Current", "Proj GW", "Proj Total", "Proj Rank", "Movement", "Chip"]
+        display_df.columns = ["Rank", "Team", "Manager", "Current", "Live GW", "Blended GW", "Orig Proj", "Proj Total", "Proj Rank", "Movement", "Chip"]
 
-    # Format numbers
-    display_df["Proj GW"] = display_df["Proj GW"].apply(lambda x: f"{x:.1f}")
-    display_df["Proj Total"] = display_df["Proj Total"].apply(lambda x: f"{x:.1f}")
+        # Format numbers
+        display_df["Blended GW"] = display_df["Blended GW"].apply(lambda x: f"{x:.1f}")
+        display_df["Orig Proj"] = display_df["Orig Proj"].apply(lambda x: f"{x:.1f}")
+        display_df["Proj Total"] = display_df["Proj Total"].apply(lambda x: f"{x:.1f}")
+    else:
+        display_df = df[[
+            "Current Rank", "Team", "Manager", "Current Total",
+            "Proj GW", "Proj Total", "Proj Rank", "Movement", "Chip"
+        ]].copy()
+
+        display_df.columns = ["Rank", "Team", "Manager", "Current", "Proj GW", "Proj Total", "Proj Rank", "Movement", "Chip"]
+
+        # Format numbers
+        display_df["Proj GW"] = display_df["Proj GW"].apply(lambda x: f"{x:.1f}")
+        display_df["Proj Total"] = display_df["Proj Total"].apply(lambda x: f"{x:.1f}")
 
     st.markdown("---")
 
     # Display the table
     render_styled_table(
         display_df,
-        text_align={"Rank": "center", "Proj Rank": "center", "Movement": "center", "Chip": "center"},
+        text_align={"Rank": "center", "Proj Rank": "center", "Movement": "center", "Chip": "center",
+                     "Live GW": "center"},
     )
 
     # Legend
+    if gw_is_live:
+        st.caption(
+            "🔴 **LIVE**: Live GW = actual points so far. Blended GW = live + projected for remaining players. "
+            "Orig Proj = pre-match projection."
+        )
     st.markdown("""
     **Legend:**
     - ↑ N (green) = Projected to move up N positions
@@ -1085,13 +1403,23 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
         my_row = df[df["Team"] == my_team_name]
         if not my_row.empty:
             row = my_row.iloc[0]
-            st.info(
-                f"**Your Team ({my_team_name}):** "
-                f"Current Rank: {row['Current Rank']} | "
-                f"Projected GW: {row['Proj GW']:.1f} | "
-                f"Projected Total: {row['Proj Total']:.1f} | "
-                f"Projected Rank: {row['Proj Rank']} ({row['Movement']})"
-            )
+            if gw_is_live:
+                st.info(
+                    f"**Your Team ({my_team_name}):** "
+                    f"Current Rank: {row['Current Rank']} | "
+                    f"Live GW: {row['Live GW']} | "
+                    f"Blended GW: {row['Blended GW']:.1f} | "
+                    f"Projected Total: {row['Proj Total']:.1f} | "
+                    f"Projected Rank: {row['Proj Rank']} ({row['Movement']})"
+                )
+            else:
+                st.info(
+                    f"**Your Team ({my_team_name}):** "
+                    f"Current Rank: {row['Current Rank']} | "
+                    f"Projected GW: {row['Proj GW']:.1f} | "
+                    f"Projected Total: {row['Proj Total']:.1f} | "
+                    f"Projected Rank: {row['Proj Rank']} ({row['Movement']})"
+                )
 
 
 # =============================================================================
@@ -1101,12 +1429,28 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
 def show_classic_fixture_projections_page():
     """Display Classic FPL fixture projections page with league selector."""
 
-    # Title with refresh button
-    col1, col2 = st.columns([6, 1])
+    current_gw = get_current_gameweek()
+    gw_is_live = is_gameweek_live(current_gw)
+
+    # Title with live indicator, auto-refresh toggle, and refresh button
+    col1, col2, col3 = st.columns([5, 1, 1])
     with col1:
-        st.title("Classic League Fixture Projections")
+        if gw_is_live:
+            st.title("🔴 Classic League Fixture Projections")
+        else:
+            st.title("Classic League Fixture Projections")
     with col2:
-        if st.button("🔄 Refresh", help="Refresh gameweek data", key="classic_gw_refresh"):
+        if gw_is_live:
+            auto_refresh = st.checkbox("Auto", value=False, help="Auto-refresh every 60s", key="classic_auto_refresh")
+            if auto_refresh:
+                import time
+                time.sleep(0.1)
+                st.rerun()
+    with col3:
+        if st.button("🔄", help="Refresh live data", key="classic_gw_refresh"):
+            # Clear live caches
+            get_live_gameweek_stats.clear()
+            is_gameweek_live.clear()
             config.refresh_gameweek()
             st.rerun()
 
@@ -1164,7 +1508,6 @@ def show_classic_fixture_projections_page():
     with col2:
         st.metric("Format", "H2H" if is_h2h else "Classic")
     with col3:
-        current_gw = get_current_gameweek()
         st.metric("Gameweek", current_gw)
 
     st.divider()

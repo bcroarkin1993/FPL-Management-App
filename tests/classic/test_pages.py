@@ -37,6 +37,9 @@ class TestClassicFixtureProjectionsPage:
              patch("scripts.classic.fixture_projections.get_classic_h2h_record", return_value={"wins": 0, "draws": 0, "losses": 0, "record_str": "0-0-0", "matches": []}), \
              patch("scripts.classic.fixture_projections.get_classic_transfers", return_value=[]), \
              patch("scripts.classic.fixture_projections.position_converter", side_effect=lambda x: {1: "G", 2: "D", 3: "M", 4: "F"}.get(x, "M")), \
+             patch("scripts.classic.fixture_projections.is_gameweek_live", return_value=False), \
+             patch("scripts.classic.fixture_projections.get_live_gameweek_stats", return_value={}), \
+             patch("scripts.classic.fixture_projections.get_fpl_player_mapping", return_value={}), \
              patch("scripts.classic.fixture_projections.show_api_error"):
             from scripts.classic.fixture_projections import show_classic_fixture_projections_page
             show_classic_fixture_projections_page()
