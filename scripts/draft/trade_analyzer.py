@@ -673,15 +673,9 @@ def _score_proposal(
     if drop_suggestion:
         trade_score *= 0.4
 
-    # Boost multi-player trades — balanced swaps where both sides
-    # strengthen a weak position are more likely to be accepted than
-    # 1-for-1 trades where subjective player valuations dominate
+    # Determine trade type
     n_send = len(send_players)
     n_recv = len(recv_players)
-    if n_send == 2 and n_recv == 2:
-        trade_score *= 2.0
-    elif n_send + n_recv == 3:  # 2-for-1 in either direction
-        trade_score *= 1.5
     if n_send == 1 and n_recv == 1:
         trade_type = "1-for-1"
     elif n_send == 2 and n_recv == 2:
@@ -1280,37 +1274,53 @@ def show_trade_analyzer_page():
         num_teams = len(rosters)
         all_proposals = []
 
+        # Collect proposals by type
+        proposals_by_type = {}
         if "1-for-1" in trade_types:
-            proposals_1 = _find_1_for_1_trades(my_team_id, rosters, needs, num_teams)
-            all_proposals.extend(proposals_1)
-
+            proposals_by_type["1-for-1"] = _find_1_for_1_trades(my_team_id, rosters, needs, num_teams)
         if "2-for-2" in trade_types:
-            proposals_2 = _find_2_for_2_trades(my_team_id, rosters, needs, num_teams)
-            all_proposals.extend(proposals_2)
-
+            proposals_by_type["2-for-2"] = _find_2_for_2_trades(my_team_id, rosters, needs, num_teams)
         if "2-for-1" in trade_types:
-            proposals_21 = _find_2_for_1_trades(my_team_id, rosters, needs, num_teams)
-            all_proposals.extend(proposals_21)
+            proposals_by_type["2-for-1"] = _find_2_for_1_trades(my_team_id, rosters, needs, num_teams)
 
-        # Deduplicate by (opp_id, frozenset of send names, frozenset of receive names)
-        seen = set()
-        unique_proposals = []
-        for p in all_proposals:
-            key = (
-                p["opp_id"],
-                frozenset(pl["name"] for pl in p["send"]),
-                frozenset(pl["name"] for pl in p["receive"]),
-            )
-            if key not in seen:
-                seen.add(key)
-                unique_proposals.append(p)
+        # Deduplicate within each type
+        for ttype in proposals_by_type:
+            seen = set()
+            unique = []
+            for p in proposals_by_type[ttype]:
+                key = (
+                    p["opp_id"],
+                    frozenset(pl["name"] for pl in p["send"]),
+                    frozenset(pl["name"] for pl in p["receive"]),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(p)
+            unique.sort(key=lambda x: x["trade_score"], reverse=True)
+            proposals_by_type[ttype] = unique
 
-        # Sort by trade_score descending, take top 10
-        unique_proposals.sort(key=lambda x: x["trade_score"], reverse=True)
-        top_proposals = unique_proposals[:15]
+        # Reserve 5 slots per enabled trade type, then fill remaining
+        # slots with the best remaining proposals across all types
+        slots_per_type = 5
+        reserved = []
+        leftover = []
+        for ttype, proposals in proposals_by_type.items():
+            reserved.extend(proposals[:slots_per_type])
+            leftover.extend(proposals[slots_per_type:])
+
+        # Sort reserved by score, then append best leftovers up to 15 total
+        reserved.sort(key=lambda x: x["trade_score"], reverse=True)
+        leftover.sort(key=lambda x: x["trade_score"], reverse=True)
+        top_proposals = reserved
+        for p in leftover:
+            if len(top_proposals) >= 15:
+                break
+            top_proposals.append(p)
+
+        total_found = sum(len(v) for v in proposals_by_type.values())
 
         if top_proposals:
-            st.caption(f"Showing top {len(top_proposals)} of {len(unique_proposals)} proposals found.")
+            st.caption(f"Showing top {len(top_proposals)} of {total_found} proposals found.")
             for i, proposal in enumerate(top_proposals):
                 _render_trade_card(proposal, i)
         else:
