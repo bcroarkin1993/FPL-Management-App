@@ -660,7 +660,7 @@ def _score_proposal(
     # impactful than swapping waiver-wire-level players
     all_involved = send_players + recv_players
     avg_caliber = np.mean([p.get("trade_value", 0) for p in all_involved]) if all_involved else 0
-    caliber_norm = min(avg_caliber / 0.4, 1.0)  # 0.4 TV ≈ strong player
+    caliber_norm = min(avg_caliber / 0.3, 1.0)  # 0.3 TV ≈ solid starter
 
     # Overall trade score
     # Normalize components to [0,1]
@@ -668,17 +668,17 @@ def _score_proposal(
     net_value_norm = min(max((net_value + 0.5) / 1.0, 0), 1)
 
     trade_score = (
-        0.25 * pos_gain_norm +
-        0.15 * net_value_norm +
+        0.20 * pos_gain_norm +
+        0.10 * net_value_norm +
         0.15 * acceptance +
-        0.30 * caliber_norm +
+        0.40 * caliber_norm +
         0.15 * fairness
     )
 
-    # Heavily penalize trades requiring a player drop — losing a roster
-    # spot makes trades far less attractive and harder to accept
+    # Near-zero multiplier for trades requiring a drop — these are
+    # essentially non-starters in practice
     if drop_suggestion:
-        trade_score *= 0.1
+        trade_score *= 0.05
 
     # Determine trade type
     n_send = len(send_players)
