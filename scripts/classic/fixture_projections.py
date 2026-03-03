@@ -15,6 +15,7 @@ import streamlit.components.v1 as components
 from datetime import datetime, timezone
 from fuzzywuzzy import fuzz
 from scripts.common.error_helpers import show_api_error
+from scripts.common.player_matching import canonical_normalize
 from scripts.common.utils import (
     find_optimal_lineup,
     get_classic_bootstrap_static,
@@ -37,6 +38,31 @@ from scripts.common.styled_tables import render_styled_table
 # =============================================================================
 # Helper Functions
 # =============================================================================
+
+def _strip_accents(name: str) -> str:
+    """Strip diacritics from a name while preserving case and spacing.
+
+    Unlike canonical_normalize (which lowercases and strips punctuation),
+    this keeps the name display-friendly:
+        "Đorđe Petrović" -> "Djordje Petrovic"
+        "Gabriel Magalhães" -> "Gabriel Magalhaes"
+    """
+    import unicodedata
+
+    # Handle special characters that don't decompose via NFKD
+    special = {
+        'ø': 'o', 'Ø': 'O', 'æ': 'ae', 'Æ': 'AE', 'œ': 'oe', 'Œ': 'OE',
+        'ð': 'd', 'Ð': 'D', 'þ': 'th', 'Þ': 'Th', 'ł': 'l', 'Ł': 'L',
+        'đ': 'd', 'Đ': 'D', 'ß': 'ss',
+    }
+    for char, repl in special.items():
+        name = name.replace(char, repl)
+
+    # NFKD decomposition + drop combining marks
+    name = unicodedata.normalize("NFKD", name)
+    name = name.encode("ascii", "ignore").decode("ascii")
+    return name
+
 
 def _is_gameweek_started(gw: int, bootstrap: dict) -> bool:
     """
@@ -179,10 +205,11 @@ def _build_squad_from_elements(element_ids: list, bootstrap: dict) -> pd.DataFra
         if not player:
             continue
 
-        full_name = f"{player.get('first_name', '')} {player.get('second_name', '')}".strip()
+        raw_name = f"{player.get('first_name', '')} {player.get('second_name', '')}".strip()
+        display_name = _strip_accents(raw_name) if raw_name else player.get("web_name", "Unknown")
         rows.append({
             "element_id": element_id,
-            "Player": full_name or player.get("web_name", "Unknown"),
+            "Player": display_name,
             "Web Name": player.get("web_name", "Unknown"),
             "Team": teams.get(player.get("team"), "???"),
             "Position": position_converter(player.get("element_type")),
@@ -409,21 +436,38 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
     components.html(html, height=height, scrolling=False)
 
 
-def _lookup_projection(player_name: str, team: str, position: str, projections_df: pd.DataFrame) -> dict:
-    """Look up projection for a player using fuzzy matching."""
+def _lookup_projection(player_name: str, team: str, position: str, projections_df: pd.DataFrame,
+                       web_name: str = None) -> dict:
+    """Look up projection for a player using fuzzy matching.
+
+    Tries multiple matching strategies:
+    1. Full name fuzzy match (e.g. "Djordje Petrovic" vs "Djordje Petrovic")
+    2. Web name fuzzy match (e.g. "Gabriel" vs "Gabriel") - catches single-name players
+    3. Team+position boost to disambiguate common names
+    """
     if projections_df is None or projections_df.empty:
         return {"Points": None, "Pos Rank": None}
 
     best_match = None
     best_score = 0
 
+    # Normalize the input names for comparison
+    norm_player = canonical_normalize(player_name)
+    norm_web = canonical_normalize(web_name) if web_name else ""
+
     for _, row in projections_df.iterrows():
         proj_name = str(row.get("Player", ""))
         proj_team = str(row.get("Team", ""))
         proj_pos = str(row.get("Position", ""))
+        norm_proj = canonical_normalize(proj_name)
 
-        # Calculate name similarity
-        score = fuzz.ratio(player_name.lower(), proj_name.lower())
+        # Score using normalized full name
+        score = fuzz.ratio(norm_player, norm_proj)
+
+        # Also try web_name (handles single-name players like "Gabriel")
+        if norm_web:
+            web_score = fuzz.ratio(norm_web, norm_proj)
+            score = max(score, web_score)
 
         # Boost score if team and position match
         if proj_team == team and proj_pos == position:
@@ -452,10 +496,11 @@ def _build_squad_dataframe(picks: list, bootstrap: dict) -> pd.DataFrame:
         element_id = pick["element"]
         player = elements.get(element_id, {})
 
-        full_name = f"{player.get('first_name', '')} {player.get('second_name', '')}".strip()
+        raw_name = f"{player.get('first_name', '')} {player.get('second_name', '')}".strip()
+        display_name = _strip_accents(raw_name) if raw_name else player.get("web_name", "Unknown")
         rows.append({
             "element_id": element_id,
-            "Player": full_name or player.get("web_name", "Unknown"),
+            "Player": display_name,
             "Web Name": player.get("web_name", "Unknown"),
             "Team": teams.get(player.get("team"), "???"),
             "Position": position_converter(player.get("element_type")),
@@ -478,7 +523,8 @@ def _add_projections_to_squad(squad_df: pd.DataFrame, projections_df: pd.DataFra
             row["Player"],
             row["Team"],
             row["Position"],
-            projections_df
+            projections_df,
+            web_name=row.get("Web Name"),
         )
         points_list.append(proj["Points"])
         rank_list.append(proj["Pos Rank"])
