@@ -179,10 +179,11 @@ def _build_squad_from_elements(element_ids: list, bootstrap: dict) -> pd.DataFra
         if not player:
             continue
 
+        full_name = f"{player.get('first_name', '')} {player.get('second_name', '')}".strip()
         rows.append({
             "element_id": element_id,
-            "Player": player.get("web_name", "Unknown"),
-            "Full Name": f"{player.get('first_name', '')} {player.get('second_name', '')}".strip(),
+            "Player": full_name or player.get("web_name", "Unknown"),
+            "Web Name": player.get("web_name", "Unknown"),
             "Team": teams.get(player.get("team"), "???"),
             "Position": position_converter(player.get("element_type")),
             "squad_position": 0,  # Will be set by optimal lineup
@@ -451,10 +452,11 @@ def _build_squad_dataframe(picks: list, bootstrap: dict) -> pd.DataFrame:
         element_id = pick["element"]
         player = elements.get(element_id, {})
 
+        full_name = f"{player.get('first_name', '')} {player.get('second_name', '')}".strip()
         rows.append({
             "element_id": element_id,
-            "Player": player.get("web_name", "Unknown"),
-            "Full Name": f"{player.get('first_name', '')} {player.get('second_name', '')}".strip(),
+            "Player": full_name or player.get("web_name", "Unknown"),
+            "Web Name": player.get("web_name", "Unknown"),
             "Team": teams.get(player.get("team"), "???"),
             "Position": position_converter(player.get("element_type")),
             "squad_position": pick["position"],
@@ -1027,10 +1029,20 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
     # Detailed view section
     st.subheader("Detailed Match Analysis")
 
+    # Default to user's fixture if configured
+    my_team_id = config.FPL_CLASSIC_TEAM_ID
+    default_idx = 0
+    if my_team_id:
+        for i, opt in enumerate(fixture_options):
+            if opt["team1_id"] == my_team_id or opt["team2_id"] == my_team_id:
+                default_idx = i
+                break
+
     # Fixture selector
     selected_fixture = st.selectbox(
         "Select a fixture to analyze:",
         options=[opt["display"] for opt in fixture_options],
+        index=default_idx,
         key="h2h_fixture_selector"
     )
 
@@ -1447,8 +1459,10 @@ def show_classic_fixture_projections_page():
                 time.sleep(0.1)
                 st.rerun()
     with col3:
-        if st.button("🔄", help="Refresh live data", key="classic_gw_refresh"):
-            # Clear live caches
+        if st.button("🔄", help="Refresh data", key="classic_gw_refresh"):
+            # Clear all relevant caches (team picks, transfers, live stats)
+            get_classic_team_picks.clear()
+            get_classic_transfers.clear()
             get_live_gameweek_stats.clear()
             is_gameweek_live.clear()
             config.refresh_gameweek()
