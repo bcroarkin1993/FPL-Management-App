@@ -363,6 +363,128 @@ def _get_availability_indicator(chance: Optional[int], news: str) -> str:
         return "✓"
 
 
+def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFrame,
+                                 bank: int, top_n: int = 3) -> List[Dict]:
+    """Build transfer suggestions pairing lowest-keep-score squad players with best replacements."""
+    if squad_df.empty or available_df.empty:
+        return []
+
+    pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
+    suggestions = []
+
+    lowest_keep = squad_df.nsmallest(top_n, "Keep_Score")
+
+    for _, drop_row in lowest_keep.iterrows():
+        pos = drop_row["Position"]
+        selling_price = drop_row.get("selling_price", drop_row.get("now_cost", 0))
+        budget = bank + selling_price
+
+        # Find best replacement at same position within budget
+        candidates = available_df[
+            (available_df["Position"] == pos) &
+            (available_df["now_cost"] <= budget)
+        ].copy()
+
+        if candidates.empty:
+            continue
+
+        add_row = candidates.iloc[0]  # Already sorted by Transfer_Score desc
+
+        # Calculate score improvement
+        score_diff = add_row.get("Transfer_Score", 0) - drop_row.get("Keep_Score", 0)
+
+        # Availability info
+        drop_chance = drop_row.get("chance_of_playing_next_round")
+        drop_news = drop_row.get("news", "")
+        drop_injury = _get_availability_indicator(drop_chance, drop_news)
+
+        add_chance = add_row.get("chance_of_playing_next_round")
+        add_news = add_row.get("news", "")
+        add_injury = _get_availability_indicator(add_chance, add_news)
+
+        # Build rationale
+        reasons = []
+        form_diff = add_row.get("form", 0) - drop_row.get("form", 0)
+        if form_diff > 0:
+            reasons.append(f"+{form_diff:.1f} form improvement")
+        proj_add = pd.to_numeric(add_row.get("Projected_Points"), errors="coerce")
+        proj_drop = pd.to_numeric(drop_row.get("Projected_Points"), errors="coerce")
+        if pd.notna(proj_add) and pd.notna(proj_drop) and proj_add > proj_drop:
+            reasons.append(f"+{proj_add - proj_drop:.1f} projected points")
+        add_fdr = add_row.get("AvgFDR")
+        drop_fdr = drop_row.get("AvgFDR")
+        if pd.notna(add_fdr) and pd.notna(drop_fdr) and add_fdr < drop_fdr:
+            reasons.append("easier upcoming fixtures")
+        if drop_news:
+            reasons.append(f"current player: {drop_news[:40]}")
+
+        rationale = " • ".join(reasons) if reasons else "Better overall transfer score"
+
+        suggestions.append({
+            "position": pos_labels.get(pos, pos),
+            "score_diff": score_diff,
+            "drop_player": drop_row["Player"],
+            "drop_team": drop_row["Team"],
+            "drop_price": f"£{drop_row['now_cost']/10:.1f}m",
+            "drop_form": f"{drop_row.get('form', 0):.1f}",
+            "drop_season_pts": drop_row.get("total_points", 0),
+            "drop_injury": drop_injury,
+            "add_player": add_row["Player"],
+            "add_team": add_row["Team"],
+            "add_price": f"£{add_row['now_cost']/10:.1f}m",
+            "add_form": f"{add_row.get('form', 0):.1f}",
+            "add_proj_pts": f"{proj_add:.1f}" if pd.notna(proj_add) else "N/A",
+            "add_injury": add_injury,
+            "rationale": rationale,
+        })
+
+    return suggestions
+
+
+def _render_transfer_suggestions(suggestions: List[Dict]):
+    """Render transfer suggestion cards using styled HTML."""
+    if not suggestions:
+        st.info("No beneficial transfers found. Your squad looks strong at all positions.")
+        return
+
+    st.subheader("Transfer Suggestions")
+
+    for s in suggestions:
+        card_html = f"""
+        <div style="border: 1px solid #444; border-radius: 10px; padding: 16px; margin-bottom: 12px;
+                    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                <span style="background: #0f3460; color: #e0e0e0; padding: 3px 12px; border-radius: 12px;
+                             font-size: 0.85em; font-weight: bold;">{s['position']}</span>
+                <span style="background: #1a472a; color: #4ecca3; padding: 3px 12px; border-radius: 12px;
+                             font-size: 0.85em; font-weight: bold;">+{s['score_diff']:.3f}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <div style="flex: 1;">
+                    <div style="color: #e74c3c; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">DROP</div>
+                    <div style="color: #e0e0e0; font-weight: bold;">{s['drop_player']} ({s['drop_team']})</div>
+                    <div style="color: #999; font-size: 0.85em;">
+                        Price: {s['drop_price']} &bull; Form: {s['drop_form']} &bull;
+                        Season: {s['drop_season_pts']} &bull; {s['drop_injury']}
+                    </div>
+                </div>
+                <div style="color: #888; font-size: 1.5em; padding: 0 16px;">&rarr;</div>
+                <div style="flex: 1; text-align: right;">
+                    <div style="color: #4ecca3; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">ADD</div>
+                    <div style="color: #e0e0e0; font-weight: bold;">{s['add_player']} ({s['add_team']})</div>
+                    <div style="color: #999; font-size: 0.85em;">
+                        Price: {s['add_price']} &bull; Proj: {s['add_proj_pts']} &bull;
+                        Form: {s['add_form']} &bull; {s['add_injury']}
+                    </div>
+                </div>
+            </div>
+            <div style="color: #aaa; font-size: 0.82em; font-style: italic; border-top: 1px solid #333;
+                        padding-top: 6px;">{s['rationale']}</div>
+        </div>
+        """
+        st.markdown(card_html, unsafe_allow_html=True)
+
+
 # ---------------------------
 # MAIN PAGE
 # ---------------------------
@@ -522,6 +644,14 @@ def show_classic_transfers_page():
     available = available.sort_values("Transfer_Score", ascending=False)
 
     # ---------------------------
+    # TRANSFER SUGGESTION CARDS (top of page)
+    # ---------------------------
+    suggestions = _build_transfer_suggestions(squad_df, available, bank, top_n=3)
+    _render_transfer_suggestions(suggestions)
+
+    st.markdown("---")
+
+    # ---------------------------
     # SQUAD ANALYSIS SECTION
     # ---------------------------
     st.header("Your Squad Analysis")
@@ -570,25 +700,6 @@ def show_classic_transfers_page():
         col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "Keep Score": "{:.3f}"},
         positive_color_cols=["Keep Score"],
     )
-
-    # Show suggested transfers out
-    st.subheader("Suggested Transfers Out")
-    st.caption("Players with lowest Keep Score - consider transferring these out.")
-
-    lowest_keep = squad_display.nsmallest(3, "Keep_Score")
-    for _, player in lowest_keep.iterrows():
-        with st.container():
-            col1, col2 = st.columns([2, 3])
-            with col1:
-                st.markdown(f"**{player['Player']}** ({player['Team']}, {player['Position']})")
-                st.caption(f"Price: £{player['now_cost']/10:.1f}m | Form: {player['form']:.1f} | Keep Score: {player['Keep_Score']:.3f}")
-            with col2:
-                fixtures = _get_team_fixtures(player["Team_ID"], fdr_weeks, current_gw)
-                st.markdown(_format_fixtures_html(fixtures, teams_map, 6), unsafe_allow_html=True)
-                if player["news"]:
-                    st.warning(f"⚠️ {player['news']}")
-
-    st.markdown("---")
 
     # ---------------------------
     # TRANSFER TARGETS SECTION

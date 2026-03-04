@@ -342,6 +342,7 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
         .player-info { flex: 1; min-width: 0; }
         .player-name { font-weight: 600; font-size: 13px; color: #1a1a2e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .player-team { font-size: 10px; color: #888; text-transform: uppercase; }
+        .player-matchup { font-size: 10px; color: #666; }
         .player-points { text-align: right; min-width: 70px; }
         .live-pts { font-size: 18px; font-weight: 700; color: #28a745; }
         .proj-pts { font-size: 12px; color: #666; }
@@ -375,6 +376,7 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
         for _, row in pos_players.iterrows():
             player_name = row.get("Player", "Unknown")
             team = row.get("Team", "")
+            matchup = row.get("Matchup", "")
             proj_pts = pd.to_numeric(row.get("Points", 0), errors="coerce") or 0
             is_captain = row.get("is_captain", False)
 
@@ -416,11 +418,14 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
                 card_class = "player-card"
                 status_html = ""
 
+            matchup_html = f'<div class="player-matchup">{matchup}</div>' if matchup else ""
+
             html += f"""
             <div class="{card_class}">
                 <div class="player-info">
                     <div class="player-name">{player_name}{captain_html}{status_html}</div>
                     <div class="player-team">{team}</div>
+                    {matchup_html}
                 </div>
                 <div class="player-points">{points_html}</div>
             </div>
@@ -481,9 +486,11 @@ def _lookup_projection(player_name: str, team: str, position: str, projections_d
         return {
             "Points": best_match.get("Points"),
             "Pos Rank": best_match.get("Pos Rank", "N/A"),
+            "Matched Name": best_match.get("Player"),
+            "Matchup": best_match.get("Matchup", ""),
         }
 
-    return {"Points": None, "Pos Rank": None}
+    return {"Points": None, "Pos Rank": None, "Matched Name": None, "Matchup": ""}
 
 
 def _build_squad_dataframe(picks: list, bootstrap: dict) -> pd.DataFrame:
@@ -514,9 +521,15 @@ def _build_squad_dataframe(picks: list, bootstrap: dict) -> pd.DataFrame:
 
 
 def _add_projections_to_squad(squad_df: pd.DataFrame, projections_df: pd.DataFrame) -> pd.DataFrame:
-    """Add Rotowire projections to squad dataframe."""
+    """Add Rotowire projections to squad dataframe.
+
+    When a Rotowire match is found, uses the Rotowire player name for display
+    (matching Draft behavior) and adds the Matchup column.
+    """
     points_list = []
     rank_list = []
+    matchup_list = []
+    matched_names = []
 
     for _, row in squad_df.iterrows():
         proj = _lookup_projection(
@@ -528,9 +541,18 @@ def _add_projections_to_squad(squad_df: pd.DataFrame, projections_df: pd.DataFra
         )
         points_list.append(proj["Points"])
         rank_list.append(proj["Pos Rank"])
+        matchup_list.append(proj.get("Matchup", ""))
+        matched_names.append(proj.get("Matched Name"))
 
     squad_df["Points"] = points_list
     squad_df["Pos Rank"] = rank_list
+    squad_df["Matchup"] = matchup_list
+
+    # Use Rotowire name when matched (matches Draft behavior)
+    for i, name in enumerate(matched_names):
+        if name:
+            squad_df.iloc[i, squad_df.columns.get_loc("Player")] = name
+
     return squad_df
 
 
