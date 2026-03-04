@@ -3,12 +3,13 @@ import math
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from scripts.common.analytics import simulate_auto_subs
 from scripts.common.utils import (
     find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures,
     get_team_id_by_name, get_rotowire_player_projections, get_team_composition_for_gameweek,
     merge_fpl_players_and_projections, normalize_apostrophes, get_historical_team_scores,
     get_draft_h2h_record, get_live_gameweek_stats, is_gameweek_live, get_fpl_player_mapping,
-    get_team_actual_lineup
+    get_team_actual_lineup, get_gw_finished_teams, get_classic_bootstrap_static,
 )
 from scripts.common.styled_tables import render_styled_table
 
@@ -327,7 +328,8 @@ def _render_winprob_bar(team1_name: str, team2_name: str, p_team1: float):
     """
     st.markdown(html, unsafe_allow_html=True)
 
-def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_lineup: bool = False):
+def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_lineup: bool = False,
+                                live_stats: dict = None):
     """
     Returns two DataFrames representing lineups and points for each team in a fixture,
     sorted by position (GK, DEF, MID, FWD) and then by descending projected points within each position.
@@ -338,9 +340,12 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
     - projections_df (DataFrame): DataFrame containing player projections from Rotowire.
     - use_actual_lineup (bool): If True, use the manager's actual starting 11 picks.
                                 If False, calculate the optimal lineup by projections.
+    - live_stats (dict): Live gameweek stats for auto-sub simulation. If provided with
+                         use_actual_lineup=True, auto-subs are applied before filtering to starters.
 
     Returns:
-    - Tuple of two DataFrames: (team1_df, team2_df, team1_name, team2_name)
+    - Tuple: (team1_df, team2_df, team1_name, team2_name) or
+             (team1_df, team2_df, team1_name, team2_name, subs1, subs2) when live_stats provided.
     """
     # Normalize the apostrophes in the fixture string
     fixture = normalize_apostrophes(fixture)
@@ -356,14 +361,41 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
     # Get the current gameweek
     gameweek = get_current_gameweek()
 
+    subs1, subs2 = [], []
+
     if use_actual_lineup:
-        # Use actual picks from the FPL Draft API
+        # Use actual picks from the FPL Draft API (full 15-player squad)
         team1_actual = get_team_actual_lineup(team1_id, gameweek)
         team2_actual = get_team_actual_lineup(team2_id, gameweek)
 
-        # Filter to starters only (positions 1-11)
-        team1_starters = team1_actual[team1_actual['Is_Starter'] == True].copy()
-        team2_starters = team2_actual[team2_actual['Is_Starter'] == True].copy()
+        # Apply auto-subs if live stats provided
+        if live_stats and not team1_actual.empty and not team2_actual.empty:
+            # Rename Player_ID to element_id for simulate_auto_subs compatibility
+            for df in [team1_actual, team2_actual]:
+                if 'Player_ID' in df.columns and 'element_id' not in df.columns:
+                    df['element_id'] = df['Player_ID']
+
+            finished_teams = get_gw_finished_teams(gameweek)
+            if finished_teams:
+                bootstrap = get_classic_bootstrap_static()
+                if bootstrap:
+                    elements = {p["id"]: p for p in bootstrap.get("elements", [])}
+                    element_to_team = {eid: p.get("team") for eid, p in elements.items()}
+
+                    team1_actual, subs1 = simulate_auto_subs(
+                        team1_actual, live_stats, element_to_team, finished_teams
+                    )
+                    team2_actual, subs2 = simulate_auto_subs(
+                        team2_actual, live_stats, element_to_team, finished_teams
+                    )
+
+        # Filter to starters only (squad_position 1-11, falling back to Is_Starter)
+        if 'squad_position' in team1_actual.columns:
+            team1_starters = team1_actual[team1_actual['squad_position'] <= 11].copy()
+            team2_starters = team2_actual[team2_actual['squad_position'] <= 11].copy()
+        else:
+            team1_starters = team1_actual[team1_actual['Is_Starter'] == True].copy()
+            team2_starters = team2_actual[team2_actual['Is_Starter'] == True].copy()
 
         # Merge with projections
         team1_df = merge_fpl_players_and_projections(
@@ -415,7 +447,9 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
     team1_df.set_index('Player', inplace=True)
     team2_df.set_index('Player', inplace=True)
 
-    # Return the final DataFrames and team names
+    # Return the final DataFrames and team names (include subs if live)
+    if live_stats is not None:
+        return team1_df, team2_df, team1_name, team2_name, subs1, subs2
     return team1_df, team2_df, team1_name, team2_name
 
 def _get_win_pct_color(pct: float) -> str:
@@ -478,11 +512,18 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
         for fixture in fixtures:
             try:
                 # Use actual lineups for live gameweeks, optimal projections otherwise
-                result = analyze_fixture_projections(fixture, league_id, projections_df, use_actual_lineup=gw_is_live)
+                result = analyze_fixture_projections(
+                    fixture, league_id, projections_df,
+                    use_actual_lineup=gw_is_live,
+                    live_stats=live_stats if gw_is_live else None,
+                )
                 if result is None:
                     continue
 
-                team1_df, team2_df, team1_name, team2_name = result
+                if gw_is_live and live_stats:
+                    team1_df, team2_df, team1_name, team2_name, _, _ = result
+                else:
+                    team1_df, team2_df, team1_name, team2_name = result
 
                 # Store original projections before blending
                 team1_orig_proj = team1_df['Points'].sum()
@@ -764,7 +805,11 @@ def show_fixtures_page():
     # Create the Streamlit visuals
     if fixture_selection:
         # Analyze fixture projections - use actual lineups for live gameweeks
-        result = analyze_fixture_projections(fixture_selection, config.FPL_DRAFT_LEAGUE_ID, fpl_player_projections, use_actual_lineup=gw_is_live)
+        result = analyze_fixture_projections(
+            fixture_selection, config.FPL_DRAFT_LEAGUE_ID, fpl_player_projections,
+            use_actual_lineup=gw_is_live,
+            live_stats=live_stats if gw_is_live else None,
+        )
 
         if result is None:
             st.error(
@@ -773,7 +818,11 @@ def show_fixtures_page():
             )
             return
 
-        team1_df, team2_df, team1_name, team2_name = result
+        subs1, subs2 = [], []
+        if gw_is_live and live_stats:
+            team1_df, team2_df, team1_name, team2_name, subs1, subs2 = result
+        else:
+            team1_df, team2_df, team1_name, team2_name = result
 
         # Blend live points if gameweek is live
         if gw_is_live and live_stats:
@@ -796,6 +845,15 @@ def show_fixtures_page():
 
         st.subheader("Win Probability")
         _render_winprob_bar(format_team_name(team1_name), format_team_name(team2_name), p_team1)
+
+        # Auto-sub info banners
+        if subs1 or subs2:
+            sub_msgs = []
+            for out_name, in_name in subs1:
+                sub_msgs.append(f"{format_team_name(team1_name)}: {out_name} -> {in_name}")
+            for out_name, in_name in subs2:
+                sub_msgs.append(f"{format_team_name(team2_name)}: {out_name} -> {in_name}")
+            st.info("**Auto-subs:** " + " | ".join(sub_msgs))
 
         # Team Lineups section
         st.subheader("Team Lineups")

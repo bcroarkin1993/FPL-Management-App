@@ -121,6 +121,111 @@ def attach_availability(df: pd.DataFrame, avail_df: pd.DataFrame) -> pd.DataFram
     return base
 
 
+def simulate_auto_subs(squad_df, live_stats, element_to_team, finished_team_ids):
+    """
+    Simulate FPL auto-substitutions for a 15-player squad.
+
+    A starter is subbed out if:
+    - They have 0 minutes in live_stats
+    - Their team's match is finished
+
+    Bench players are subbed in following FPL rules:
+    - GK bench slot (squad_position 12) only subs for GK starter
+    - Outfield bench (squad_position 13→14→15) in order for outfield starters
+    - Must maintain at least 3 DEF after sub
+
+    Parameters:
+    - squad_df: Full 15-player DataFrame with squad_position, element_id, Position columns.
+    - live_stats: {element_id: {has_played, minutes, points, ...}} from get_live_gameweek_stats().
+    - element_to_team: {element_id: team_id} mapping.
+    - finished_team_ids: set of team_ids whose match is finished.
+
+    Returns: (updated_squad_df, sub_list)
+    - updated_squad_df: DataFrame with squad_positions swapped for auto-subs.
+    - sub_list: list of (out_name, in_name) tuples for display.
+    """
+    df = squad_df.copy()
+    sub_list = []
+
+    if df.empty or not finished_team_ids:
+        return df, sub_list
+
+    # Identify starters needing a sub: 0 minutes AND their team's match is finished
+    starters_out = []
+    for idx, row in df[df["squad_position"].between(1, 11)].iterrows():
+        eid = row.get("element_id")
+        if eid is None:
+            continue
+        team_id = element_to_team.get(eid)
+        if team_id is None or team_id not in finished_team_ids:
+            continue
+        stats = live_stats.get(eid, {})
+        # Player must have 0 minutes (not played at all) to be auto-subbed
+        if stats.get("minutes", 0) == 0 and not stats.get("has_played", False):
+            starters_out.append(idx)
+
+    if not starters_out:
+        return df, sub_list
+
+    # Get bench players ordered by squad_position (12, 13, 14, 15)
+    bench = df[df["squad_position"].between(12, 15)].sort_values("squad_position")
+    used_bench = set()
+
+    for starter_idx in starters_out:
+        starter_row = df.loc[starter_idx]
+        starter_pos = starter_row["Position"]
+        starter_squad_pos = starter_row["squad_position"]
+
+        # Count current DEF starters (excluding this player being subbed out)
+        current_def_count = len(
+            df[(df["squad_position"].between(1, 11)) & (df["Position"] == "D") & (df.index != starter_idx)]
+        )
+        # Also subtract any DEF starters already subbed out in this loop
+        for prev_idx in starters_out:
+            if prev_idx != starter_idx and prev_idx in [s for s, _ in sub_list if isinstance(s, int)]:
+                if df.loc[prev_idx, "Position"] == "D":
+                    current_def_count -= 1
+
+        if starter_pos == "G":
+            # GK can only be replaced by bench GK (squad_position 12)
+            for bench_idx, bench_row in bench.iterrows():
+                if bench_idx in used_bench:
+                    continue
+                if bench_row["Position"] == "G":
+                    # Swap squad positions
+                    df.at[bench_idx, "squad_position"] = starter_squad_pos
+                    df.at[starter_idx, "squad_position"] = bench_row["squad_position"]
+                    used_bench.add(bench_idx)
+                    starter_name = starter_row.get("Player", "Unknown")
+                    bench_name = bench_row.get("Player", "Unknown")
+                    sub_list.append((starter_name, bench_name))
+                    break
+        else:
+            # Outfield: try bench positions 13, 14, 15 in order
+            for bench_idx, bench_row in bench.iterrows():
+                if bench_idx in used_bench:
+                    continue
+                if bench_row["Position"] == "G":
+                    continue  # Skip GK bench slot for outfield subs
+
+                # Check DEF minimum constraint: if removing this starter drops DEF below 3,
+                # only a DEF can replace them
+                if starter_pos == "D" and current_def_count < 3:
+                    if bench_row["Position"] != "D":
+                        continue
+
+                # Valid sub found
+                df.at[bench_idx, "squad_position"] = starter_squad_pos
+                df.at[starter_idx, "squad_position"] = bench_row["squad_position"]
+                used_bench.add(bench_idx)
+                starter_name = starter_row.get("Player", "Unknown")
+                bench_name = bench_row.get("Player", "Unknown")
+                sub_list.append((starter_name, bench_name))
+                break
+
+    return df, sub_list
+
+
 def team_optimizer(player_rankings):
     """
     Optimize team lineup based on player rankings.

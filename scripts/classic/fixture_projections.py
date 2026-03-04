@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from fuzzywuzzy import fuzz
 from scripts.common.error_helpers import show_api_error
 from scripts.common.player_matching import canonical_normalize
+from scripts.common.analytics import simulate_auto_subs
 from scripts.common.utils import (
     find_optimal_lineup,
     get_classic_bootstrap_static,
@@ -25,6 +26,7 @@ from scripts.common.utils import (
     get_current_gameweek,
     get_entry_details,
     get_fpl_player_mapping,
+    get_gw_finished_teams,
     get_h2h_league_matches,
     get_league_standings,
     get_live_gameweek_stats,
@@ -498,6 +500,26 @@ def _lookup_projection(player_name: str, team: str, position: str, projections_d
     return {"Points": None, "Pos Rank": None, "Matched Name": None, "Matchup": ""}
 
 
+def _apply_auto_subs(squad_df: pd.DataFrame, live_stats: dict, bootstrap: dict, gw: int = None) -> tuple:
+    """
+    Apply FPL auto-substitution rules to a squad during a live gameweek.
+
+    Returns (updated_squad_df, sub_list) where sub_list is [(out_name, in_name), ...].
+    """
+    if squad_df.empty or not live_stats:
+        return squad_df, []
+
+    current_gw = gw or get_current_gameweek()
+    finished_teams = get_gw_finished_teams(current_gw)
+    if not finished_teams:
+        return squad_df, []
+
+    elements = {p["id"]: p for p in bootstrap.get("elements", [])}
+    element_to_team = {eid: p.get("team") for eid, p in elements.items()}
+
+    return simulate_auto_subs(squad_df, live_stats, element_to_team, finished_teams)
+
+
 def _build_squad_dataframe(picks: list, bootstrap: dict) -> pd.DataFrame:
     """Map element IDs from picks to player info from bootstrap data."""
     elements = {p["id"]: p for p in bootstrap.get("elements", [])}
@@ -803,6 +825,11 @@ def _render_h2h_fixtures_overview(
 
             if squad_1.empty or squad_2.empty:
                 continue
+
+            # Apply auto-subs before scoring if gameweek is live
+            if gw_is_live and live_stats:
+                squad_1, _ = _apply_auto_subs(squad_1, live_stats, bootstrap, gw=current_gw)
+                squad_2, _ = _apply_auto_subs(squad_2, live_stats, bootstrap, gw=current_gw)
 
             orig_1 = _calculate_projected_score(squad_1, chip_1)
             orig_2 = _calculate_projected_score(squad_2, chip_2)
@@ -1140,6 +1167,12 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
             show_api_error("loading team data")
             return
 
+        # Apply auto-subs before live blending
+        subs_1, subs_2 = [], []
+        if gw_is_live and live_stats:
+            squad_1, subs_1 = _apply_auto_subs(squad_1, live_stats, bootstrap, gw=current_gw)
+            squad_2, subs_2 = _apply_auto_subs(squad_2, live_stats, bootstrap, gw=current_gw)
+
         # Blend live data if available
         if gw_is_live and live_stats:
             squad_1 = _blend_live_with_squad(squad_1, live_stats)
@@ -1206,6 +1239,15 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
                     pd.DataFrame(match_data),
                     text_align={"Gameweek": "center", "Result": "center"},
                 )
+
+    # Auto-sub info banners
+    if subs_1 or subs_2:
+        sub_msgs = []
+        for out_name, in_name in subs_1:
+            sub_msgs.append(f"{selected['team1_name']}: {out_name} -> {in_name}")
+        for out_name, in_name in subs_2:
+            sub_msgs.append(f"{selected['team2_name']}: {out_name} -> {in_name}")
+        st.info("**Auto-subs:** " + " | ".join(sub_msgs))
 
     # Side-by-side team displays
     st.subheader("Team Lineups")
@@ -1379,6 +1421,10 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
         blended_gw = 0.0
 
         if not squad_df.empty:
+            # Apply auto-subs before scoring
+            if gw_is_live and live_stats:
+                squad_df, _ = _apply_auto_subs(squad_df, live_stats, bootstrap, gw=current_gw)
+
             projected_gw = _calculate_projected_score(squad_df, active_chip)
 
             if gw_is_live and live_stats:

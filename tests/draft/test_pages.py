@@ -37,7 +37,10 @@ class TestDraftFixtureProjectionsPage:
              patch("scripts.draft.fixture_projections.get_live_gameweek_stats", return_value={}), \
              patch("scripts.draft.fixture_projections.is_gameweek_live", return_value=False), \
              patch("scripts.draft.fixture_projections.get_fpl_player_mapping", return_value={}), \
-             patch("scripts.draft.fixture_projections.get_team_actual_lineup", return_value=pd.DataFrame()):
+             patch("scripts.draft.fixture_projections.get_team_actual_lineup", return_value=pd.DataFrame()), \
+             patch("scripts.draft.fixture_projections.get_gw_finished_teams", return_value=set()), \
+             patch("scripts.draft.fixture_projections.simulate_auto_subs", return_value=(pd.DataFrame(), [])), \
+             patch("scripts.draft.fixture_projections.get_classic_bootstrap_static", return_value={"elements": [], "teams": []}):
             from scripts.draft.fixture_projections import show_fixtures_page
             show_fixtures_page()
 

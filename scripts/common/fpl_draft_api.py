@@ -599,8 +599,9 @@ def get_team_actual_lineup(team_id: int, gameweek: int) -> pd.DataFrame:
     - gameweek: The gameweek number
 
     Returns:
-    - DataFrame with columns ['Player', 'Team', 'Position', 'Is_Starter'] for all 15 players
-      Is_Starter is True for positions 1-11, False for bench (12-15)
+    - DataFrame with columns ['Player', 'Team', 'Position', 'Is_Starter', 'Player_ID', 'squad_position']
+      for all 15 players. Is_Starter is True for positions 1-11, False for bench (12-15).
+      squad_position is the raw position slot (1-15) from the FPL picks API.
     """
     player_map = get_fpl_player_mapping()
 
@@ -611,11 +612,11 @@ def get_team_actual_lineup(team_id: int, gameweek: int) -> pd.DataFrame:
         data = resp.json()
     except Exception as e:
         _logger.warning("Failed to fetch team picks for team %s GW %s: %s", team_id, gameweek, e)
-        return pd.DataFrame(columns=['Player', 'Team', 'Position', 'Is_Starter'])
+        return pd.DataFrame(columns=['Player', 'Team', 'Position', 'Is_Starter', 'Player_ID', 'squad_position'])
 
     picks = data.get('picks', [])
     if not picks:
-        return pd.DataFrame(columns=['Player', 'Team', 'Position', 'Is_Starter'])
+        return pd.DataFrame(columns=['Player', 'Team', 'Position', 'Is_Starter', 'Player_ID', 'squad_position'])
 
     rows = []
     for pick in picks:
@@ -630,6 +631,7 @@ def get_team_actual_lineup(team_id: int, gameweek: int) -> pd.DataFrame:
             'Position': player_info.get('Position', '?'),
             'Is_Starter': is_starter,
             'Player_ID': element_id,
+            'squad_position': position_slot,
         })
 
     return pd.DataFrame(rows)

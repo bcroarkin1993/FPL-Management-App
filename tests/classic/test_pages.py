@@ -40,6 +40,8 @@ class TestClassicFixtureProjectionsPage:
              patch("scripts.classic.fixture_projections.is_gameweek_live", return_value=False), \
              patch("scripts.classic.fixture_projections.get_live_gameweek_stats", return_value={}), \
              patch("scripts.classic.fixture_projections.get_fpl_player_mapping", return_value={}), \
+             patch("scripts.classic.fixture_projections.get_gw_finished_teams", return_value=set()), \
+             patch("scripts.classic.fixture_projections.simulate_auto_subs", return_value=(pd.DataFrame(), [])), \
              patch("scripts.classic.fixture_projections.show_api_error"):
             from scripts.classic.fixture_projections import show_classic_fixture_projections_page
             show_classic_fixture_projections_page()

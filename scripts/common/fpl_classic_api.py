@@ -454,3 +454,26 @@ def get_classic_team_position_data(team_id: int, max_gw: int) -> dict:
             player_accum[eid]["total_points"] += gw_pts
 
     return {"positions": positions, "players": list(player_accum.values())}
+
+
+# =============================================================================
+# GAMEWEEK FIXTURE STATUS
+# =============================================================================
+
+@st.cache_data(ttl=60)
+def get_gw_finished_teams(gw: int) -> set:
+    """Return set of team_ids whose match in this GW is finished."""
+    try:
+        url = "https://fantasy.premierleague.com/api/fixtures/"
+        resp = requests.get(url, params={"event": int(gw)}, timeout=20)
+        resp.raise_for_status()
+        fixtures = resp.json()
+        finished_teams = set()
+        for f in fixtures:
+            if f.get("finished"):
+                finished_teams.add(f["team_h"])
+                finished_teams.add(f["team_a"])
+        return finished_teams
+    except Exception:
+        _logger.warning("Failed to fetch finished teams for GW %s", gw, exc_info=True)
+        return set()
