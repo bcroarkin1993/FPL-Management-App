@@ -451,7 +451,7 @@ def _lookup_projection(player_name: str, team: str, position: str, projections_d
     3. Team+position boost to disambiguate common names
     """
     if projections_df is None or projections_df.empty:
-        return {"Points": None, "Pos Rank": None}
+        return {"Points": None, "Pos Rank": None, "Matched Name": None, "Matchup": ""}
 
     best_match = None
     best_score = 0
@@ -475,10 +475,15 @@ def _lookup_projection(player_name: str, team: str, position: str, projections_d
             score = max(score, web_score)
 
         # Boost score if team and position match
-        if proj_team == team and proj_pos == position:
+        same_team_pos = proj_team == team and proj_pos == position
+        if same_team_pos:
             score += 15
 
-        if score > best_score and score >= 60:
+        # Require higher threshold for cross-team/cross-position matches
+        # to prevent false positives like "Wilson" matching "Alisson" (score 62)
+        threshold = 60 if same_team_pos else 80
+
+        if score > best_score and score >= threshold:
             best_score = score
             best_match = row
 
