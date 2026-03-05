@@ -10,6 +10,20 @@ from scripts.common.styled_tables import render_styled_table
 
 _logger = get_logger("fpl_app.draft.home")
 
+# ---------------------------
+# DARK CHART THEME
+# ---------------------------
+
+_DARK_CHART_LAYOUT = dict(
+    paper_bgcolor="#1a1a2e",
+    plot_bgcolor="#1a1a2e",
+    font=dict(color="#ffffff", size=14),
+    title=dict(font=dict(size=22, color="#ffffff"), x=0.5, xanchor="center"),
+    xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+    yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
+    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
+)
+
 def checkValidLineup(df):
     """
     Given a dataframe with a lineup, check to see if it is a valid lineup.
@@ -325,183 +339,267 @@ def get_luck_adjusted_league_standings(draft_league_id):
 
     return calculate_all_play_standings(gw_scores, actual_standings)
 
-def plot_league_points_over_time(draft_league_id):
-    """
-    Fetches the gameweek results for all teams in an FPL Draft league and plots the total league points
-    over time based on wins, ties, and losses. Points are awarded: 3 for a win, 1 for a tie, and 0 for a loss.
 
-    Parameters:
-    - draft_league_id (int or str): The ID of the FPL Draft league to retrieve data from.
+# ---------------------------
+# HISTORY DATA BUILDER
+# ---------------------------
 
-    Returns:
-    - Plotly figure displaying the total league points by team over time (gameweek).
+@st.cache_data(ttl=300)
+def build_draft_history_df(draft_league_id):
     """
-    # Step 1: Get the current gameweek
+    Build a single DataFrame with per-team, per-gameweek history from match data.
+
+    Returns DataFrame with columns:
+        Team, Gameweek, GW_Points, Total_Points, League_Pts, League_Position
+    """
     current_gameweek = get_current_gameweek()
-
-    # Prevent failure if the season hasn't started
     if current_gameweek is None:
-        st.info("⚠️ The season hasn't started yet. Points over time will be shown once games begin.")
-        return None  # Or return an empty figure
+        return pd.DataFrame()
 
-    # Step 2: Use cached league details
     league_response = get_draft_league_details(draft_league_id)
     if not league_response:
-        _logger.warning("Failed to fetch league details for points chart")
-        return None
+        return pd.DataFrame()
 
-    # Step 3: Create a dictionary mapping entry_ids to team names
-    league_entries = league_response['league_entries']
-    team_names = {entry['id']: entry['entry_name'] for entry in league_entries}
-
-    # Step 4: Initialize league points for each team and data for plotting
-    league_points = {team_id: 0 for team_id in team_names.keys()}  # Holds cumulative league points
-    data = []  # To store data for plotting
-
-    # Check if the season has started (i.e., 'matches' key exists)
-    if 'matches' not in league_response or not league_response['matches']:
-        st.info("⚠️ No fixture data available yet. The season might not have started.")
-        return
-
-    # Step 5: Process match results and accumulate points by gameweek
-    matches = league_response['matches']
-    for match in matches:
-        gameweek = match['event']
-        if gameweek > current_gameweek:  # Ignore future matches
-            continue
-
-        team1_id = match['league_entry_1']
-        team2_id = match['league_entry_2']
-        team1_points = match['league_entry_1_points']
-        team2_points = match['league_entry_2_points']
-
-        # Determine match result and update league points
-        if team1_points > team2_points:
-            league_points[team1_id] += 3  # 3 points for a win
-        elif team1_points < team2_points:
-            league_points[team2_id] += 3  # 3 points for a win
-        else:
-            team1_result = team2_result = 'T'
-            league_points[team1_id] += 1  # 1 point for a tie
-            league_points[team2_id] += 1
-
-        # Step 6: Append data for both teams to track their points by gameweek
-        data.append(
-            {'Team': team_names[team1_id], 'Gameweek': gameweek, 'Total League Points': league_points[team1_id]})
-        data.append(
-            {'Team': team_names[team2_id], 'Gameweek': gameweek, 'Total League Points': league_points[team2_id]})
-
-    # Step 7: Create a DataFrame from the data
-    df = pd.DataFrame(data)
-
-    # Step 8: Plot the data using Plotly
-    fig = px.line(df, x="Gameweek", y="Total League Points", color="Team",
-                  labels={"Total League Points": "Total League Points", "Gameweek": "Gameweek", "Team": "Team"},
-                  title="Team Total League Points Over Time (Gameweek)")
-
-    # Customize the layout with dark theme
-    fig.update_layout(
-        xaxis_title="Gameweek",
-        yaxis_title="Total League Points",
-        hovermode="x unified",
-        paper_bgcolor="#1a1a2e",
-        plot_bgcolor="#1a1a2e",
-        font=dict(color="#ffffff", size=14),
-        title=dict(font=dict(size=22, color="#ffffff"), x=0.5, xanchor="center"),
-        xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-        yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
-    )
-
-    # Return the figure
-    return(fig)
-
-def plot_team_points_over_time(draft_league_id):
-    """
-    Fetches the gameweek results for all teams in an FPL Draft league and plots the total points over time for each team.
-    Only includes matches that have been played (up to the current gameweek).
-
-    Parameters:
-    - draft_league_id (int or str): The ID of the FPL Draft league to retrieve data from.
-
-    Returns:
-    - Plotly figure displaying the total points by team over time (gameweek).
-    """
-    # Step 1: Get the current gameweek
-    current_gameweek = get_current_gameweek()
-
-    # Prevent failure if the season hasn't started
-    if current_gameweek is None:
-        return None  # Or return an empty figure
-
-    # Step 2: Use cached league details
-    league_response = get_draft_league_details(draft_league_id)
-    if not league_response:
-        _logger.warning("Failed to fetch league details for team points chart")
-        return None
-
-    # Step 3: Create a dictionary mapping entry_ids to team names
     league_entries = league_response.get('league_entries', [])
     team_names = {entry['id']: entry['entry_name'] for entry in league_entries}
 
-    # Check if the season has started (i.e., 'matches' key exists)
     if 'matches' not in league_response or not league_response['matches']:
-        st.info("⚠️ No fixture data available yet. The season might not have started.")
-        return
+        return pd.DataFrame()
 
-    # Step 4: Extract matches data from the response
     matches = league_response['matches']
 
-    # Step 5: Create a DataFrame to track points for each team over time
-    total_points = {team_id: 0 for team_id in team_names.keys()}  # Dictionary to hold cumulative points
-    data = []
+    # Accumulators per team
+    cum_points = {tid: 0 for tid in team_names}
+    cum_league_pts = {tid: 0 for tid in team_names}
 
-    # Step 6: Process each match and accumulate points by gameweek, ignoring future matches
-    for match in matches:
-        gameweek = match['event']
-        if gameweek > current_gameweek:  # Ignore future matches
+    # Collect per-GW rows
+    gw_rows = {}  # (team_id, gw) -> dict
+
+    for match in sorted(matches, key=lambda m: m['event']):
+        gw = match['event']
+        if gw >= current_gameweek:
             continue
 
-        team1_id = match['league_entry_1']
-        team2_id = match['league_entry_2']
-        team1_points = match['league_entry_1_points']
-        team2_points = match['league_entry_2_points']
+        t1 = match['league_entry_1']
+        t2 = match['league_entry_2']
+        p1 = match['league_entry_1_points']
+        p2 = match['league_entry_2_points']
 
-        # Update cumulative points for both teams
-        total_points[team1_id] += team1_points
-        total_points[team2_id] += team2_points
+        # GW fantasy points
+        gw_rows.setdefault((t1, gw), {'gw_pts': 0})['gw_pts'] += p1
+        gw_rows.setdefault((t2, gw), {'gw_pts': 0})['gw_pts'] += p2
 
-        # Append points data to DataFrame for plotting
-        data.append({'Team': team_names[team1_id], 'Gameweek': gameweek, 'Total Points': total_points[team1_id]})
-        data.append({'Team': team_names[team2_id], 'Gameweek': gameweek, 'Total Points': total_points[team2_id]})
+        # Cumulative fantasy points
+        cum_points[t1] += p1
+        cum_points[t2] += p2
 
-    # Step 7: Create a DataFrame from the data
+        # League points (W=3, D=1, L=0)
+        if p1 > p2:
+            cum_league_pts[t1] += 3
+        elif p1 < p2:
+            cum_league_pts[t2] += 3
+        else:
+            cum_league_pts[t1] += 1
+            cum_league_pts[t2] += 1
+
+        gw_rows[(t1, gw)]['total_pts'] = cum_points[t1]
+        gw_rows[(t1, gw)]['league_pts'] = cum_league_pts[t1]
+        gw_rows[(t2, gw)]['total_pts'] = cum_points[t2]
+        gw_rows[(t2, gw)]['league_pts'] = cum_league_pts[t2]
+
+    if not gw_rows:
+        return pd.DataFrame()
+
+    # Build flat rows
+    data = []
+    for (tid, gw), vals in gw_rows.items():
+        data.append({
+            'Team': team_names.get(tid, f"Team {tid}"),
+            'Gameweek': gw,
+            'GW_Points': vals.get('gw_pts', 0),
+            'Total_Points': vals.get('total_pts', 0),
+            'League_Pts': vals.get('league_pts', 0),
+        })
+
     df = pd.DataFrame(data)
 
-    # Step 8: Plot the data using Plotly
-    fig = px.line(df, x="Gameweek", y="Total Points", color="Team",
-                  labels={"Total Points": "Total Points", "Gameweek": "Gameweek", "Team": "Team"},
-                  title="Team Total Points Over Time (Gameweek)")
+    # Compute League_Position per gameweek (rank by league pts desc, tiebreak by total pts desc)
+    df = df.sort_values(['Gameweek', 'League_Pts', 'Total_Points'], ascending=[True, False, False])
+    df['League_Position'] = df.groupby('Gameweek').cumcount() + 1
 
-    # Customize the layout with dark theme
+    return df
+
+
+# ---------------------------
+# CHART FUNCTIONS
+# ---------------------------
+
+def plot_league_points_over_time(history_df):
+    """Cumulative league points (W=3, D=1) over time."""
+    if history_df.empty:
+        return None
+
+    fig = px.line(
+        history_df,
+        x="Gameweek",
+        y="League_Pts",
+        color="Team",
+        title="League Points Over Time",
+        labels={"League_Pts": "League Points", "Gameweek": "Gameweek", "Team": "Team"},
+    )
+
+    fig.update_layout(
+        xaxis_title="Gameweek",
+        yaxis_title="League Points",
+        hovermode="x unified",
+        **_DARK_CHART_LAYOUT,
+    )
+
+    return fig
+
+
+def plot_team_points_over_time(history_df):
+    """Cumulative fantasy points over time."""
+    if history_df.empty:
+        return None
+
+    fig = px.line(
+        history_df,
+        x="Gameweek",
+        y="Total_Points",
+        color="Team",
+        title="Total Points Over Time",
+        labels={"Total_Points": "Total Points", "Gameweek": "Gameweek", "Team": "Team"},
+    )
+
     fig.update_layout(
         xaxis_title="Gameweek",
         yaxis_title="Total Points",
         hovermode="x unified",
-        paper_bgcolor="#1a1a2e",
-        plot_bgcolor="#1a1a2e",
-        font=dict(color="#ffffff", size=14),
-        title=dict(font=dict(size=22, color="#ffffff"), x=0.5, xanchor="center"),
-        xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-        yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
+        **_DARK_CHART_LAYOUT,
     )
 
-    # Return the figure
-    return(fig)
+    return fig
+
+
+def plot_team_points_vs_avg(history_df):
+    """Total fantasy points relative to league average over time."""
+    if history_df.empty:
+        return None
+
+    avg_by_gw = history_df.groupby("Gameweek")["Total_Points"].mean().reset_index()
+    avg_by_gw.rename(columns={"Total_Points": "Avg_Total_Points"}, inplace=True)
+
+    df = history_df.merge(avg_by_gw, on="Gameweek")
+    df["Points_vs_Avg"] = df["Total_Points"] - df["Avg_Total_Points"]
+
+    fig = px.line(
+        df,
+        x="Gameweek",
+        y="Points_vs_Avg",
+        color="Team",
+        title="Total Points vs League Average",
+        labels={"Points_vs_Avg": "Points vs Average", "Gameweek": "Gameweek", "Team": "Team"},
+    )
+
+    fig.update_layout(
+        xaxis_title="Gameweek",
+        yaxis_title="Points vs Average",
+        hovermode="x unified",
+        **_DARK_CHART_LAYOUT,
+    )
+
+    fig.add_hline(y=0, line_dash="dash", line_color="#888", opacity=0.6)
+
+    return fig
+
+
+def plot_gw_points_over_time(history_df):
+    """Per-gameweek fantasy points over time."""
+    if history_df.empty:
+        return None
+
+    fig = px.line(
+        history_df,
+        x="Gameweek",
+        y="GW_Points",
+        color="Team",
+        title="Gameweek Points Over Time",
+        labels={"GW_Points": "GW Points", "Gameweek": "Gameweek", "Team": "Team"},
+    )
+
+    fig.update_layout(
+        xaxis_title="Gameweek",
+        yaxis_title="GW Points",
+        hovermode="x unified",
+        **_DARK_CHART_LAYOUT,
+    )
+
+    return fig
+
+
+def plot_gw_points_vs_avg(history_df):
+    """Per-gameweek fantasy points relative to league average."""
+    if history_df.empty:
+        return None
+
+    avg_by_gw = history_df.groupby("Gameweek")["GW_Points"].mean().reset_index()
+    avg_by_gw.rename(columns={"GW_Points": "Avg_GW_Points"}, inplace=True)
+
+    df = history_df.merge(avg_by_gw, on="Gameweek")
+    df["GW_Pts_vs_Avg"] = df["GW_Points"] - df["Avg_GW_Points"]
+
+    fig = px.line(
+        df,
+        x="Gameweek",
+        y="GW_Pts_vs_Avg",
+        color="Team",
+        title="Gameweek Points vs League Average",
+        labels={"GW_Pts_vs_Avg": "GW Points vs Average", "Gameweek": "Gameweek", "Team": "Team"},
+    )
+
+    fig.update_layout(
+        xaxis_title="Gameweek",
+        yaxis_title="GW Points vs Average",
+        hovermode="x unified",
+        **_DARK_CHART_LAYOUT,
+    )
+
+    fig.add_hline(y=0, line_dash="dash", line_color="#888", opacity=0.6)
+
+    return fig
+
+
+def plot_league_position_over_time(history_df):
+    """League position over time with inverted Y-axis (1st at top)."""
+    if history_df.empty:
+        return None
+
+    fig = px.line(
+        history_df,
+        x="Gameweek",
+        y="League_Position",
+        color="Team",
+        title="League Position Over Time",
+        labels={"League_Position": "Position", "Gameweek": "Gameweek", "Team": "Team"},
+    )
+
+    fig.update_layout(
+        xaxis_title="Gameweek",
+        yaxis_title="Position",
+        hovermode="x unified",
+        **_DARK_CHART_LAYOUT,
+    )
+    fig.update_yaxes(autorange="reversed")
+
+    return fig
+
+
+# ---------------------------
+# MAIN PAGE
+# ---------------------------
 
 def show_home_page():
-    # st.image('images/fpl_logo_2.png', width=100)  # Adjust path and size as needed
     st.title("My Fantasy Draft Team & League Standings")
 
     st.subheader("FPL Draft League Table")
@@ -519,18 +617,83 @@ def show_home_page():
     else:
         render_standings_table(standings_df, is_h2h=True)
 
-    # Dropdown to select gameweek
-    gameweek = st.selectbox("Select Gameweek to view results:", range(1, 39))  # Gameweeks 1 to 38
+    st.divider()
+
+    # ---------------------------
+    # GAMEWEEK RESULTS
+    # ---------------------------
+    st.subheader("Gameweek Results")
+
+    current_gw = get_current_gameweek()
+    default_gw_index = max(current_gw - 2, 0) if current_gw and current_gw >= 1 else 0
+
+    gameweek = st.selectbox(
+        "Select Gameweek",
+        range(1, 39),
+        index=default_gw_index,
+    )
     show_fixture_results(config.FPL_DRAFT_LEAGUE_ID, gameweek)
 
-    # Create the table standings plot
-    fig = plot_league_points_over_time(config.FPL_DRAFT_LEAGUE_ID)
-    # Display the chart (if season has started)
-    if fig:
-        st.plotly_chart(fig)
+    st.divider()
 
-    # Create the total points plot
-    fig = plot_team_points_over_time(config.FPL_DRAFT_LEAGUE_ID)
-    # Display the chart (if season has started)
-    if fig:
-        st.plotly_chart(fig)
+    # ---------------------------
+    # SEASON PROGRESSION CHARTS
+    # ---------------------------
+    st.subheader("Season Progression")
+
+    history_df = build_draft_history_df(config.FPL_DRAFT_LEAGUE_ID)
+
+    if history_df.empty:
+        st.info("No gameweek data available yet. Charts will appear once games are played.")
+        return
+
+    tab1, tab2, tab3, tab4 = st.tabs(["League Points", "Total Points", "Gameweek Points", "Position Progression"])
+
+    with tab1:
+        fig = plot_league_points_over_time(history_df)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Not enough data to display chart.")
+
+    with tab2:
+        pts_view = st.radio(
+            "View",
+            ["All Teams", "vs League Average"],
+            index=1,
+            horizontal=True,
+            key="draft_total_pts_view",
+        )
+        if pts_view == "All Teams":
+            fig = plot_team_points_over_time(history_df)
+        else:
+            fig = plot_team_points_vs_avg(history_df)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Not enough data to display chart.")
+
+    with tab3:
+        gw_pts_view = st.radio(
+            "View",
+            ["All Teams", "vs League Average"],
+            index=1,
+            horizontal=True,
+            key="draft_gw_pts_view",
+        )
+        if gw_pts_view == "All Teams":
+            fig = plot_gw_points_over_time(history_df)
+        else:
+            fig = plot_gw_points_vs_avg(history_df)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Not enough data to display chart.")
+
+    with tab4:
+        fig = plot_league_position_over_time(history_df)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption("Lower position = better rank (1st is best)")
+        else:
+            st.info("Not enough data to display chart.")

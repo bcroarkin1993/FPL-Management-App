@@ -626,6 +626,32 @@ def _calculate_projected_score(squad_df: pd.DataFrame, active_chip: str = None, 
     return total
 
 
+def _calculate_live_score(squad_df: pd.DataFrame, active_chip: str = None) -> int:
+    """
+    Calculate live score from Live_Points with captain multiplier applied.
+
+    Same logic as _calculate_projected_score but uses Live_Points column.
+    """
+    if squad_df.empty or "Live_Points" not in squad_df.columns:
+        return 0
+
+    if active_chip == "bboost":
+        active_players = squad_df
+    else:
+        active_players = squad_df[squad_df["squad_position"] <= 11]
+
+    captain_mult = 3 if active_chip == "3xc" else 2
+
+    total = 0
+    for _, row in active_players.iterrows():
+        pts = int(row.get("Live_Points", 0) or 0)
+        if row.get("is_captain", False):
+            pts *= captain_mult
+        total += pts
+
+    return total
+
+
 def _format_movement(current_rank: int, projected_rank: int) -> str:
     """Format rank movement with arrow indicator."""
     if current_rank is None or projected_rank is None:
@@ -840,8 +866,8 @@ def _render_h2h_fixtures_overview(
                 squad_2 = _blend_live_with_squad(squad_2, live_stats)
                 blended_1 = _calculate_projected_score(squad_1, chip_1, use_blended=True)
                 blended_2 = _calculate_projected_score(squad_2, chip_2, use_blended=True)
-                live_1 = squad_1[squad_1["squad_position"] <= 11]["Live_Points"].sum() if chip_1 != "bboost" else squad_1["Live_Points"].sum()
-                live_2 = squad_2[squad_2["squad_position"] <= 11]["Live_Points"].sum() if chip_2 != "bboost" else squad_2["Live_Points"].sum()
+                live_1 = _calculate_live_score(squad_1, chip_1)
+                live_2 = _calculate_live_score(squad_2, chip_2)
             else:
                 blended_1 = orig_1
                 blended_2 = orig_2
@@ -1185,8 +1211,8 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
         if gw_is_live and live_stats:
             score_1 = _calculate_projected_score(squad_1, chip_1, use_blended=True)
             score_2 = _calculate_projected_score(squad_2, chip_2, use_blended=True)
-            live_1 = squad_1[squad_1["squad_position"] <= 11]["Live_Points"].sum() if chip_1 != "bboost" else squad_1["Live_Points"].sum()
-            live_2 = squad_2[squad_2["squad_position"] <= 11]["Live_Points"].sum() if chip_2 != "bboost" else squad_2["Live_Points"].sum()
+            live_1 = _calculate_live_score(squad_1, chip_1)
+            live_2 = _calculate_live_score(squad_2, chip_2)
         else:
             score_1 = orig_score_1
             score_2 = orig_score_2
@@ -1430,11 +1456,7 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
             if gw_is_live and live_stats:
                 squad_df = _blend_live_with_squad(squad_df, live_stats)
                 blended_gw = _calculate_projected_score(squad_df, active_chip, use_blended=True)
-                # Sum raw live points for starting XI (or all for bench boost)
-                if active_chip == "bboost":
-                    live_gw = int(squad_df["Live_Points"].sum())
-                else:
-                    live_gw = int(squad_df[squad_df["squad_position"] <= 11]["Live_Points"].sum())
+                live_gw = _calculate_live_score(squad_df, active_chip)
             else:
                 blended_gw = projected_gw
 

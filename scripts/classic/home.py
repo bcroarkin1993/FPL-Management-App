@@ -235,6 +235,44 @@ def plot_total_points_over_time(history_df: pd.DataFrame) -> Optional[px.line]:
     return fig
 
 
+def plot_total_points_vs_avg(history_df: pd.DataFrame) -> Optional[px.line]:
+    """Create line chart of total points relative to league average per gameweek."""
+    if history_df.empty:
+        return None
+
+    # Calculate league average total points per gameweek
+    avg_by_gw = history_df.groupby("Gameweek")["Total_Points"].mean().reset_index()
+    avg_by_gw.rename(columns={"Total_Points": "Avg_Total_Points"}, inplace=True)
+
+    df = history_df.merge(avg_by_gw, on="Gameweek")
+    df["Points_vs_Avg"] = df["Total_Points"] - df["Avg_Total_Points"]
+
+    fig = px.line(
+        df,
+        x="Gameweek",
+        y="Points_vs_Avg",
+        color="Team",
+        title="Total Points vs League Average",
+        labels={
+            "Points_vs_Avg": "Points vs Average",
+            "Gameweek": "Gameweek",
+            "Team": "Team"
+        }
+    )
+
+    fig.update_layout(
+        xaxis_title="Gameweek",
+        yaxis_title="Points vs Average",
+        hovermode="x unified",
+        **_DARK_CHART_LAYOUT,
+    )
+
+    # Add a zero reference line
+    fig.add_hline(y=0, line_dash="dash", line_color="#888", opacity=0.6)
+
+    return fig
+
+
 def plot_gw_points_over_time(history_df: pd.DataFrame) -> Optional[px.line]:
     """Create line chart of gameweek points over time."""
     if history_df.empty:
@@ -259,6 +297,42 @@ def plot_gw_points_over_time(history_df: pd.DataFrame) -> Optional[px.line]:
         hovermode="x unified",
         **_DARK_CHART_LAYOUT,
     )
+
+    return fig
+
+
+def plot_gw_points_vs_avg(history_df: pd.DataFrame) -> Optional[px.line]:
+    """Create line chart of gameweek points relative to league average."""
+    if history_df.empty:
+        return None
+
+    avg_by_gw = history_df.groupby("Gameweek")["GW_Points"].mean().reset_index()
+    avg_by_gw.rename(columns={"GW_Points": "Avg_GW_Points"}, inplace=True)
+
+    df = history_df.merge(avg_by_gw, on="Gameweek")
+    df["GW_Pts_vs_Avg"] = df["GW_Points"] - df["Avg_GW_Points"]
+
+    fig = px.line(
+        df,
+        x="Gameweek",
+        y="GW_Pts_vs_Avg",
+        color="Team",
+        title="Gameweek Points vs League Average",
+        labels={
+            "GW_Pts_vs_Avg": "GW Points vs Average",
+            "Gameweek": "Gameweek",
+            "Team": "Team"
+        }
+    )
+
+    fig.update_layout(
+        xaxis_title="Gameweek",
+        yaxis_title="GW Points vs Average",
+        hovermode="x unified",
+        **_DARK_CHART_LAYOUT,
+    )
+
+    fig.add_hline(y=0, line_dash="dash", line_color="#888", opacity=0.6)
 
     return fig
 
@@ -451,14 +525,34 @@ def show_classic_home_page():
     tab1, tab2, tab3 = st.tabs(["Total Points", "Gameweek Points", "Rank Progression"])
 
     with tab1:
-        fig = plot_total_points_over_time(history_df)
+        pts_view = st.radio(
+            "View",
+            ["All Teams", "vs League Average"],
+            index=1,
+            horizontal=True,
+            key="classic_total_pts_view",
+        )
+        if pts_view == "All Teams":
+            fig = plot_total_points_over_time(history_df)
+        else:
+            fig = plot_total_points_vs_avg(history_df)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Not enough data to display chart.")
 
     with tab2:
-        fig = plot_gw_points_over_time(history_df)
+        gw_pts_view = st.radio(
+            "View",
+            ["All Teams", "vs League Average"],
+            index=1,
+            horizontal=True,
+            key="classic_gw_pts_view",
+        )
+        if gw_pts_view == "All Teams":
+            fig = plot_gw_points_over_time(history_df)
+        else:
+            fig = plot_gw_points_vs_avg(history_df)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         else:

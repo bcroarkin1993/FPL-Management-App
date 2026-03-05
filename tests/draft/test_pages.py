@@ -16,7 +16,8 @@ class TestDraftHomePage:
              patch("scripts.draft.home.extract_draft_gw_scores", return_value=pd.DataFrame()), \
              patch("scripts.draft.home.calculate_all_play_standings", return_value=pd.DataFrame()), \
              patch("scripts.draft.home.render_luck_adjusted_table"), \
-             patch("scripts.draft.home.render_standings_table"):
+             patch("scripts.draft.home.render_standings_table"), \
+             patch("scripts.draft.home.build_draft_history_df", return_value=pd.DataFrame()):
             from scripts.draft.home import show_home_page
             show_home_page()
 
