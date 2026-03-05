@@ -20,19 +20,27 @@ FIXTURES_URL = "https://fantasy.premierleague.com/api/fixtures/"
 
 
 def get_current_gw_team_short_names(gw: int) -> set:
-    """Fetch team short names playing in the given gameweek."""
+    """Fetch team first-word names playing in the given gameweek.
+
+    Returns the first word of each team name (uppercased) to match
+    FFP fixture format like "Brighton (a)", "Man Utd (H)".
+    """
     try:
         bootstrap = requests.get(BOOTSTRAP_URL, timeout=15).json()
-        team_id_to_short = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
+        team_id_to_first_word = {}
+        for t in bootstrap.get("teams", []):
+            full_name = t.get("name", "")
+            first_word = full_name.split()[0].upper() if full_name else ""
+            team_id_to_first_word[t["id"]] = first_word
 
         fixtures = requests.get(FIXTURES_URL, params={"event": gw}, timeout=15).json()
         teams = set()
         for fx in fixtures:
             h, a = fx.get("team_h"), fx.get("team_a")
             if h:
-                teams.add(team_id_to_short.get(h, ""))
+                teams.add(team_id_to_first_word.get(h, ""))
             if a:
-                teams.add(team_id_to_short.get(a, ""))
+                teams.add(team_id_to_first_word.get(a, ""))
         teams.discard("")
         return teams
     except Exception as e:

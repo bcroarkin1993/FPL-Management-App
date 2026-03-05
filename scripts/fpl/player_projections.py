@@ -33,14 +33,24 @@ from scripts.common.styled_tables import render_styled_table
 
 @st.cache_data(ttl=300)
 def _get_current_gw_teams() -> set:
-    """Get set of team short names playing in the current gameweek."""
+    """Get set of team names playing in the current gameweek.
+
+    Returns both full names and first-word variants (uppercased) so they
+    can be matched against FFP fixture strings like "Brighton (a)".
+    """
     try:
         # Get bootstrap data for team names
         bootstrap = get_classic_bootstrap_static()
         if not bootstrap:
             return set()
 
-        team_id_to_short = {t['id']: t['short_name'] for t in bootstrap.get('teams', [])}
+        team_id_to_names = {}
+        for t in bootstrap.get('teams', []):
+            tid = t['id']
+            # Store first word of full name uppercased (matches FFP format)
+            full_name = t.get('name', '')
+            first_word = full_name.split()[0].upper() if full_name else ''
+            team_id_to_names[tid] = first_word
 
         # Get current GW fixtures
         gw = config.CURRENT_GAMEWEEK
@@ -53,9 +63,10 @@ def _get_current_gw_teams() -> set:
         for fx in fixtures:
             h, a = fx.get('team_h'), fx.get('team_a')
             if h:
-                teams.add(team_id_to_short.get(h, ''))
+                teams.add(team_id_to_names.get(h, ''))
             if a:
-                teams.add(team_id_to_short.get(a, ''))
+                teams.add(team_id_to_names.get(a, ''))
+        teams.discard('')
 
         return teams
     except Exception:
@@ -65,6 +76,9 @@ def _get_current_gw_teams() -> set:
 def _is_ffp_data_current(ffp_df: pd.DataFrame) -> bool:
     """
     Check if FFP data is for the current gameweek by comparing fixtures.
+
+    FFP fixtures use format like "Brighton (a)", "Man Utd (H)".
+    We extract the first word and compare against FPL team first words.
 
     Returns True if the FFP fixture data matches current GW teams.
     """
@@ -79,10 +93,9 @@ def _is_ffp_data_current(ffp_df: pd.DataFrame) -> bool:
         # Can't determine, assume current
         return True
 
-    # Extract team abbreviations from FFP fixtures (format: "ARS (H)" or "MUN (A)")
+    # Extract first word from FFP fixtures (e.g., "Brighton (a)" -> "BRIGHTON")
     ffp_teams = set()
     for fixture in ffp_df['Fixture'].dropna().unique():
-        # Extract team code (first 3 chars typically)
         parts = str(fixture).split()
         if parts:
             team_code = parts[0].upper()
