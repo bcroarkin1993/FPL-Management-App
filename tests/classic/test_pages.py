@@ -99,7 +99,9 @@ class TestClassicTeamAnalysisPage:
              patch("scripts.classic.team_analysis.get_current_gameweek", return_value=25), \
              patch("scripts.classic.team_analysis.get_rotowire_player_projections", return_value=pd.DataFrame()), \
              patch("scripts.classic.team_analysis.position_converter", side_effect=lambda x: {1: "G", 2: "D", 3: "M", 4: "F"}.get(x, "M")), \
-             patch("scripts.classic.team_analysis.render_season_highlights"):
+             patch("scripts.classic.team_analysis.render_season_highlights"), \
+             patch("scripts.classic.team_analysis.compute_classic_bench_data", return_value=None), \
+             patch("scripts.classic.team_analysis.render_bench_analysis"):
             from scripts.classic.team_analysis import show_classic_team_analysis_page
             show_classic_team_analysis_page()
 

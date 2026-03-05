@@ -17,6 +17,7 @@ from scripts.common.utils import (
 )
 from scripts.common.team_analysis_helpers import render_season_highlights
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.bench_analysis import compute_draft_bench_data, render_bench_analysis
 
 
 def _stat_card(label: str, value: str, accent: str = "#00ff87") -> str:
@@ -279,6 +280,19 @@ def show_team_stats_page():
             )
     else:
         st.info("No position data available for this team.")
+
+    st.divider()
+
+    # ---------------------------
+    # BENCH ANALYSIS
+    # ---------------------------
+    st.header("Bench Analysis")
+    with st.spinner("Analyzing bench decisions..."):
+        bench_data = compute_draft_bench_data(team_id, config.CURRENT_GAMEWEEK)
+    if bench_data and bench_data.get("per_gw"):
+        render_bench_analysis(bench_data, is_classic=False)
+    else:
+        st.info("Not enough data for bench analysis.")
 
     st.divider()
 

@@ -22,6 +22,7 @@ from scripts.common.utils import (
 )
 from scripts.common.team_analysis_helpers import render_season_highlights
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.bench_analysis import compute_classic_bench_data, render_bench_analysis
 from fuzzywuzzy import fuzz
 
 
@@ -634,6 +635,19 @@ def show_classic_team_analysis_page():
             st.info("No position data available yet (season may not have started).")
     else:
         st.info("No position data available yet (season may not have started).")
+
+    st.markdown("---")
+
+    # ---------------------------
+    # BENCH ANALYSIS
+    # ---------------------------
+    st.markdown("### Bench Analysis")
+    with st.spinner("Analyzing bench decisions..."):
+        bench_data = compute_classic_bench_data(team_id, latest_played_gw or current_gw)
+    if bench_data and bench_data.get("per_gw"):
+        render_bench_analysis(bench_data, is_classic=True)
+    else:
+        st.info("Not enough data for bench analysis.")
 
     st.markdown("---")
 

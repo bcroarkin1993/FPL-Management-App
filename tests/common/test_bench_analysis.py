@@ -1,0 +1,308 @@
+"""
+Unit tests for scripts/common/bench_analysis.py.
+
+Tests the optimal lineup algorithm and bench data computation functions.
+"""
+
+import pytest
+from unittest.mock import patch, MagicMock
+
+from scripts.common.bench_analysis import (
+    find_optimal_gw_lineup,
+    compute_classic_bench_data,
+    compute_draft_bench_data,
+)
+
+
+# =============================================================================
+# TestFindOptimalGwLineup
+# =============================================================================
+
+class TestFindOptimalGwLineup:
+
+    def _make_player(self, eid, pos, pts):
+        return {"element_id": eid, "position": pos, "points": pts}
+
+    def test_empty_input(self):
+        assert find_optimal_gw_lineup([]) == []
+
+    def test_picks_highest_scorers(self):
+        """Best 11 should be the highest-scoring valid formation."""
+        players = [
+            # 2 GKs
+            self._make_player(1, "GK", 6),
+            self._make_player(2, "GK", 2),
+            # 5 DEFs
+            self._make_player(3, "DEF", 10),
+            self._make_player(4, "DEF", 8),
+            self._make_player(5, "DEF", 7),
+            self._make_player(6, "DEF", 5),
+            self._make_player(7, "DEF", 3),
+            # 5 MIDs
+            self._make_player(8, "MID", 12),
+            self._make_player(9, "MID", 9),
+            self._make_player(10, "MID", 6),
+            self._make_player(11, "MID", 4),
+            self._make_player(12, "MID", 1),
+            # 3 FWDs
+            self._make_player(13, "FWD", 11),
+            self._make_player(14, "FWD", 8),
+            self._make_player(15, "FWD", 2),
+        ]
+
+        result = find_optimal_gw_lineup(players)
+        assert len(result) == 11
+
+        total = sum(p["points"] for p in result)
+        # Verify the selection is optimal
+        selected_ids = {p["element_id"] for p in result}
+        # GK: 1 (6), DEF: 3,4,5 (10,8,7), MID: 8,9,10 (12,9,6), FWD: 13,14 (11,8)
+        # Remaining 3 flex slots filled by best available: DEF 6 (5), MID 11 (4), FWD 15 (2)
+        # Actually: DEF 6 (5), MID 11 (4), ... need to check formation
+        # Best would be: 1 GK(6), 3 DEF(10+8+7), 3 MID(12+9+6), 1 FWD(11) = 8 picked (69)
+        # Remaining 3: DEF5(5), MID4(4), FWD8(8) -> pick FWD14(8), DEF6(5), MID11(4) = 17
+        # Total = 86
+        assert total == 86
+
+    def test_respects_formation_rules(self):
+        """Must have exactly 1 GK, 3-5 DEF, 3-5 MID, 1-3 FWD."""
+        players = [
+            self._make_player(1, "GK", 5),
+            self._make_player(2, "GK", 3),
+            self._make_player(3, "DEF", 10),
+            self._make_player(4, "DEF", 9),
+            self._make_player(5, "DEF", 8),
+            self._make_player(6, "DEF", 7),
+            self._make_player(7, "DEF", 6),
+            self._make_player(8, "MID", 4),
+            self._make_player(9, "MID", 3),
+            self._make_player(10, "MID", 2),
+            self._make_player(11, "MID", 1),
+            self._make_player(12, "MID", 0),
+            self._make_player(13, "FWD", 5),
+            self._make_player(14, "FWD", 4),
+            self._make_player(15, "FWD", 3),
+        ]
+
+        result = find_optimal_gw_lineup(players)
+        assert len(result) == 11
+
+        pos_counts = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
+        for p in result:
+            pos_counts[p["position"]] += 1
+
+        assert pos_counts["GK"] == 1
+        assert 3 <= pos_counts["DEF"] <= 5
+        assert 3 <= pos_counts["MID"] <= 5
+        assert 1 <= pos_counts["FWD"] <= 3
+
+    def test_handles_ties(self):
+        """When players have equal points, selection is deterministic by element_id."""
+        players = [
+            self._make_player(1, "GK", 5),
+            self._make_player(2, "GK", 5),
+            self._make_player(3, "DEF", 5),
+            self._make_player(4, "DEF", 5),
+            self._make_player(5, "DEF", 5),
+            self._make_player(6, "DEF", 5),
+            self._make_player(7, "DEF", 5),
+            self._make_player(8, "MID", 5),
+            self._make_player(9, "MID", 5),
+            self._make_player(10, "MID", 5),
+            self._make_player(11, "MID", 5),
+            self._make_player(12, "MID", 5),
+            self._make_player(13, "FWD", 5),
+            self._make_player(14, "FWD", 5),
+            self._make_player(15, "FWD", 5),
+        ]
+
+        result1 = find_optimal_gw_lineup(players)
+        result2 = find_optimal_gw_lineup(players)
+
+        ids1 = [p["element_id"] for p in result1]
+        ids2 = [p["element_id"] for p in result2]
+        assert ids1 == ids2  # Deterministic
+
+    def test_all_fwds_high_scoring(self):
+        """When FWDs outscore everyone, should max out at 3 FWDs."""
+        players = [
+            self._make_player(1, "GK", 2),
+            self._make_player(2, "GK", 1),
+            self._make_player(3, "DEF", 3),
+            self._make_player(4, "DEF", 2),
+            self._make_player(5, "DEF", 1),
+            self._make_player(6, "DEF", 0),
+            self._make_player(7, "DEF", 0),
+            self._make_player(8, "MID", 3),
+            self._make_player(9, "MID", 2),
+            self._make_player(10, "MID", 1),
+            self._make_player(11, "MID", 0),
+            self._make_player(12, "MID", 0),
+            self._make_player(13, "FWD", 15),
+            self._make_player(14, "FWD", 14),
+            self._make_player(15, "FWD", 13),
+        ]
+
+        result = find_optimal_gw_lineup(players)
+        fwd_count = sum(1 for p in result if p["position"] == "FWD")
+        assert fwd_count == 3  # Max FWDs
+
+
+# =============================================================================
+# TestComputeClassicBenchData
+# =============================================================================
+
+class TestComputeClassicBenchData:
+
+    @patch("scripts.common.bench_analysis._get_classic_gw_live_points")
+    @patch("scripts.common.bench_analysis.get_classic_team_picks")
+    @patch("scripts.common.bench_analysis.get_classic_bootstrap_static")
+    def test_basic_bench_points(self, mock_bootstrap, mock_picks, mock_live):
+        """Verify bench vs starter split and bench points calculation."""
+        mock_bootstrap.return_value = {
+            "elements": [
+                {"id": i, "web_name": f"P{i}", "element_type": et}
+                for i, et in [
+                    (1, 1),   # GK
+                    (2, 1),   # GK
+                    (3, 2), (4, 2), (5, 2), (6, 2), (7, 2),  # DEF
+                    (8, 3), (9, 3), (10, 3), (11, 3), (12, 3),  # MID
+                    (13, 4), (14, 4), (15, 4),  # FWD
+                ]
+            ],
+        }
+
+        # Starters: positions 1-11, bench: 12-15
+        picks = [{"element": i, "position": i, "multiplier": 2 if i == 1 else 1,
+                  "is_captain": i == 1, "is_vice_captain": False}
+                 for i in range(1, 16)]
+
+        mock_picks.return_value = {"picks": picks, "active_chip": None}
+
+        # All players score 5 points
+        mock_live.return_value = {i: 5 for i in range(1, 16)}
+
+        result = compute_classic_bench_data(1, 1)
+
+        assert result is not None
+        assert len(result["per_gw"]) == 1
+        gw = result["per_gw"][0]
+        assert gw["bench_pts"] == 20  # 4 bench players * 5 pts
+        # Actual: 10 starters * 5 + captain * 5 (double) = 55 + 5 = 60
+        assert gw["actual"] == 60
+
+    @patch("scripts.common.bench_analysis._get_classic_gw_live_points")
+    @patch("scripts.common.bench_analysis.get_classic_team_picks")
+    @patch("scripts.common.bench_analysis.get_classic_bootstrap_static")
+    def test_captain_multiplier(self, mock_bootstrap, mock_picks, mock_live):
+        """Captain gets 2x in actual score."""
+        mock_bootstrap.return_value = {
+            "elements": [
+                {"id": i, "web_name": f"P{i}", "element_type": et}
+                for i, et in [
+                    (1, 1), (2, 1),
+                    (3, 2), (4, 2), (5, 2), (6, 2), (7, 2),
+                    (8, 3), (9, 3), (10, 3), (11, 3), (12, 3),
+                    (13, 4), (14, 4), (15, 4),
+                ]
+            ],
+        }
+
+        picks = [{"element": i, "position": i,
+                  "multiplier": 2 if i == 8 else 1,
+                  "is_captain": i == 8, "is_vice_captain": False}
+                 for i in range(1, 16)]
+
+        mock_picks.return_value = {"picks": picks, "active_chip": None}
+
+        # Player 8 (captain) scores 10, everyone else scores 3
+        live = {i: 3 for i in range(1, 16)}
+        live[8] = 10
+        mock_live.return_value = live
+
+        result = compute_classic_bench_data(1, 1)
+        gw = result["per_gw"][0]
+
+        # Actual: 10 non-captain starters * 3 + captain 10 * 2 = 30 + 20 = 50
+        assert gw["actual"] == 50
+
+    @patch("scripts.common.bench_analysis._get_classic_gw_live_points")
+    @patch("scripts.common.bench_analysis.get_classic_team_picks")
+    @patch("scripts.common.bench_analysis.get_classic_bootstrap_static")
+    def test_bench_boost_excluded_from_points_lost(self, mock_bootstrap, mock_picks, mock_live):
+        """Bench Boost GWs should not count toward total points lost."""
+        mock_bootstrap.return_value = {
+            "elements": [
+                {"id": i, "web_name": f"P{i}", "element_type": et}
+                for i, et in [
+                    (1, 1), (2, 1),
+                    (3, 2), (4, 2), (5, 2), (6, 2), (7, 2),
+                    (8, 3), (9, 3), (10, 3), (11, 3), (12, 3),
+                    (13, 4), (14, 4), (15, 4),
+                ]
+            ],
+        }
+
+        # GW 1: normal, GW 2: bench boost
+        def mock_picks_fn(team_id, gw):
+            picks = [{"element": i, "position": i,
+                      "multiplier": 2 if i == 1 else 1,
+                      "is_captain": i == 1, "is_vice_captain": False}
+                     for i in range(1, 16)]
+            chip = "bboost" if gw == 2 else None
+            return {"picks": picks, "active_chip": chip}
+
+        mock_picks.side_effect = mock_picks_fn
+        mock_live.return_value = {i: 5 for i in range(1, 16)}
+
+        result = compute_classic_bench_data(1, 2)
+
+        # BB GW should have bench_pts = 0 (all playing)
+        bb_gw = next(g for g in result["per_gw"] if g["active_chip"] == "bboost")
+        assert bb_gw["bench_pts"] == 0
+
+        # Total points lost should only count GW 1
+        normal_gw = next(g for g in result["per_gw"] if g["active_chip"] is None)
+        assert result["total_points_lost"] == normal_gw["points_lost"]
+
+
+# =============================================================================
+# TestComputeDraftBenchData
+# =============================================================================
+
+class TestComputeDraftBenchData:
+
+    @patch("scripts.common.bench_analysis.requests.get")
+    @patch("scripts.common.bench_analysis._get_draft_gw_live_points")
+    @patch("scripts.common.bench_analysis.get_fpl_player_mapping")
+    def test_no_captain_multiplier(self, mock_player_map, mock_live, mock_get):
+        """Draft has no captaincy — all players score 1x."""
+        mock_player_map.return_value = {
+            i: {"Player": f"Player {i}", "Web_Name": f"P{i}", "Position": pos}
+            for i, pos in [
+                (1, "G"), (2, "G"),
+                (3, "D"), (4, "D"), (5, "D"), (6, "D"), (7, "D"),
+                (8, "M"), (9, "M"), (10, "M"), (11, "M"), (12, "M"),
+                (13, "F"), (14, "F"), (15, "F"),
+            ]
+        }
+
+        picks = [{"element": i, "position": i} for i in range(1, 16)]
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"picks": picks}
+        mock_get.return_value = mock_response
+
+        # All players score 5 pts
+        mock_live.return_value = {i: 5 for i in range(1, 16)}
+
+        result = compute_draft_bench_data(1, 1)
+
+        assert result is not None
+        gw = result["per_gw"][0]
+        # No captain: 11 starters * 5 = 55
+        assert gw["actual"] == 55
+        # Bench: 4 * 5 = 20
+        assert gw["bench_pts"] == 20
+        # Optimal is also 55 (all equal points, no captain bonus)
+        assert gw["optimal"] == 55
+        assert gw["points_lost"] == 0

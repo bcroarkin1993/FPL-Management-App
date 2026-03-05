@@ -77,7 +77,9 @@ class TestTeamAnalysisPage:
              patch("scripts.draft.team_analysis.get_draft_points_by_position", return_value={}), \
              patch("scripts.draft.team_analysis.get_draft_team_players_with_points", return_value={}), \
              patch("scripts.draft.team_analysis.get_classic_bootstrap_static", return_value={"elements": [], "teams": []}), \
-             patch("scripts.draft.team_analysis.render_season_highlights"):
+             patch("scripts.draft.team_analysis.render_season_highlights"), \
+             patch("scripts.draft.team_analysis.compute_draft_bench_data", return_value=None), \
+             patch("scripts.draft.team_analysis.render_bench_analysis"):
             from scripts.draft.team_analysis import show_team_stats_page
             try:
                 show_team_stats_page()
