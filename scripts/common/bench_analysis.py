@@ -89,6 +89,55 @@ def find_optimal_gw_lineup(players):
     return selected
 
 
+def _find_optimal_keeping_captain(all_players, captain):
+    """
+    Find optimal 11 with the captain forced in.
+
+    Fills the remaining 10 slots from non-captain players,
+    respecting formation rules after accounting for the captain's position.
+    """
+    others = [p for p in all_players if p["element_id"] != captain["element_id"]]
+    captain_pos = captain["position"]
+
+    by_pos = {"GK": [], "DEF": [], "MID": [], "FWD": []}
+    for p in others:
+        if p.get("position", "") in by_pos:
+            by_pos[p["position"]].append(p)
+    for pos in by_pos:
+        by_pos[pos].sort(key=lambda x: (-x.get("points", 0), x.get("element_id", 0)))
+
+    # Captain fills one slot — reduce minimum for their position
+    adj_min = dict(_POS_MIN)
+    adj_min[captain_pos] = max(0, adj_min[captain_pos] - 1)
+
+    selected = [captain]
+    remaining = {}
+    for pos, minimum in adj_min.items():
+        picked = by_pos[pos][:minimum]
+        selected.extend(picked)
+        remaining[pos] = by_pos[pos][minimum:]
+
+    slots_left = 11 - len(selected)
+    pos_counts = {pos: adj_min[pos] for pos in adj_min}
+    pos_counts[captain_pos] += 1  # captain already counted
+
+    candidates = []
+    for pool in remaining.values():
+        candidates.extend(pool)
+    candidates.sort(key=lambda x: (-x.get("points", 0), x.get("element_id", 0)))
+
+    for p in candidates:
+        if slots_left <= 0:
+            break
+        pos = p.get("position", "")
+        if pos in pos_counts and pos_counts[pos] < _POS_MAX.get(pos, 0):
+            selected.append(p)
+            pos_counts[pos] += 1
+            slots_left -= 1
+
+    return selected
+
+
 # =============================================================================
 # CLASSIC BENCH DATA
 # =============================================================================
@@ -153,14 +202,20 @@ def compute_classic_bench_data(team_id, max_gw):
             actual_score = sum(p["points"] * p["multiplier"] for p in starters)
             bench_pts = sum(p["points"] for p in bench)
 
-        # Optimal score: best 11, captain = highest scorer gets 2x (or 3x if 3xc active)
-        optimal_11 = find_optimal_gw_lineup(all_players)
+        # Optimal score: best 11, keeping the actual captain choice
+        # (bench analysis measures lineup decisions, not captain decisions)
+        captain = next((p for p in all_players if p.get("is_captain")), None)
         captain_mult = 3 if active_chip == "3xc" else 2
-        if optimal_11:
-            best_scorer = max(optimal_11, key=lambda p: p["points"])
-            optimal_score = sum(p["points"] for p in optimal_11) + best_scorer["points"] * (captain_mult - 1)
+
+        if captain:
+            optimal_11 = _find_optimal_keeping_captain(all_players, captain)
+            optimal_score = (
+                sum(p["points"] for p in optimal_11 if p["element_id"] != captain["element_id"])
+                + captain["points"] * captain_mult
+            )
         else:
-            optimal_score = actual_score
+            optimal_11 = find_optimal_gw_lineup(all_players)
+            optimal_score = sum(p["points"] for p in optimal_11) if optimal_11 else actual_score
 
         # Top bench player
         if bench:
@@ -401,7 +456,7 @@ def render_bench_analysis(bench_data, is_classic=True):
         )
         fig.update_xaxes(title="Gameweek", dtick=1)
         fig.update_yaxes(title="Points Lost")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, theme=None)
 
     # --- Per-GW Table ---
     rows = []

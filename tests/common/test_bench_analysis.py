@@ -229,6 +229,51 @@ class TestComputeClassicBenchData:
     @patch("scripts.common.bench_analysis._get_classic_gw_live_points")
     @patch("scripts.common.bench_analysis.get_classic_team_picks")
     @patch("scripts.common.bench_analysis.get_classic_bootstrap_static")
+    def test_captain_not_reoptimized(self, mock_bootstrap, mock_picks, mock_live):
+        """Optimal score keeps actual captain — doesn't reassign to best scorer."""
+        mock_bootstrap.return_value = {
+            "elements": [
+                {"id": i, "web_name": f"P{i}", "element_type": et}
+                for i, et in [
+                    (1, 1), (2, 1),
+                    (3, 2), (4, 2), (5, 2), (6, 2), (7, 2),
+                    (8, 3), (9, 3), (10, 3), (11, 3), (12, 3),
+                    (13, 4), (14, 4), (15, 4),
+                ]
+            ],
+        }
+
+        # Captain is player 8 (MID), but bench player 14 (FWD) scores highest
+        picks = [{"element": i, "position": i,
+                  "multiplier": 2 if i == 8 else 1,
+                  "is_captain": i == 8, "is_vice_captain": False}
+                 for i in range(1, 16)]
+
+        mock_picks.return_value = {"picks": picks, "active_chip": None}
+
+        live = {i: 3 for i in range(1, 16)}
+        live[8] = 5   # captain scores 5
+        live[14] = 15  # bench FWD scores 15
+        mock_live.return_value = live
+
+        result = compute_classic_bench_data(1, 1)
+        gw = result["per_gw"][0]
+
+        # Actual: 10 non-captain starters * 3 + captain 5 * 2 = 30 + 10 = 40
+        assert gw["actual"] == 40
+        # Optimal should keep captain (player 8) with 2x, not reassign to player 14
+        # Optimal 11: swap weakest starter for bench player 14 (15 pts)
+        # Captain 8 still gets 2x = 10, player 14 gets 1x = 15
+        # Points lost should reflect only the bench swap, not captain change
+        assert gw["points_lost"] == gw["optimal"] - gw["actual"]
+        # If captain were re-optimized to player 14: optimal = best11_sum + 15*(2-1) = much higher
+        # With captain kept: optimal = best11_sum + 5*(2-1) = more modest
+        # Key assertion: points lost should be <= bench player's score (not inflated by captain)
+        assert gw["points_lost"] <= 15  # can't lose more than the best bench player contributes
+
+    @patch("scripts.common.bench_analysis._get_classic_gw_live_points")
+    @patch("scripts.common.bench_analysis.get_classic_team_picks")
+    @patch("scripts.common.bench_analysis.get_classic_bootstrap_static")
     def test_bench_boost_excluded_from_points_lost(self, mock_bootstrap, mock_picks, mock_live):
         """Bench Boost GWs should not count toward total points lost."""
         mock_bootstrap.return_value = {
