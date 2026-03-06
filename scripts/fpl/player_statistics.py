@@ -235,6 +235,15 @@ def build_stats_display(df: pd.DataFrame, selected_columns: list):
     return display_df, col_formats, positive_cols, negative_cols
 
 
+def _ordinal(n):
+    """Convert 1 -> '1st', 2 -> '2nd', etc. Returns '—' for NaN."""
+    if pd.isna(n):
+        return "—"
+    n = int(n)
+    suffix = {1: "st", 2: "nd", 3: "rd"}.get(n if n < 20 else n % 10, "th")
+    return f"{n}{suffix}"
+
+
 # Dark theme layout for Plotly charts
 _DARK_LAYOUT = dict(
     paper_bgcolor="#1a1a2e",
@@ -608,6 +617,101 @@ def display_boxplot_point_distribution(player_statistics, position_filter, team_
     # Display chart in Streamlit
     st.plotly_chart(fig, use_container_width=True)
 
+def display_set_piece_takers(player_df: pd.DataFrame):
+    """Display set piece takers table grouped by team with filters and sorting."""
+    st.subheader("Set Piece Takers")
+    st.caption("Players assigned penalty, corner, or free kick duties in FPL. Order indicates priority (1st = primary taker).")
+
+    # Filter to players with at least one set piece duty
+    sp_cols = ["penalties_order", "corners_and_indirect_freekicks_order", "direct_freekicks_order"]
+    for col in sp_cols:
+        if col in player_df.columns:
+            player_df[col] = pd.to_numeric(player_df[col], errors="coerce")
+        else:
+            player_df[col] = np.nan
+
+    has_duty = player_df[sp_cols].notna().any(axis=1)
+    df = player_df[has_duty].copy()
+
+    if df.empty:
+        st.info("No set piece taker data available.")
+        return
+
+    # Convert numeric columns needed for display
+    for col in ["total_points", "goals_scored", "assists", "expected_goals",
+                "now_cost", "penalties_missed", "form"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Filters
+    col1, col2 = st.columns(2)
+    with col1:
+        available_teams = sorted(df["team_name_abbrv"].dropna().unique().tolist())
+        team_filter = st.multiselect(
+            "Filter by Team", options=available_teams, default=available_teams,
+            key="sp_team_filter"
+        )
+    with col2:
+        available_positions = df["position_abbrv"].dropna().unique().tolist()
+        position_filter = st.multiselect(
+            "Filter by Position", options=available_positions, default=available_positions,
+            key="sp_position_filter"
+        )
+
+    df = df[
+        (df["team_name_abbrv"].isin(team_filter)) &
+        (df["position_abbrv"].isin(position_filter))
+    ]
+
+    if df.empty:
+        st.info("No players match the current filters.")
+        return
+
+    # Build display DataFrame
+    display_df = pd.DataFrame({
+        "Player": df["player"].values,
+        "Team": df["team_name_abbrv"].values,
+        "Pos": df["position_abbrv"].values,
+        "Pen": [_ordinal(v) for v in df["penalties_order"].values],
+        "Corners": [_ordinal(v) for v in df["corners_and_indirect_freekicks_order"].values],
+        "FKs": [_ordinal(v) for v in df["direct_freekicks_order"].values],
+        "Pts": df["total_points"].values,
+        "Form": df["form"].values,
+        "Goals": df["goals_scored"].values,
+        "Assists": df["assists"].values,
+        "xG": df["expected_goals"].values,
+        "Price": (df["now_cost"] / 10).values,
+        "Pen Miss": df["penalties_missed"].values,
+    })
+
+    # Sort controls
+    sortable_cols = ["Pts", "Form", "Goals", "Assists", "xG", "Price", "Pen Miss"]
+    sort_col1, sort_col2 = st.columns([2, 1])
+    with sort_col1:
+        sort_by = st.selectbox("Sort by", sortable_cols, index=0, key="sp_sort_col")
+    with sort_col2:
+        sort_order = st.selectbox("Order", ["Descending", "Ascending"], key="sp_sort_order")
+
+    display_df[sort_by] = pd.to_numeric(display_df[sort_by], errors="coerce")
+    display_df = display_df.sort_values(sort_by, ascending=(sort_order == "Ascending"), na_position="last")
+
+    render_styled_table(
+        display_df,
+        col_formats={
+            "Pts": "{:,.0f}",
+            "Form": "{:.1f}",
+            "Goals": "{:,.0f}",
+            "Assists": "{:,.0f}",
+            "xG": "{:.2f}",
+            "Price": "£{:.1f}m",
+            "Pen Miss": "{:,.0f}",
+        },
+        positive_color_cols=["Pts", "Form", "Goals", "Assists", "xG"],
+        negative_color_cols=["Pen Miss"],
+        max_height=600,
+    )
+
+
 def show_player_stats_page():
     # Page Title and Description with Emojis and Image
     st.title("📊 FPL Player Statistics Dashboard ⚽")
@@ -627,7 +731,7 @@ def show_player_stats_page():
         fpl_player_statistics = clean_fpl_player_names(fpl_player_statistics, fpl_player_projections)
 
     # Create tabs for different views
-    tab_advanced, tab_charts = st.tabs(["Advanced Stats Table", "Visual Charts"])
+    tab_advanced, tab_charts, tab_set_pieces = st.tabs(["Advanced Stats Table", "Visual Charts", "Set Piece Takers"])
 
     # Tab 1: Advanced Stats Table (main view)
     with tab_advanced:
@@ -686,5 +790,12 @@ def show_player_stats_page():
             with col5:
                 display_boxplot_point_distribution(fpl_player_statistics, position_filter, team_filter)
 
+        else:
+            st.error("No data available at the URL provided.")
+
+    # Tab 3: Set Piece Takers
+    with tab_set_pieces:
+        if not fpl_player_statistics.empty:
+            display_set_piece_takers(fpl_player_statistics)
         else:
             st.error("No data available at the URL provided.")
