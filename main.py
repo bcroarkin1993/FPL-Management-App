@@ -38,6 +38,7 @@ from scripts.fpl.player_projections import show_player_projections_page
 from scripts.fpl.projected_lineups import show_projected_lineups
 from scripts.fpl.injuries import show_injuries_page
 from scripts.fpl.price_changes import show_price_changes_page
+from scripts.fpl.gameweek_review import show_gw_review_page
 from scripts.fpl.settings import show_settings_page
 
 # --- Classic pages ---
@@ -651,6 +652,7 @@ def _render_injury_watchlist():
 # ------------------------------------------------------------
 FPL_PAGES = {
     "🏠  Home": render_app_home,
+    "📋  Gameweek Review": show_gw_review_page,
     "📅  Gameweek Fixtures": show_club_fixtures_section,
     "📋  Projected Lineups": show_projected_lineups,
     "📊  Projections Hub": show_player_projections_page,

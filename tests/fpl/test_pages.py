@@ -74,6 +74,29 @@ class TestPriceChangesPage:
             show_price_changes_page()
 
 
+class TestGameweekReviewPage:
+    def test_smoke(self, mock_all_utils):
+        with patch("scripts.fpl.gameweek_review.get_classic_bootstrap_static",
+                   return_value={"elements": [], "teams": [], "events": [
+                       {"id": 1, "finished": True},
+                       {"id": 2, "finished": True},
+                   ]}), \
+             patch("scripts.fpl.gameweek_review._get_classic_gw_live_points",
+                   return_value={}), \
+             patch("scripts.fpl.gameweek_review.get_classic_team_picks",
+                   return_value=None), \
+             patch("scripts.fpl.gameweek_review.get_classic_team_history",
+                   return_value=None), \
+             patch("scripts.fpl.gameweek_review.get_fpl_player_mapping",
+                   return_value={}), \
+             patch("scripts.fpl.gameweek_review._get_draft_gw_live_points",
+                   return_value={}), \
+             patch("scripts.fpl.gameweek_review.requests.get",
+                   return_value=MagicMock(json=MagicMock(return_value={"picks": []}))):
+            from scripts.fpl.gameweek_review import show_gw_review_page
+            show_gw_review_page()
+
+
 class TestSettingsPage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.fpl.settings.load_settings", return_value={
