@@ -162,7 +162,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 |------|--------|-------|
 | Multi-GW Transfer Planner | Not Started | Blend FFP multi-GW projections (GW2–GW6, Next2–6GWs) with Rotowire/other sources for multi-week transfer analysis. Upgrade transfer suggestions for both Draft and Classic to factor in future GWs. Requires projection blending strategy. |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
-| Gameweek Review/Recap | Not Started | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |
+| Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |
 
 ### Medium Priority
 
@@ -199,3 +199,4 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Add basic tests | pytest framework with 136 tests: unit tests for pure functions (player matching, luck analysis, alert config, team analysis helpers, utils), integration tests for API wrappers (mocked HTTP), and smoke tests for all 19 Streamlit pages |
 | Season History for Team Analysis | Classic: Season History section with tabbed Plotly charts (Overall Rank, Total Points by season) and formatted data table; Draft: League Standing section with position, record, points for/against, and league points metrics |
 | Styled Tables UI Refresh | Dark-themed HTML tables via shared `styled_tables.py` replacing ~35 `st.dataframe()` calls; dark gradient cards replacing `st.metric()` across all pages; Plotly charts with consistent `_DARK_CHART_LAYOUT` (dark bg, white text, green accents); FDR heatmap with distinct 5-level palette and continuous Avg FDR color interpolation; Match Odds proportional bars; side-by-side Points by Position charts; muted Injury Watchlist; sort-by-column on Advanced Stats and Rotowire Projections |
+| Gameweek Review/Recap | Cross-format GW review page under FPL App Home. GW selector (defaults to last completed), top 10 scorers and notable blankers, Classic review (summary cards, squad table with captain, captain vs best-captain analysis, optimal lineup with best captaincy), Draft review (squad table, optimal lineup). Reuses `find_optimal_gw_lineup()` from `bench_analysis.py`. |
