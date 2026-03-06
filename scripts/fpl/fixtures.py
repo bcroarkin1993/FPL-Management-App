@@ -5,6 +5,7 @@ import random
 import requests
 import streamlit as st
 from typing import Tuple
+from scripts.common.cache import cached_api_call
 from scripts.common.utils import get_current_gameweek, get_fixture_difficulty_grid, style_fixture_difficulty
 from scripts.common.styled_tables import render_styled_table
 
@@ -49,13 +50,22 @@ def _to_est_dt(utc_iso: str):
         return None
 
 def _fetch_fixtures_range(start_gw: int, end_gw: int) -> pd.DataFrame:
+    current_gw = config.CURRENT_GAMEWEEK
     all_rows = []
     for gw in range(start_gw, end_gw + 1):
-        url = f"https://fantasy.premierleague.com/api/fixtures/?event={gw}"
-        rows = requests.get(url, timeout=30).json()
-        for r in rows:
-            r["event"] = r.get("event", gw)
-        all_rows.extend(rows)
+        # Permanent cache for finished GWs; short TTL for current/future
+        is_finished = gw < current_gw
+        cache_ttl = None if is_finished else 300
+
+        def _fetch(g=gw):
+            url = f"https://fantasy.premierleague.com/api/fixtures/?event={g}"
+            return requests.get(url, timeout=30).json()
+
+        rows = cached_api_call(f"fixtures:{gw}", _fetch, ttl=cache_ttl)
+        if rows:
+            for r in rows:
+                r["event"] = r.get("event", gw)
+            all_rows.extend(rows)
     df = pd.DataFrame(all_rows)
     if df.empty:
         return df

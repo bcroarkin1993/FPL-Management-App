@@ -322,10 +322,10 @@ class TestComputeClassicBenchData:
 
 class TestComputeDraftBenchData:
 
-    @patch("scripts.common.bench_analysis.requests.get")
+    @patch("scripts.common.bench_analysis._get_draft_entry_full_picks_for_gw")
     @patch("scripts.common.bench_analysis._get_draft_gw_live_points")
     @patch("scripts.common.bench_analysis.get_fpl_player_mapping")
-    def test_no_captain_multiplier(self, mock_player_map, mock_live, mock_get):
+    def test_no_captain_multiplier(self, mock_player_map, mock_live, mock_full_picks):
         """Draft has no captaincy — all players score 1x."""
         mock_player_map.return_value = {
             i: {"Player": f"Player {i}", "Web_Name": f"P{i}", "Position": pos}
@@ -338,9 +338,7 @@ class TestComputeDraftBenchData:
         }
 
         picks = [{"element": i, "position": i} for i in range(1, 16)]
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"picks": picks}
-        mock_get.return_value = mock_response
+        mock_full_picks.return_value = picks
 
         # All players score 5 pts
         mock_live.return_value = {i: 5 for i in range(1, 16)}

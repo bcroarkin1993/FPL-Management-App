@@ -31,5 +31,8 @@ Thumbs.db
 *.swo
 *.pid
 
+# SQLite cache
+*.db
+
 # Environment configuration (sensitive values go in .env, not config.py)
 .env

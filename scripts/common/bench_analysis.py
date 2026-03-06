@@ -10,7 +10,6 @@ Also provides league-wide bench analysis functions for League Analysis pages.
 
 import pandas as pd
 import plotly.graph_objects as go
-import requests
 import streamlit as st
 
 from scripts.common.error_helpers import get_logger
@@ -23,6 +22,7 @@ from scripts.common.fpl_draft_api import (
     get_fpl_player_mapping,
     get_draft_league_details,
     _get_draft_gw_live_points,
+    _get_draft_entry_full_picks_for_gw,
 )
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import position_converter
@@ -281,15 +281,8 @@ def compute_draft_bench_data(entry_id, max_gw):
     total_points_lost = 0
 
     for gw in range(1, max_gw + 1):
-        # Fetch picks for this GW
-        try:
-            url = f"https://draft.premierleague.com/api/entry/{entry_id}/event/{gw}"
-            resp = requests.get(url, timeout=30)
-            data = resp.json()
-            picks = data.get("picks", [])
-        except Exception:
-            _logger.warning("Failed to fetch draft picks for entry %s GW %s", entry_id, gw, exc_info=True)
-            continue
+        # Fetch picks for this GW (cached — permanent for finished GWs)
+        picks = _get_draft_entry_full_picks_for_gw(entry_id, gw)
 
         if not picks:
             continue

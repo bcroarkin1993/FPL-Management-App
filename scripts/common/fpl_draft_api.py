@@ -11,6 +11,7 @@ import streamlit as st
 from typing import Dict, List, Any, Optional
 
 import config
+from scripts.common.cache import cached_api_call
 from scripts.common.error_helpers import get_logger
 from scripts.common.text_helpers import (
     normalize_apostrophes,
@@ -329,18 +330,29 @@ def _get_draft_gw_live_points(gw: int) -> dict:
     {"1": {"stats": {"total_points": 10, ...}}, "2": {...}, ...}
     We normalise keys to int so they match the int element IDs from picks.
     """
-    try:
-        url = f"https://draft.premierleague.com/api/event/{gw}/live"
-        resp = requests.get(url, timeout=30)
-        data = resp.json()
-        elements = data.get("elements", {})
-        return {
-            int(eid): edata.get("stats", {}).get("total_points", 0)
-            for eid, edata in elements.items()
-        }
-    except Exception:
-        _logger.warning("Failed to fetch draft GW %s live points", gw, exc_info=True)
+    # Permanent SQLite cache for finished GWs; short TTL for current
+    is_finished = gw < config.CURRENT_GAMEWEEK
+    cache_ttl = None if is_finished else 300
+
+    def _fetch():
+        try:
+            url = f"https://draft.premierleague.com/api/event/{gw}/live"
+            resp = requests.get(url, timeout=30)
+            data = resp.json()
+            elements = data.get("elements", {})
+            return {
+                str(eid): edata.get("stats", {}).get("total_points", 0)
+                for eid, edata in elements.items()
+            }
+        except Exception:
+            _logger.warning("Failed to fetch draft GW %s live points", gw, exc_info=True)
+            return None
+
+    result = cached_api_call(f"draft_live_points:{gw}", _fetch, ttl=cache_ttl)
+    if result is None:
         return {}
+    # Convert string keys back to int (JSON serialization converts int keys to strings)
+    return {int(k): v for k, v in result.items()}
 
 
 @st.cache_data(ttl=60)  # Short TTL for live data
@@ -391,14 +403,47 @@ def is_gameweek_live(gw: int) -> bool:
 @st.cache_data(ttl=3600)
 def _get_draft_entry_picks_for_gw(entry_id: int, gw: int) -> list:
     """Returns list of element IDs for a Draft entry's picks in a single GW."""
-    try:
-        url = f"https://draft.premierleague.com/api/entry/{entry_id}/event/{gw}"
-        resp = requests.get(url, timeout=30)
-        data = resp.json()
-        return [p["element"] for p in data.get("picks", [])]
-    except Exception:
-        _logger.warning("Failed to fetch draft entry %s picks for GW %s", entry_id, gw, exc_info=True)
-        return []
+    # Permanent SQLite cache for finished GWs; short TTL for current
+    is_finished = gw < config.CURRENT_GAMEWEEK
+    cache_ttl = None if is_finished else 300
+
+    def _fetch():
+        try:
+            url = f"https://draft.premierleague.com/api/entry/{entry_id}/event/{gw}"
+            resp = requests.get(url, timeout=30)
+            data = resp.json()
+            return [p["element"] for p in data.get("picks", [])]
+        except Exception:
+            _logger.warning("Failed to fetch draft entry %s picks for GW %s", entry_id, gw, exc_info=True)
+            return None
+
+    result = cached_api_call(f"draft_picks:{entry_id}:{gw}", _fetch, ttl=cache_ttl)
+    return result if result is not None else []
+
+
+@st.cache_data(ttl=3600)
+def _get_draft_entry_full_picks_for_gw(entry_id: int, gw: int) -> list:
+    """Returns full picks list (with 'element', 'position' keys) for a Draft entry in a single GW.
+
+    Unlike _get_draft_entry_picks_for_gw which returns only element IDs,
+    this returns the raw pick dicts needed for bench analysis (squad position info).
+    """
+    # Permanent SQLite cache for finished GWs; short TTL for current
+    is_finished = gw < config.CURRENT_GAMEWEEK
+    cache_ttl = None if is_finished else 300
+
+    def _fetch():
+        try:
+            url = f"https://draft.premierleague.com/api/entry/{entry_id}/event/{gw}"
+            resp = requests.get(url, timeout=30)
+            data = resp.json()
+            return data.get("picks", [])
+        except Exception:
+            _logger.warning("Failed to fetch draft full picks for entry %s GW %s", entry_id, gw, exc_info=True)
+            return None
+
+    result = cached_api_call(f"draft_full_picks:{entry_id}:{gw}", _fetch, ttl=cache_ttl)
+    return result if result is not None else []
 
 
 # =============================================================================
