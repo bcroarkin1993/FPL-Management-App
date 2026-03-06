@@ -433,30 +433,18 @@ def _render_optimal_lineup(all_players, starters, active_chip, is_classic=True):
         # Actual score with captain multiplier
         actual_score = sum(p["points"] * p.get("multiplier", 1) for p in starters)
 
-        # Optimal: keep same captain, just optimize which 11 play
         captain = next((p for p in all_players if p.get("is_captain")), None)
         captain_mult = 3 if active_chip == "3xc" else 2
 
-        if captain:
-            captain_in_optimal = any(p["element_id"] == captain["element_id"] for p in optimal_11)
-            if captain_in_optimal:
-                optimal_score = (
-                    sum(p["points"] for p in optimal_11 if p["element_id"] != captain["element_id"])
-                    + captain["points"] * captain_mult
-                )
-            else:
-                # Captain benched in optimal — unusual but possible (captain scored poorly)
-                # Use best non-GK in optimal as captain
-                best_in_optimal = max(
-                    [p for p in optimal_11 if p["position"] != "GK"] or optimal_11,
-                    key=lambda p: p["points"],
-                )
-                optimal_score = (
-                    sum(p["points"] for p in optimal_11 if p["element_id"] != best_in_optimal["element_id"])
-                    + best_in_optimal["points"] * captain_mult
-                )
-        else:
-            optimal_score = sum(p["points"] for p in optimal_11)
+        # Optimal: best 11 + best captain (highest non-GK scorer in optimal 11)
+        optimal_captain = max(
+            [p for p in optimal_11 if p["position"] != "GK"] or optimal_11,
+            key=lambda p: p["points"],
+        )
+        optimal_score = (
+            sum(p["points"] for p in optimal_11 if p["element_id"] != optimal_captain["element_id"])
+            + optimal_captain["points"] * captain_mult
+        )
     else:
         # Draft: no captain
         actual_score = sum(p["points"] for p in starters)
@@ -485,10 +473,22 @@ def _render_optimal_lineup(all_players, starters, active_chip, is_classic=True):
         should_have_started.sort(key=lambda p: -p["points"])
         should_have_benched.sort(key=lambda p: p["points"])
 
+        html = ""
+
+        # Show optimal captain if different from actual
+        if is_classic and captain and optimal_captain["element_id"] != captain["element_id"]:
+            captain_diff = (optimal_captain["points"] - captain["points"]) * (captain_mult - 1)
+            html += (
+                f'<div class="gwr-swap-row" style="border-left:3px solid #00ff87;">'
+                f'<span class="gwr-swap-in">👑 Captain {optimal_captain["web_name"]} '
+                f'({optimal_captain["points"]} x{captain_mult} = {optimal_captain["points"] * captain_mult} pts)</span>'
+                f'<span class="gwr-swap-arrow">instead of</span>'
+                f'<span class="gwr-swap-out">👑 {captain["web_name"]} '
+                f'({captain["points"]} x{captain_mult} = {captain["points"] * captain_mult} pts)</span>'
+                f'</div>'
+            )
+
         if should_have_started:
-            st.markdown("")
-            st.markdown("**Recommended Swaps**")
-            html = ""
             for swap_in, swap_out in zip(should_have_started, should_have_benched):
                 html += (
                     f'<div class="gwr-swap-row">'
@@ -497,6 +497,10 @@ def _render_optimal_lineup(all_players, starters, active_chip, is_classic=True):
                     f'<span class="gwr-swap-out">▼ {swap_out["web_name"]} ({swap_out["points"]} pts)</span>'
                     f'</div>'
                 )
+
+        if html:
+            st.markdown("")
+            st.markdown("**Hindsight Changes**")
             st.markdown(html, unsafe_allow_html=True)
     else:
         st.success("Your lineup was optimal! No points were left on the bench.")
