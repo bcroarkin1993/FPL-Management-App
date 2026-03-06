@@ -618,7 +618,15 @@ def display_boxplot_point_distribution(player_statistics, position_filter, team_
     st.plotly_chart(fig, use_container_width=True)
 
 def _build_team_set_piece_grid(player_df: pd.DataFrame) -> str:
-    """Build an HTML grid showing the primary set piece taker per team."""
+    """Build an HTML grid showing the primary *available* set piece taker per team.
+
+    Skips players with FPL status i (injured), s (suspended), u (unavailable),
+    or n (not available) and promotes the next taker in the order. Doubtful
+    players (status 'd') are kept but shown with a warning indicator.
+    """
+    # Statuses that mean a player is definitively out
+    _OUT_STATUSES = {"i", "s", "u", "n"}
+
     sp_map = {
         "penalties_order": "Penalties",
         "corners_and_indirect_freekicks_order": "Corners",
@@ -632,16 +640,26 @@ def _build_team_set_piece_grid(player_df: pd.DataFrame) -> str:
         cells = f'<td style="font-weight:700;white-space:nowrap;">{team}</td>'
         for col in sp_map:
             takers = team_df[team_df[col].notna()].sort_values(col)
-            if takers.empty:
+            # Filter out injured/suspended/unavailable players
+            available = takers[~takers["status"].astype(str).str.lower().isin(_OUT_STATUSES)]
+            if available.empty:
                 cells += '<td style="color:#888;">—</td>'
             else:
-                top = takers.iloc[0]
+                top = available.iloc[0]
                 name = top["player"]
                 pos = top["position_abbrv"]
                 pts = int(top["total_points"]) if pd.notna(top["total_points"]) else "—"
+                is_doubtful = str(top.get("status", "")).lower() == "d"
+                flag = ' <span style="color:#e67e22;" title="Doubtful">&#9888;</span>' if is_doubtful else ""
+                promoted = int(top[col]) > 1
+                promo_tag = (
+                    f' <span style="color:#f1c40f;font-size:0.8em;" '
+                    f'title="Normally {_ordinal(int(top[col]))}; promoted due to unavailability">'
+                    f'(was {_ordinal(int(top[col]))})</span>'
+                ) if promoted else ""
                 cells += (
-                    f'<td>{name} <span style="color:#aaa;font-size:0.85em;">'
-                    f'({pos}, {pts} pts)</span></td>'
+                    f'<td>{name}{flag} <span style="color:#aaa;font-size:0.85em;">'
+                    f'({pos}, {pts} pts)</span>{promo_tag}</td>'
                 )
         rows_html += f"<tr>{cells}</tr>"
 
