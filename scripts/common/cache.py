@@ -21,12 +21,59 @@ _logger = get_logger("fpl_app.cache")
 # Singleton connection — lazy-initialised by get_cache_db()
 _connection: Optional[sqlite3.Connection] = None
 
+_CREATE_TABLE_SQL = """CREATE TABLE IF NOT EXISTS cache (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    expires_at REAL
+)"""
+
 
 def _find_project_root() -> Path:
     """Walk up from this file (scripts/common/) to find the project root."""
     here = Path(__file__).resolve().parent
     # scripts/common/ -> scripts/ -> project root
     return here.parent.parent
+
+
+def _default_db_path() -> Path:
+    return _find_project_root() / ".fpl_cache.db"
+
+
+def _init_connection(path: str) -> sqlite3.Connection:
+    """Open a SQLite connection and ensure the cache table exists."""
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(_CREATE_TABLE_SQL)
+    conn.commit()
+    return conn
+
+
+def _reset_default_connection() -> sqlite3.Connection:
+    """Delete the corrupt DB file and create a fresh connection."""
+    global _connection
+
+    db_path = _default_db_path()
+    _logger.warning("Resetting corrupt cache DB: %s", db_path)
+
+    # Close existing connection if any
+    if _connection is not None:
+        try:
+            _connection.close()
+        except Exception:
+            pass
+        _connection = None
+
+    # Delete the corrupt file (and WAL/SHM sidecars)
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(str(db_path) + suffix)
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # Create fresh
+    _connection = _init_connection(str(db_path))
+    return _connection
 
 
 def get_cache_db(db_path: Optional[str] = None) -> sqlite3.Connection:
@@ -43,33 +90,17 @@ def get_cache_db(db_path: Optional[str] = None) -> sqlite3.Connection:
 
     if db_path is not None:
         # Custom path (tests) — always create a new connection
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS cache (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                expires_at REAL
-            )"""
-        )
-        conn.commit()
-        return conn
+        return _init_connection(db_path)
 
     if _connection is not None:
         return _connection
 
-    root = _find_project_root()
-    path = root / ".fpl_cache.db"
-    _connection = sqlite3.connect(str(path), check_same_thread=False)
-    _connection.execute("PRAGMA journal_mode=WAL")
-    _connection.execute(
-        """CREATE TABLE IF NOT EXISTS cache (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            expires_at REAL
-        )"""
-    )
-    _connection.commit()
+    path = _default_db_path()
+    try:
+        _connection = _init_connection(str(path))
+    except sqlite3.DatabaseError:
+        # Corrupt DB on first open — reset it
+        _connection = _reset_default_connection()
     return _connection
 
 
@@ -77,6 +108,7 @@ def cache_get(key: str, conn: Optional[sqlite3.Connection] = None) -> Optional[A
     """
     Get value by key. Returns None if missing or expired.
     Deletes expired entries opportunistically.
+    Auto-recovers from corrupt DB by deleting and recreating it.
 
     Parameters:
     - key: Cache key string.
@@ -87,6 +119,11 @@ def cache_get(key: str, conn: Optional[sqlite3.Connection] = None) -> Optional[A
         row = db.execute(
             "SELECT value, expires_at FROM cache WHERE key = ?", (key,)
         ).fetchone()
+    except sqlite3.DatabaseError:
+        _logger.warning("Cache read error (corrupt DB) for key %s", key, exc_info=True)
+        if conn is None:
+            _reset_default_connection()
+        return None
     except Exception:
         _logger.warning("Cache read error for key %s", key, exc_info=True)
         return None
@@ -121,6 +158,7 @@ def cache_set(
 ) -> None:
     """
     Store value as JSON. ttl=None means never expires (permanent).
+    Auto-recovers from corrupt DB by deleting and recreating it.
 
     Parameters:
     - key: Cache key string.
@@ -138,6 +176,20 @@ def cache_set(
             (key, value_json, expires_at),
         )
         db.commit()
+    except sqlite3.DatabaseError:
+        _logger.warning("Cache write error (corrupt DB) for key %s — resetting", key, exc_info=True)
+        if conn is None:
+            new_db = _reset_default_connection()
+            # Retry the write once on the fresh DB
+            try:
+                value_json = json.dumps(value)
+                new_db.execute(
+                    "INSERT OR REPLACE INTO cache (key, value, expires_at) VALUES (?, ?, ?)",
+                    (key, value_json, expires_at),
+                )
+                new_db.commit()
+            except Exception:
+                _logger.warning("Cache write retry failed for key %s", key, exc_info=True)
     except Exception:
         _logger.warning("Cache write error for key %s", key, exc_info=True)
 
@@ -180,6 +232,11 @@ def clear_cache(conn: Optional[sqlite3.Connection] = None) -> int:
         cursor = db.execute("DELETE FROM cache")
         db.commit()
         return cursor.rowcount
+    except sqlite3.DatabaseError:
+        _logger.warning("Cache clear error (corrupt DB) — resetting", exc_info=True)
+        if conn is None:
+            _reset_default_connection()
+        return 0
     except Exception:
         _logger.warning("Cache clear error", exc_info=True)
         return 0
