@@ -60,26 +60,23 @@ def _build_price_data() -> pd.DataFrame:
 def _price_card_css() -> str:
     return """
     <style>
-    .price-cards-container { display: flex; flex-direction: column; gap: 6px; }
-    .price-card {
-        display: flex; align-items: center; justify-content: space-between;
-        padding: 10px 14px; border-radius: 8px;
-        background: #1a1a2e; border: 1px solid #333;
-        color: #e0e0e0;
+    .price-cards-container { display: flex; flex-direction: column; gap: 4px; }
+    .price-row {
+        display: flex; align-items: center; gap: 8px;
+        padding: 6px 10px; border-radius: 8px;
+        color: #e0e0e0; font-size: 0.88rem;
     }
-    .price-card-left { display: flex; flex-direction: column; }
-    .price-card-name { font-weight: 700; font-size: 0.92rem; color: #e0e0e0; }
-    .price-card-meta { font-size: 0.78rem; color: #9ca3af; margin-top: 2px; }
-    .price-card-right { display: flex; flex-direction: column; align-items: flex-end; }
-    .price-card-price { font-weight: 700; font-size: 0.92rem; color: #e0e0e0; }
-    .price-card-change {
-        font-weight: 800; font-size: 0.82rem;
-        padding: 2px 8px; border-radius: 10px; margin-top: 2px;
+    .price-row-rise { background: #16213e; border-left: 3px solid #00ff87; }
+    .price-row-fall { background: #16213e; border-left: 3px solid #ff4757; }
+    .price-row-name { font-weight: 700; flex: 1; color: #e0e0e0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .price-row-meta { color: #9ca3af; font-size: 0.78rem; min-width: 48px; }
+    .price-row-price { font-weight: 600; color: #e0e0e0; min-width: 58px; text-align: right; }
+    .price-row-change {
+        font-weight: 800; font-size: 0.8rem;
+        padding: 2px 8px; border-radius: 10px; min-width: 60px; text-align: center;
     }
-    .price-rise { background: rgba(0,255,135,0.15); color: #00ff87; border-left: 3px solid #00ff87; }
-    .price-fall { background: rgba(255,71,87,0.1); color: #ff4757; border-left: 3px solid #ff4757; }
     .change-rise { background: rgba(0,255,135,0.2); color: #00ff87; }
-    .change-fall { background: rgba(255,71,87,0.15); color: #ff4757; }
+    .change-fall { background: rgba(255,71,87,0.2); color: #ff4757; }
     .no-changes-msg {
         text-align: center; padding: 20px; color: #9ca3af;
         background: #1a1a2e; border-radius: 8px; border: 1px solid #333;
@@ -106,21 +103,18 @@ def _render_gw_price_changes(df: pd.DataFrame):
             st.markdown('<div class="no-changes-msg">No risers this gameweek yet</div>',
                         unsafe_allow_html=True)
         else:
-            cards = '<div class="price-cards-container">'
+            html = '<div class="price-cards-container">'
             for _, row in risers.iterrows():
-                cards += (
-                    f'<div class="price-card price-rise">'
-                    f'<div class="price-card-left">'
-                    f'<span class="price-card-name">{row["Player"]}</span>'
-                    f'<span class="price-card-meta">{row["Team"]} · {row["Pos"]}</span>'
+                html += (
+                    f'<div class="price-row price-row-rise">'
+                    f'<span class="price-row-name">{row["Player"]}</span>'
+                    f'<span class="price-row-meta">{row["Team"]} · {row["Pos"]}</span>'
+                    f'<span class="price-row-price">{_format_price(row["now_cost"])}</span>'
+                    f'<span class="price-row-change change-rise">{_format_change(row["cost_change_event"])}</span>'
                     f'</div>'
-                    f'<div class="price-card-right">'
-                    f'<span class="price-card-price">{_format_price(row["now_cost"])}</span>'
-                    f'<span class="price-card-change change-rise">{_format_change(row["cost_change_event"])}</span>'
-                    f'</div></div>'
                 )
-            cards += '</div>'
-            st.markdown(cards, unsafe_allow_html=True)
+            html += '</div>'
+            st.markdown(html, unsafe_allow_html=True)
 
     with col2:
         st.markdown("**Fallers**")
@@ -128,21 +122,18 @@ def _render_gw_price_changes(df: pd.DataFrame):
             st.markdown('<div class="no-changes-msg">No fallers this gameweek yet</div>',
                         unsafe_allow_html=True)
         else:
-            cards = '<div class="price-cards-container">'
+            html = '<div class="price-cards-container">'
             for _, row in fallers.iterrows():
-                cards += (
-                    f'<div class="price-card price-fall">'
-                    f'<div class="price-card-left">'
-                    f'<span class="price-card-name">{row["Player"]}</span>'
-                    f'<span class="price-card-meta">{row["Team"]} · {row["Pos"]}</span>'
+                html += (
+                    f'<div class="price-row price-row-fall">'
+                    f'<span class="price-row-name">{row["Player"]}</span>'
+                    f'<span class="price-row-meta">{row["Team"]} · {row["Pos"]}</span>'
+                    f'<span class="price-row-price">{_format_price(row["now_cost"])}</span>'
+                    f'<span class="price-row-change change-fall">{_format_change(row["cost_change_event"])}</span>'
                     f'</div>'
-                    f'<div class="price-card-right">'
-                    f'<span class="price-card-price">{_format_price(row["now_cost"])}</span>'
-                    f'<span class="price-card-change change-fall">{_format_change(row["cost_change_event"])}</span>'
-                    f'</div></div>'
                 )
-            cards += '</div>'
-            st.markdown(cards, unsafe_allow_html=True)
+            html += '</div>'
+            st.markdown(html, unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------
@@ -199,10 +190,8 @@ def _render_transfer_activity(df: pd.DataFrame):
         if most_in.empty:
             st.info("No transfer data available.")
         else:
-            display = most_in[["Player", "Team", "Pos"]].copy()
+            display = most_in[["Player", "Team"]].copy()
             display["Price"] = most_in["now_cost"].apply(_format_price)
-            display["In"] = most_in["transfers_in_event"].apply(lambda x: f"{x:,}")
-            display["Out"] = most_in["transfers_out_event"].apply(lambda x: f"{x:,}")
             display["Net"] = most_in["net_transfers"].apply(lambda x: f"{x:+,}")
             display["Own%"] = most_in["selected_by_percent"].astype(str) + "%"
             render_styled_table(display, title="Most Transferred In")
@@ -211,10 +200,8 @@ def _render_transfer_activity(df: pd.DataFrame):
         if most_out.empty:
             st.info("No transfer data available.")
         else:
-            display = most_out[["Player", "Team", "Pos"]].copy()
+            display = most_out[["Player", "Team"]].copy()
             display["Price"] = most_out["now_cost"].apply(_format_price)
-            display["In"] = most_out["transfers_in_event"].apply(lambda x: f"{x:,}")
-            display["Out"] = most_out["transfers_out_event"].apply(lambda x: f"{x:,}")
             display["Net"] = most_out["net_transfers"].apply(lambda x: f"{x:+,}")
             display["Own%"] = most_out["selected_by_percent"].astype(str) + "%"
             render_styled_table(display, title="Most Transferred Out")
