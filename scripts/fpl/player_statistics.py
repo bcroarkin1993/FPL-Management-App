@@ -617,6 +617,58 @@ def display_boxplot_point_distribution(player_statistics, position_filter, team_
     # Display chart in Streamlit
     st.plotly_chart(fig, use_container_width=True)
 
+def _build_team_set_piece_grid(player_df: pd.DataFrame) -> str:
+    """Build an HTML grid showing the primary set piece taker per team."""
+    sp_map = {
+        "penalties_order": "Penalties",
+        "corners_and_indirect_freekicks_order": "Corners",
+        "direct_freekicks_order": "Free Kicks",
+    }
+    teams = sorted(player_df["team_name_abbrv"].dropna().unique().tolist())
+
+    rows_html = ""
+    for team in teams:
+        team_df = player_df[player_df["team_name_abbrv"] == team]
+        cells = f'<td style="font-weight:700;white-space:nowrap;">{team}</td>'
+        for col in sp_map:
+            takers = team_df[team_df[col].notna()].sort_values(col)
+            if takers.empty:
+                cells += '<td style="color:#888;">—</td>'
+            else:
+                top = takers.iloc[0]
+                name = top["player"]
+                pos = top["position_abbrv"]
+                pts = int(top["total_points"]) if pd.notna(top["total_points"]) else "—"
+                cells += (
+                    f'<td>{name} <span style="color:#aaa;font-size:0.85em;">'
+                    f'({pos}, {pts} pts)</span></td>'
+                )
+        rows_html += f"<tr>{cells}</tr>"
+
+    return (
+        '<div style="overflow-x:auto;">'
+        '<table style="width:100%;border-collapse:collapse;background:#16213e;color:#e0e0e0;'
+        'font-size:0.92em;border-radius:8px;overflow:hidden;">'
+        '<thead>'
+        '<tr style="background:#1a1a2e;border-bottom:2px solid #00ff87;">'
+        '<th style="padding:10px 14px;text-align:left;color:#00ff87;">Team</th>'
+        '<th style="padding:10px 14px;text-align:left;color:#00ff87;">Penalties</th>'
+        '<th style="padding:10px 14px;text-align:left;color:#00ff87;">Corners</th>'
+        '<th style="padding:10px 14px;text-align:left;color:#00ff87;">Free Kicks</th>'
+        '</tr>'
+        '</thead>'
+        '<tbody>' + rows_html + '</tbody>'
+        '</table>'
+        '</div>'
+        '<style>'
+        'div table tbody tr:nth-child(even) { background: #1a1a2e; }'
+        'div table tbody tr:hover { background: #2a2a4e; }'
+        'div table td, div table th { padding: 8px 14px; }'
+        'div table tbody tr { border-bottom: 1px solid #333; }'
+        '</style>'
+    )
+
+
 def display_set_piece_takers(player_df: pd.DataFrame):
     """Display set piece takers table grouped by team with filters and sorting."""
     st.subheader("Set Piece Takers")
@@ -642,6 +694,14 @@ def display_set_piece_takers(player_df: pd.DataFrame):
                 "now_cost", "penalties_missed", "form"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # --- Team Overview Grid (primary takers only) ---
+    st.markdown("#### Team Overview — Primary Takers")
+    grid_html = _build_team_set_piece_grid(df)
+    st.markdown(grid_html, unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("#### All Set Piece Takers")
 
     # Filters
     col1, col2 = st.columns(2)
