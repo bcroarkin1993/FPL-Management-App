@@ -15,6 +15,7 @@ from scripts.common.bench_analysis import (
     compute_classic_league_bench_data,
     render_league_bench_analysis,
     _summarize_bench_data,
+    _normalize_league_bench_results,
 )
 
 
@@ -383,8 +384,11 @@ class TestSummarizeBenchData:
         assert result["Total Pts Lost"] == 10
         assert result["Avg Bench/GW"] == 12.5
         assert result["Avg Lost/GW"] == 5.0
-        # Efficiency: 110/120 * 100 = 91.7
-        assert result["Bench Efficiency"] == 91.7
+        # Selection %: 110/120 * 100 = 91.7
+        assert result["Selection %"] == 91.7
+        # Bench Strength and Bench Mgmt Score default to 0 (populated after normalization)
+        assert "Bench Strength" in result
+        assert "Bench Mgmt Score" in result
         assert "GW" in result["Worst GW"]
 
     def test_none_bench_data(self):
@@ -447,10 +451,19 @@ class TestComputeDraftLeagueBenchData:
         result = compute_draft_league_bench_data(1, 1)
 
         assert len(result) == 2
-        # Sorted by efficiency descending: Team A (50/55=90.9%) > Team B (45/55=81.8%)
+        # Both teams have Bench Strength and Bench Mgmt Score populated
+        for row in result:
+            assert "Bench Strength" in row
+            assert "Bench Mgmt Score" in row
+            assert "Selection %" in row
+            assert row["Bench Mgmt Score"] > 0
+        # Sorted by Bench Mgmt Score descending
+        assert result[0]["Bench Mgmt Score"] >= result[1]["Bench Mgmt Score"]
+        # Team A has better Selection % (90.9 vs 81.8) and lower bench (10 vs 20)
+        # Team A: Selection % higher → sel_norm=100, Bench Strength=0 → score=60
+        # Team B: Selection % lower → sel_norm=0, Bench Strength=100 → score=40
         assert result[0]["Team"] == "Team A"
         assert result[1]["Team"] == "Team B"
-        assert result[0]["Bench Efficiency"] > result[1]["Bench Efficiency"]
 
     @patch("scripts.common.bench_analysis.get_draft_league_details")
     def test_no_league_data(self, mock_league):
@@ -489,7 +502,17 @@ class TestComputeClassicLeagueBenchData:
         result = compute_classic_league_bench_data((1, 2), team_names, 1)
 
         assert len(result) == 2
-        # Sorted by efficiency: Manager X (60/62=96.8%) > Manager Y (55/65=84.6%)
+        # Both teams have normalized scores populated
+        for row in result:
+            assert "Bench Strength" in row
+            assert "Bench Mgmt Score" in row
+            assert "Selection %" in row
+            assert row["Bench Mgmt Score"] > 0
+        # Sorted by Bench Mgmt Score descending
+        assert result[0]["Bench Mgmt Score"] >= result[1]["Bench Mgmt Score"]
+        # Manager X: higher Selection % (96.8 vs 84.6), lower bench (8 vs 15)
+        # Manager X: sel_norm=100, Bench Strength=0 → score=60
+        # Manager Y: sel_norm=0, Bench Strength=100 → score=40
         assert result[0]["Team"] == "Manager X"
         assert result[1]["Team"] == "Manager Y"
 
@@ -517,7 +540,9 @@ class TestRenderLeagueBenchAnalysis:
                 "Avg Bench/GW": 10.0,
                 "Total Pts Lost": 30,
                 "Avg Lost/GW": 3.0,
-                "Bench Efficiency": 95.0,
+                "Selection %": 95.0,
+                "Bench Strength": 0.0,
+                "Bench Mgmt Score": 60.0,
                 "Worst GW": "GW5: 8 pts",
             },
             {
@@ -526,7 +551,9 @@ class TestRenderLeagueBenchAnalysis:
                 "Avg Bench/GW": 15.0,
                 "Total Pts Lost": 50,
                 "Avg Lost/GW": 5.0,
-                "Bench Efficiency": 90.0,
+                "Selection %": 90.0,
+                "Bench Strength": 100.0,
+                "Bench Mgmt Score": 40.0,
                 "Worst GW": "GW3: 12 pts",
             },
         ]

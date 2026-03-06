@@ -522,9 +522,37 @@ def _summarize_bench_data(team_name, bench_data, max_gw):
         "Avg Bench/GW": round(total_bench / num_gws, 1) if num_gws > 0 else 0,
         "Total Pts Lost": total_lost,
         "Avg Lost/GW": round(total_lost / num_gws, 1) if num_gws > 0 else 0,
-        "Bench Efficiency": round(efficiency, 1),
+        "Selection %": round(efficiency, 1),
+        "Bench Strength": 0,      # populated after normalization in compute functions
+        "Bench Mgmt Score": 0,    # populated after normalization in compute functions
         "Worst GW": worst_str,
     }
+
+
+def _normalize_league_bench_results(results):
+    """Normalize Bench Strength and compute Bench Mgmt Score for league results."""
+    if not results:
+        return results
+
+    # Normalize Bench Strength: linear scale min→0, max→100
+    avg_benches = [r["Avg Bench/GW"] for r in results]
+    min_b, max_b = min(avg_benches), max(avg_benches)
+    for r in results:
+        if max_b > min_b:
+            r["Bench Strength"] = round((r["Avg Bench/GW"] - min_b) / (max_b - min_b) * 100, 1)
+        else:
+            r["Bench Strength"] = 50.0  # all equal
+
+    # Normalize Selection % to 0-100 for composite calculation
+    selections = [r["Selection %"] for r in results]
+    min_s, max_s = min(selections), max(selections)
+    for r in results:
+        sel_norm = ((r["Selection %"] - min_s) / (max_s - min_s) * 100) if max_s > min_s else 50.0
+        r["Bench Mgmt Score"] = round(0.5 * sel_norm + 0.5 * r["Bench Strength"], 1)
+
+    # Sort by Bench Mgmt Score descending
+    results.sort(key=lambda r: r["Bench Mgmt Score"], reverse=True)
+    return results
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -553,7 +581,7 @@ def compute_draft_league_bench_data(league_id, max_gw):
         if row:
             results.append(row)
 
-    results.sort(key=lambda r: r["Bench Efficiency"], reverse=True)
+    _normalize_league_bench_results(results)
     return results
 
 
@@ -582,7 +610,7 @@ def compute_classic_league_bench_data(team_ids, team_names_json, max_gw):
         if row:
             results.append(row)
 
-    results.sort(key=lambda r: r["Bench Efficiency"], reverse=True)
+    _normalize_league_bench_results(results)
     return results
 
 
@@ -601,33 +629,35 @@ def render_league_bench_analysis(league_data, is_classic=True):
     df = pd.DataFrame(league_data)
 
     # --- Summary Cards ---
-    best_row = min(league_data, key=lambda r: r["Total Pts Lost"])
-    worst_row = max(league_data, key=lambda r: r["Total Pts Lost"])
-    avg_lost = round(df["Total Pts Lost"].mean(), 1)
+    best_mgr = max(league_data, key=lambda r: r["Bench Mgmt Score"])
+    strongest_bench = max(league_data, key=lambda r: r["Avg Bench/GW"])
+    best_selector = max(league_data, key=lambda r: r["Selection %"])
 
     col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown(
-            _stat_card("Best Bench Manager", f"{best_row['Team']}", accent="#00ff87"),
+            _stat_card("Best Bench Manager", f"{best_mgr['Team']}", accent="#00ff87"),
             unsafe_allow_html=True,
         )
-        st.caption(f"Only {best_row['Total Pts Lost']} pts left on bench")
+        st.caption(f"Score: {best_mgr['Bench Mgmt Score']}")
     with col2:
         st.markdown(
-            _stat_card("Worst Bench Manager", f"{worst_row['Team']}", accent="#f87171"),
+            _stat_card("Strongest Bench", f"{strongest_bench['Team']}", accent="#60a5fa"),
             unsafe_allow_html=True,
         )
-        st.caption(f"{worst_row['Total Pts Lost']} pts left on bench")
+        st.caption(f"Avg {strongest_bench['Avg Bench/GW']} pts/GW on bench")
     with col3:
         st.markdown(
-            _stat_card("League Avg Pts Lost", str(avg_lost)),
+            _stat_card("Best Selector", f"{best_selector['Team']}", accent="#00ff87"),
             unsafe_allow_html=True,
         )
+        st.caption(f"{best_selector['Selection %']}% selection accuracy")
 
     st.markdown("")  # spacer
 
     # --- Ranking Table ---
-    table_df = df.copy()
+    table_df = df[["Team", "Bench Mgmt Score", "Selection %", "Bench Strength",
+                    "Avg Bench/GW", "Total Pts Lost", "Avg Lost/GW", "Worst GW"]].copy()
     table_df.insert(0, "Rank", range(1, len(table_df) + 1))
 
     render_styled_table(
@@ -635,45 +665,68 @@ def render_league_bench_analysis(league_data, is_classic=True):
         col_formats={
             "Avg Bench/GW": "{:.1f}",
             "Avg Lost/GW": "{:.1f}",
-            "Bench Efficiency": "{:.1f}%",
+            "Selection %": "{:.1f}%",
+            "Bench Mgmt Score": "{:.1f}",
+            "Bench Strength": "{:.1f}",
         },
-        positive_color_cols=["Bench Efficiency"],
+        positive_color_cols=["Bench Mgmt Score", "Selection %", "Bench Strength"],
         negative_color_cols=["Total Pts Lost"],
     )
 
     st.markdown("")  # spacer
 
-    # --- Bar Chart: Total Points Lost ---
-    chart_df = df.sort_values("Total Pts Lost", ascending=True)
-    max_lost = chart_df["Total Pts Lost"].max() if len(chart_df) > 0 else 1
+    # --- Bar Chart: Bench Management Score ---
+    chart_df = df.sort_values("Bench Mgmt Score", ascending=True)
+    min_score = chart_df["Bench Mgmt Score"].min() if len(chart_df) > 0 else 0
+    max_score = chart_df["Bench Mgmt Score"].max() if len(chart_df) > 0 else 1
+    score_range = max_score - min_score if max_score > min_score else 1
 
     colors = []
-    for val in chart_df["Total Pts Lost"]:
-        if max_lost > 0:
-            ratio = val / max_lost
-            r = int(60 + 188 * ratio)
-            g = int(200 - 140 * ratio)
-            colors.append(f"rgb({r},{g},60)")
+    for val in chart_df["Bench Mgmt Score"]:
+        # Normalize to 0-1 across the actual range for maximum color spread
+        ratio = (val - min_score) / score_range
+        # Two-segment gradient: dark red → amber → dark green (avoids muddy brown)
+        if ratio < 0.5:
+            t = ratio / 0.5  # 0→1 within first half
+            r = int(180 + 60 * t)   # 180 → 240 (red → amber)
+            g = int(40 + 140 * t)   # 40 → 180
+            b = int(30)
         else:
-            colors.append("rgb(60,200,60)")
+            t = (ratio - 0.5) / 0.5  # 0→1 within second half
+            r = int(240 - 210 * t)   # 240 → 30 (amber → green)
+            g = int(180 + 40 * t)    # 180 → 220
+            b = int(30 + 10 * t)     # 30 → 40
+        colors.append(f"rgb({r},{g},{b})")
+
+    # Build custom hover text with score breakdown
+    hover_texts = []
+    for _, row in chart_df.iterrows():
+        hover_texts.append(
+            f"<b>{row['Team']}</b><br>"
+            f"Score: {row['Bench Mgmt Score']}<br>"
+            f"Selection: {row['Selection %']}%<br>"
+            f"Bench Strength: {row['Bench Strength']}"
+        )
 
     fig = go.Figure(data=[
         go.Bar(
             y=chart_df["Team"],
-            x=chart_df["Total Pts Lost"],
+            x=chart_df["Bench Mgmt Score"],
             orientation="h",
             marker_color=colors,
-            hovertemplate="%{y}: %{x} pts lost<extra></extra>",
+            hovertemplate="%{customdata}<extra></extra>",
+            customdata=hover_texts,
         )
     ])
 
     fig.update_layout(
         **_DARK_CHART_LAYOUT,
-        title="Total Points Lost by Manager",
+        title="Bench Management Score by Manager",
         height=max(350, len(chart_df) * 40),
         showlegend=False,
+        margin=dict(l=150),
     )
-    fig.update_xaxes(title="Points Lost")
+    fig.update_xaxes(title="Bench Mgmt Score")
     fig.update_yaxes(title="")
 
     st.plotly_chart(fig, use_container_width=True, theme=None)
