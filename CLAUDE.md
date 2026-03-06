@@ -156,10 +156,25 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 ## Roadmap
 
+### High Priority
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Multi-GW Transfer Planner | Not Started | Blend FFP multi-GW projections (GW2–GW6, Next2–6GWs) with Rotowire/other sources for multi-week transfer analysis. Upgrade transfer suggestions for both Draft and Classic to factor in future GWs. Requires projection blending strategy. |
+| Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
+| Gameweek Review/Recap | Not Started | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |
+
+### Medium Priority
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Fixture Projections Enhancements | Not Started | Add key differentials section highlighting players most likely to swing results. Explore captaincy prediction (historical captain choices). Fix: move Classic H2H History below team lineups to match Draft layout. |
+
 ### Low Priority
 
 | Task | Status | Notes |
 |------|--------|-------|
+| Mini-League Rival Tracker | Not Started | Tab on League Analysis pages. Show differential players, projected points gap, effective ownership within mini-league. Data available via get_league_player_ownership (Draft) and team picks (Classic). No transfer advice (handled elsewhere). |
 | Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2/2-for-1 trade discovery, acceptance likelihood scoring, Explore Teams comparison, Regression Watch (buy-low/sell-high) |
 | Historical Data Analysis | Completed | Season History section on Classic Team Analysis (rank chart, points chart, data table); League Standing metrics on Draft Team Analysis |
 | Split utils.py | Completed | Split into 7 focused modules (`text_helpers`, `fpl_draft_api`, `fpl_classic_api`, `scraping`, `fixture_helpers`, `analytics`, `optimization`); merged matching functions into `player_matching.py`; `utils.py` is now a thin re-export shim |
