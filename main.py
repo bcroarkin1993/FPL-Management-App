@@ -1,11 +1,13 @@
 # main.py
 import logging
 import os
+from datetime import datetime
 
 import requests
 import streamlit as st
 
 import config
+from scripts.common.text_helpers import TZ_ET
 from scripts.common.utils import (
     get_classic_bootstrap_static,
     get_classic_league_standings,
@@ -301,6 +303,14 @@ def _render_fixtures(gw):
             h_score = fix.get("team_h_score")
             a_score = fix.get("team_a_score")
 
+            kickoff_str = fix.get("kickoff_time")
+            if kickoff_str:
+                dt_utc = datetime.fromisoformat(kickoff_str.replace("Z", "+00:00"))
+                dt_et = dt_utc.astimezone(TZ_ET)
+                kickoff_display = dt_et.strftime("%-m/%-d %-I:%M %p EST")
+            else:
+                kickoff_display = ""
+
             # Extract goal scorers from stats
             h_scorers, a_scorers = [], []
             for stat in fix.get("stats", []):
@@ -336,7 +346,10 @@ def _render_fixtures(gw):
                 score_text = "vs"
                 score_cls = "score-vs"
                 card_cls = "fixture-upcoming-card"
-                status_html = '<span class="fixture-status status-upcoming">Upcoming</span>'
+                if kickoff_display:
+                    status_html = f'<span class="fixture-status status-upcoming">{kickoff_display}</span>'
+                else:
+                    status_html = '<span class="fixture-status status-upcoming">Upcoming</span>'
                 home_cls = away_cls = "fixture-upcoming"
 
             cards_html += (
