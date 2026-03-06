@@ -37,6 +37,7 @@ from scripts.fpl.player_statistics import show_player_stats_page
 from scripts.fpl.player_projections import show_player_projections_page
 from scripts.fpl.projected_lineups import show_projected_lineups
 from scripts.fpl.injuries import show_injuries_page
+from scripts.fpl.price_changes import show_price_changes_page
 from scripts.fpl.settings import show_settings_page
 
 # --- Classic pages ---
@@ -654,6 +655,7 @@ FPL_PAGES = {
     "📋  Projected Lineups": show_projected_lineups,
     "📊  Projections Hub": show_player_projections_page,
     "📈  Player Statistics": show_player_stats_page,
+    "💰  Price Changes": show_price_changes_page,
     "🏥  Player Injuries": show_injuries_page,
     "⚙️  Alert Settings": show_settings_page,
 }

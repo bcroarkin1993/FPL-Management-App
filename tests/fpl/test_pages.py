@@ -66,6 +66,14 @@ class TestPlayerProjectionsPage:
             show_player_projections_page()
 
 
+class TestPriceChangesPage:
+    def test_smoke(self, mock_all_utils):
+        with patch("scripts.fpl.price_changes.get_classic_bootstrap_static",
+                   return_value={"elements": [], "teams": []}):
+            from scripts.fpl.price_changes import show_price_changes_page
+            show_price_changes_page()
+
+
 class TestSettingsPage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.fpl.settings.load_settings", return_value={
