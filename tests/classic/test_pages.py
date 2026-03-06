@@ -113,6 +113,8 @@ class TestClassicLeagueAnalysisPage:
              patch("scripts.classic.league_analysis.get_current_gameweek", return_value=25), \
              patch("scripts.classic.league_analysis.get_classic_bootstrap_static", return_value={"elements": [], "teams": [], "events": []}), \
              patch("scripts.classic.league_analysis.get_classic_team_position_data", return_value={}), \
-             patch("scripts.classic.league_analysis.show_api_error"):
+             patch("scripts.classic.league_analysis.show_api_error"), \
+             patch("scripts.classic.league_analysis.compute_classic_league_bench_data", return_value=[]), \
+             patch("scripts.classic.league_analysis.render_league_bench_analysis"):
             from scripts.classic.league_analysis import show_classic_league_analysis_page
             show_classic_league_analysis_page()

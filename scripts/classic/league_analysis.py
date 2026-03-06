@@ -15,6 +15,7 @@ import streamlit as st
 from typing import Optional, Dict, List
 
 import config
+from scripts.common.bench_analysis import compute_classic_league_bench_data, render_league_bench_analysis
 from scripts.common.error_helpers import show_api_error
 from scripts.common.utils import (
     get_league_standings,
@@ -563,13 +564,14 @@ def show_classic_league_analysis_page():
     st.divider()
 
     # Create tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "Chip Usage",
         "Rank Movement",
         "Points Analysis",
         "Team Values",
         "Performance Stats",
-        "Points by Position"
+        "Points by Position",
+        "Bench Analysis"
     ])
 
     # ---------------------------
@@ -933,3 +935,23 @@ def show_classic_league_analysis_page():
                         margin=dict(t=60, b=20, l=20, r=20),
                     )
                     st.plotly_chart(fig_pie, use_container_width=True)
+
+    # ---------------------------
+    # TAB 7: BENCH ANALYSIS
+    # ---------------------------
+    with tab7:
+        st.subheader("Bench Analysis")
+        st.caption("How effectively does each manager choose their starting lineup?")
+
+        import json
+        with st.spinner("Analyzing bench decisions across the league..."):
+            league_bench = compute_classic_league_bench_data(
+                tuple(team_ids),
+                json.dumps({str(k): v for k, v in team_names.items()}),
+                current_gw,
+            )
+
+        if league_bench:
+            render_league_bench_analysis(league_bench, is_classic=True)
+        else:
+            st.info("Not enough data for bench analysis.")

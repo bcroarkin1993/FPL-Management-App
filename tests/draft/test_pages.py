@@ -90,7 +90,9 @@ class TestTeamAnalysisPage:
 class TestLeagueAnalysisPage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.draft.league_analysis.get_current_gameweek", return_value=25), \
-             patch("scripts.draft.league_analysis.get_draft_points_by_position", return_value={}):
+             patch("scripts.draft.league_analysis.get_draft_points_by_position", return_value={}), \
+             patch("scripts.draft.league_analysis.compute_draft_league_bench_data", return_value=[]), \
+             patch("scripts.draft.league_analysis.render_league_bench_analysis"):
             from scripts.draft.league_analysis import show_draft_league_analysis_page
             show_draft_league_analysis_page()
 

@@ -11,6 +11,10 @@ from scripts.common.bench_analysis import (
     find_optimal_gw_lineup,
     compute_classic_bench_data,
     compute_draft_bench_data,
+    compute_draft_league_bench_data,
+    compute_classic_league_bench_data,
+    render_league_bench_analysis,
+    _summarize_bench_data,
 )
 
 
@@ -351,3 +355,189 @@ class TestComputeDraftBenchData:
         # Optimal is also 55 (all equal points, no captain bonus)
         assert gw["optimal"] == 55
         assert gw["points_lost"] == 0
+
+
+# =============================================================================
+# TestSummarizeBenchData
+# =============================================================================
+
+class TestSummarizeBenchData:
+
+    def test_basic_summary(self):
+        bench_data = {
+            "per_gw": [
+                {"gw": 1, "actual": 50, "bench_pts": 15, "optimal": 55, "points_lost": 5, "active_chip": None},
+                {"gw": 2, "actual": 60, "bench_pts": 10, "optimal": 65, "points_lost": 5, "active_chip": None},
+            ],
+            "total_bench_pts": 25,
+            "total_actual": 110,
+            "total_optimal": 120,
+            "total_points_lost": 10,
+        }
+
+        result = _summarize_bench_data("Test Team", bench_data, 2)
+
+        assert result is not None
+        assert result["Team"] == "Test Team"
+        assert result["Total Bench Pts"] == 25
+        assert result["Total Pts Lost"] == 10
+        assert result["Avg Bench/GW"] == 12.5
+        assert result["Avg Lost/GW"] == 5.0
+        # Efficiency: 110/120 * 100 = 91.7
+        assert result["Bench Efficiency"] == 91.7
+        assert "GW" in result["Worst GW"]
+
+    def test_none_bench_data(self):
+        assert _summarize_bench_data("Team", None, 5) is None
+
+    def test_empty_per_gw(self):
+        assert _summarize_bench_data("Team", {"per_gw": []}, 5) is None
+
+    def test_bb_excluded_from_gw_count(self):
+        bench_data = {
+            "per_gw": [
+                {"gw": 1, "actual": 50, "bench_pts": 15, "optimal": 55, "points_lost": 5, "active_chip": None},
+                {"gw": 2, "actual": 80, "bench_pts": 0, "optimal": 80, "points_lost": 0, "active_chip": "bboost"},
+            ],
+            "total_bench_pts": 15,
+            "total_actual": 130,
+            "total_optimal": 135,
+            "total_points_lost": 5,
+        }
+
+        result = _summarize_bench_data("Test", bench_data, 2)
+        # Only 1 eligible GW (BB excluded)
+        assert result["Avg Bench/GW"] == 15.0
+        assert result["Avg Lost/GW"] == 5.0
+
+
+# =============================================================================
+# TestComputeDraftLeagueBenchData
+# =============================================================================
+
+class TestComputeDraftLeagueBenchData:
+
+    @patch("scripts.common.bench_analysis.compute_draft_bench_data")
+    @patch("scripts.common.bench_analysis.get_draft_league_details")
+    def test_basic_league_data(self, mock_league, mock_bench):
+        mock_league.return_value = {
+            "league_entries": [
+                {"entry_id": 100, "entry_name": "Team A"},
+                {"entry_id": 200, "entry_name": "Team B"},
+            ]
+        }
+
+        mock_bench.side_effect = [
+            {
+                "per_gw": [{"gw": 1, "actual": 50, "bench_pts": 10, "optimal": 55, "points_lost": 5, "active_chip": None}],
+                "total_bench_pts": 10,
+                "total_actual": 50,
+                "total_optimal": 55,
+                "total_points_lost": 5,
+            },
+            {
+                "per_gw": [{"gw": 1, "actual": 45, "bench_pts": 20, "optimal": 55, "points_lost": 10, "active_chip": None}],
+                "total_bench_pts": 20,
+                "total_actual": 45,
+                "total_optimal": 55,
+                "total_points_lost": 10,
+            },
+        ]
+
+        result = compute_draft_league_bench_data(1, 1)
+
+        assert len(result) == 2
+        # Sorted by efficiency descending: Team A (50/55=90.9%) > Team B (45/55=81.8%)
+        assert result[0]["Team"] == "Team A"
+        assert result[1]["Team"] == "Team B"
+        assert result[0]["Bench Efficiency"] > result[1]["Bench Efficiency"]
+
+    @patch("scripts.common.bench_analysis.get_draft_league_details")
+    def test_no_league_data(self, mock_league):
+        mock_league.return_value = None
+        result = compute_draft_league_bench_data(1, 1)
+        assert result == []
+
+
+# =============================================================================
+# TestComputeClassicLeagueBenchData
+# =============================================================================
+
+class TestComputeClassicLeagueBenchData:
+
+    @patch("scripts.common.bench_analysis.compute_classic_bench_data")
+    def test_basic_league_data(self, mock_bench):
+        mock_bench.side_effect = [
+            {
+                "per_gw": [{"gw": 1, "actual": 60, "bench_pts": 8, "optimal": 62, "points_lost": 2, "active_chip": None}],
+                "total_bench_pts": 8,
+                "total_actual": 60,
+                "total_optimal": 62,
+                "total_points_lost": 2,
+            },
+            {
+                "per_gw": [{"gw": 1, "actual": 55, "bench_pts": 15, "optimal": 65, "points_lost": 10, "active_chip": None}],
+                "total_bench_pts": 15,
+                "total_actual": 55,
+                "total_optimal": 65,
+                "total_points_lost": 10,
+            },
+        ]
+
+        import json
+        team_names = json.dumps({"1": "Manager X", "2": "Manager Y"})
+        result = compute_classic_league_bench_data((1, 2), team_names, 1)
+
+        assert len(result) == 2
+        # Sorted by efficiency: Manager X (60/62=96.8%) > Manager Y (55/65=84.6%)
+        assert result[0]["Team"] == "Manager X"
+        assert result[1]["Team"] == "Manager Y"
+
+
+# =============================================================================
+# TestRenderLeagueBenchAnalysis
+# =============================================================================
+
+class TestRenderLeagueBenchAnalysis:
+
+    @patch("scripts.common.bench_analysis.st")
+    @patch("scripts.common.bench_analysis.render_styled_table")
+    def test_renders_without_error(self, mock_table, mock_st):
+        """Verify render function doesn't raise with valid input."""
+        # st.columns(3) must return 3 context managers
+        mock_col = MagicMock()
+        mock_col.__enter__ = MagicMock(return_value=None)
+        mock_col.__exit__ = MagicMock(return_value=False)
+        mock_st.columns.return_value = [mock_col, mock_col, mock_col]
+
+        league_data = [
+            {
+                "Team": "Team A",
+                "Total Bench Pts": 100,
+                "Avg Bench/GW": 10.0,
+                "Total Pts Lost": 30,
+                "Avg Lost/GW": 3.0,
+                "Bench Efficiency": 95.0,
+                "Worst GW": "GW5: 8 pts",
+            },
+            {
+                "Team": "Team B",
+                "Total Bench Pts": 150,
+                "Avg Bench/GW": 15.0,
+                "Total Pts Lost": 50,
+                "Avg Lost/GW": 5.0,
+                "Bench Efficiency": 90.0,
+                "Worst GW": "GW3: 12 pts",
+            },
+        ]
+
+        # Should not raise
+        render_league_bench_analysis(league_data, is_classic=True)
+
+        # Verify table was rendered
+        mock_table.assert_called_once()
+
+    @patch("scripts.common.bench_analysis.st")
+    def test_empty_data(self, mock_st):
+        render_league_bench_analysis([], is_classic=True)
+        mock_st.info.assert_called_once()

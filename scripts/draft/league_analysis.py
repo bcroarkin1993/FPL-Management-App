@@ -16,6 +16,7 @@ import streamlit as st
 from typing import Optional, Dict, List, Tuple
 
 import config
+from scripts.common.bench_analysis import compute_draft_league_bench_data, render_league_bench_analysis
 from scripts.common.error_helpers import get_logger, show_api_error
 from scripts.common.utils import get_current_gameweek, get_draft_points_by_position
 from scripts.common.styled_tables import render_styled_table
@@ -611,13 +612,14 @@ def show_draft_league_analysis_page():
     st.divider()
 
     # Create tabs for different analyses
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "Head-to-Head",
         "Scoring Analysis",
         "Weekly Trends",
         "Strength of Schedule",
         "Records & Streaks",
-        "Points by Position"
+        "Points by Position",
+        "Bench Analysis"
     ])
 
     # ---------------------------
@@ -980,3 +982,18 @@ def show_draft_league_analysis_page():
                     margin=dict(t=60, b=20, l=20, r=20),
                 )
                 st.plotly_chart(fig_pie, use_container_width=True)
+
+    # ---------------------------
+    # TAB 7: BENCH ANALYSIS
+    # ---------------------------
+    with tab7:
+        st.subheader("Bench Analysis")
+        st.caption("How effectively does each manager choose their starting lineup?")
+
+        with st.spinner("Analyzing bench decisions across the league..."):
+            league_bench = compute_draft_league_bench_data(league_id, current_gw - 1 if current_gw else 0)
+
+        if league_bench:
+            render_league_bench_analysis(league_bench, is_classic=False)
+        else:
+            st.info("Not enough data for bench analysis.")

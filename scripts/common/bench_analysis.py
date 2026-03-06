@@ -4,6 +4,8 @@ Bench Analysis — shared computation + rendering for Draft and Classic Team Ana
 Computes per-GW bench points, optimal hindsight lineups, and points lost
 due to suboptimal lineup decisions. Renders summary cards, a bar chart,
 and a per-GW breakdown table.
+
+Also provides league-wide bench analysis functions for League Analysis pages.
 """
 
 import pandas as pd
@@ -19,6 +21,7 @@ from scripts.common.fpl_classic_api import (
 )
 from scripts.common.fpl_draft_api import (
     get_fpl_player_mapping,
+    get_draft_league_details,
     _get_draft_gw_live_points,
 )
 from scripts.common.styled_tables import render_styled_table
@@ -483,3 +486,194 @@ def render_bench_analysis(bench_data, is_classic=True):
         table_df,
         positive_color_cols=["Pts Lost"],
     )
+
+
+# =============================================================================
+# LEAGUE-LEVEL BENCH ANALYSIS
+# =============================================================================
+
+def _summarize_bench_data(team_name, bench_data, max_gw):
+    """Convert per-team bench_data dict into a league summary row."""
+    if not bench_data or not bench_data.get("per_gw"):
+        return None
+
+    per_gw = bench_data["per_gw"]
+    total_bench = bench_data["total_bench_pts"]
+    total_actual = bench_data["total_actual"]
+    total_optimal = bench_data["total_optimal"]
+    total_lost = bench_data["total_points_lost"]
+
+    # Exclude BB/FH from GW count
+    eligible = [g for g in per_gw if g.get("active_chip") not in ("bboost", "freehit")]
+    num_gws = len(eligible)
+
+    efficiency = (total_actual / total_optimal * 100) if total_optimal > 0 else 100.0
+
+    # Worst GW (by points lost, excluding BB/FH)
+    if eligible:
+        worst = max(eligible, key=lambda g: g["points_lost"])
+        worst_str = f"GW{worst['gw']}: {worst['points_lost']} pts"
+    else:
+        worst_str = "-"
+
+    return {
+        "Team": team_name,
+        "Total Bench Pts": total_bench,
+        "Avg Bench/GW": round(total_bench / num_gws, 1) if num_gws > 0 else 0,
+        "Total Pts Lost": total_lost,
+        "Avg Lost/GW": round(total_lost / num_gws, 1) if num_gws > 0 else 0,
+        "Bench Efficiency": round(efficiency, 1),
+        "Worst GW": worst_str,
+    }
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def compute_draft_league_bench_data(league_id, max_gw):
+    """
+    Compute league-wide bench analysis for all teams in a Draft league.
+
+    Returns list of summary dicts sorted by Bench Efficiency descending.
+    """
+    league_data = get_draft_league_details(league_id)
+    if not league_data:
+        return []
+
+    entries = league_data.get("league_entries", [])
+    results = []
+
+    for entry in entries:
+        entry_id = entry.get("entry_id")
+        entry_name = entry.get("entry_name", f"Team {entry_id}")
+
+        if not entry_id:
+            continue
+
+        bench_data = compute_draft_bench_data(entry_id, max_gw)
+        row = _summarize_bench_data(entry_name, bench_data, max_gw)
+        if row:
+            results.append(row)
+
+    results.sort(key=lambda r: r["Bench Efficiency"], reverse=True)
+    return results
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def compute_classic_league_bench_data(team_ids, team_names_json, max_gw):
+    """
+    Compute league-wide bench analysis for Classic FPL teams.
+
+    Parameters:
+    - team_ids: tuple of team IDs (tuple for cache hashability)
+    - team_names_json: JSON string of {team_id: name} mapping (for cache hashability)
+    - max_gw: last completed gameweek
+
+    Returns list of summary dicts sorted by Bench Efficiency descending.
+    """
+    import json
+    team_names = json.loads(team_names_json)
+
+    results = []
+    for tid in team_ids:
+        tid_int = int(tid)
+        team_name = team_names.get(str(tid_int), f"Team {tid_int}")
+
+        bench_data = compute_classic_bench_data(tid_int, max_gw)
+        row = _summarize_bench_data(team_name, bench_data, max_gw)
+        if row:
+            results.append(row)
+
+    results.sort(key=lambda r: r["Bench Efficiency"], reverse=True)
+    return results
+
+
+def render_league_bench_analysis(league_data, is_classic=True):
+    """
+    Render league-wide bench analysis with summary cards, ranking table, and bar chart.
+
+    Parameters:
+    - league_data: list of dicts from compute_draft/classic_league_bench_data
+    - is_classic: True for Classic, False for Draft
+    """
+    if not league_data:
+        st.info("No bench data available.")
+        return
+
+    df = pd.DataFrame(league_data)
+
+    # --- Summary Cards ---
+    best_row = min(league_data, key=lambda r: r["Total Pts Lost"])
+    worst_row = max(league_data, key=lambda r: r["Total Pts Lost"])
+    avg_lost = round(df["Total Pts Lost"].mean(), 1)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(
+            _stat_card("Best Bench Manager", f"{best_row['Team']}", accent="#00ff87"),
+            unsafe_allow_html=True,
+        )
+        st.caption(f"Only {best_row['Total Pts Lost']} pts left on bench")
+    with col2:
+        st.markdown(
+            _stat_card("Worst Bench Manager", f"{worst_row['Team']}", accent="#f87171"),
+            unsafe_allow_html=True,
+        )
+        st.caption(f"{worst_row['Total Pts Lost']} pts left on bench")
+    with col3:
+        st.markdown(
+            _stat_card("League Avg Pts Lost", str(avg_lost)),
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("")  # spacer
+
+    # --- Ranking Table ---
+    table_df = df.copy()
+    table_df.insert(0, "Rank", range(1, len(table_df) + 1))
+
+    render_styled_table(
+        table_df,
+        col_formats={
+            "Avg Bench/GW": "{:.1f}",
+            "Avg Lost/GW": "{:.1f}",
+            "Bench Efficiency": "{:.1f}%",
+        },
+        positive_color_cols=["Bench Efficiency"],
+        negative_color_cols=["Total Pts Lost"],
+    )
+
+    st.markdown("")  # spacer
+
+    # --- Bar Chart: Total Points Lost ---
+    chart_df = df.sort_values("Total Pts Lost", ascending=True)
+    max_lost = chart_df["Total Pts Lost"].max() if len(chart_df) > 0 else 1
+
+    colors = []
+    for val in chart_df["Total Pts Lost"]:
+        if max_lost > 0:
+            ratio = val / max_lost
+            r = int(60 + 188 * ratio)
+            g = int(200 - 140 * ratio)
+            colors.append(f"rgb({r},{g},60)")
+        else:
+            colors.append("rgb(60,200,60)")
+
+    fig = go.Figure(data=[
+        go.Bar(
+            y=chart_df["Team"],
+            x=chart_df["Total Pts Lost"],
+            orientation="h",
+            marker_color=colors,
+            hovertemplate="%{y}: %{x} pts lost<extra></extra>",
+        )
+    ])
+
+    fig.update_layout(
+        **_DARK_CHART_LAYOUT,
+        title="Total Points Lost by Manager",
+        height=max(350, len(chart_df) * 40),
+        showlegend=False,
+    )
+    fig.update_xaxes(title="Points Lost")
+    fig.update_yaxes(title="")
+
+    st.plotly_chart(fig, use_container_width=True, theme=None)
