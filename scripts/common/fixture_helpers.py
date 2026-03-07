@@ -352,34 +352,32 @@ def render_key_differentials(
         t1_eff = t1_pts * t1_mult
         t2_eff = t2_pts * t2_mult
 
-        st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #37003c 0%, #5a0060 100%);
-                    padding: 16px; border-radius: 10px; margin-bottom: 16px; color: #e0e0e0;">
-            <div style="text-align: center; font-size: 13px; font-weight: 600;
-                        color: #00ff87; margin-bottom: 12px;">
-                Captain Comparison{pred_suffix}
-            </div>
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div style="text-align: center; flex: 1; color: #e0e0e0;">
-                    <div style="font-size: 13px; color: rgba(255,255,255,0.7);">{team1_name}</div>
-                    <div style="font-size: 16px; font-weight: 700; color: white;">{t1_cap}</div>
-                    <div style="font-size: 22px; font-weight: 700; color: #00ff87;">{t1_eff:.1f}</div>
-                    <div style="font-size: 11px; color: rgba(255,255,255,0.5);">
-                        {t1_pts:.1f} &times; {t1_mult}x
-                    </div>
-                </div>
-                <div style="font-size: 14px; color: rgba(255,255,255,0.4); padding: 0 12px;">vs</div>
-                <div style="text-align: center; flex: 1; color: #e0e0e0;">
-                    <div style="font-size: 13px; color: rgba(255,255,255,0.7);">{team2_name}</div>
-                    <div style="font-size: 16px; font-weight: 700; color: white;">{t2_cap}</div>
-                    <div style="font-size: 22px; font-weight: 700; color: #00ff87;">{t2_eff:.1f}</div>
-                    <div style="font-size: 11px; color: rgba(255,255,255,0.5);">
-                        {t2_pts:.1f} &times; {t2_mult}x
-                    </div>
-                </div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        cap_parts = [
+            '<div style="background:linear-gradient(135deg,#37003c 0%,#5a0060 100%);'
+            'padding:16px;border-radius:10px;margin-bottom:16px;color:#e0e0e0;">',
+            f'<div style="text-align:center;font-size:13px;font-weight:600;'
+            f'color:#00ff87;margin-bottom:12px;">Captain Comparison{pred_suffix}</div>',
+            '<div style="display:flex;justify-content:space-between;align-items:center;">',
+        ]
+        for name, cap, eff, pts, mult in [
+            (team1_name, t1_cap, t1_eff, t1_pts, t1_mult),
+            (team2_name, t2_cap, t2_eff, t2_pts, t2_mult),
+        ]:
+            if name == team2_name:
+                cap_parts.append(
+                    '<div style="font-size:14px;color:rgba(255,255,255,0.4);padding:0 12px;">vs</div>'
+                )
+            cap_parts.append(
+                f'<div style="text-align:center;flex:1;color:#e0e0e0;">'
+                f'<div style="font-size:13px;color:rgba(255,255,255,0.7);">{name}</div>'
+                f'<div style="font-size:16px;font-weight:700;color:white;">{cap}</div>'
+                f'<div style="font-size:22px;font-weight:700;color:#00ff87;">{eff:.1f}</div>'
+                f'<div style="font-size:11px;color:rgba(255,255,255,0.5);">'
+                f'{pts:.1f} &times; {mult}x</div>'
+                f'</div>'
+            )
+        cap_parts.append('</div></div>')
+        st.markdown("".join(cap_parts), unsafe_allow_html=True)
 
     # Cap display at top 5 for Draft (all players are differentials)
     max_show = 5 if is_draft else None
@@ -389,47 +387,48 @@ def render_key_differentials(
     POS_COLORS = {"G": "#f59e0b", "D": "#3b82f6", "M": "#10b981", "F": "#ef4444"}
 
     def _build_card(diffs, team_label):
+        parts = [
+            '<div style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);'
+            'padding:16px;border-radius:10px;color:#e0e0e0;">',
+            f'<div style="font-size:14px;font-weight:600;color:#00ff87;'
+            f'margin-bottom:12px;">{team_label}</div>',
+        ]
         if not diffs:
-            return (
-                f'<div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);'
-                f' padding: 16px; border-radius: 10px; color: #e0e0e0;">'
-                f'<div style="font-size: 14px; font-weight: 600; color: #00ff87;'
-                f' margin-bottom: 12px;">{team_label}</div>'
-                f'<div style="color: rgba(255,255,255,0.5); font-size: 13px;">No unique players</div>'
-                f'</div>'
+            parts.append(
+                '<div style="color:rgba(255,255,255,0.5);font-size:13px;">No unique players</div>'
             )
+            parts.append('</div>')
+            return "".join(parts)
+
         total = sum(d["points"] for d in diffs)
-        rows = ""
         for d in diffs:
             pos_color = POS_COLORS.get(d["position"], "#9ca3af")
-            matchup = f' <span style="color: rgba(255,255,255,0.4); font-size: 11px;">({d["matchup"]})</span>' if d["matchup"] else ""
-            rows += f"""
-            <div style="display: flex; align-items: center; padding: 8px 0;
-                        border-bottom: 1px solid rgba(255,255,255,0.08); color: #e0e0e0;">
-                <span style="background: {pos_color}; color: white; font-size: 10px;
-                             font-weight: 700; padding: 2px 6px; border-radius: 4px;
-                             margin-right: 8px; min-width: 20px; text-align: center;">
-                    {d["position"]}
-                </span>
-                <span style="flex: 1; font-size: 13px; color: #e0e0e0;">
-                    {d["player"]}
-                    <span style="color: rgba(255,255,255,0.5); font-size: 11px;"> {d["epl_team"]}</span>
-                    {matchup}
-                </span>
-                <span style="font-weight: 700; color: #00ff87; font-size: 14px;">{d["points"]:.1f}</span>
-            </div>"""
-        return f"""
-        <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-                    padding: 16px; border-radius: 10px; color: #e0e0e0;">
-            <div style="font-size: 14px; font-weight: 600; color: #00ff87;
-                        margin-bottom: 12px;">{team_label}</div>
-            {rows}
-            <div style="display: flex; justify-content: space-between; margin-top: 12px;
-                        padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.15); color: #e0e0e0;">
-                <span style="font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.7);">Differential Total</span>
-                <span style="font-size: 15px; font-weight: 700; color: #00ff87;">{total:.1f}</span>
-            </div>
-        </div>"""
+            matchup_html = (
+                f' <span style="color:rgba(255,255,255,0.4);font-size:11px;">({d["matchup"]})</span>'
+                if d["matchup"] else ""
+            )
+            parts.append(
+                f'<div style="display:flex;align-items:center;padding:8px 0;'
+                f'border-bottom:1px solid rgba(255,255,255,0.08);color:#e0e0e0;">'
+                f'<span style="background:{pos_color};color:white;font-size:10px;'
+                f'font-weight:700;padding:2px 6px;border-radius:4px;'
+                f'margin-right:8px;min-width:20px;text-align:center;">{d["position"]}</span>'
+                f'<span style="flex:1;font-size:13px;color:#e0e0e0;">'
+                f'{d["player"]}'
+                f' <span style="color:rgba(255,255,255,0.5);font-size:11px;">{d["epl_team"]}</span>'
+                f'{matchup_html}</span>'
+                f'<span style="font-weight:700;color:#00ff87;font-size:14px;">{d["points"]:.1f}</span>'
+                f'</div>'
+            )
+        parts.append(
+            f'<div style="display:flex;justify-content:space-between;margin-top:12px;'
+            f'padding-top:8px;border-top:1px solid rgba(255,255,255,0.15);color:#e0e0e0;">'
+            f'<span style="font-size:13px;font-weight:600;color:rgba(255,255,255,0.7);">Differential Total</span>'
+            f'<span style="font-size:15px;font-weight:700;color:#00ff87;">{total:.1f}</span>'
+            f'</div>'
+        )
+        parts.append('</div>')
+        return "".join(parts)
 
     col1, col2 = st.columns(2)
     with col1:
