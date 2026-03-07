@@ -168,7 +168,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Fixture Projections Enhancements | Not Started | Add key differentials section highlighting players most likely to swing results. Explore captaincy prediction (historical captain choices). Fix: move Classic H2H History below team lineups to match Draft layout. |
+| Fixture Projections Enhancements | Completed | Key differentials section, captain comparison (Classic), H2H layout fix (Classic now matches Draft order). |
 
 ### Low Priority
 

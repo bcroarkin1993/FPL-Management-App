@@ -41,7 +41,9 @@ class TestDraftFixtureProjectionsPage:
              patch("scripts.draft.fixture_projections.get_team_actual_lineup", return_value=pd.DataFrame()), \
              patch("scripts.draft.fixture_projections.get_gw_finished_teams", return_value=set()), \
              patch("scripts.draft.fixture_projections.simulate_auto_subs", return_value=(pd.DataFrame(), [])), \
-             patch("scripts.draft.fixture_projections.get_classic_bootstrap_static", return_value={"elements": [], "teams": []}):
+             patch("scripts.draft.fixture_projections.get_classic_bootstrap_static", return_value={"elements": [], "teams": []}), \
+             patch("scripts.draft.fixture_projections.compute_key_differentials", return_value=([], [])), \
+             patch("scripts.draft.fixture_projections.render_key_differentials"):
             from scripts.draft.fixture_projections import show_fixtures_page
             show_fixtures_page()
 

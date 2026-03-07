@@ -17,6 +17,7 @@ from fuzzywuzzy import fuzz
 from scripts.common.error_helpers import show_api_error
 from scripts.common.player_matching import canonical_normalize
 from scripts.common.analytics import simulate_auto_subs
+from scripts.common.fixture_helpers import compute_key_differentials, render_key_differentials
 from scripts.common.utils import (
     find_optimal_lineup,
     get_classic_bootstrap_static,
@@ -1227,45 +1228,6 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
     st.subheader("Win Probability")
     _render_winprob_bar(selected["team1_name"], selected["team2_name"], p_team1)
 
-    # --- Head-to-Head History ---
-    h2h = get_classic_h2h_record(league_id, selected["team1_id"], selected["team2_id"])
-
-    if h2h["wins"] + h2h["draws"] + h2h["losses"] > 0:
-        st.subheader("Head-to-Head History")
-
-        h2h_col1, h2h_col2, h2h_col3 = st.columns(3)
-        with h2h_col1:
-            st.metric(
-                label=f"{selected['team1_name']} Wins",
-                value=h2h["wins"]
-            )
-        with h2h_col2:
-            st.metric(
-                label="Draws",
-                value=h2h["draws"]
-            )
-        with h2h_col3:
-            st.metric(
-                label=f"{selected['team2_name']} Wins",
-                value=h2h["losses"]
-            )
-
-        # Show recent matchups if available
-        if h2h["matches"]:
-            with st.expander("View Past Matchups"):
-                match_data = []
-                for m in reversed(h2h["matches"]):  # Most recent first
-                    match_data.append({
-                        "Gameweek": f"GW{m['gameweek']}",
-                        selected["team1_name"]: m["my_pts"],
-                        selected["team2_name"]: m["opp_pts"],
-                        "Result": m["outcome"]
-                    })
-                render_styled_table(
-                    pd.DataFrame(match_data),
-                    text_align={"Gameweek": "center", "Result": "center"},
-                )
-
     # Auto-sub info banners
     if subs_1 or subs_2:
         sub_msgs = []
@@ -1345,6 +1307,90 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
             "**Note:** [Predicted] lineups show optimal starting XI based on current squad and projections. "
             "Actual lineups may differ. Captain marked with (C*) is predicted based on highest projected scorer."
         )
+
+    # --- Key Differentials + Captain Display ---
+    starters_1 = squad_1[squad_1['squad_position'] <= 11].copy()
+    starters_2 = squad_2[squad_2['squad_position'] <= 11].copy()
+    # Include all players if bench boost active
+    if chip_1 == 'bboost':
+        starters_1 = squad_1.copy()
+    if chip_2 == 'bboost':
+        starters_2 = squad_2.copy()
+
+    diff_points_col = 'Blended_Points' if (gw_is_live and 'Blended_Points' in starters_1.columns) else 'Points'
+    team1_diffs, team2_diffs = compute_key_differentials(
+        starters_1, starters_2,
+        selected['team1_name'], selected['team2_name'],
+        points_col=diff_points_col,
+    )
+
+    # Build captain info
+    captain_info = None
+    cap_1_rows = squad_1[squad_1['is_captain'] == True] if 'is_captain' in squad_1.columns else pd.DataFrame()
+    cap_2_rows = squad_2[squad_2['is_captain'] == True] if 'is_captain' in squad_2.columns else pd.DataFrame()
+    if not cap_1_rows.empty or not cap_2_rows.empty:
+        cap_pts_col = 'Blended_Points' if (gw_is_live and 'Blended_Points' in squad_1.columns) else 'Points'
+        t1_cap_name = cap_1_rows.iloc[0]['Player'] if not cap_1_rows.empty else "N/A"
+        t1_cap_pts = float(cap_1_rows.iloc[0].get(cap_pts_col, 0) or 0) if not cap_1_rows.empty else 0
+        t1_mult = int(cap_1_rows.iloc[0].get('multiplier', 2) or 2) if not cap_1_rows.empty else 2
+        t2_cap_name = cap_2_rows.iloc[0]['Player'] if not cap_2_rows.empty else "N/A"
+        t2_cap_pts = float(cap_2_rows.iloc[0].get(cap_pts_col, 0) or 0) if not cap_2_rows.empty else 0
+        t2_mult = int(cap_2_rows.iloc[0].get('multiplier', 2) or 2) if not cap_2_rows.empty else 2
+        captain_info = {
+            "team1_captain": t1_cap_name,
+            "team1_captain_pts": t1_cap_pts,
+            "team1_multiplier": t1_mult,
+            "team2_captain": t2_cap_name,
+            "team2_captain_pts": t2_cap_pts,
+            "team2_multiplier": t2_mult,
+            "is_predicted": predicted_1 or predicted_2,
+        }
+
+    if team1_diffs or team2_diffs or captain_info:
+        render_key_differentials(
+            team1_diffs, team2_diffs,
+            selected['team1_name'], selected['team2_name'],
+            captain_info=captain_info,
+        )
+
+    # --- Head-to-Head History ---
+    h2h = get_classic_h2h_record(league_id, selected["team1_id"], selected["team2_id"])
+
+    if h2h["wins"] + h2h["draws"] + h2h["losses"] > 0:
+        st.subheader("Head-to-Head History")
+
+        h2h_col1, h2h_col2, h2h_col3 = st.columns(3)
+        with h2h_col1:
+            st.metric(
+                label=f"{selected['team1_name']} Wins",
+                value=h2h["wins"]
+            )
+        with h2h_col2:
+            st.metric(
+                label="Draws",
+                value=h2h["draws"]
+            )
+        with h2h_col3:
+            st.metric(
+                label=f"{selected['team2_name']} Wins",
+                value=h2h["losses"]
+            )
+
+        # Show recent matchups if available
+        if h2h["matches"]:
+            with st.expander("View Past Matchups"):
+                match_data = []
+                for m in reversed(h2h["matches"]):  # Most recent first
+                    match_data.append({
+                        "Gameweek": f"GW{m['gameweek']}",
+                        selected["team1_name"]: m["my_pts"],
+                        selected["team2_name"]: m["opp_pts"],
+                        "Result": m["outcome"]
+                    })
+                render_styled_table(
+                    pd.DataFrame(match_data),
+                    text_align={"Gameweek": "center", "Result": "center"},
+                )
 
 
 # =============================================================================

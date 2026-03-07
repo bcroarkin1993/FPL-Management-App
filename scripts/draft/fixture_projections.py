@@ -11,6 +11,7 @@ from scripts.common.utils import (
     get_draft_h2h_record, get_live_gameweek_stats, is_gameweek_live, get_fpl_player_mapping,
     get_team_actual_lineup, get_gw_finished_teams, get_classic_bootstrap_static,
 )
+from scripts.common.fixture_helpers import compute_key_differentials, render_key_differentials
 from scripts.common.styled_tables import render_styled_table
 
 def _blend_live_with_projections(team_df: pd.DataFrame, live_stats: dict, player_mapping: dict) -> pd.DataFrame:
@@ -920,6 +921,20 @@ def show_fixtures_page():
                 """, unsafe_allow_html=True)
 
             _render_team_lineup(team2_df, team2_name, is_live=gw_is_live)
+
+        # --- Key Differentials ---
+        points_col = 'Blended_Points' if (gw_is_live and 'Blended_Points' in team1_df.columns) else 'Points'
+        team1_diffs, team2_diffs = compute_key_differentials(
+            team1_df, team2_df,
+            format_team_name(team1_name), format_team_name(team2_name),
+            points_col=points_col,
+        )
+        if team1_diffs or team2_diffs:
+            render_key_differentials(
+                team1_diffs, team2_diffs,
+                format_team_name(team1_name), format_team_name(team2_name),
+                is_draft=True,
+            )
 
         # --- Head-to-Head History (below lineups) ---
         team1_id = get_team_id_by_name(config.FPL_DRAFT_LEAGUE_ID, team1_name)

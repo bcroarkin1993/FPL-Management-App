@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import requests
+import streamlit as st
 
 import config
 from scripts.common.error_helpers import get_logger
@@ -237,3 +238,207 @@ def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame) -> str:
 
     parts.append("</tbody></table></div>")
     return "".join(parts)
+
+
+def compute_key_differentials(
+    team1_players: pd.DataFrame,
+    team2_players: pd.DataFrame,
+    team1_name: str,
+    team2_name: str,
+    points_col: str = "Points",
+) -> tuple:
+    """Find players unique to one squad but not the other.
+
+    Works with both Draft format (Player as index, cols: Team, Position,
+    Matchup, Points) and Classic format (Player as column, cols: Team,
+    Position, Matchup, Points, squad_position).
+
+    Returns (team1_diffs, team2_diffs) — each a list of dicts sorted by
+    projected points descending:
+        {"player": str, "epl_team": str, "position": str,
+         "points": float, "matchup": str}
+    """
+    from scripts.common.player_matching import canonical_normalize
+
+    if team1_players.empty or team2_players.empty:
+        return [], []
+
+    def _extract_names(df):
+        if "Player" in df.columns:
+            return set(canonical_normalize(n) for n in df["Player"].tolist())
+        return set(canonical_normalize(n) for n in df.index.tolist())
+
+    def _get_player_col(df, col, player_name):
+        """Get a column value for a player, handling both index and column formats."""
+        if "Player" in df.columns:
+            mask = df["Player"].apply(canonical_normalize) == canonical_normalize(player_name)
+            rows = df[mask]
+        else:
+            norm = canonical_normalize(player_name)
+            rows = df[df.index.map(canonical_normalize) == norm]
+        if rows.empty:
+            return None
+        return rows.iloc[0].get(col, "")
+
+    def _iter_players(df):
+        """Yield (player_name, row_series) for each player."""
+        if "Player" in df.columns:
+            for _, row in df.iterrows():
+                yield row["Player"], row
+        else:
+            for name, row in df.iterrows():
+                yield name, row
+
+    names1 = _extract_names(team1_players)
+    names2 = _extract_names(team2_players)
+
+    shared = names1 & names2
+    pcol = points_col if points_col in team1_players.columns else "Points"
+
+    def _build_diffs(df, shared_names, pcol_name):
+        diffs = []
+        for player_name, row in _iter_players(df):
+            if canonical_normalize(player_name) in shared_names:
+                continue
+            pts = float(row.get(pcol_name, 0) or 0)
+            diffs.append({
+                "player": player_name,
+                "epl_team": row.get("Team", ""),
+                "position": row.get("Position", ""),
+                "points": pts,
+                "matchup": row.get("Matchup", ""),
+            })
+        diffs.sort(key=lambda d: d["points"], reverse=True)
+        return diffs
+
+    # For Classic, use the correct points column from each DF
+    pcol2 = points_col if points_col in team2_players.columns else "Points"
+    team1_diffs = _build_diffs(team1_players, shared, pcol)
+    team2_diffs = _build_diffs(team2_players, shared, pcol2)
+
+    return team1_diffs, team2_diffs
+
+
+def render_key_differentials(
+    team1_diffs: list,
+    team2_diffs: list,
+    team1_name: str,
+    team2_name: str,
+    captain_info: dict = None,
+    is_draft: bool = False,
+):
+    """Render the Key Differentials section.
+
+    Parameters
+    ----------
+    captain_info : dict, optional (Classic only)
+        Keys: team1_captain, team1_captain_pts, team1_multiplier,
+              team2_captain, team2_captain_pts, team2_multiplier,
+              is_predicted (bool)
+    is_draft : bool
+        If True, cap at top 5 per team with explanatory caption.
+    """
+    st.subheader("Key Differentials")
+
+    # Captain comparison bar (Classic only)
+    if captain_info:
+        t1_cap = captain_info.get("team1_captain", "Unknown")
+        t1_pts = captain_info.get("team1_captain_pts", 0)
+        t1_mult = captain_info.get("team1_multiplier", 2)
+        t2_cap = captain_info.get("team2_captain", "Unknown")
+        t2_pts = captain_info.get("team2_captain_pts", 0)
+        t2_mult = captain_info.get("team2_multiplier", 2)
+        pred_suffix = " (Predicted)" if captain_info.get("is_predicted") else ""
+        t1_eff = t1_pts * t1_mult
+        t2_eff = t2_pts * t2_mult
+
+        st.markdown(f"""
+        <div style="background: linear-gradient(135deg, #37003c 0%, #5a0060 100%);
+                    padding: 16px; border-radius: 10px; margin-bottom: 16px; color: #e0e0e0;">
+            <div style="text-align: center; font-size: 13px; font-weight: 600;
+                        color: #00ff87; margin-bottom: 12px;">
+                Captain Comparison{pred_suffix}
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div style="text-align: center; flex: 1; color: #e0e0e0;">
+                    <div style="font-size: 13px; color: rgba(255,255,255,0.7);">{team1_name}</div>
+                    <div style="font-size: 16px; font-weight: 700; color: white;">{t1_cap}</div>
+                    <div style="font-size: 22px; font-weight: 700; color: #00ff87;">{t1_eff:.1f}</div>
+                    <div style="font-size: 11px; color: rgba(255,255,255,0.5);">
+                        {t1_pts:.1f} &times; {t1_mult}x
+                    </div>
+                </div>
+                <div style="font-size: 14px; color: rgba(255,255,255,0.4); padding: 0 12px;">vs</div>
+                <div style="text-align: center; flex: 1; color: #e0e0e0;">
+                    <div style="font-size: 13px; color: rgba(255,255,255,0.7);">{team2_name}</div>
+                    <div style="font-size: 16px; font-weight: 700; color: white;">{t2_cap}</div>
+                    <div style="font-size: 22px; font-weight: 700; color: #00ff87;">{t2_eff:.1f}</div>
+                    <div style="font-size: 11px; color: rgba(255,255,255,0.5);">
+                        {t2_pts:.1f} &times; {t2_mult}x
+                    </div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Cap display at top 5 for Draft (all players are differentials)
+    max_show = 5 if is_draft else None
+    show1 = team1_diffs[:max_show] if max_show else team1_diffs
+    show2 = team2_diffs[:max_show] if max_show else team2_diffs
+
+    POS_COLORS = {"G": "#f59e0b", "D": "#3b82f6", "M": "#10b981", "F": "#ef4444"}
+
+    def _build_card(diffs, team_label):
+        if not diffs:
+            return (
+                f'<div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);'
+                f' padding: 16px; border-radius: 10px; color: #e0e0e0;">'
+                f'<div style="font-size: 14px; font-weight: 600; color: #00ff87;'
+                f' margin-bottom: 12px;">{team_label}</div>'
+                f'<div style="color: rgba(255,255,255,0.5); font-size: 13px;">No unique players</div>'
+                f'</div>'
+            )
+        total = sum(d["points"] for d in diffs)
+        rows = ""
+        for d in diffs:
+            pos_color = POS_COLORS.get(d["position"], "#9ca3af")
+            matchup = f' <span style="color: rgba(255,255,255,0.4); font-size: 11px;">({d["matchup"]})</span>' if d["matchup"] else ""
+            rows += f"""
+            <div style="display: flex; align-items: center; padding: 8px 0;
+                        border-bottom: 1px solid rgba(255,255,255,0.08); color: #e0e0e0;">
+                <span style="background: {pos_color}; color: white; font-size: 10px;
+                             font-weight: 700; padding: 2px 6px; border-radius: 4px;
+                             margin-right: 8px; min-width: 20px; text-align: center;">
+                    {d["position"]}
+                </span>
+                <span style="flex: 1; font-size: 13px; color: #e0e0e0;">
+                    {d["player"]}
+                    <span style="color: rgba(255,255,255,0.5); font-size: 11px;"> {d["epl_team"]}</span>
+                    {matchup}
+                </span>
+                <span style="font-weight: 700; color: #00ff87; font-size: 14px;">{d["points"]:.1f}</span>
+            </div>"""
+        return f"""
+        <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                    padding: 16px; border-radius: 10px; color: #e0e0e0;">
+            <div style="font-size: 14px; font-weight: 600; color: #00ff87;
+                        margin-bottom: 12px;">{team_label}</div>
+            {rows}
+            <div style="display: flex; justify-content: space-between; margin-top: 12px;
+                        padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.15); color: #e0e0e0;">
+                <span style="font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.7);">Differential Total</span>
+                <span style="font-size: 15px; font-weight: 700; color: #00ff87;">{total:.1f}</span>
+            </div>
+        </div>"""
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(_build_card(show1, team1_name), unsafe_allow_html=True)
+    with col2:
+        st.markdown(_build_card(show2, team2_name), unsafe_allow_html=True)
+
+    if is_draft:
+        st.caption(
+            "In Draft leagues all players are unique to one team. "
+            "Showing top 5 differentials per side by projected points."
+        )

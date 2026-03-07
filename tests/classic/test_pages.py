@@ -42,7 +42,9 @@ class TestClassicFixtureProjectionsPage:
              patch("scripts.classic.fixture_projections.get_fpl_player_mapping", return_value={}), \
              patch("scripts.classic.fixture_projections.get_gw_finished_teams", return_value=set()), \
              patch("scripts.classic.fixture_projections.simulate_auto_subs", return_value=(pd.DataFrame(), [])), \
-             patch("scripts.classic.fixture_projections.show_api_error"):
+             patch("scripts.classic.fixture_projections.show_api_error"), \
+             patch("scripts.classic.fixture_projections.compute_key_differentials", return_value=([], [])), \
+             patch("scripts.classic.fixture_projections.render_key_differentials"):
             from scripts.classic.fixture_projections import show_classic_fixture_projections_page
             show_classic_fixture_projections_page()
 
