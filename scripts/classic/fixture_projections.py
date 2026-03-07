@@ -1357,24 +1357,37 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
     h2h = get_classic_h2h_record(league_id, selected["team1_id"], selected["team2_id"])
 
     if h2h["wins"] + h2h["draws"] + h2h["losses"] > 0:
+        st.markdown("<div style='margin-top: 24px;'></div>", unsafe_allow_html=True)
         st.subheader("Head-to-Head History")
 
-        h2h_col1, h2h_col2, h2h_col3 = st.columns(3)
-        with h2h_col1:
-            st.metric(
-                label=f"{selected['team1_name']} Wins",
-                value=h2h["wins"]
-            )
-        with h2h_col2:
-            st.metric(
-                label="Draws",
-                value=h2h["draws"]
-            )
-        with h2h_col3:
-            st.metric(
-                label=f"{selected['team2_name']} Wins",
-                value=h2h["losses"]
-            )
+        # Styled H2H record display (matches Draft layout)
+        total_matches = h2h["wins"] + h2h["draws"] + h2h["losses"]
+        t1_pct = (h2h["wins"] / total_matches * 100) if total_matches > 0 else 0
+        t2_pct = (h2h["losses"] / total_matches * 100) if total_matches > 0 else 0
+
+        st.markdown(f"""
+        <div style="background: #f8f9fa; border-radius: 10px; padding: 20px; margin-bottom: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <div style="text-align: center; flex: 1;">
+                    <div style="font-size: 36px; font-weight: 700; color: #28a745;">{h2h["wins"]}</div>
+                    <div style="font-size: 12px; color: #666; text-transform: uppercase;">{selected['team1_name']} Wins</div>
+                </div>
+                <div style="text-align: center; flex: 1;">
+                    <div style="font-size: 36px; font-weight: 700; color: #6c757d;">{h2h["draws"]}</div>
+                    <div style="font-size: 12px; color: #666; text-transform: uppercase;">Draws</div>
+                </div>
+                <div style="text-align: center; flex: 1;">
+                    <div style="font-size: 36px; font-weight: 700; color: #dc3545;">{h2h["losses"]}</div>
+                    <div style="font-size: 12px; color: #666; text-transform: uppercase;">{selected['team2_name']} Wins</div>
+                </div>
+            </div>
+            <div style="height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden; display: flex;">
+                <div style="width: {t1_pct}%; background: #28a745;"></div>
+                <div style="width: {100 - t1_pct - t2_pct}%; background: #6c757d;"></div>
+                <div style="width: {t2_pct}%; background: #dc3545;"></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
         # Show recent matchups if available
         if h2h["matches"]:
