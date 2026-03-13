@@ -1080,7 +1080,17 @@ def _compute_transfer_suggestions(
 
         txn_score = best_avail['player_value'] - worst_roster['player_value']
 
-        if txn_score > 0:
+        # Minimum threshold scaled by drop player quality — protect elite players
+        # from marginal swaps (e.g., don't suggest dropping Pickford for a tiny edge)
+        drop_season = float(worst_roster.get('Season_norm', 0.5) or 0.5)
+        if drop_season > 0.75:
+            min_threshold = 0.15  # elite: need 15%+ improvement
+        elif drop_season > 0.5:
+            min_threshold = 0.08  # above-avg: need 8%+ improvement
+        else:
+            min_threshold = 0.02  # weak players: 2% is enough
+
+        if txn_score > min_threshold:
             rationale = _build_rationale(worst_roster, best_avail)
             urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
             suggestions.append({
@@ -1117,33 +1127,39 @@ def _compute_transfer_suggestions(
 
 
 def _render_depth_card(depth_map: Dict):
-    """Render a positional depth summary card."""
+    """Render a compact horizontal positional depth summary."""
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
     level_colors = {'Critical': '#dc3545', 'Low': '#ff9800', 'Adequate': '#4ecca3'}
 
-    rows_html = []
-    for pos_code in ['F', 'M', 'D', 'G']:
+    items_html = []
+    for pos_code in ['G', 'D', 'M', 'F']:
         depth = depth_map.get(pos_code)
-        if depth is None:
+        if depth is None or depth.total == 0:
             continue
         label = pos_labels.get(pos_code, pos_code)
         dots = ('●' * depth.healthy) + ('○' * (depth.total - depth.healthy))
         color = level_colors.get(depth.depth_level, '#888')
-        rows_html.append(
-            f'<div style="display:flex;align-items:center;gap:12px;padding:4px 0;color:#e0e0e0;">'
-            f'<span style="width:35px;font-weight:bold;">{label}</span>'
-            f'<span style="color:#e0e0e0;">{depth.healthy}/{depth.total} healthy</span>'
-            f'<span style="letter-spacing:3px;color:#e0e0e0;">{dots}</span>'
-            f'<span style="color:{color};font-weight:bold;font-size:0.85em;">[{depth.depth_level}]</span>'
+        level_text = depth.depth_level if depth.depth_level != "Adequate" else ""
+        level_span = (
+            f'<span style="color:{color};font-weight:bold;font-size:0.8em;margin-left:4px;">'
+            f'{level_text}</span>' if level_text else ""
+        )
+        items_html.append(
+            f'<div style="display:flex;align-items:center;gap:6px;">'
+            f'<span style="font-weight:bold;color:#e0e0e0;">{label}</span>'
+            f'<span style="color:#aaa;font-size:0.85em;">{depth.healthy}/{depth.total}</span>'
+            f'<span style="letter-spacing:2px;font-size:0.85em;color:#e0e0e0;">{dots}</span>'
+            f'{level_span}'
             f'</div>'
         )
 
-    if rows_html:
+    if items_html:
         card = (
-            '<div style="border:1px solid #444;border-radius:10px;padding:14px 18px;margin-bottom:12px;'
-            'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e0e0e0;">'
-            '<div style="font-weight:bold;margin-bottom:8px;font-size:1.05em;color:#e0e0e0;">Squad Depth</div>'
-            + ''.join(rows_html)
+            '<div style="border:1px solid #444;border-radius:8px;padding:10px 16px;margin-bottom:10px;'
+            'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e0e0e0;'
+            'display:flex;align-items:center;gap:24px;flex-wrap:wrap;">'
+            '<span style="font-weight:bold;font-size:0.9em;color:#aaa;">Squad Depth</span>'
+            + ''.join(items_html)
             + '</div>'
         )
         st.markdown(card, unsafe_allow_html=True)
@@ -1759,13 +1775,47 @@ def show_waiver_wire_page():
         except Exception as e:
             st.warning(f"Could not compute transfer suggestions: {e}")
 
-    # --- RENDER: Positional depth card + Suggestion cards at top ---
+    # --- RENDER: Suggestion cards at top ---
     with suggestion_container:
-        if depth_map:
-            _render_depth_card(depth_map)
         _render_transfer_suggestions(suggestions)
 
-    # --- Compute display scores ---
+    st.markdown("---")
+
+    # ---------------------------
+    # MY ROSTER SECTION (with depth card)
+    # ---------------------------
+    if not my_roster.empty:
+        my_roster = _compute_keep_score(my_roster, draft_df, w_proj, w_form, w_fdr, w_season, w_draft)
+        my_roster = my_roster.sort_values("Keep Score", ascending=False).reset_index(drop=True)
+
+        st.subheader(f"Your Squad — {my_team.get('team_name', '(unknown)')}")
+
+        # Compact depth card next to roster header
+        if depth_map:
+            _render_depth_card(depth_map)
+
+        _display_roster = my_roster.copy()
+        for col in _display_roster.select_dtypes(include=[np.number]).columns:
+            _display_roster[col] = _display_roster[col].round(2)
+
+        display_cols_roster = ["Player", "Team", "Position", "Season_Points", "Projected_Points", "Form", "AvgFDRNextN", "Keep Score"]
+        if show_draft and "DraftPick" in _display_roster.columns:
+            display_cols_roster.append("DraftPick")
+        display_cols_roster = [c for c in display_cols_roster if c in _display_roster.columns]
+        render_styled_table(
+            _display_roster[display_cols_roster],
+            col_formats={"Projected_Points": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}", "Keep Score": "{:.2f}"},
+            positive_color_cols=["Keep Score"],
+        )
+    else:
+        st.subheader(f"Your Squad — {my_team.get('team_name', '(unknown)')}")
+        st.info("No roster data available for this team.")
+
+    st.markdown("---")
+
+    # ---------------------------
+    # AVAILABLE PLAYERS SECTION
+    # ---------------------------
     # Waiver Score for available players (apply position filter for display)
     avail_display = avail_all.copy()
     if pos_filter:
@@ -1786,29 +1836,6 @@ def show_waiver_wire_page():
         positive_color_cols=["Waiver Score"],
         max_height=500,
     )
-
-    # Keep Score for roster
-    if not my_roster.empty:
-        my_roster = _compute_keep_score(my_roster, draft_df, w_proj, w_form, w_fdr, w_season, w_draft)
-        my_roster = my_roster.sort_values("Keep Score", ascending=False).reset_index(drop=True)
-
-        _display_roster = my_roster.copy()
-        for col in _display_roster.select_dtypes(include=[np.number]).columns:
-            _display_roster[col] = _display_roster[col].round(2)
-
-        st.subheader(f"My Roster — {my_team.get('team_name', '(unknown)')}")
-        display_cols_roster = ["Player", "Team", "Position", "Season_Points", "Projected_Points", "Form", "AvgFDRNextN", "Keep Score"]
-        if show_draft and "DraftPick" in _display_roster.columns:
-            display_cols_roster.append("DraftPick")
-        display_cols_roster = [c for c in display_cols_roster if c in _display_roster.columns]
-        render_styled_table(
-            _display_roster[display_cols_roster],
-            col_formats={"Projected_Points": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}", "Keep Score": "{:.2f}"},
-            positive_color_cols=["Keep Score"],
-        )
-    else:
-        st.subheader(f"My Roster — {my_team.get('team_name', '(unknown)')}")
-        st.info("No roster data available for this team.")
 
     # ---------------------------
     # TRANSFER ACTIVITY SECTION

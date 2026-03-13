@@ -415,6 +415,18 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         # Calculate score improvement
         score_diff = add_row.get("Transfer_Score", 0) - drop_row.get("Keep_Score", 0)
 
+        # Protect elite players from marginal swaps — scale threshold by Keep_Score
+        keep_score = float(drop_row.get("Keep_Score", 0.5) or 0.5)
+        if keep_score > 0.7:
+            min_threshold = 0.15
+        elif keep_score > 0.5:
+            min_threshold = 0.08
+        else:
+            min_threshold = 0.02
+
+        if score_diff < min_threshold:
+            continue
+
         # Availability info
         drop_chance = drop_row.get("chance_of_playing_next_round")
         drop_news = drop_row.get("news", "")
@@ -475,33 +487,39 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
 
 
 def _render_depth_card(depth_map: Dict):
-    """Render a positional depth summary card."""
+    """Render a compact horizontal positional depth summary."""
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
     level_colors = {'Critical': '#dc3545', 'Low': '#ff9800', 'Adequate': '#4ecca3'}
 
-    rows_html = []
-    for pos_code in ['F', 'M', 'D', 'G']:
+    items_html = []
+    for pos_code in ['G', 'D', 'M', 'F']:
         depth = depth_map.get(pos_code)
-        if depth is None:
+        if depth is None or depth.total == 0:
             continue
         label = pos_labels.get(pos_code, pos_code)
         dots = ('●' * depth.healthy) + ('○' * (depth.total - depth.healthy))
         color = level_colors.get(depth.depth_level, '#888')
-        rows_html.append(
-            f'<div style="display:flex;align-items:center;gap:12px;padding:4px 0;color:#e0e0e0;">'
-            f'<span style="width:35px;font-weight:bold;">{label}</span>'
-            f'<span style="color:#e0e0e0;">{depth.healthy}/{depth.total} healthy</span>'
-            f'<span style="letter-spacing:3px;color:#e0e0e0;">{dots}</span>'
-            f'<span style="color:{color};font-weight:bold;font-size:0.85em;">[{depth.depth_level}]</span>'
+        level_text = depth.depth_level if depth.depth_level != "Adequate" else ""
+        level_span = (
+            f'<span style="color:{color};font-weight:bold;font-size:0.8em;margin-left:4px;">'
+            f'{level_text}</span>' if level_text else ""
+        )
+        items_html.append(
+            f'<div style="display:flex;align-items:center;gap:6px;">'
+            f'<span style="font-weight:bold;color:#e0e0e0;">{label}</span>'
+            f'<span style="color:#aaa;font-size:0.85em;">{depth.healthy}/{depth.total}</span>'
+            f'<span style="letter-spacing:2px;font-size:0.85em;color:#e0e0e0;">{dots}</span>'
+            f'{level_span}'
             f'</div>'
         )
 
-    if rows_html:
+    if items_html:
         card = (
-            '<div style="border:1px solid #444;border-radius:10px;padding:14px 18px;margin-bottom:12px;'
-            'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e0e0e0;">'
-            '<div style="font-weight:bold;margin-bottom:8px;font-size:1.05em;color:#e0e0e0;">Squad Depth</div>'
-            + ''.join(rows_html)
+            '<div style="border:1px solid #444;border-radius:8px;padding:10px 16px;margin-bottom:10px;'
+            'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e0e0e0;'
+            'display:flex;align-items:center;gap:24px;flex-wrap:wrap;">'
+            '<span style="font-weight:bold;font-size:0.9em;color:#aaa;">Squad Depth</span>'
+            + ''.join(items_html)
             + '</div>'
         )
         st.markdown(card, unsafe_allow_html=True)
@@ -772,19 +790,20 @@ def show_classic_transfers_page():
     available = available.sort_values("Transfer_Score", ascending=False)
 
     # ---------------------------
-    # POSITIONAL DEPTH + TRANSFER SUGGESTION CARDS (top of page)
+    # TRANSFER SUGGESTION CARDS
     # ---------------------------
-    if depth_map:
-        _render_depth_card(depth_map)
     suggestions = _build_transfer_suggestions(squad_df, available, bank, top_n=3, depth_map=depth_map)
     _render_transfer_suggestions(suggestions)
 
     st.markdown("---")
 
     # ---------------------------
-    # SQUAD ANALYSIS SECTION
+    # SQUAD ANALYSIS SECTION (with depth card)
     # ---------------------------
-    st.header("Your Squad Analysis")
+    st.header("Your Squad")
+
+    if depth_map:
+        _render_depth_card(depth_map)
 
     # Split into starting XI and bench
     starting_xi = squad_df[squad_df["squad_position"] <= 11].copy()
