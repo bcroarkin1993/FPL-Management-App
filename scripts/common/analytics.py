@@ -1,16 +1,240 @@
 """
 Player Analytics Functions.
 
-FDR/form enrichment, availability penalties, and related analytics.
+FDR/form enrichment, availability penalties, multi-GW projections,
+positional depth analysis, and related analytics.
 """
+
+import requests
+from dataclasses import dataclass
+from typing import Optional, Callable, Dict
 
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 import config
 from scripts.common.error_helpers import get_logger
+from scripts.common.player_matching import canonical_normalize
+from scripts.common.text_helpers import TEAM_FULL_TO_SHORT
 
 _logger = get_logger("fpl_app.analytics")
+
+
+# =============================================================================
+# MULTI-GW TRANSFER PLANNER — Shared Functions
+# =============================================================================
+
+def compute_healthy_form(
+    player_id: int,
+    last_n: int = 5,
+    element_history_fn: Optional[Callable] = None,
+) -> Optional[float]:
+    """
+    Compute form based only on GWs where a player actually played (minutes > 0).
+
+    Unlike raw FPL form which includes 0-point GWs from injury/bench,
+    this looks back further to find `last_n` GWs with actual minutes.
+
+    Args:
+        player_id: FPL element ID.
+        last_n: Number of played GWs to average.
+        element_history_fn: Injectable function(player_id) -> DataFrame.
+            If None, uses _fetch_element_history.
+
+    Returns:
+        Average points across the last `last_n` played GWs, or None.
+    """
+    fetcher = element_history_fn or _fetch_element_history
+    try:
+        hist = fetcher(int(player_id))
+    except Exception:
+        return None
+
+    if hist is None or hist.empty:
+        return None
+
+    gw_col = "round" if "round" in hist.columns else "event"
+    pts_col = "total_points" if "total_points" in hist.columns else "points"
+    min_col = "minutes"
+
+    if pts_col not in hist.columns or min_col not in hist.columns:
+        return None
+
+    try:
+        hist = hist.copy()
+        hist[min_col] = pd.to_numeric(hist[min_col], errors="coerce").fillna(0)
+        hist[pts_col] = pd.to_numeric(hist[pts_col], errors="coerce")
+
+        # Filter to GWs where player actually played
+        played = hist[hist[min_col] > 0].copy()
+        if played.empty:
+            return None
+
+        # Sort by GW descending and take the last_n played GWs
+        played = played.sort_values(gw_col, ascending=False)
+        recent = played.head(last_n)
+        vals = recent[pts_col].dropna()
+        return float(vals.mean()) if not vals.empty else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_element_history(player_id: int) -> Optional[pd.DataFrame]:
+    """Standalone cached element-summary fetcher for Classic mode."""
+    try:
+        url = f"https://fantasy.premierleague.com/api/element-summary/{player_id}/"
+        js = requests.get(url, timeout=30).json()
+        hist = pd.DataFrame(js.get("history", []))
+        return hist if not hist.empty else None
+    except Exception:
+        return None
+
+
+@dataclass
+class PositionalDepth:
+    """Depth info for a single position."""
+    position: str
+    total: int
+    healthy: int
+    depth_level: str  # "Critical", "Low", "Adequate"
+
+
+def compute_positional_depth(roster_df: pd.DataFrame) -> Dict[str, PositionalDepth]:
+    """
+    Compute squad depth at each position based on injury/availability data.
+
+    Args:
+        roster_df: Squad DataFrame with Position, chance_of_playing_next_round, status columns.
+
+    Returns:
+        Dict mapping position code (G/D/M/F) to PositionalDepth.
+    """
+    result = {}
+    for pos in ["G", "D", "M", "F"]:
+        pos_players = roster_df[roster_df["Position"] == pos]
+        total = len(pos_players)
+        if total == 0:
+            result[pos] = PositionalDepth(pos, 0, 0, "Critical")
+            continue
+
+        healthy = 0
+        for _, row in pos_players.iterrows():
+            status = row.get("status")
+            chance = row.get("chance_of_playing_next_round")
+
+            # Default: if both missing, assume healthy
+            if pd.isna(status) and pd.isna(chance):
+                healthy += 1
+            elif not pd.isna(status) and str(status).lower() == "a":
+                healthy += 1
+            elif not pd.isna(chance):
+                try:
+                    if float(chance) >= 75:
+                        healthy += 1
+                except (ValueError, TypeError):
+                    healthy += 1  # Can't parse, assume healthy
+            # else: injured/doubtful, not counted
+
+        # Determine depth level
+        if healthy <= 1:
+            level = "Critical"
+        elif healthy < total:
+            level = "Low"
+        else:
+            level = "Adequate"
+
+        result[pos] = PositionalDepth(pos, total, healthy, level)
+
+    return result
+
+
+def compute_transfer_urgency(position: str, depth_map: Dict[str, PositionalDepth]) -> str:
+    """
+    Return urgency label for a position based on squad depth.
+
+    Returns:
+        "URGENT" if Critical, "LOW DEPTH" if Low, "" if Adequate.
+    """
+    depth = depth_map.get(position)
+    if depth is None:
+        return ""
+    if depth.depth_level == "Critical":
+        return "URGENT"
+    if depth.depth_level == "Low":
+        return "LOW DEPTH"
+    return ""
+
+
+def blend_multi_gw_projections(
+    player_df: pd.DataFrame,
+    ffp_df: Optional[pd.DataFrame],
+    single_gw_col: str = "Points",
+    output_col: str = "MultiGW_Proj",
+) -> pd.DataFrame:
+    """
+    Blend FFP multi-GW (Next3GWs) projections into a player DataFrame.
+
+    Matches FFP players by normalized name + team short code.
+    Unmatched players or missing FFP data falls back to single_gw_col * 3.
+
+    Args:
+        player_df: DataFrame with player names and a single-GW projection column.
+        ffp_df: FFP projections DataFrame with Name, Team, Next3GWs columns (or None).
+        single_gw_col: Column name for single-GW projection.
+        output_col: Column name for the blended multi-GW value.
+
+    Returns:
+        player_df with output_col added.
+    """
+    result = player_df.copy()
+
+    # Determine the player name column
+    name_col = "Player" if "Player" in result.columns else "Name" if "Name" in result.columns else None
+
+    # Fallback: single_gw * 3
+    single_vals = pd.to_numeric(result.get(single_gw_col, 0), errors="coerce").fillna(0)
+    result[output_col] = single_vals * 3
+
+    if ffp_df is None or ffp_df.empty or name_col is None:
+        return result
+
+    if "Next3GWs" not in ffp_df.columns or "Name" not in ffp_df.columns:
+        return result
+
+    # Build lookup from FFP data: (normalized_name, team_short) -> Next3GWs
+    ffp = ffp_df[["Name", "Team", "Next3GWs"]].dropna(subset=["Next3GWs"]).copy()
+    ffp["__norm"] = ffp["Name"].apply(canonical_normalize)
+    ffp["__team_short"] = ffp["Team"].replace(TEAM_FULL_TO_SHORT)
+    ffp["Next3GWs"] = pd.to_numeric(ffp["Next3GWs"], errors="coerce")
+
+    # Build lookup dict
+    lookup = {}
+    for _, row in ffp.iterrows():
+        key = (row["__norm"], str(row["__team_short"]))
+        val = row["Next3GWs"]
+        if pd.notna(val):
+            lookup[key] = val
+
+    if not lookup:
+        return result
+
+    # Match players
+    result["__norm"] = result[name_col].apply(canonical_normalize)
+    team_col = "Team" if "Team" in result.columns else None
+
+    for idx in result.index:
+        norm_name = result.at[idx, "__norm"]
+        team_short = str(result.at[idx, team_col]) if team_col else ""
+        team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
+
+        key = (norm_name, team_short)
+        if key in lookup:
+            result.at[idx, output_col] = lookup[key]
+
+    result.drop(columns=["__norm"], inplace=True, errors="ignore")
+    return result
 
 
 def _add_fdr_and_form(

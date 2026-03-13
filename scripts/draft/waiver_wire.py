@@ -31,6 +31,13 @@ from scripts.common.utils import (
 )
 from scripts.common.player_matching import canonical_normalize, get_player_registry
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.analytics import (
+    compute_healthy_form,
+    compute_positional_depth,
+    compute_transfer_urgency,
+    blend_multi_gw_projections,
+)
+from scripts.common.scraping import get_ffp_projections_data
 
 # ---------------------------
 # FPL API READS
@@ -710,14 +717,17 @@ def _add_fdr_and_form(
     base["AvgFDRNextN"] = base["Team"].apply(lambda t: _avg_fdr_for_team(str(t), current_gw, weeks))
     base["AvgFDRNextN"] = pd.to_numeric(base["AvgFDRNextN"], errors="coerce")
 
-    # Robust Form calculation with fallbacks
+    # Robust Form calculation with fallbacks (uses healthy form — filters out 0-minute GWs)
     _form_n = form_weeks if form_weeks is not None else config.FORM_LOOKBACK_WEEKS
     def _safe_form(pid, fallback_form, fallback_ppg):
-        # element-summary average of last N
+        # Healthy form: average of last N GWs where player actually played
         val = None
         if pd.notna(pid):
             try:
-                val = _avg_form_last_n(int(pid), _form_n)
+                val = compute_healthy_form(
+                    int(pid), _form_n,
+                    element_history_fn=_element_history_df
+                )
             except Exception:
                 val = None
         if val is None or (isinstance(val, float) and np.isnan(val)):
@@ -933,6 +943,11 @@ def _build_rationale(drop: pd.Series, add: pd.Series) -> str:
     if add_proj > 0:
         parts.append(f"projected {add_proj:.1f} pts")
 
+    add_multi = float(add.get('MultiGW_Proj', 0) or 0)
+    drop_multi = float(drop.get('MultiGW_Proj', 0) or 0)
+    if add_multi > drop_multi and add_multi > 0:
+        parts.append(f"3GW outlook: {add_multi:.1f} vs {drop_multi:.1f} pts")
+
     drop_avail = _format_availability(
         drop.get('chance_of_playing_next_round'),
         drop.get('status'),
@@ -951,7 +966,8 @@ def _compute_transfer_suggestions(
     w_form: float,
     w_fdr: float,
     w_season: float,
-    top_n: int = 3
+    top_n: int = 3,
+    depth_map: Optional[Dict] = None,
 ) -> List[Dict]:
     """Core suggestion logic: position-locked swaps with context-aware injury handling."""
     suggestions = []
@@ -993,6 +1009,11 @@ def _compute_transfer_suggestions(
         combined['FDREase_norm'] = _min_max_norm(combined['FDREase']).fillna(0.5)
         combined['Season_norm'] = _min_max_norm(combined['Season_Points']).fillna(0.5)
 
+        # Multi-GW projection blend (40% single-GW, 60% multi-GW)
+        combined['MultiGW_Proj'] = pd.to_numeric(combined.get('MultiGW_Proj', 0), errors='coerce').fillna(0)
+        combined['MultiGW_norm'] = _min_max_norm(combined['MultiGW_Proj']).fillna(0.5)
+        combined['BlendedProj_norm'] = 0.4 * combined['Proj_norm'] + 0.6 * combined['MultiGW_norm']
+
         # Asymmetric weight tilt: adds favor projections (immediate impact),
         # drops favor season points (proven value; low projection may just be
         # rotation or a tough matchup).  Tilt redistributes weight between
@@ -1006,16 +1027,16 @@ def _compute_transfer_suggestions(
         denom_add  = max(w_proj_add  + w_form + w_fdr + w_season_add,  1e-9)
         denom_drop = max(w_proj_drop + w_form + w_fdr + w_season_drop, 1e-9)
 
-        # Compute context-aware base values per source
+        # Compute context-aware base values per source (using blended multi-GW projections)
         combined['base_value_add'] = (
-            w_proj_add   * combined['Proj_norm'] +
+            w_proj_add   * combined['BlendedProj_norm'] +
             w_form       * combined['Form_norm'] +
             w_fdr        * combined['FDREase_norm'] +
             w_season_add * combined['Season_norm']
         ) / denom_add
 
         combined['base_value_drop'] = (
-            w_proj_drop   * combined['Proj_norm'] +
+            w_proj_drop   * combined['BlendedProj_norm'] +
             w_form        * combined['Form_norm'] +
             w_fdr         * combined['FDREase_norm'] +
             w_season_drop * combined['Season_norm']
@@ -1061,6 +1082,7 @@ def _compute_transfer_suggestions(
 
         if txn_score > 0:
             rationale = _build_rationale(worst_roster, best_avail)
+            urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
             suggestions.append({
                 'drop_player': str(worst_roster.get('Player', '')),
                 'drop_team': str(worst_roster.get('Team', '')),
@@ -1086,11 +1108,45 @@ def _compute_transfer_suggestions(
                 ),
                 'transaction_score': round(float(txn_score), 3),
                 'rationale': rationale,
+                'urgency': urgency,
             })
 
     # Sort by transaction score descending, return top N
     suggestions.sort(key=lambda x: x['transaction_score'], reverse=True)
     return suggestions[:top_n]
+
+
+def _render_depth_card(depth_map: Dict):
+    """Render a positional depth summary card."""
+    pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
+    level_colors = {'Critical': '#dc3545', 'Low': '#ff9800', 'Adequate': '#4ecca3'}
+
+    rows_html = []
+    for pos_code in ['F', 'M', 'D', 'G']:
+        depth = depth_map.get(pos_code)
+        if depth is None:
+            continue
+        label = pos_labels.get(pos_code, pos_code)
+        dots = ('●' * depth.healthy) + ('○' * (depth.total - depth.healthy))
+        color = level_colors.get(depth.depth_level, '#888')
+        rows_html.append(
+            f'<div style="display:flex;align-items:center;gap:12px;padding:4px 0;color:#e0e0e0;">'
+            f'<span style="width:35px;font-weight:bold;">{label}</span>'
+            f'<span style="color:#e0e0e0;">{depth.healthy}/{depth.total} healthy</span>'
+            f'<span style="letter-spacing:3px;color:#e0e0e0;">{dots}</span>'
+            f'<span style="color:{color};font-weight:bold;font-size:0.85em;">[{depth.depth_level}]</span>'
+            f'</div>'
+        )
+
+    if rows_html:
+        card = (
+            '<div style="border:1px solid #444;border-radius:10px;padding:14px 18px;margin-bottom:12px;'
+            'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e0e0e0;">'
+            '<div style="font-weight:bold;margin-bottom:8px;font-size:1.05em;color:#e0e0e0;">Squad Depth</div>'
+            + ''.join(rows_html)
+            + '</div>'
+        )
+        st.markdown(card, unsafe_allow_html=True)
 
 
 def _render_transfer_suggestions(suggestions: List[Dict]):
@@ -1106,12 +1162,24 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
         pos_label = pos_labels.get(s['drop_position'], s['drop_position'])
         score = s['transaction_score']
 
+        # Urgency badge
+        urgency = s.get('urgency', '')
+        urgency_html = ""
+        if urgency == "URGENT":
+            urgency_html = ('<span style="background:#dc3545;color:#fff;padding:3px 10px;border-radius:12px;'
+                            'font-size:0.8em;font-weight:bold;margin-left:8px;">URGENT</span>')
+        elif urgency == "LOW DEPTH":
+            urgency_html = ('<span style="background:#ff9800;color:#fff;padding:3px 10px;border-radius:12px;'
+                            'font-size:0.8em;font-weight:bold;margin-left:8px;">LOW DEPTH</span>')
+
         card_html = f"""
         <div style="border: 1px solid #444; border-radius: 10px; padding: 16px; margin-bottom: 12px;
                     background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);">
             <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
-                <span style="background: #0f3460; color: #e0e0e0; padding: 3px 12px; border-radius: 12px;
-                             font-size: 0.85em; font-weight: bold;">{pos_label}</span>
+                <div>
+                    <span style="background: #0f3460; color: #e0e0e0; padding: 3px 12px; border-radius: 12px;
+                                 font-size: 0.85em; font-weight: bold;">{pos_label}</span>{urgency_html}
+                </div>
                 <span style="background: #1a472a; color: #4ecca3; padding: 3px 12px; border-radius: 12px;
                              font-size: 0.85em; font-weight: bold;">+{score:.3f}</span>
             </div>
@@ -1120,7 +1188,7 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
                     <div style="color: #e74c3c; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">DROP</div>
                     <div style="color: #e0e0e0; font-weight: bold;">{s['drop_player']} ({s['drop_team']})</div>
                     <div style="color: #999; font-size: 0.85em;">
-                        Value: {s['drop_value']} &bull; Form: {s['drop_form']} &bull;
+                        Value: {s['drop_value']} &bull; Form: {s['drop_form']} (healthy) &bull;
                         Season: {s['drop_season_pts']} &bull; {s['drop_injury']}
                     </div>
                 </div>
@@ -1130,7 +1198,7 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
                     <div style="color: #e0e0e0; font-weight: bold;">{s['add_player']} ({s['add_team']})</div>
                     <div style="color: #999; font-size: 0.85em;">
                         Value: {s['add_value']} &bull; Proj: {s['add_proj_pts']} &bull;
-                        Form: {s['add_form']} &bull; {s['add_injury']}
+                        Form: {s['add_form']} (healthy) &bull; {s['add_injury']}
                     </div>
                 </div>
             </div>
@@ -1661,6 +1729,24 @@ def show_waiver_wire_page():
         my_roster = _add_fdr_and_form(my_roster, fpl_stats, current_gw, lookahead)
         my_roster = _add_injury_data(my_roster, fpl_stats)
 
+    # --- Multi-GW Projections (FFP) ---
+    try:
+        ffp_df = get_ffp_projections_data()
+    except Exception:
+        ffp_df = None
+
+    if not avail_all.empty:
+        avail_all = blend_multi_gw_projections(avail_all, ffp_df, single_gw_col="Points")
+    if not my_roster.empty:
+        # Roster uses Projected_Points as single-GW col
+        pts_col = "Projected_Points" if "Projected_Points" in my_roster.columns else "Points"
+        my_roster = blend_multi_gw_projections(my_roster, ffp_df, single_gw_col=pts_col)
+
+    # --- Positional Depth ---
+    depth_map = {}
+    if not my_roster.empty:
+        depth_map = compute_positional_depth(my_roster)
+
     # --- Compute transfer suggestions (before rendering) ---
     suggestions = []
     if not my_roster.empty and not avail_all.empty:
@@ -1668,13 +1754,15 @@ def show_waiver_wire_page():
             suggestions = _compute_transfer_suggestions(
                 avail_all, my_roster,
                 w_proj=w_proj, w_form=w_form, w_fdr=w_fdr, w_season=w_season,
-                top_n=3
+                top_n=3, depth_map=depth_map,
             )
         except Exception as e:
             st.warning(f"Could not compute transfer suggestions: {e}")
 
-    # --- RENDER: Suggestion cards at top ---
+    # --- RENDER: Positional depth card + Suggestion cards at top ---
     with suggestion_container:
+        if depth_map:
+            _render_depth_card(depth_map)
         _render_transfer_suggestions(suggestions)
 
     # --- Compute display scores ---

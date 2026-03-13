@@ -59,7 +59,11 @@ class TestClassicTransfersPage:
              patch("scripts.classic.transfers.get_rotowire_player_projections", return_value=pd.DataFrame()), \
              patch("scripts.classic.transfers.get_classic_transfers", return_value=[]), \
              patch("scripts.classic.transfers.position_converter", side_effect=lambda x: {1: "G", 2: "D", 3: "M", 4: "F"}.get(x, "M")), \
-             patch("scripts.classic.transfers.show_api_error"):
+             patch("scripts.classic.transfers.show_api_error"), \
+             patch("scripts.classic.transfers.compute_healthy_form", return_value=5.0), \
+             patch("scripts.classic.transfers.get_ffp_projections_data", return_value=None), \
+             patch("scripts.classic.transfers.blend_multi_gw_projections", side_effect=lambda df, *a, **kw: df), \
+             patch("scripts.classic.transfers.compute_positional_depth", return_value={}):
             from scripts.classic.transfers import show_classic_transfers_page
             show_classic_transfers_page()
 

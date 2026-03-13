@@ -24,6 +24,14 @@ from scripts.common.utils import (
     position_converter,
 )
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.analytics import (
+    compute_healthy_form,
+    _fetch_element_history,
+    compute_positional_depth,
+    compute_transfer_urgency,
+    blend_multi_gw_projections,
+)
+from scripts.common.scraping import get_ffp_projections_data
 
 
 # ---------------------------
@@ -270,12 +278,18 @@ def _min_max_norm(series: pd.Series) -> pd.Series:
 
 def _compute_transfer_score(df: pd.DataFrame, w_proj: float, w_form: float,
                             w_fdr: float, w_price: float) -> pd.DataFrame:
-    """Compute transfer target score."""
+    """Compute transfer target score with multi-GW projection blending."""
     tmp = df.copy()
 
     # Normalize components
     tmp["Proj_norm"] = _min_max_norm(tmp["Projected_Points"]).fillna(0.5)
-    tmp["Form_norm"] = _min_max_norm(tmp["form"]).fillna(0.5)
+    form_col = "HealthyForm" if "HealthyForm" in tmp.columns else "form"
+    tmp["Form_norm"] = _min_max_norm(tmp[form_col]).fillna(0.5)
+
+    # Multi-GW projection blend (40% single-GW, 60% multi-GW)
+    tmp["MultiGW_Proj"] = pd.to_numeric(tmp.get("MultiGW_Proj", 0), errors="coerce").fillna(0)
+    tmp["MultiGW_norm"] = _min_max_norm(tmp["MultiGW_Proj"]).fillna(0.5)
+    tmp["BlendedProj_norm"] = 0.4 * tmp["Proj_norm"] + 0.6 * tmp["MultiGW_norm"]
 
     # Invert FDR (lower is better)
     tmp["FDREase"] = 6 - pd.to_numeric(tmp["AvgFDR"], errors="coerce")
@@ -288,26 +302,33 @@ def _compute_transfer_score(df: pd.DataFrame, w_proj: float, w_form: float,
 
     denom = max(w_proj + w_form + w_fdr + w_price, 1e-9)
     tmp["Transfer_Score"] = (
-        w_proj * tmp["Proj_norm"] +
+        w_proj * tmp["BlendedProj_norm"] +
         w_form * tmp["Form_norm"] +
         w_fdr * tmp["FDREase_norm"] +
         w_price * tmp["Price_norm"]
     ) / denom
 
     # Cleanup
-    drop_cols = ["Proj_norm", "Form_norm", "FDREase", "FDREase_norm", "PriceValue", "Price_norm"]
+    drop_cols = ["Proj_norm", "Form_norm", "FDREase", "FDREase_norm", "PriceValue", "Price_norm",
+                 "MultiGW_norm", "BlendedProj_norm"]
     return tmp.drop(columns=[c for c in drop_cols if c in tmp.columns])
 
 
 def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
                         w_fdr: float, w_points: float) -> pd.DataFrame:
-    """Compute keep score for current squad players."""
+    """Compute keep score for current squad players with multi-GW projection blending."""
     tmp = df.copy()
 
     # Normalize components
     tmp["Proj_norm"] = _min_max_norm(tmp["Projected_Points"]).fillna(0.5)
-    tmp["Form_norm"] = _min_max_norm(tmp["form"]).fillna(0.5)
+    form_col = "HealthyForm" if "HealthyForm" in tmp.columns else "form"
+    tmp["Form_norm"] = _min_max_norm(tmp[form_col]).fillna(0.5)
     tmp["Points_norm"] = _min_max_norm(tmp["total_points"]).fillna(0.5)
+
+    # Multi-GW projection blend (40% single-GW, 60% multi-GW)
+    tmp["MultiGW_Proj"] = pd.to_numeric(tmp.get("MultiGW_Proj", 0), errors="coerce").fillna(0)
+    tmp["MultiGW_norm"] = _min_max_norm(tmp["MultiGW_Proj"]).fillna(0.5)
+    tmp["BlendedProj_norm"] = 0.4 * tmp["Proj_norm"] + 0.6 * tmp["MultiGW_norm"]
 
     # Invert FDR
     tmp["FDREase"] = 6 - pd.to_numeric(tmp["AvgFDR"], errors="coerce")
@@ -315,14 +336,15 @@ def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
 
     denom = max(w_proj + w_form + w_fdr + w_points, 1e-9)
     tmp["Keep_Score"] = (
-        w_proj * tmp["Proj_norm"] +
+        w_proj * tmp["BlendedProj_norm"] +
         w_form * tmp["Form_norm"] +
         w_fdr * tmp["FDREase_norm"] +
         w_points * tmp["Points_norm"]
     ) / denom
 
     # Cleanup
-    drop_cols = ["Proj_norm", "Form_norm", "Points_norm", "FDREase", "FDREase_norm"]
+    drop_cols = ["Proj_norm", "Form_norm", "Points_norm", "FDREase", "FDREase_norm",
+                 "MultiGW_norm", "BlendedProj_norm"]
     return tmp.drop(columns=[c for c in drop_cols if c in tmp.columns])
 
 
@@ -364,7 +386,7 @@ def _get_availability_indicator(chance: Optional[int], news: str) -> str:
 
 
 def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFrame,
-                                 bank: int, top_n: int = 3) -> List[Dict]:
+                                 bank: int, top_n: int = 3, depth_map: Optional[Dict] = None) -> List[Dict]:
     """Build transfer suggestions pairing lowest-keep-score squad players with best replacements."""
     if squad_df.empty or available_df.empty:
         return []
@@ -404,13 +426,19 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
 
         # Build rationale
         reasons = []
-        form_diff = add_row.get("form", 0) - drop_row.get("form", 0)
+        add_form_col = "HealthyForm" if "HealthyForm" in add_row.index else "form"
+        drop_form_col = "HealthyForm" if "HealthyForm" in drop_row.index else "form"
+        form_diff = float(add_row.get(add_form_col, 0) or 0) - float(drop_row.get(drop_form_col, 0) or 0)
         if form_diff > 0:
             reasons.append(f"+{form_diff:.1f} form improvement")
         proj_add = pd.to_numeric(add_row.get("Projected_Points"), errors="coerce")
         proj_drop = pd.to_numeric(drop_row.get("Projected_Points"), errors="coerce")
         if pd.notna(proj_add) and pd.notna(proj_drop) and proj_add > proj_drop:
             reasons.append(f"+{proj_add - proj_drop:.1f} projected points")
+        add_multi = float(add_row.get("MultiGW_Proj", 0) or 0)
+        drop_multi = float(drop_row.get("MultiGW_Proj", 0) or 0)
+        if add_multi > drop_multi and add_multi > 0:
+            reasons.append(f"3GW outlook: {add_multi:.1f} vs {drop_multi:.1f} pts")
         add_fdr = add_row.get("AvgFDR")
         drop_fdr = drop_row.get("AvgFDR")
         if pd.notna(add_fdr) and pd.notna(drop_fdr) and add_fdr < drop_fdr:
@@ -419,6 +447,10 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
             reasons.append(f"current player: {drop_news[:40]}")
 
         rationale = " • ".join(reasons) if reasons else "Better overall transfer score"
+        urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
+
+        add_form_val = float(add_row.get(add_form_col, 0) or 0)
+        drop_form_val = float(drop_row.get(drop_form_col, 0) or 0)
 
         suggestions.append({
             "position": pos_labels.get(pos, pos),
@@ -426,19 +458,53 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
             "drop_player": drop_row["Player"],
             "drop_team": drop_row["Team"],
             "drop_price": f"£{drop_row['now_cost']/10:.1f}m",
-            "drop_form": f"{drop_row.get('form', 0):.1f}",
+            "drop_form": f"{drop_form_val:.1f}",
             "drop_season_pts": drop_row.get("total_points", 0),
             "drop_injury": drop_injury,
             "add_player": add_row["Player"],
             "add_team": add_row["Team"],
             "add_price": f"£{add_row['now_cost']/10:.1f}m",
-            "add_form": f"{add_row.get('form', 0):.1f}",
+            "add_form": f"{add_form_val:.1f}",
             "add_proj_pts": f"{proj_add:.1f}" if pd.notna(proj_add) else "N/A",
             "add_injury": add_injury,
             "rationale": rationale,
+            "urgency": urgency,
         })
 
     return suggestions
+
+
+def _render_depth_card(depth_map: Dict):
+    """Render a positional depth summary card."""
+    pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
+    level_colors = {'Critical': '#dc3545', 'Low': '#ff9800', 'Adequate': '#4ecca3'}
+
+    rows_html = []
+    for pos_code in ['F', 'M', 'D', 'G']:
+        depth = depth_map.get(pos_code)
+        if depth is None:
+            continue
+        label = pos_labels.get(pos_code, pos_code)
+        dots = ('●' * depth.healthy) + ('○' * (depth.total - depth.healthy))
+        color = level_colors.get(depth.depth_level, '#888')
+        rows_html.append(
+            f'<div style="display:flex;align-items:center;gap:12px;padding:4px 0;color:#e0e0e0;">'
+            f'<span style="width:35px;font-weight:bold;">{label}</span>'
+            f'<span style="color:#e0e0e0;">{depth.healthy}/{depth.total} healthy</span>'
+            f'<span style="letter-spacing:3px;color:#e0e0e0;">{dots}</span>'
+            f'<span style="color:{color};font-weight:bold;font-size:0.85em;">[{depth.depth_level}]</span>'
+            f'</div>'
+        )
+
+    if rows_html:
+        card = (
+            '<div style="border:1px solid #444;border-radius:10px;padding:14px 18px;margin-bottom:12px;'
+            'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e0e0e0;">'
+            '<div style="font-weight:bold;margin-bottom:8px;font-size:1.05em;color:#e0e0e0;">Squad Depth</div>'
+            + ''.join(rows_html)
+            + '</div>'
+        )
+        st.markdown(card, unsafe_allow_html=True)
 
 
 def _render_transfer_suggestions(suggestions: List[Dict]):
@@ -450,12 +516,24 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
     st.subheader("Transfer Suggestions")
 
     for s in suggestions:
+        # Urgency badge
+        urgency = s.get('urgency', '')
+        urgency_html = ""
+        if urgency == "URGENT":
+            urgency_html = ('<span style="background:#dc3545;color:#fff;padding:3px 10px;border-radius:12px;'
+                            'font-size:0.8em;font-weight:bold;margin-left:8px;">URGENT</span>')
+        elif urgency == "LOW DEPTH":
+            urgency_html = ('<span style="background:#ff9800;color:#fff;padding:3px 10px;border-radius:12px;'
+                            'font-size:0.8em;font-weight:bold;margin-left:8px;">LOW DEPTH</span>')
+
         card_html = f"""
         <div style="border: 1px solid #444; border-radius: 10px; padding: 16px; margin-bottom: 12px;
                     background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);">
             <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
-                <span style="background: #0f3460; color: #e0e0e0; padding: 3px 12px; border-radius: 12px;
-                             font-size: 0.85em; font-weight: bold;">{s['position']}</span>
+                <div>
+                    <span style="background: #0f3460; color: #e0e0e0; padding: 3px 12px; border-radius: 12px;
+                                 font-size: 0.85em; font-weight: bold;">{s['position']}</span>{urgency_html}
+                </div>
                 <span style="background: #1a472a; color: #4ecca3; padding: 3px 12px; border-radius: 12px;
                              font-size: 0.85em; font-weight: bold;">+{s['score_diff']:.3f}</span>
             </div>
@@ -464,7 +542,7 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
                     <div style="color: #e74c3c; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">DROP</div>
                     <div style="color: #e0e0e0; font-weight: bold;">{s['drop_player']} ({s['drop_team']})</div>
                     <div style="color: #999; font-size: 0.85em;">
-                        Price: {s['drop_price']} &bull; Form: {s['drop_form']} &bull;
+                        Price: {s['drop_price']} &bull; Form: {s['drop_form']} (healthy) &bull;
                         Season: {s['drop_season_pts']} &bull; {s['drop_injury']}
                     </div>
                 </div>
@@ -474,7 +552,7 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
                     <div style="color: #e0e0e0; font-weight: bold;">{s['add_player']} ({s['add_team']})</div>
                     <div style="color: #999; font-size: 0.85em;">
                         Price: {s['add_price']} &bull; Proj: {s['add_proj_pts']} &bull;
-                        Form: {s['add_form']} &bull; {s['add_injury']}
+                        Form: {s['add_form']} (healthy) &bull; {s['add_injury']}
                     </div>
                 </div>
             </div>
@@ -620,8 +698,44 @@ def show_classic_transfers_page():
         all_players = _add_projections(all_players, projections_df)
         squad_df = _add_projections(squad_df, projections_df)
 
+        # Compute healthy form for squad players (15 players — fast)
+        for idx, row in squad_df.iterrows():
+            pid = row.get("Player_ID")
+            if pd.notna(pid):
+                hf = compute_healthy_form(int(pid), element_history_fn=_fetch_element_history)
+                squad_df.at[idx, "HealthyForm"] = hf if hf is not None else row.get("form", 0)
+            else:
+                squad_df.at[idx, "HealthyForm"] = row.get("form", 0)
+
+        # Load FFP multi-GW projections
+        try:
+            ffp_df = get_ffp_projections_data()
+        except Exception:
+            ffp_df = None
+
+        # Add multi-GW projections
+        squad_df = blend_multi_gw_projections(
+            squad_df, ffp_df, single_gw_col="Projected_Points"
+        )
+        all_players = blend_multi_gw_projections(
+            all_players, ffp_df, single_gw_col="Projected_Points"
+        )
+
         # Compute scores
         squad_df = _compute_keep_score(squad_df, w_proj, w_form, w_fdr, 0.2)
+
+    # Positional depth
+    depth_map = {}
+    if not squad_df.empty:
+        # Map status from bootstrap for depth calculation
+        elements_status = {p["id"]: p for p in bootstrap.get("elements", [])}
+        for idx, row in squad_df.iterrows():
+            pid = row.get("Player_ID")
+            el = elements_status.get(pid, {})
+            if "status" not in squad_df.columns:
+                squad_df["status"] = None
+            squad_df.at[idx, "status"] = el.get("status", "a")
+        depth_map = compute_positional_depth(squad_df)
 
     # Get squad player IDs for filtering
     squad_ids = set(squad_df["Player_ID"].tolist())
@@ -639,14 +753,30 @@ def show_classic_transfers_page():
         (all_players["minutes"] > 0)  # Must have played this season
     ].copy()
 
+    # Compute healthy form for top transfer candidates (selective — not all 600+ players)
+    top_candidates = available.nlargest(50, "Projected_Points", keep="all") if "Projected_Points" in available.columns and available["Projected_Points"].notna().any() else available.head(50)
+    for idx in top_candidates.index:
+        pid = available.at[idx, "Player_ID"]
+        if pd.notna(pid):
+            hf = compute_healthy_form(int(pid), element_history_fn=_fetch_element_history)
+            available.at[idx, "HealthyForm"] = hf if hf is not None else available.at[idx, "form"]
+        else:
+            available.at[idx, "HealthyForm"] = available.at[idx, "form"]
+    # Fill remaining candidates with FPL form
+    if "HealthyForm" not in available.columns:
+        available["HealthyForm"] = available["form"]
+    available["HealthyForm"] = available["HealthyForm"].fillna(available["form"])
+
     # Compute transfer score
     available = _compute_transfer_score(available, w_proj, w_form, w_fdr, w_price)
     available = available.sort_values("Transfer_Score", ascending=False)
 
     # ---------------------------
-    # TRANSFER SUGGESTION CARDS (top of page)
+    # POSITIONAL DEPTH + TRANSFER SUGGESTION CARDS (top of page)
     # ---------------------------
-    suggestions = _build_transfer_suggestions(squad_df, available, bank, top_n=3)
+    if depth_map:
+        _render_depth_card(depth_map)
+    suggestions = _build_transfer_suggestions(squad_df, available, bank, top_n=3, depth_map=depth_map)
     _render_transfer_suggestions(suggestions)
 
     st.markdown("---")
@@ -676,9 +806,11 @@ def show_classic_transfers_page():
         axis=1
     )
 
-    # Format display columns
-    display_cols = ["Player", "Team", "Position", "now_cost", "form", "total_points",
+    # Format display columns — use HealthyForm if available
+    form_display_col = "HealthyForm" if "HealthyForm" in squad_display.columns else "form"
+    display_cols = ["Player", "Team", "Position", "now_cost", form_display_col, "total_points",
                     "Projected_Points", "AvgFDR", "Keep_Score", "Status"]
+    display_cols = [c for c in display_cols if c in squad_display.columns]
     squad_show = squad_display[display_cols].copy()
     squad_show["Price"] = squad_show["now_cost"].apply(lambda x: f"£{x/10:.1f}m")
     squad_show["AvgFDR"] = squad_show["AvgFDR"].round(2)
@@ -687,7 +819,7 @@ def show_classic_transfers_page():
 
     # Rename for display
     squad_show = squad_show.rename(columns={
-        "form": "Form",
+        form_display_col: "Form",
         "total_points": "Season Pts",
         "Projected_Points": "Proj Pts",
         "AvgFDR": "Avg FDR",
@@ -728,9 +860,10 @@ def show_classic_transfers_page():
     # Add price change indicator
     top_targets["Price_Change"] = top_targets["cost_change_event"].apply(_format_price_change)
 
-    # Format for display
+    # Format for display — use HealthyForm if available
+    target_form_col = "HealthyForm" if "HealthyForm" in top_targets.columns else "form"
     targets_show = top_targets[[
-        "Player", "Team", "Position", "now_cost", "Price_Change", "form",
+        "Player", "Team", "Position", "now_cost", "Price_Change", target_form_col,
         "total_points", "Projected_Points", "selected_by_percent",
         "AvgFDR", "Transfer_Score", "Status"
     ]].copy()
@@ -743,7 +876,7 @@ def show_classic_transfers_page():
 
     # Rename for display
     targets_show = targets_show.rename(columns={
-        "form": "Form",
+        target_form_col: "Form",
         "total_points": "Season Pts",
         "Projected_Points": "Proj Pts",
         "AvgFDR": "Avg FDR",
