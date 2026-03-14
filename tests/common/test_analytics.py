@@ -17,6 +17,7 @@ from scripts.common.analytics import (
     positional_rank,
     dampen_form_by_starts,
     season_progress_weight,
+    ros_rebalanced_weights,
     merge_season_projections,
     PositionalDepth,
 )
@@ -678,32 +679,71 @@ class TestDampenFormByStarts:
 
 
 class TestSeasonProgressWeight:
-    """Tests for season_progress_weight()."""
+    """Tests for season_progress_weight() — concave curve."""
 
     def test_early_season_favors_projections(self):
-        """GW 1 should return 0.1 (floor — heavily favor projections over actual)."""
+        """GW 1 should return 0.10 (floor — heavily favor projections)."""
         w = season_progress_weight(1)
-        assert w == pytest.approx(0.1, abs=0.01)
+        assert w == pytest.approx(0.10, abs=0.01)
 
-    def test_midseason_balanced(self):
-        """GW 19 should return ~0.5 (balanced)."""
+    def test_midseason_actuals_lead(self):
+        """GW 19 should return ~0.58 (actuals already leading due to concave curve)."""
         w = season_progress_weight(19)
-        assert 0.45 <= w <= 0.55
+        assert 0.50 <= w <= 0.65
+
+    def test_gw30_actuals_dominate(self):
+        """GW 30 should return ~0.82 (Rotowire season projection ≈ 18%)."""
+        w = season_progress_weight(30)
+        assert 0.78 <= w <= 0.88
 
     def test_late_season_favors_actual(self):
-        """GW 38 should return 0.9 (cap — favor actual points)."""
+        """GW 38 should return 0.95 (cap — projection nearly irrelevant)."""
         w = season_progress_weight(38)
-        assert w == pytest.approx(0.9, abs=0.01)
+        assert w == pytest.approx(0.95, abs=0.01)
 
-    def test_floor_never_below_0_1(self):
-        """Even GW 0 should not go below 0.1."""
+    def test_floor_never_below_0_10(self):
+        """Even GW 0 should not go below 0.10."""
         w = season_progress_weight(0)
-        assert w >= 0.1
+        assert w >= 0.10
 
-    def test_ceiling_never_above_0_9(self):
-        """Even GW 50 should not exceed 0.9."""
+    def test_ceiling_never_above_0_95(self):
+        """Even GW 50 should not exceed 0.95."""
         w = season_progress_weight(50)
-        assert w <= 0.9
+        assert w <= 0.95
+
+
+class TestRosRebalancedWeights:
+    """Tests for ros_rebalanced_weights()."""
+
+    def test_early_season_small_shift(self):
+        """GW 1: minimal shift from proj+form to season."""
+        p, f, fdr, s, ex = ros_rebalanced_weights(0.35, 0.25, 0.20, 0.20, 1)
+        assert p < 0.35  # proj reduced
+        assert f < 0.25  # form reduced
+        assert s > 0.20  # season increased
+        assert fdr == 0.20  # FDR unchanged
+        total_shift = (0.35 - p) + (0.25 - f)
+        assert total_shift < 0.15  # small shift early
+
+    def test_late_season_large_shift(self):
+        """GW 30: significant shift — season dominates."""
+        p, f, fdr, s, ex = ros_rebalanced_weights(0.35, 0.25, 0.20, 0.20, 30)
+        assert s > 0.45  # season gets majority
+        assert p < 0.20  # proj heavily reduced
+        assert f < 0.15  # form reduced
+        assert fdr == 0.20
+
+    def test_weight_conservation(self):
+        """Total weights are preserved (no weight created or destroyed)."""
+        for gw in [1, 10, 19, 30, 38]:
+            p, f, fdr, s, ex = ros_rebalanced_weights(0.35, 0.25, 0.20, 0.20, gw)
+            assert p + f + fdr + s + ex == pytest.approx(1.0, abs=0.001)
+
+    def test_minimums_respected(self):
+        """Proj and form never go below 0.05."""
+        p, f, _, _, _ = ros_rebalanced_weights(0.35, 0.25, 0.20, 0.20, 38)
+        assert p >= 0.05
+        assert f >= 0.05
 
 
 class TestMergeSeasonProjections:

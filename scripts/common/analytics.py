@@ -36,11 +36,41 @@ POSITIONAL_SCARCITY = {"G": 1.20, "F": 1.10, "D": 1.00, "M": 1.00}
 # =============================================================================
 # ROS WEIGHT REBALANCING
 # =============================================================================
-# For ROS scoring, shift weight from projection toward season points.
-# Rationale: proven season track record is more predictive of long-term value
-# than a single-week projection.  1GW keeps original weights.
-# This amount is shifted from w_proj to w_season (both clipped to ≥ 0).
-ROS_SEASON_WEIGHT_BOOST = 0.15
+# For ROS scoring, dynamically shift weight from projection + form toward
+# season points as the season progresses.  Early season: small shift (projections
+# still matter).  Late season: large shift (track record dominates).
+
+def ros_rebalanced_weights(
+    w_proj: float, w_form: float, w_fdr: float, w_season: float,
+    current_gw: int, w_extra: float = 0.0,
+) -> tuple:
+    """Compute ROS-rebalanced weights based on season progress.
+
+    Shifts weight from projection (60%) and form (40%) toward season points.
+    The total shift scales linearly with gameweek progress:
+      - GW  1: shift ≈ 0.08  (minimal)
+      - GW 19: shift ≈ 0.20  (moderate)
+      - GW 30: shift ≈ 0.30  (significant — season track record dominates)
+      - GW 38: shift ≈ 0.37  (near-maximum)
+
+    Returns:
+        (w_proj_ros, w_form_ros, w_fdr, w_season_ros, w_extra) — same order as inputs.
+    """
+    progress = season_progress_weight(current_gw)
+    total_shift = 0.05 + 0.35 * progress  # 0.085 at GW1 → 0.365 at GW38
+
+    # Take 60% from projection, 40% from form, respecting 0.05 minimums
+    proj_shift = min(total_shift * 0.6, max(w_proj - 0.05, 0))
+    form_shift = min(total_shift * 0.4, max(w_form - 0.05, 0))
+    actual_shift = proj_shift + form_shift
+
+    return (
+        w_proj - proj_shift,
+        w_form - form_shift,
+        w_fdr,
+        w_season + actual_shift,
+        w_extra,
+    )
 
 
 # =============================================================================
@@ -48,19 +78,23 @@ ROS_SEASON_WEIGHT_BOOST = 0.15
 # =============================================================================
 # Early season: trust Rotowire season projections more (small sample of actuals).
 # Late season: trust actual season points more (projections are stale).
+# Uses a concave curve (power < 1) so actuals are trusted faster mid-season.
 
 def season_progress_weight(current_gw: int, total_gws: int = 38) -> float:
     """Return weight for *actual* season points vs season projections.
 
-    Returns a value in [0.1, 0.9]:
-      - GW 1  → 0.1  (10% actual, 90% projection)
-      - GW 19 → 0.5  (50/50)
-      - GW 38 → 0.9  (90% actual, 10% projection)
+    Uses a concave curve so actuals are trusted faster than linear:
+      - GW  1 → 0.10  (mostly projection)
+      - GW 10 → 0.40  (projections waning)
+      - GW 19 → 0.58  (actuals lead)
+      - GW 30 → 0.82  (actuals dominate, projection ~18%)
+      - GW 38 → 0.95  (projection nearly irrelevant)
 
-    The floor/ceiling (0.1/0.9) ensures neither signal is fully ignored.
+    The floor/ceiling (0.10/0.95) ensures neither signal is fully ignored.
     """
     raw = current_gw / max(total_gws, 1)
-    return max(0.1, min(0.9, raw))
+    curved = raw ** 0.7  # concave: faster rise early/mid-season
+    return max(0.10, min(0.95, curved))
 
 
 # =============================================================================

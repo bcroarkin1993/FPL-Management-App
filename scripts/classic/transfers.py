@@ -26,7 +26,7 @@ from scripts.common.utils import (
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.analytics import (
     POSITIONAL_SCARCITY,
-    ROS_SEASON_WEIGHT_BOOST,
+    ros_rebalanced_weights,
     compute_healthy_form,
     _fetch_element_history,
     compute_positional_depth,
@@ -409,14 +409,14 @@ def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
     else:
         tmp["Points_ros_norm"] = tmp["Points_norm"]
 
-    # ROS rebalancing: shift weight from projection to season (proven track record)
-    ros_shift = min(ROS_SEASON_WEIGHT_BOOST, w_proj)  # can't shift more than proj has
-    w_proj_ros = w_proj - ros_shift
-    w_points_ros = w_points + ros_shift
+    # Dynamic ROS rebalancing: shift from proj+form → season based on GW progress
+    w_proj_ros, w_form_ros, _, w_points_ros, _ = ros_rebalanced_weights(
+        w_proj, w_form, w_fdr, w_points, current_gw
+    )
 
     tmp["Keep ROS"] = (
         w_proj_ros * tmp["Proj_ros_norm"] +
-        w_form * tmp["Form_ros_norm"] +
+        w_form_ros * tmp["Form_ros_norm"] +
         w_fdr * tmp["FDREase_norm"] +
         w_points_ros * tmp["Points_ros_norm"]
     ) / denom
