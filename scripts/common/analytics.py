@@ -26,6 +26,15 @@ _POS_LABELS = {"G": "GK", "D": "DEF", "M": "MID", "F": "FWD"}
 
 
 # =============================================================================
+# POSITIONAL SCARCITY
+# =============================================================================
+# GK and FWD have fewer lineup slots and less rotation, making quality players
+# at those positions harder to replace.  Applied as a multiplicative boost to
+# Keep scores (clipped to 1.0).
+POSITIONAL_SCARCITY = {"G": 1.20, "F": 1.10, "D": 1.00, "M": 1.00}
+
+
+# =============================================================================
 # FORM DAMPENING
 # =============================================================================
 

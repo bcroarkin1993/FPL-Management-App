@@ -25,6 +25,7 @@ from scripts.common.utils import (
 )
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.analytics import (
+    POSITIONAL_SCARCITY,
     compute_healthy_form,
     _fetch_element_history,
     compute_positional_depth,
@@ -396,6 +397,11 @@ def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
         w_fdr * tmp["FDREase_norm"] +
         w_points * tmp["Points_norm"]
     ) / denom
+
+    # Positional scarcity boost — GK/FWD are harder to replace
+    scarcity = tmp["Position"].map(POSITIONAL_SCARCITY).fillna(1.0)
+    tmp["Keep 1GW"] = (tmp["Keep 1GW"] * scarcity).clip(upper=1.0)
+    tmp["Keep ROS"] = (tmp["Keep ROS"] * scarcity).clip(upper=1.0)
 
     # Cleanup
     drop_cols = ["Proj_1gw_norm", "Form_norm", "Points_norm", "FDREase", "FDREase_norm",

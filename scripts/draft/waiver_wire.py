@@ -32,6 +32,7 @@ from scripts.common.utils import (
 from scripts.common.player_matching import canonical_normalize, get_player_registry
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.analytics import (
+    POSITIONAL_SCARCITY,
     compute_healthy_form,
     compute_positional_depth,
     compute_transfer_urgency,
@@ -1073,7 +1074,9 @@ def _compute_transfer_suggestions(
                     row.get('news'),
                     pctile
                 )
-                combined.loc[idx, 'player_value'] = row['base_value_drop'] * factor
+                pos = str(row.get('Position', ''))
+                scarcity_mult = POSITIONAL_SCARCITY.get(pos, 1.0)
+                combined.loc[idx, 'player_value'] = row['base_value_drop'] * factor * scarcity_mult
 
         # Find worst roster player and best available player
         roster_vals = combined[combined['_source'] == 'roster'].sort_values('player_value')
@@ -1397,6 +1400,11 @@ def _compute_keep_score(roster_df: pd.DataFrame,
         w_fdr    * df["FDREase_norm"] +
         w_draft  * df["Draft_norm"]
     ) / denom
+
+    # Positional scarcity boost — GK/FWD are harder to replace
+    scarcity = df["Position"].map(POSITIONAL_SCARCITY).fillna(1.0)
+    df["Keep 1GW"] = (df["Keep 1GW"] * scarcity).clip(upper=1.0)
+    df["Keep ROS"] = (df["Keep ROS"] * scarcity).clip(upper=1.0)
 
     drop_cols = ["Proj_1gw_norm", "Season_norm", "Form_norm", "FDREase", "FDREase_norm",
                  "Draft_norm", "DraftValueRaw", "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm"]
