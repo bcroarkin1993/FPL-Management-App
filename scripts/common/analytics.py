@@ -2,7 +2,8 @@
 Player Analytics Functions.
 
 FDR/form enrichment, availability penalties, multi-GW projections,
-positional depth analysis, and related analytics.
+positional depth analysis, positional percentile normalization,
+and related analytics.
 """
 
 import requests
@@ -19,6 +20,182 @@ from scripts.common.player_matching import canonical_normalize
 from scripts.common.text_helpers import TEAM_FULL_TO_SHORT
 
 _logger = get_logger("fpl_app.analytics")
+
+# Position code → short label for display
+_POS_LABELS = {"G": "GK", "D": "DEF", "M": "MID", "F": "FWD"}
+
+
+# =============================================================================
+# FORM DAMPENING
+# =============================================================================
+
+def dampen_form_by_starts(form_norm: pd.Series, starts: pd.Series,
+                          min_starts: int = 5, floor: float = 0.2) -> pd.Series:
+    """Blend form_norm toward 0.5 (neutral) for players with few starts.
+
+    Players with a small sample size of starts have unreliable form.
+    This function dampens their form toward neutral (0.5) proportionally
+    to how far below min_starts they are.
+
+    confidence = clip(starts / min_starts, floor, 1.0)
+    dampened = confidence * form_norm + (1 - confidence) * 0.5
+
+    Args:
+        form_norm: Already-normalized form values in [0, 1].
+        starts:    Number of starts for each player (NaN treated as 0).
+        min_starts: Starts needed for full confidence (default 5).
+        floor:     Minimum confidence even with 0 starts (default 0.2).
+
+    Returns:
+        pd.Series of dampened form values in [0, 1].
+    """
+    s = pd.to_numeric(starts, errors="coerce").fillna(0)
+    f = pd.to_numeric(form_norm, errors="coerce").fillna(0.5)
+    confidence = (s / max(min_starts, 1)).clip(lower=floor, upper=1.0)
+    return confidence * f + (1 - confidence) * 0.5
+
+
+# =============================================================================
+# POSITIONAL PERCENTILE NORMALIZATION
+# =============================================================================
+
+def _min_max_norm_series(series: pd.Series) -> pd.Series:
+    """Min-max normalization to [0,1]. Safe for constants/NaN."""
+    s = pd.to_numeric(series, errors="coerce")
+    lo, hi = s.min(), s.max()
+    if pd.isna(lo) or pd.isna(hi) or hi == lo:
+        return pd.Series([0.5] * len(s), index=s.index)
+    return (s - lo) / (hi - lo)
+
+
+def positional_percentile(
+    df: pd.DataFrame,
+    reference_df: Optional[pd.DataFrame],
+    value_col: str,
+    position_col: str = "Position",
+    ref_value_col: Optional[str] = None,
+    min_minutes: int = 0,
+) -> pd.Series:
+    """
+    Compute within-position percentile for each player in *df* using *reference_df*
+    as the full player pool.
+
+    For each player, the percentile is the fraction of same-position players in the
+    reference pool with a **strictly lower** value.  Result is in [0, 1] where
+    1.0 = best at the position.
+
+    Args:
+        df:            Squad / candidate DataFrame containing value_col and position_col.
+        reference_df:  Full FPL player pool (~700 players) with position_col and the
+                       value column. If None or missing the column, falls back to
+                       global min-max normalization on *df* alone.
+        value_col:     Column name in *df* to percentile-normalize.
+        position_col:  Column containing position codes (G/D/M/F).
+        ref_value_col: Column name in *reference_df* if it differs from value_col.
+                       E.g. roster has "Season_Points", reference has "total_points".
+        min_minutes:   Filter reference players with fewer than this many minutes
+                       (avoids 0-minute players distorting percentiles).  Ignored
+                       if reference_df lacks a "minutes" column.
+
+    Returns:
+        pd.Series aligned to df.index with values in [0, 1].
+    """
+    ref_col = ref_value_col or value_col
+
+    # Fallback: no usable reference
+    if reference_df is None or ref_col not in reference_df.columns:
+        return _min_max_norm_series(df[value_col])
+
+    if position_col not in reference_df.columns or position_col not in df.columns:
+        return _min_max_norm_series(df[value_col])
+
+    # Prepare reference pool
+    ref = reference_df.copy()
+    ref[ref_col] = pd.to_numeric(ref[ref_col], errors="coerce")
+    if min_minutes > 0 and "minutes" in ref.columns:
+        ref = ref[pd.to_numeric(ref["minutes"], errors="coerce").fillna(0) >= min_minutes]
+
+    # Build per-position value arrays
+    pos_values: Dict[str, np.ndarray] = {}
+    for pos, grp in ref.groupby(position_col):
+        vals = grp[ref_col].dropna().values
+        if len(vals) > 0:
+            pos_values[str(pos)] = vals
+
+    # Compute percentile for each player
+    player_vals = pd.to_numeric(df[value_col], errors="coerce")
+    result = pd.Series(0.5, index=df.index, dtype=float)
+
+    for idx in df.index:
+        pos = str(df.at[idx, position_col])
+        val = player_vals.at[idx]
+        if pd.isna(val) or pos not in pos_values:
+            continue
+        pool = pos_values[pos]
+        n_below = np.sum(pool < val)
+        result.at[idx] = float(n_below) / len(pool)
+
+    return result
+
+
+def positional_rank(
+    df: pd.DataFrame,
+    reference_df: Optional[pd.DataFrame],
+    value_col: str,
+    position_col: str = "Position",
+    ref_value_col: Optional[str] = None,
+) -> pd.Series:
+    """
+    Return ordinal rank strings like "#2 GK", "#15 MID" based on *value_col*
+    within each position group from *reference_df*.
+
+    Rank 1 = highest value at that position.  Tied values share the same rank.
+
+    Args:
+        df:            Squad DataFrame.
+        reference_df:  Full FPL player pool.  If None, returns "N/A".
+        value_col:     Column in df to rank by.
+        position_col:  Column with position codes.
+        ref_value_col: Column in reference_df if different from value_col.
+
+    Returns:
+        pd.Series of rank strings aligned to df.index.
+    """
+    ref_col = ref_value_col or value_col
+
+    if (
+        reference_df is None
+        or ref_col not in reference_df.columns
+        or position_col not in reference_df.columns
+        or position_col not in df.columns
+    ):
+        return pd.Series("N/A", index=df.index)
+
+    ref = reference_df.copy()
+    ref[ref_col] = pd.to_numeric(ref[ref_col], errors="coerce")
+
+    # Build sorted descending arrays per position
+    pos_sorted: Dict[str, np.ndarray] = {}
+    for pos, grp in ref.groupby(position_col):
+        vals = grp[ref_col].dropna().sort_values(ascending=False).values
+        if len(vals) > 0:
+            pos_sorted[str(pos)] = vals
+
+    player_vals = pd.to_numeric(df[value_col], errors="coerce")
+    result = pd.Series("N/A", index=df.index)
+
+    for idx in df.index:
+        pos = str(df.at[idx, position_col])
+        val = player_vals.at[idx]
+        if pd.isna(val) or pos not in pos_sorted:
+            continue
+        pool = pos_sorted[pos]
+        # Rank = number of players with strictly higher value + 1
+        rank = int(np.sum(pool > val)) + 1
+        label = _POS_LABELS.get(pos, pos)
+        result.at[idx] = f"#{rank} {label}"
+
+    return result
 
 
 # =============================================================================
@@ -98,7 +275,18 @@ class PositionalDepth:
     position: str
     total: int
     healthy: int
+    doubtful: int
+    injured: int
     depth_level: str  # "Critical", "Low", "Adequate"
+
+
+# Position-aware depth thresholds: healthy >= green → Adequate, >= yellow → Low, else Critical
+_DEPTH_THRESHOLDS = {
+    "G": {"green": 2, "yellow": 1},   # 2 slots: 2=green, 1=yellow, 0=red
+    "D": {"green": 4, "yellow": 3},   # 5 slots: >=4=green, 3=yellow, <=2=red
+    "M": {"green": 4, "yellow": 3},   # 5 slots: >=4=green, 3=yellow, <=2=red
+    "F": {"green": 2, "yellow": 1},   # 3 slots: >=2=green, 1=yellow, 0=red
+}
 
 
 def compute_positional_depth(roster_df: pd.DataFrame) -> Dict[str, PositionalDepth]:
@@ -116,36 +304,50 @@ def compute_positional_depth(roster_df: pd.DataFrame) -> Dict[str, PositionalDep
         pos_players = roster_df[roster_df["Position"] == pos]
         total = len(pos_players)
         if total == 0:
-            result[pos] = PositionalDepth(pos, 0, 0, "Critical")
+            result[pos] = PositionalDepth(pos, 0, 0, 0, 0, "Critical")
             continue
 
         healthy = 0
+        doubtful = 0
+        injured = 0
         for _, row in pos_players.iterrows():
             status = row.get("status")
             chance = row.get("chance_of_playing_next_round")
 
-            # Default: if both missing, assume healthy
+            # Classify each player into one of three states
             if pd.isna(status) and pd.isna(chance):
-                healthy += 1
+                healthy += 1  # Both missing → assume healthy
             elif not pd.isna(status) and str(status).lower() == "a":
                 healthy += 1
+            elif not pd.isna(status) and str(status).lower() == "d":
+                doubtful += 1
+            elif not pd.isna(status) and str(status).lower() in ("i", "s", "u"):
+                injured += 1
             elif not pd.isna(chance):
                 try:
-                    if float(chance) >= 75:
+                    c = float(chance)
+                    if c >= 75:
                         healthy += 1
+                    elif c >= 25:
+                        doubtful += 1
+                    else:
+                        injured += 1
                 except (ValueError, TypeError):
                     healthy += 1  # Can't parse, assume healthy
-            # else: injured/doubtful, not counted
+            else:
+                injured += 1  # Unknown status, not available
 
-        # Determine depth level
-        if healthy <= 1:
-            level = "Critical"
-        elif healthy < total:
+        # Position-aware depth levels (doubtful counts as half-available)
+        effective = healthy + doubtful * 0.5
+        thresholds = _DEPTH_THRESHOLDS.get(pos, {"green": 2, "yellow": 1})
+        if effective >= thresholds["green"]:
+            level = "Adequate"
+        elif effective >= thresholds["yellow"]:
             level = "Low"
         else:
-            level = "Adequate"
+            level = "Critical"
 
-        result[pos] = PositionalDepth(pos, total, healthy, level)
+        result[pos] = PositionalDepth(pos, total, healthy, doubtful, injured, level)
 
     return result
 

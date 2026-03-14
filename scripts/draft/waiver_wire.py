@@ -36,6 +36,9 @@ from scripts.common.analytics import (
     compute_positional_depth,
     compute_transfer_urgency,
     blend_multi_gw_projections,
+    positional_percentile,
+    positional_rank,
+    dampen_form_by_starts,
 )
 from scripts.common.scraping import get_ffp_projections_data
 
@@ -1004,10 +1007,14 @@ def _compute_transfer_suggestions(
 
         # Joint min-max normalization
         combined['Proj_norm'] = _min_max_norm(combined['Points']).fillna(0.5)
-        combined['Form_norm'] = _min_max_norm(combined['Form']).fillna(0.5)
+        combined['Form_raw_norm'] = _min_max_norm(combined['Form']).fillna(0.5)
         combined['FDREase'] = 6 - combined['AvgFDRNextN']
         combined['FDREase_norm'] = _min_max_norm(combined['FDREase']).fillna(0.5)
         combined['Season_norm'] = _min_max_norm(combined['Season_Points']).fillna(0.5)
+
+        # Dampen form by starts (ROS-oriented — suggestions are long-term moves)
+        starts = pd.to_numeric(combined.get('starts', 0), errors='coerce').fillna(0)
+        combined['Form_norm'] = dampen_form_by_starts(combined['Form_raw_norm'], starts)
 
         # Multi-GW projection blend (40% single-GW, 60% multi-GW)
         combined['MultiGW_Proj'] = pd.to_numeric(combined.get('MultiGW_Proj', 0), errors='coerce').fillna(0)
@@ -1137,8 +1144,22 @@ def _render_depth_card(depth_map: Dict):
         if depth is None or depth.total == 0:
             continue
         label = pos_labels.get(pos_code, pos_code)
-        dots = ('●' * depth.healthy) + ('○' * (depth.total - depth.healthy))
         color = level_colors.get(depth.depth_level, '#888')
+        # Three-state dots, uniform color from depth level
+        # Use inline CSS circles for consistent sizing
+        dot_full = (f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
+                    f'background:{color};margin:0 1px;vertical-align:middle;"></span>')
+        dot_half = (f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
+                    f'background:linear-gradient(90deg,{color} 50%,transparent 50%);'
+                    f'border:1.5px solid {color};box-sizing:border-box;'
+                    f'margin:0 1px;vertical-align:middle;"></span>')
+        dot_empty = (f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
+                     f'border:1.5px solid {color};box-sizing:border-box;'
+                     f'margin:0 1px;vertical-align:middle;"></span>')
+        dots_html = (dot_full * depth.healthy) + (dot_half * depth.doubtful) + (dot_empty * depth.injured)
+        # Count doubtful as 0.5
+        effective = depth.healthy + depth.doubtful * 0.5
+        count_str = f"{effective:g}/{depth.total}"
         level_text = depth.depth_level if depth.depth_level != "Adequate" else ""
         level_span = (
             f'<span style="color:{color};font-weight:bold;font-size:0.8em;margin-left:4px;">'
@@ -1147,8 +1168,8 @@ def _render_depth_card(depth_map: Dict):
         items_html.append(
             f'<div style="display:flex;align-items:center;gap:6px;">'
             f'<span style="font-weight:bold;color:#e0e0e0;">{label}</span>'
-            f'<span style="color:#aaa;font-size:0.85em;">{depth.healthy}/{depth.total}</span>'
-            f'<span style="letter-spacing:2px;font-size:0.85em;color:#e0e0e0;">{dots}</span>'
+            f'<span style="color:#aaa;font-size:0.85em;">{count_str}</span>'
+            f'<span style="display:inline-flex;align-items:center;">{dots_html}</span>'
             f'{level_span}'
             f'</div>'
         )
@@ -1234,33 +1255,67 @@ def _compute_waiver_score(df: pd.DataFrame,
                           w_form: float,
                           w_fdr: float,
                           w_season: float) -> pd.DataFrame:
-    tmp = df.copy()
-    tmp["Proj_norm"] = _min_max_norm(tmp["Points"]).fillna(0.5)
-    tmp["Form_norm"] = _min_max_norm(tmp["Form"]).fillna(0.5)
+    """Compute dual waiver scores: 1GW (this week) and ROS (rest of season).
 
+    1GW uses single-GW projection + raw form.
+    ROS uses blended multi-GW projection + form dampened by starts.
+    Both use same user weights.
+    """
+    tmp = df.copy()
+
+    # Shared components
+    tmp["Form_norm"] = _min_max_norm(tmp["Form"]).fillna(0.5)
     tmp["FDREase"] = 6 - pd.to_numeric(tmp["AvgFDRNextN"], errors="coerce")
     tmp["FDREase_norm"] = _min_max_norm(tmp["FDREase"]).fillna(0.5)
-
     tmp["Season_Points"] = pd.to_numeric(tmp.get("Season_Points"), errors="coerce").fillna(0)
     tmp["Season_norm"] = _min_max_norm(tmp["Season_Points"]).fillna(0.5)
 
     denom = max(w_proj + w_form + w_fdr + w_season, 1e-9)
-    tmp["Waiver Score"] = (
-        w_proj   * tmp["Proj_norm"] +
+
+    # --- 1GW: single-GW projection + raw form ---
+    tmp["Proj_1gw_norm"] = _min_max_norm(tmp["Points"]).fillna(0.5)
+    tmp["1GW"] = (
+        w_proj   * tmp["Proj_1gw_norm"] +
         w_form   * tmp["Form_norm"] +
         w_fdr    * tmp["FDREase_norm"] +
         w_season * tmp["Season_norm"]
     ) / denom
 
-    return tmp.drop(columns=["Proj_norm", "Form_norm", "FDREase", "FDREase_norm", "Season_norm"])
+    # --- ROS: blended multi-GW projection + dampened form ---
+    tmp["MultiGW_Proj"] = pd.to_numeric(tmp.get("MultiGW_Proj", 0), errors="coerce").fillna(0)
+    tmp["MultiGW_norm"] = _min_max_norm(tmp["MultiGW_Proj"]).fillna(0.5)
+    tmp["Proj_ros_norm"] = 0.4 * tmp["Proj_1gw_norm"] + 0.6 * tmp["MultiGW_norm"]
+
+    starts = pd.to_numeric(tmp.get("starts", 0), errors="coerce").fillna(0)
+    tmp["Form_ros_norm"] = dampen_form_by_starts(tmp["Form_norm"], starts)
+
+    tmp["ROS"] = (
+        w_proj   * tmp["Proj_ros_norm"] +
+        w_form   * tmp["Form_ros_norm"] +
+        w_fdr    * tmp["FDREase_norm"] +
+        w_season * tmp["Season_norm"]
+    ) / denom
+
+    drop_cols = ["Proj_1gw_norm", "Form_norm", "FDREase", "FDREase_norm", "Season_norm",
+                 "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm"]
+    return tmp.drop(columns=[c for c in drop_cols if c in tmp.columns])
 
 def _compute_keep_score(roster_df: pd.DataFrame,
                         draft_df: Optional[pd.DataFrame],
+                        all_players_df: Optional[pd.DataFrame],
                         w_proj: float,
                         w_form: float,
                         w_fdr: float,
                         w_season: float,
                         w_draft: float) -> pd.DataFrame:
+    """Compute dual keep scores: Keep 1GW and Keep ROS.
+
+    Uses all_players_df as the full FPL pool for within-position percentiles,
+    so GKs/DEFs are scored fairly against their own position group.
+
+    Keep 1GW: single-GW projection + raw form (who's best THIS week)
+    Keep ROS: blended multi-GW projection + dampened form (long-term value)
+    """
     df = roster_df.copy()
 
     # Coerce numerics
@@ -1280,14 +1335,17 @@ def _compute_keep_score(roster_df: pd.DataFrame,
     else:
         df["DraftPick"] = np.nan
 
-    # Normalized components (fill NaN -> 0.5 neutral)
-    df["Proj_norm"]   = _min_max_norm(df["Projected_Points"]).fillna(0.5)
-    df["Season_norm"] = _min_max_norm(df["Season_Points"]).fillna(0.5)
-    df["Form_norm"]   = _min_max_norm(df["Form"]).fillna(0.5)
+    # --- Shared components ---
+    # Positional percentile for season points (same for both horizons)
+    df["Season_norm"] = positional_percentile(
+        df, all_players_df, "Season_Points", ref_value_col="Season_Points"
+    ).fillna(0.5)
+
+    # FDR stays global (position-agnostic)
     df["FDREase"]     = 6 - df["AvgFDRNextN"]
     df["FDREase_norm"]= _min_max_norm(df["FDREase"]).fillna(0.5)
 
-    # Draft norm
+    # Draft pick stays global
     if df["DraftPick"].notna().any():
         max_pick = pd.to_numeric(df["DraftPick"], errors="coerce").max()
         df["DraftValueRaw"] = max_pick - pd.to_numeric(df["DraftPick"], errors="coerce")
@@ -1295,16 +1353,53 @@ def _compute_keep_score(roster_df: pd.DataFrame,
     else:
         df["Draft_norm"] = 0.5
 
+    # Form — positional percentile using points_per_game as reference
+    df["Form_norm"] = positional_percentile(
+        df, all_players_df, "Form", ref_value_col="form"
+    ).fillna(0.5)
+
     denom = max(w_proj + w_season + w_form + w_fdr + w_draft, 1e-9)
-    df["Keep Score"] = (
-        w_proj   * df["Proj_norm"] +
+
+    # --- 1GW: single-GW projection + raw form ---
+    df["Proj_1gw_norm"] = positional_percentile(
+        df, all_players_df, "Projected_Points", ref_value_col="points_per_game"
+    ).fillna(0.5)
+
+    df["Keep 1GW"] = (
+        w_proj   * df["Proj_1gw_norm"] +
         w_season * df["Season_norm"] +
         w_form   * df["Form_norm"] +
         w_fdr    * df["FDREase_norm"] +
         w_draft  * df["Draft_norm"]
     ) / denom
 
-    drop_cols = ["Proj_norm", "Season_norm", "Form_norm", "FDREase", "FDREase_norm", "Draft_norm", "DraftValueRaw"]
+    # --- ROS: blended multi-GW projection + dampened form ---
+    df["MultiGW_Proj"] = pd.to_numeric(df.get("MultiGW_Proj", 0), errors="coerce").fillna(0)
+    # Build a ppg*3 reference for multi-GW percentile
+    if all_players_df is not None and "points_per_game" in all_players_df.columns:
+        ref_ppg3 = all_players_df.copy()
+        ref_ppg3["_ppg3"] = pd.to_numeric(ref_ppg3["points_per_game"], errors="coerce").fillna(0) * 3
+        df["MultiGW_norm"] = positional_percentile(
+            df, ref_ppg3, "MultiGW_Proj", ref_value_col="_ppg3"
+        ).fillna(0.5)
+    else:
+        df["MultiGW_norm"] = _min_max_norm(df["MultiGW_Proj"]).fillna(0.5)
+
+    df["Proj_ros_norm"] = 0.4 * df["Proj_1gw_norm"] + 0.6 * df["MultiGW_norm"]
+
+    starts = pd.to_numeric(df.get("starts", 0), errors="coerce").fillna(0)
+    df["Form_ros_norm"] = dampen_form_by_starts(df["Form_norm"], starts)
+
+    df["Keep ROS"] = (
+        w_proj   * df["Proj_ros_norm"] +
+        w_season * df["Season_norm"] +
+        w_form   * df["Form_ros_norm"] +
+        w_fdr    * df["FDREase_norm"] +
+        w_draft  * df["Draft_norm"]
+    ) / denom
+
+    drop_cols = ["Proj_1gw_norm", "Season_norm", "Form_norm", "FDREase", "FDREase_norm",
+                 "Draft_norm", "DraftValueRaw", "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm"]
     drop_cols = [c for c in drop_cols if c in df.columns]
     return df.drop(columns=drop_cols)
 
@@ -1328,13 +1423,17 @@ def _azure_suggest_moves(available_df: pd.DataFrame,
             base_url=f"{endpoint}/openai/deployments/{deployment}",
             api_key=api_key,
         )
-        top_adds = available_df.head(top_k)[["Player", "Team", "Position", "Points", "Form", "AvgFDRNextN", "Waiver Score"]]
-        top_drops = roster_df.nsmallest(top_k, "Keep Score")[["Player", "Team", "Position", "Season_Points", "Form", "AvgFDRNextN", "Keep Score"]]
+        avail_cols = ["Player", "Team", "Position", "Points", "Form", "AvgFDRNextN", "1GW", "ROS"]
+        avail_cols = [c for c in avail_cols if c in available_df.columns]
+        top_adds = available_df.head(top_k)[avail_cols]
+        drop_cols = ["Player", "Team", "Position", "Season_Points", "Form", "AvgFDRNextN", "Keep 1GW", "Keep ROS"]
+        drop_cols = [c for c in drop_cols if c in roster_df.columns]
+        top_drops = roster_df.nsmallest(top_k, "Keep ROS")[drop_cols]
 
         prompt = (
-            "You are an FPL Draft assistant. Based on Waiver Score (adds) and Keep Score (drops), "
-            "suggest the best 3 add/drop pairs. Prefer players with higher Waiver Score to add, and "
-            "players with lower Keep Score to drop. Keep positional balance where possible.\n\n"
+            "You are an FPL Draft assistant. Based on ROS score (adds) and Keep ROS (drops), "
+            "suggest the best 3 add/drop pairs. Prefer players with higher ROS to add, and "
+            "players with lower Keep ROS to drop. Keep positional balance where possible.\n\n"
             f"Top Adds:\n{top_adds.to_string(index=False)}\n\n"
             f"Potential Drops:\n{top_drops.to_string(index=False)}\n\n"
             "Return 3 bullet points like: "
@@ -1696,11 +1795,18 @@ def show_waiver_wire_page():
     avail_all = _add_fdr_and_form(avail_all, fpl_stats, current_gw, lookahead, form_weeks=form_weeks)
     avail_all = _add_injury_data(avail_all, fpl_stats)
 
-    # Add Season_Points to available players via Player_ID
+    # Add Season_Points and starts to available players via Player_ID
     if 'Player_ID' in avail_all.columns and 'Season_Points' not in avail_all.columns:
-        sp_data = fpl_stats[['Player_ID', 'Season_Points']].drop_duplicates(subset=['Player_ID'])
+        sp_cols = ['Player_ID', 'Season_Points']
+        if 'starts' in fpl_stats.columns:
+            sp_cols.append('starts')
+        sp_data = fpl_stats[sp_cols].drop_duplicates(subset=['Player_ID'])
         avail_all = avail_all.merge(sp_data, on='Player_ID', how='left')
+    elif 'Player_ID' in avail_all.columns and 'starts' not in avail_all.columns and 'starts' in fpl_stats.columns:
+        starts_data = fpl_stats[['Player_ID', 'starts']].drop_duplicates(subset=['Player_ID'])
+        avail_all = avail_all.merge(starts_data, on='Player_ID', how='left')
     avail_all['Season_Points'] = pd.to_numeric(avail_all.get('Season_Points'), errors='coerce').fillna(0)
+    avail_all['starts'] = pd.to_numeric(avail_all.get('starts', 0), errors='coerce').fillna(0)
 
     # --- Build MY ROSTER ---
     my_players = []
@@ -1710,13 +1816,19 @@ def show_waiver_wire_page():
     my_roster = pd.DataFrame(my_players)
 
     if not my_roster.empty:
-        # Attach Team/Player_ID/Season_Points from FPL master using normalized names
+        # Attach Team/Player_ID/Season_Points/starts from FPL master using normalized names
         my_roster["__norm_name"] = my_roster["Player"].apply(canonical_normalize)
-        fpl_stats_for_roster = fpl_stats[["Player", "Team", "Position", "Player_ID", "Season_Points"]].copy()
+        roster_merge_cols = ["Player", "Team", "Position", "Player_ID", "Season_Points"]
+        if "starts" in fpl_stats.columns:
+            roster_merge_cols.append("starts")
+        fpl_stats_for_roster = fpl_stats[roster_merge_cols].copy()
         fpl_stats_for_roster["__norm_name"] = fpl_stats_for_roster["Player"].apply(canonical_normalize)
 
+        merge_right_cols = ["__norm_name", "Team", "Position", "Player_ID", "Season_Points"]
+        if "starts" in fpl_stats_for_roster.columns:
+            merge_right_cols.append("starts")
         my_roster = my_roster.merge(
-            fpl_stats_for_roster[["__norm_name", "Team", "Position", "Player_ID", "Season_Points"]],
+            fpl_stats_for_roster[merge_right_cols],
             on=["__norm_name", "Position"], how="left"
         )
         my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
@@ -1785,8 +1897,8 @@ def show_waiver_wire_page():
     # MY ROSTER SECTION (with depth card)
     # ---------------------------
     if not my_roster.empty:
-        my_roster = _compute_keep_score(my_roster, draft_df, w_proj, w_form, w_fdr, w_season, w_draft)
-        my_roster = my_roster.sort_values("Keep Score", ascending=False).reset_index(drop=True)
+        my_roster = _compute_keep_score(my_roster, draft_df, fpl_stats, w_proj, w_form, w_fdr, w_season, w_draft)
+        my_roster = my_roster.sort_values("Keep ROS", ascending=False).reset_index(drop=True)
 
         st.subheader(f"Your Squad — {my_team.get('team_name', '(unknown)')}")
 
@@ -1795,17 +1907,22 @@ def show_waiver_wire_page():
             _render_depth_card(depth_map)
 
         _display_roster = my_roster.copy()
+        _display_roster["Pos_Rank"] = positional_rank(
+            _display_roster, fpl_stats, "Season_Points", ref_value_col="Season_Points"
+        )
         for col in _display_roster.select_dtypes(include=[np.number]).columns:
             _display_roster[col] = _display_roster[col].round(2)
 
-        display_cols_roster = ["Player", "Team", "Position", "Season_Points", "Projected_Points", "Form", "AvgFDRNextN", "Keep Score"]
+        display_cols_roster = ["Player", "Team", "Position", "Pos_Rank", "Season_Points", "Projected_Points", "Form", "AvgFDRNextN", "Keep 1GW", "Keep ROS"]
         if show_draft and "DraftPick" in _display_roster.columns:
             display_cols_roster.append("DraftPick")
         display_cols_roster = [c for c in display_cols_roster if c in _display_roster.columns]
+        roster_show = _display_roster[display_cols_roster].rename(columns={"Pos_Rank": "Pos Rank"})
         render_styled_table(
-            _display_roster[display_cols_roster],
-            col_formats={"Projected_Points": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}", "Keep Score": "{:.2f}"},
-            positive_color_cols=["Keep Score"],
+            roster_show,
+            col_formats={"Projected_Points": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}",
+                         "Keep 1GW": "{:.2f}", "Keep ROS": "{:.2f}"},
+            positive_color_cols=["Keep 1GW", "Keep ROS"],
         )
     else:
         st.subheader(f"Your Squad — {my_team.get('team_name', '(unknown)')}")
@@ -1821,19 +1938,20 @@ def show_waiver_wire_page():
     if pos_filter:
         avail_display = avail_display[avail_display["Position"].isin(pos_filter)]
     avail_display = _compute_waiver_score(avail_display, w_proj, w_form, w_fdr, w_season)
-    avail_display = avail_display.sort_values("Waiver Score", ascending=False).reset_index(drop=True)
+    avail_display = avail_display.sort_values("ROS", ascending=False).reset_index(drop=True)
 
     _display_avail = avail_display.copy()
     for col in _display_avail.select_dtypes(include=[np.number]).columns:
         _display_avail[col] = _display_avail[col].round(2)
 
     st.subheader("Available Players (ranked)")
-    display_cols_avail = ["Player", "Team", "Position", "Points", "Form", "AvgFDRNextN", "Season_Points", "Waiver Score"]
+    display_cols_avail = ["Player", "Team", "Position", "Points", "Form", "AvgFDRNextN", "Season_Points", "1GW", "ROS"]
     display_cols_avail = [c for c in display_cols_avail if c in _display_avail.columns]
     render_styled_table(
         _display_avail[display_cols_avail].reset_index(drop=True),
-        col_formats={"Points": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}", "Waiver Score": "{:.2f}"},
-        positive_color_cols=["Waiver Score"],
+        col_formats={"Points": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}",
+                     "1GW": "{:.2f}", "ROS": "{:.2f}"},
+        positive_color_cols=["1GW", "ROS"],
         max_height=500,
     )
 

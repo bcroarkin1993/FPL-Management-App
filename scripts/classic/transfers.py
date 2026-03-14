@@ -30,6 +30,9 @@ from scripts.common.analytics import (
     compute_positional_depth,
     compute_transfer_urgency,
     blend_multi_gw_projections,
+    positional_percentile,
+    positional_rank,
+    dampen_form_by_starts,
 )
 from scripts.common.scraping import get_ffp_projections_data
 
@@ -193,6 +196,7 @@ def _build_all_players_df(bootstrap: dict, current_gw: int, n_weeks: int) -> pd.
             "cost_change_event": p.get("cost_change_event", 0),
             "ep_next": float(p.get("ep_next", 0) or 0),  # Expected points next GW
             "minutes": p.get("minutes", 0),
+            "starts": p.get("starts", 0),
             "news": p.get("news", ""),
             "chance_of_playing_next_round": p.get("chance_of_playing_next_round"),
         })
@@ -235,6 +239,7 @@ def _build_squad_df(picks: list, bootstrap: dict, entry_history: dict) -> pd.Dat
             "total_points": player.get("total_points", 0),
             "ep_next": float(player.get("ep_next", 0) or 0),
             "minutes": player.get("minutes", 0),
+            "starts": player.get("starts", 0),
             "news": player.get("news", ""),
             "chance_of_playing_next_round": player.get("chance_of_playing_next_round"),
         })
@@ -277,74 +282,124 @@ def _min_max_norm(series: pd.Series) -> pd.Series:
 
 
 def _compute_transfer_score(df: pd.DataFrame, w_proj: float, w_form: float,
-                            w_fdr: float, w_price: float) -> pd.DataFrame:
-    """Compute transfer target score with multi-GW projection blending."""
+                            w_fdr: float, w_price: float,
+                            all_players_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """Compute dual transfer target scores: 1GW and ROS.
+
+    1GW uses single-GW projection + raw form.
+    ROS uses blended multi-GW projection + form dampened by starts.
+    """
     tmp = df.copy()
 
-    # Normalize components
-    tmp["Proj_norm"] = _min_max_norm(tmp["Projected_Points"]).fillna(0.5)
+    # Shared components
     form_col = "HealthyForm" if "HealthyForm" in tmp.columns else "form"
-    tmp["Form_norm"] = _min_max_norm(tmp[form_col]).fillna(0.5)
+    tmp["Form_norm"] = positional_percentile(
+        tmp, all_players_df, form_col, ref_value_col="form", min_minutes=90
+    ).fillna(0.5)
 
-    # Multi-GW projection blend (40% single-GW, 60% multi-GW)
-    tmp["MultiGW_Proj"] = pd.to_numeric(tmp.get("MultiGW_Proj", 0), errors="coerce").fillna(0)
-    tmp["MultiGW_norm"] = _min_max_norm(tmp["MultiGW_Proj"]).fillna(0.5)
-    tmp["BlendedProj_norm"] = 0.4 * tmp["Proj_norm"] + 0.6 * tmp["MultiGW_norm"]
-
-    # Invert FDR (lower is better)
+    # Invert FDR (lower is better) — stays global (fixtures are position-agnostic)
     tmp["FDREase"] = 6 - pd.to_numeric(tmp["AvgFDR"], errors="coerce")
     tmp["FDREase_norm"] = _min_max_norm(tmp["FDREase"]).fillna(0.5)
 
-    # Invert price (lower price = more value)
+    # Invert price (lower price = more value) — stays global
     max_cost = tmp["now_cost"].max()
     tmp["PriceValue"] = max_cost - tmp["now_cost"]
     tmp["Price_norm"] = _min_max_norm(tmp["PriceValue"]).fillna(0.5)
 
     denom = max(w_proj + w_form + w_fdr + w_price, 1e-9)
-    tmp["Transfer_Score"] = (
-        w_proj * tmp["BlendedProj_norm"] +
+
+    # --- 1GW: single-GW projection + raw form ---
+    tmp["Proj_1gw_norm"] = positional_percentile(
+        tmp, all_players_df, "Projected_Points", ref_value_col="Projected_Points", min_minutes=90
+    ).fillna(0.5)
+
+    tmp["Transfer 1GW"] = (
+        w_proj * tmp["Proj_1gw_norm"] +
         w_form * tmp["Form_norm"] +
         w_fdr * tmp["FDREase_norm"] +
         w_price * tmp["Price_norm"]
     ) / denom
 
+    # --- ROS: blended multi-GW projection + dampened form ---
+    tmp["MultiGW_Proj"] = pd.to_numeric(tmp.get("MultiGW_Proj", 0), errors="coerce").fillna(0)
+    tmp["MultiGW_norm"] = positional_percentile(
+        tmp, all_players_df, "MultiGW_Proj", ref_value_col="MultiGW_Proj", min_minutes=90
+    ).fillna(0.5)
+    tmp["Proj_ros_norm"] = 0.4 * tmp["Proj_1gw_norm"] + 0.6 * tmp["MultiGW_norm"]
+
+    starts = pd.to_numeric(tmp.get("starts", 0), errors="coerce").fillna(0)
+    tmp["Form_ros_norm"] = dampen_form_by_starts(tmp["Form_norm"], starts)
+
+    tmp["Transfer ROS"] = (
+        w_proj * tmp["Proj_ros_norm"] +
+        w_form * tmp["Form_ros_norm"] +
+        w_fdr * tmp["FDREase_norm"] +
+        w_price * tmp["Price_norm"]
+    ) / denom
+
     # Cleanup
-    drop_cols = ["Proj_norm", "Form_norm", "FDREase", "FDREase_norm", "PriceValue", "Price_norm",
-                 "MultiGW_norm", "BlendedProj_norm"]
+    drop_cols = ["Proj_1gw_norm", "Form_norm", "FDREase", "FDREase_norm", "PriceValue", "Price_norm",
+                 "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm"]
     return tmp.drop(columns=[c for c in drop_cols if c in tmp.columns])
 
 
 def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
-                        w_fdr: float, w_points: float) -> pd.DataFrame:
-    """Compute keep score for current squad players with multi-GW projection blending."""
+                        w_fdr: float, w_points: float,
+                        all_players_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """Compute dual keep scores: Keep 1GW and Keep ROS.
+
+    Keep 1GW: single-GW projection + raw form (who's best THIS week)
+    Keep ROS: blended multi-GW projection + dampened form (long-term value)
+    """
     tmp = df.copy()
 
-    # Normalize components
-    tmp["Proj_norm"] = _min_max_norm(tmp["Projected_Points"]).fillna(0.5)
+    # Shared components
     form_col = "HealthyForm" if "HealthyForm" in tmp.columns else "form"
-    tmp["Form_norm"] = _min_max_norm(tmp[form_col]).fillna(0.5)
-    tmp["Points_norm"] = _min_max_norm(tmp["total_points"]).fillna(0.5)
+    tmp["Form_norm"] = positional_percentile(
+        tmp, all_players_df, form_col, ref_value_col="form", min_minutes=90
+    ).fillna(0.5)
+    tmp["Points_norm"] = positional_percentile(
+        tmp, all_players_df, "total_points", ref_value_col="total_points", min_minutes=90
+    ).fillna(0.5)
 
-    # Multi-GW projection blend (40% single-GW, 60% multi-GW)
-    tmp["MultiGW_Proj"] = pd.to_numeric(tmp.get("MultiGW_Proj", 0), errors="coerce").fillna(0)
-    tmp["MultiGW_norm"] = _min_max_norm(tmp["MultiGW_Proj"]).fillna(0.5)
-    tmp["BlendedProj_norm"] = 0.4 * tmp["Proj_norm"] + 0.6 * tmp["MultiGW_norm"]
-
-    # Invert FDR
+    # Invert FDR — stays global (fixtures are position-agnostic)
     tmp["FDREase"] = 6 - pd.to_numeric(tmp["AvgFDR"], errors="coerce")
     tmp["FDREase_norm"] = _min_max_norm(tmp["FDREase"]).fillna(0.5)
 
     denom = max(w_proj + w_form + w_fdr + w_points, 1e-9)
-    tmp["Keep_Score"] = (
-        w_proj * tmp["BlendedProj_norm"] +
+
+    # --- 1GW: single-GW projection + raw form ---
+    tmp["Proj_1gw_norm"] = positional_percentile(
+        tmp, all_players_df, "Projected_Points", ref_value_col="Projected_Points", min_minutes=90
+    ).fillna(0.5)
+
+    tmp["Keep 1GW"] = (
+        w_proj * tmp["Proj_1gw_norm"] +
         w_form * tmp["Form_norm"] +
         w_fdr * tmp["FDREase_norm"] +
         w_points * tmp["Points_norm"]
     ) / denom
 
+    # --- ROS: blended multi-GW projection + dampened form ---
+    tmp["MultiGW_Proj"] = pd.to_numeric(tmp.get("MultiGW_Proj", 0), errors="coerce").fillna(0)
+    tmp["MultiGW_norm"] = positional_percentile(
+        tmp, all_players_df, "MultiGW_Proj", ref_value_col="MultiGW_Proj", min_minutes=90
+    ).fillna(0.5)
+    tmp["Proj_ros_norm"] = 0.4 * tmp["Proj_1gw_norm"] + 0.6 * tmp["MultiGW_norm"]
+
+    starts = pd.to_numeric(tmp.get("starts", 0), errors="coerce").fillna(0)
+    tmp["Form_ros_norm"] = dampen_form_by_starts(tmp["Form_norm"], starts)
+
+    tmp["Keep ROS"] = (
+        w_proj * tmp["Proj_ros_norm"] +
+        w_form * tmp["Form_ros_norm"] +
+        w_fdr * tmp["FDREase_norm"] +
+        w_points * tmp["Points_norm"]
+    ) / denom
+
     # Cleanup
-    drop_cols = ["Proj_norm", "Form_norm", "Points_norm", "FDREase", "FDREase_norm",
-                 "MultiGW_norm", "BlendedProj_norm"]
+    drop_cols = ["Proj_1gw_norm", "Form_norm", "Points_norm", "FDREase", "FDREase_norm",
+                 "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm"]
     return tmp.drop(columns=[c for c in drop_cols if c in tmp.columns])
 
 
@@ -394,7 +449,7 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
     suggestions = []
 
-    lowest_keep = squad_df.nsmallest(top_n, "Keep_Score")
+    lowest_keep = squad_df.nsmallest(top_n, "Keep ROS")
 
     for _, drop_row in lowest_keep.iterrows():
         pos = drop_row["Position"]
@@ -410,13 +465,13 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         if candidates.empty:
             continue
 
-        add_row = candidates.iloc[0]  # Already sorted by Transfer_Score desc
+        add_row = candidates.iloc[0]  # Already sorted by Transfer ROS desc
 
-        # Calculate score improvement
-        score_diff = add_row.get("Transfer_Score", 0) - drop_row.get("Keep_Score", 0)
+        # Calculate score improvement (use ROS for long-term transfer decisions)
+        score_diff = add_row.get("Transfer ROS", 0) - drop_row.get("Keep ROS", 0)
 
-        # Protect elite players from marginal swaps — scale threshold by Keep_Score
-        keep_score = float(drop_row.get("Keep_Score", 0.5) or 0.5)
+        # Protect elite players from marginal swaps — scale threshold by Keep ROS
+        keep_score = float(drop_row.get("Keep ROS", 0.5) or 0.5)
         if keep_score > 0.7:
             min_threshold = 0.15
         elif keep_score > 0.5:
@@ -497,8 +552,22 @@ def _render_depth_card(depth_map: Dict):
         if depth is None or depth.total == 0:
             continue
         label = pos_labels.get(pos_code, pos_code)
-        dots = ('●' * depth.healthy) + ('○' * (depth.total - depth.healthy))
         color = level_colors.get(depth.depth_level, '#888')
+        # Three-state dots, uniform color from depth level
+        # Use inline CSS circles for consistent sizing
+        dot_full = (f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
+                    f'background:{color};margin:0 1px;vertical-align:middle;"></span>')
+        dot_half = (f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
+                    f'background:linear-gradient(90deg,{color} 50%,transparent 50%);'
+                    f'border:1.5px solid {color};box-sizing:border-box;'
+                    f'margin:0 1px;vertical-align:middle;"></span>')
+        dot_empty = (f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
+                     f'border:1.5px solid {color};box-sizing:border-box;'
+                     f'margin:0 1px;vertical-align:middle;"></span>')
+        dots_html = (dot_full * depth.healthy) + (dot_half * depth.doubtful) + (dot_empty * depth.injured)
+        # Count doubtful as 0.5
+        effective = depth.healthy + depth.doubtful * 0.5
+        count_str = f"{effective:g}/{depth.total}"
         level_text = depth.depth_level if depth.depth_level != "Adequate" else ""
         level_span = (
             f'<span style="color:{color};font-weight:bold;font-size:0.8em;margin-left:4px;">'
@@ -507,8 +576,8 @@ def _render_depth_card(depth_map: Dict):
         items_html.append(
             f'<div style="display:flex;align-items:center;gap:6px;">'
             f'<span style="font-weight:bold;color:#e0e0e0;">{label}</span>'
-            f'<span style="color:#aaa;font-size:0.85em;">{depth.healthy}/{depth.total}</span>'
-            f'<span style="letter-spacing:2px;font-size:0.85em;color:#e0e0e0;">{dots}</span>'
+            f'<span style="color:#aaa;font-size:0.85em;">{count_str}</span>'
+            f'<span style="display:inline-flex;align-items:center;">{dots_html}</span>'
             f'{level_span}'
             f'</div>'
         )
@@ -617,9 +686,8 @@ def show_classic_transfers_page():
         show_api_error(f"loading team details for team ID {team_id}", hint_key="team_id")
         return
 
-    # Team header info
+    # Team name (used in squad header below)
     team_name = entry.get("name", "Unknown Team")
-    st.markdown(f"### {team_name}")
 
     # Get current squad
     picks_data = get_classic_team_picks(team_id, current_gw)
@@ -634,35 +702,10 @@ def show_classic_transfers_page():
     picks = picks_data.get("picks", [])
     entry_history = picks_data.get("entry_history", {})
 
-    # Display bank and value
-    def _stat_card(label: str, value: str, accent: str = "#00ff87") -> str:
-        return (
-            f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
-            f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);text-align:center;">'
-            f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
-            f'letter-spacing:0.5px;margin-bottom:6px;">{label}</div>'
-            f'<div style="color:{accent};font-size:22px;font-weight:700;">{value}</div>'
-            f'</div>'
-        )
-
     bank = entry_history.get("bank", 0)
     squad_value = entry_history.get("value", 0)
     transfers_made = entry_history.get("event_transfers", 0)
     transfer_cost = entry_history.get("event_transfers_cost", 0)
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(_stat_card("Bank", _format_money(bank)), unsafe_allow_html=True)
-    with col2:
-        st.markdown(_stat_card("Squad Value", _format_money(squad_value)), unsafe_allow_html=True)
-    with col3:
-        st.markdown(_stat_card("Transfers Made", str(transfers_made)), unsafe_allow_html=True)
-    with col4:
-        cost_text = f"-{transfer_cost} pts" if transfer_cost else "0 pts"
-        cost_color = "#f87171" if transfer_cost else "#00ff87"
-        st.markdown(_stat_card("Transfer Cost", cost_text, accent=cost_color), unsafe_allow_html=True)
-
-    st.markdown("---")
 
     # Controls
     with st.expander("Filters & Weights", expanded=True):
@@ -740,7 +783,8 @@ def show_classic_transfers_page():
         )
 
         # Compute scores
-        squad_df = _compute_keep_score(squad_df, w_proj, w_form, w_fdr, 0.2)
+        squad_df = _compute_keep_score(squad_df, w_proj, w_form, w_fdr, 0.2,
+                                       all_players_df=all_players)
 
     # Positional depth
     depth_map = {}
@@ -786,8 +830,9 @@ def show_classic_transfers_page():
     available["HealthyForm"] = available["HealthyForm"].fillna(available["form"])
 
     # Compute transfer score
-    available = _compute_transfer_score(available, w_proj, w_form, w_fdr, w_price)
-    available = available.sort_values("Transfer_Score", ascending=False)
+    available = _compute_transfer_score(available, w_proj, w_form, w_fdr, w_price,
+                                        all_players_df=all_players)
+    available = available.sort_values("Transfer ROS", ascending=False)
 
     # ---------------------------
     # TRANSFER SUGGESTION CARDS
@@ -800,7 +845,32 @@ def show_classic_transfers_page():
     # ---------------------------
     # SQUAD ANALYSIS SECTION (with depth card)
     # ---------------------------
-    st.header("Your Squad")
+    st.header(f"Your Squad — {team_name}")
+
+    # Stat cards for bank, value, transfers
+    def _stat_card(label: str, value: str, accent: str = "#00ff87") -> str:
+        return (
+            f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
+            f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);text-align:center;">'
+            f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+            f'letter-spacing:0.5px;margin-bottom:6px;">{label}</div>'
+            f'<div style="color:{accent};font-size:22px;font-weight:700;">{value}</div>'
+            f'</div>'
+        )
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(_stat_card("Bank", _format_money(bank)), unsafe_allow_html=True)
+    with col2:
+        st.markdown(_stat_card("Squad Value", _format_money(squad_value)), unsafe_allow_html=True)
+    with col3:
+        st.markdown(_stat_card("Transfers Made", str(transfers_made)), unsafe_allow_html=True)
+    with col4:
+        cost_text = f"-{transfer_cost} pts" if transfer_cost else "0 pts"
+        cost_color = "#f87171" if transfer_cost else "#00ff87"
+        st.markdown(_stat_card("Transfer Cost", cost_text, accent=cost_color), unsafe_allow_html=True)
+
+    st.markdown("")  # spacing between stat cards and depth card
 
     if depth_map:
         _render_depth_card(depth_map)
@@ -809,8 +879,8 @@ def show_classic_transfers_page():
     starting_xi = squad_df[squad_df["squad_position"] <= 11].copy()
     bench = squad_df[squad_df["squad_position"] > 11].copy()
 
-    # Show squad with keep scores
-    squad_display = squad_df.sort_values("Keep_Score", ascending=True).copy()
+    # Show squad with keep scores (sort by ROS for long-term view)
+    squad_display = squad_df.sort_values("Keep ROS", ascending=True).copy()
 
     # Add fixtures for each player
     fixture_html_list = []
@@ -825,15 +895,23 @@ def show_classic_transfers_page():
         axis=1
     )
 
+    # Add positional rank
+    squad_display["Pos_Rank"] = positional_rank(
+        squad_display, all_players, "total_points", ref_value_col="total_points"
+    )
+
     # Format display columns — use HealthyForm if available
     form_display_col = "HealthyForm" if "HealthyForm" in squad_display.columns else "form"
-    display_cols = ["Player", "Team", "Position", "now_cost", form_display_col, "total_points",
-                    "Projected_Points", "AvgFDR", "Keep_Score", "Status"]
+    display_cols = ["Player", "Team", "Position", "Pos_Rank", "now_cost", form_display_col, "total_points",
+                    "Projected_Points", "AvgFDR", "Keep 1GW", "Keep ROS", "Status"]
     display_cols = [c for c in display_cols if c in squad_display.columns]
     squad_show = squad_display[display_cols].copy()
     squad_show["Price"] = squad_show["now_cost"].apply(lambda x: f"£{x/10:.1f}m")
     squad_show["AvgFDR"] = squad_show["AvgFDR"].round(2)
-    squad_show["Keep_Score"] = squad_show["Keep_Score"].round(3)
+    if "Keep 1GW" in squad_show.columns:
+        squad_show["Keep 1GW"] = squad_show["Keep 1GW"].round(3)
+    if "Keep ROS" in squad_show.columns:
+        squad_show["Keep ROS"] = squad_show["Keep ROS"].round(3)
     squad_show["Projected_Points"] = squad_show["Projected_Points"].fillna("-")
 
     # Rename for display
@@ -841,15 +919,15 @@ def show_classic_transfers_page():
         form_display_col: "Form",
         "total_points": "Season Pts",
         "Projected_Points": "Proj Pts",
+        "Pos_Rank": "Pos Rank",
         "AvgFDR": "Avg FDR",
-        "Keep_Score": "Keep Score"
     })
 
     render_styled_table(
-        squad_show[["Player", "Team", "Position", "Price", "Form", "Season Pts",
-                    "Proj Pts", "Avg FDR", "Keep Score", "Status"]],
-        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "Keep Score": "{:.3f}"},
-        positive_color_cols=["Keep Score"],
+        squad_show[["Player", "Team", "Position", "Pos Rank", "Price", "Form", "Season Pts",
+                    "Proj Pts", "Avg FDR", "Keep 1GW", "Keep ROS", "Status"]],
+        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "Keep 1GW": "{:.3f}", "Keep ROS": "{:.3f}"},
+        positive_color_cols=["Keep 1GW", "Keep ROS"],
     )
 
     # ---------------------------
@@ -881,15 +959,20 @@ def show_classic_transfers_page():
 
     # Format for display — use HealthyForm if available
     target_form_col = "HealthyForm" if "HealthyForm" in top_targets.columns else "form"
-    targets_show = top_targets[[
+    target_display_cols = [
         "Player", "Team", "Position", "now_cost", "Price_Change", target_form_col,
         "total_points", "Projected_Points", "selected_by_percent",
-        "AvgFDR", "Transfer_Score", "Status"
-    ]].copy()
+        "AvgFDR", "Transfer 1GW", "Transfer ROS", "Status"
+    ]
+    target_display_cols = [c for c in target_display_cols if c in top_targets.columns]
+    targets_show = top_targets[target_display_cols].copy()
 
     targets_show["Price"] = targets_show["now_cost"].apply(lambda x: f"£{x/10:.1f}m")
     targets_show["AvgFDR"] = targets_show["AvgFDR"].round(2)
-    targets_show["Transfer_Score"] = targets_show["Transfer_Score"].round(3)
+    if "Transfer 1GW" in targets_show.columns:
+        targets_show["Transfer 1GW"] = targets_show["Transfer 1GW"].round(3)
+    if "Transfer ROS" in targets_show.columns:
+        targets_show["Transfer ROS"] = targets_show["Transfer ROS"].round(3)
     targets_show["Projected_Points"] = targets_show["Projected_Points"].fillna("-")
     targets_show["Ownership"] = targets_show["selected_by_percent"].apply(lambda x: f"{x:.1f}%")
 
@@ -899,15 +982,16 @@ def show_classic_transfers_page():
         "total_points": "Season Pts",
         "Projected_Points": "Proj Pts",
         "AvgFDR": "Avg FDR",
-        "Transfer_Score": "Score",
-        "Price_Change": "Δ"
+        "Price_Change": "Δ",
+        "Transfer 1GW": "1GW",
+        "Transfer ROS": "ROS",
     })
 
     render_styled_table(
         targets_show[["Player", "Team", "Position", "Price", "Δ", "Form",
-                      "Season Pts", "Proj Pts", "Ownership", "Avg FDR", "Score", "Status"]],
-        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "Score": "{:.3f}"},
-        positive_color_cols=["Score"],
+                      "Season Pts", "Proj Pts", "Ownership", "Avg FDR", "1GW", "ROS", "Status"]],
+        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}"},
+        positive_color_cols=["1GW", "ROS"],
         max_height=500,
     )
 
@@ -938,28 +1022,34 @@ def show_classic_transfers_page():
             pos_targets["Fixtures"] = pos_fixture_list
 
             # Format for display
-            pos_show = pos_targets[[
-                "Player", "Team", "now_cost", "form", "total_points",
-                "Projected_Points", "selected_by_percent", "AvgFDR", "Transfer_Score"
-            ]].copy()
+            pos_cols = ["Player", "Team", "now_cost", "form", "total_points",
+                        "Projected_Points", "selected_by_percent", "AvgFDR",
+                        "Transfer 1GW", "Transfer ROS"]
+            pos_cols = [c for c in pos_cols if c in pos_targets.columns]
+            pos_show = pos_targets[pos_cols].copy()
 
             pos_show["Price"] = pos_show["now_cost"].apply(lambda x: f"£{x/10:.1f}m")
             pos_show["AvgFDR"] = pos_show["AvgFDR"].round(2)
-            pos_show["Transfer_Score"] = pos_show["Transfer_Score"].round(3)
+            if "Transfer 1GW" in pos_show.columns:
+                pos_show["Transfer 1GW"] = pos_show["Transfer 1GW"].round(3)
+            if "Transfer ROS" in pos_show.columns:
+                pos_show["Transfer ROS"] = pos_show["Transfer ROS"].round(3)
             pos_show["Projected_Points"] = pos_show["Projected_Points"].fillna("-")
             pos_show["Own%"] = pos_show["selected_by_percent"].apply(lambda x: f"{x:.1f}%")
 
-            pos_display = pos_show[["Player", "Team", "Price", "form", "total_points",
-                          "Projected_Points", "Own%", "AvgFDR", "Transfer_Score"]].copy()
+            pos_display_cols = ["Player", "Team", "Price", "form", "total_points",
+                          "Projected_Points", "Own%", "AvgFDR", "Transfer 1GW", "Transfer ROS"]
+            pos_display_cols = [c for c in pos_display_cols if c in pos_show.columns]
+            pos_display = pos_show[pos_display_cols].copy()
             pos_display = pos_display.rename(columns={
                 "form": "Form", "total_points": "Season Pts",
                 "Projected_Points": "Proj Pts", "AvgFDR": "Avg FDR",
-                "Transfer_Score": "Score",
+                "Transfer 1GW": "1GW", "Transfer ROS": "ROS",
             })
             render_styled_table(
                 pos_display,
-                col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "Score": "{:.3f}"},
-                positive_color_cols=["Score"],
+                col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}"},
+                positive_color_cols=["1GW", "ROS"],
             )
 
     st.markdown("---")
