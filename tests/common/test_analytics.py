@@ -16,6 +16,8 @@ from scripts.common.analytics import (
     positional_percentile,
     positional_rank,
     dampen_form_by_starts,
+    season_progress_weight,
+    merge_season_projections,
     PositionalDepth,
 )
 
@@ -673,3 +675,87 @@ class TestDampenFormByStarts:
         # confidence = 5/10 = 0.5 (above floor 0.1), dampened = 0.5*0.9 + 0.5*0.5 = 0.7
         result = dampen_form_by_starts(form, starts, min_starts=10, floor=0.1)
         assert result.iloc[0] == pytest.approx(0.7)
+
+
+class TestSeasonProgressWeight:
+    """Tests for season_progress_weight()."""
+
+    def test_early_season_favors_projections(self):
+        """GW 1 should return 0.1 (floor — heavily favor projections over actual)."""
+        w = season_progress_weight(1)
+        assert w == pytest.approx(0.1, abs=0.01)
+
+    def test_midseason_balanced(self):
+        """GW 19 should return ~0.5 (balanced)."""
+        w = season_progress_weight(19)
+        assert 0.45 <= w <= 0.55
+
+    def test_late_season_favors_actual(self):
+        """GW 38 should return 0.9 (cap — favor actual points)."""
+        w = season_progress_weight(38)
+        assert w == pytest.approx(0.9, abs=0.01)
+
+    def test_floor_never_below_0_1(self):
+        """Even GW 0 should not go below 0.1."""
+        w = season_progress_weight(0)
+        assert w >= 0.1
+
+    def test_ceiling_never_above_0_9(self):
+        """Even GW 50 should not exceed 0.9."""
+        w = season_progress_weight(50)
+        assert w <= 0.9
+
+
+class TestMergeSeasonProjections:
+    """Tests for merge_season_projections()."""
+
+    def test_basic_merge(self):
+        """Season projection is merged by name + team."""
+        players = pd.DataFrame({
+            "Player": ["Salah", "Haaland"],
+            "Team": ["LIV", "MCI"],
+        })
+        season = pd.DataFrame({
+            "Player": ["Salah", "Haaland"],
+            "Team": ["LIV", "MCI"],
+            "Points": [220, 240],
+        })
+        result = merge_season_projections(players, season)
+        assert "SeasonProjection" in result.columns
+        assert result.loc[0, "SeasonProjection"] == 220
+        assert result.loc[1, "SeasonProjection"] == 240
+
+    def test_unmatched_players_get_nan(self):
+        """Players not in season rankings get NaN."""
+        players = pd.DataFrame({
+            "Player": ["Salah", "Unknown Player"],
+            "Team": ["LIV", "MCI"],
+        })
+        season = pd.DataFrame({
+            "Player": ["Salah"],
+            "Team": ["LIV"],
+            "Points": [220],
+        })
+        result = merge_season_projections(players, season)
+        assert result.loc[0, "SeasonProjection"] == 220
+        assert pd.isna(result.loc[1, "SeasonProjection"])
+
+    def test_none_season_df(self):
+        """Graceful fallback when season rankings are None."""
+        players = pd.DataFrame({
+            "Player": ["Salah"],
+            "Team": ["LIV"],
+        })
+        result = merge_season_projections(players, None)
+        assert "SeasonProjection" in result.columns
+        assert pd.isna(result.loc[0, "SeasonProjection"])
+
+    def test_empty_season_df(self):
+        """Graceful fallback when season rankings are empty."""
+        players = pd.DataFrame({
+            "Player": ["Salah"],
+            "Team": ["LIV"],
+        })
+        result = merge_season_projections(players, pd.DataFrame())
+        assert "SeasonProjection" in result.columns
+        assert pd.isna(result.loc[0, "SeasonProjection"])

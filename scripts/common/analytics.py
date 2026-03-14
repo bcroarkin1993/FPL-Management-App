@@ -44,6 +44,26 @@ ROS_SEASON_WEIGHT_BOOST = 0.15
 
 
 # =============================================================================
+# SEASON PROGRESS — TIME-DECAY BLEND
+# =============================================================================
+# Early season: trust Rotowire season projections more (small sample of actuals).
+# Late season: trust actual season points more (projections are stale).
+
+def season_progress_weight(current_gw: int, total_gws: int = 38) -> float:
+    """Return weight for *actual* season points vs season projections.
+
+    Returns a value in [0.1, 0.9]:
+      - GW 1  → 0.1  (10% actual, 90% projection)
+      - GW 19 → 0.5  (50/50)
+      - GW 38 → 0.9  (90% actual, 10% projection)
+
+    The floor/ceiling (0.1/0.9) ensures neither signal is fully ignored.
+    """
+    raw = current_gw / max(total_gws, 1)
+    return max(0.1, min(0.9, raw))
+
+
+# =============================================================================
 # FORM DAMPENING
 # =============================================================================
 
@@ -449,6 +469,68 @@ def blend_multi_gw_projections(
         team_short = str(result.at[idx, team_col]) if team_col else ""
         team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
 
+        key = (norm_name, team_short)
+        if key in lookup:
+            result.at[idx, output_col] = lookup[key]
+
+    result.drop(columns=["__norm"], inplace=True, errors="ignore")
+    return result
+
+
+def merge_season_projections(
+    player_df: pd.DataFrame,
+    season_rankings_df: Optional[pd.DataFrame],
+    output_col: str = "SeasonProjection",
+) -> pd.DataFrame:
+    """Merge Rotowire season-long projected points onto a player DataFrame.
+
+    Matches by normalized name + team short code.
+    Unmatched players get NaN (callers should handle fallback).
+
+    Args:
+        player_df: DataFrame with player names and Team column.
+        season_rankings_df: Rotowire season rankings with Player, Team, Points.
+        output_col: Column name for the merged season projection.
+
+    Returns:
+        player_df with output_col added.
+    """
+    result = player_df.copy()
+    result[output_col] = np.nan
+
+    if season_rankings_df is None or season_rankings_df.empty:
+        return result
+
+    if "Points" not in season_rankings_df.columns or "Player" not in season_rankings_df.columns:
+        return result
+
+    name_col = "Player" if "Player" in result.columns else "Name" if "Name" in result.columns else None
+    if name_col is None:
+        return result
+
+    # Build lookup: (normalized_name, team_short) -> Points
+    sr = season_rankings_df[["Player", "Team", "Points"]].dropna(subset=["Points"]).copy()
+    sr["__norm"] = sr["Player"].apply(canonical_normalize)
+    sr["__team_short"] = sr["Team"].replace(TEAM_FULL_TO_SHORT)
+    sr["Points"] = pd.to_numeric(sr["Points"], errors="coerce")
+
+    lookup = {}
+    for _, row in sr.iterrows():
+        key = (row["__norm"], str(row["__team_short"]))
+        val = row["Points"]
+        if pd.notna(val):
+            lookup[key] = val
+
+    if not lookup:
+        return result
+
+    result["__norm"] = result[name_col].apply(canonical_normalize)
+    team_col = "Team" if "Team" in result.columns else None
+
+    for idx in result.index:
+        norm_name = result.at[idx, "__norm"]
+        team_short = str(result.at[idx, team_col]) if team_col else ""
+        team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
         key = (norm_name, team_short)
         if key in lookup:
             result.at[idx, output_col] = lookup[key]

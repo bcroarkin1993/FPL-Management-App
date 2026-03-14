@@ -41,8 +41,10 @@ from scripts.common.analytics import (
     positional_percentile,
     positional_rank,
     dampen_form_by_starts,
+    season_progress_weight,
+    merge_season_projections,
 )
-from scripts.common.scraping import get_ffp_projections_data
+from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
 
 # ---------------------------
 # FPL API READS
@@ -1258,12 +1260,13 @@ def _compute_waiver_score(df: pd.DataFrame,
                           w_proj: float,
                           w_form: float,
                           w_fdr: float,
-                          w_season: float) -> pd.DataFrame:
+                          w_season: float,
+                          current_gw: int = 19) -> pd.DataFrame:
     """Compute dual waiver scores: 1GW (this week) and ROS (rest of season).
 
     1GW uses single-GW projection + raw form.
     ROS uses blended multi-GW projection + form dampened by starts.
-    Both use same user weights.
+    Season component blends actual points with Rotowire season projections.
     """
     tmp = df.copy()
 
@@ -1293,6 +1296,16 @@ def _compute_waiver_score(df: pd.DataFrame,
     starts = pd.to_numeric(tmp.get("starts", 0), errors="coerce").fillna(0)
     tmp["Form_ros_norm"] = dampen_form_by_starts(tmp["Form_norm"], starts)
 
+    # Time-blended season component
+    actual_w = season_progress_weight(current_gw)
+    if "SeasonProjection" in tmp.columns and tmp["SeasonProjection"].notna().any():
+        tmp["SeasonProj_norm"] = _min_max_norm(
+            pd.to_numeric(tmp["SeasonProjection"], errors="coerce")
+        ).fillna(0.5)
+        tmp["Season_ros_norm"] = actual_w * tmp["Season_norm"] + (1 - actual_w) * tmp["SeasonProj_norm"]
+    else:
+        tmp["Season_ros_norm"] = tmp["Season_norm"]
+
     # ROS rebalancing: shift weight from projection to season (proven track record)
     ros_shift = min(ROS_SEASON_WEIGHT_BOOST, w_proj)
     w_proj_ros = w_proj - ros_shift
@@ -1302,11 +1315,11 @@ def _compute_waiver_score(df: pd.DataFrame,
         w_proj_ros   * tmp["Proj_ros_norm"] +
         w_form       * tmp["Form_ros_norm"] +
         w_fdr        * tmp["FDREase_norm"] +
-        w_season_ros * tmp["Season_norm"]
+        w_season_ros * tmp["Season_ros_norm"]
     ) / denom
 
     drop_cols = ["Proj_1gw_norm", "Form_norm", "FDREase", "FDREase_norm", "Season_norm",
-                 "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm"]
+                 "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm", "SeasonProj_norm", "Season_ros_norm"]
     return tmp.drop(columns=[c for c in drop_cols if c in tmp.columns])
 
 def _compute_keep_score(roster_df: pd.DataFrame,
@@ -1316,7 +1329,8 @@ def _compute_keep_score(roster_df: pd.DataFrame,
                         w_form: float,
                         w_fdr: float,
                         w_season: float,
-                        w_draft: float) -> pd.DataFrame:
+                        w_draft: float,
+                        current_gw: int = 19) -> pd.DataFrame:
     """Compute dual keep scores: Keep 1GW and Keep ROS.
 
     Uses all_players_df as the full FPL pool for within-position percentiles,
@@ -1324,6 +1338,8 @@ def _compute_keep_score(roster_df: pd.DataFrame,
 
     Keep 1GW: single-GW projection + raw form (who's best THIS week)
     Keep ROS: blended multi-GW projection + dampened form (long-term value)
+             Season component blends actual points with Rotowire season
+             projections based on gameweek progress.
     """
     df = roster_df.copy()
 
@@ -1399,6 +1415,17 @@ def _compute_keep_score(roster_df: pd.DataFrame,
     starts = pd.to_numeric(df.get("starts", 0), errors="coerce").fillna(0)
     df["Form_ros_norm"] = dampen_form_by_starts(df["Form_norm"], starts)
 
+    # Time-blended season component: blend actual season points with Rotowire season projections
+    actual_w = season_progress_weight(current_gw)  # 0.1 early → 0.9 late
+    if "SeasonProjection" in df.columns and df["SeasonProjection"].notna().any():
+        df["SeasonProj_norm"] = positional_percentile(
+            df, all_players_df, "SeasonProjection",
+            ref_value_col="SeasonProjection" if (all_players_df is not None and "SeasonProjection" in all_players_df.columns) else None
+        ).fillna(0.5)
+        df["Season_ros_norm"] = actual_w * df["Season_norm"] + (1 - actual_w) * df["SeasonProj_norm"]
+    else:
+        df["Season_ros_norm"] = df["Season_norm"]
+
     # ROS rebalancing: shift weight from projection to season (proven track record)
     ros_shift = min(ROS_SEASON_WEIGHT_BOOST, w_proj)  # can't shift more than proj has
     w_proj_ros = w_proj - ros_shift
@@ -1406,7 +1433,7 @@ def _compute_keep_score(roster_df: pd.DataFrame,
 
     df["Keep ROS"] = (
         w_proj_ros   * df["Proj_ros_norm"] +
-        w_season_ros * df["Season_norm"] +
+        w_season_ros * df["Season_ros_norm"] +
         w_form       * df["Form_ros_norm"] +
         w_fdr        * df["FDREase_norm"] +
         w_draft      * df["Draft_norm"]
@@ -1418,7 +1445,8 @@ def _compute_keep_score(roster_df: pd.DataFrame,
     df["Keep ROS"] = (df["Keep ROS"] * scarcity).clip(upper=1.0)
 
     drop_cols = ["Proj_1gw_norm", "Season_norm", "Form_norm", "FDREase", "FDREase_norm",
-                 "Draft_norm", "DraftValueRaw", "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm"]
+                 "Draft_norm", "DraftValueRaw", "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm",
+                 "SeasonProj_norm", "Season_ros_norm"]
     drop_cols = [c for c in drop_cols if c in df.columns]
     return df.drop(columns=drop_cols)
 
@@ -1889,6 +1917,17 @@ def show_waiver_wire_page():
         pts_col = "Projected_Points" if "Projected_Points" in my_roster.columns else "Points"
         my_roster = blend_multi_gw_projections(my_roster, ffp_df, single_gw_col=pts_col)
 
+    # --- Rotowire Season Projections ---
+    try:
+        season_rankings_df = get_rotowire_season_rankings(config.ROTOWIRE_SEASON_RANKINGS_URL)
+    except Exception:
+        season_rankings_df = None
+
+    if not avail_all.empty:
+        avail_all = merge_season_projections(avail_all, season_rankings_df)
+    if not my_roster.empty:
+        my_roster = merge_season_projections(my_roster, season_rankings_df)
+
     # --- Positional Depth ---
     depth_map = {}
     if not my_roster.empty:
@@ -1916,7 +1955,7 @@ def show_waiver_wire_page():
     # MY ROSTER SECTION (with depth card)
     # ---------------------------
     if not my_roster.empty:
-        my_roster = _compute_keep_score(my_roster, draft_df, fpl_stats, w_proj, w_form, w_fdr, w_season, w_draft)
+        my_roster = _compute_keep_score(my_roster, draft_df, fpl_stats, w_proj, w_form, w_fdr, w_season, w_draft, current_gw=current_gw)
         my_roster = my_roster.sort_values("Keep ROS", ascending=False).reset_index(drop=True)
 
         st.subheader(f"Your Squad — {my_team.get('team_name', '(unknown)')}")
@@ -1956,7 +1995,7 @@ def show_waiver_wire_page():
     avail_display = avail_all.copy()
     if pos_filter:
         avail_display = avail_display[avail_display["Position"].isin(pos_filter)]
-    avail_display = _compute_waiver_score(avail_display, w_proj, w_form, w_fdr, w_season)
+    avail_display = _compute_waiver_score(avail_display, w_proj, w_form, w_fdr, w_season, current_gw=current_gw)
     avail_display = avail_display.sort_values("ROS", ascending=False).reset_index(drop=True)
 
     _display_avail = avail_display.copy()

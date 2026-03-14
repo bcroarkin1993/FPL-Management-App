@@ -35,8 +35,10 @@ from scripts.common.analytics import (
     positional_percentile,
     positional_rank,
     dampen_form_by_starts,
+    season_progress_weight,
+    merge_season_projections,
 )
-from scripts.common.scraping import get_ffp_projections_data
+from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
 
 
 # ---------------------------
@@ -347,11 +349,14 @@ def _compute_transfer_score(df: pd.DataFrame, w_proj: float, w_form: float,
 
 def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
                         w_fdr: float, w_points: float,
-                        all_players_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+                        all_players_df: Optional[pd.DataFrame] = None,
+                        current_gw: int = 19) -> pd.DataFrame:
     """Compute dual keep scores: Keep 1GW and Keep ROS.
 
     Keep 1GW: single-GW projection + raw form (who's best THIS week)
     Keep ROS: blended multi-GW projection + dampened form (long-term value)
+             Season component blends actual points with Rotowire season
+             projections based on gameweek progress.
     """
     tmp = df.copy()
 
@@ -392,6 +397,18 @@ def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
     starts = pd.to_numeric(tmp.get("starts", 0), errors="coerce").fillna(0)
     tmp["Form_ros_norm"] = dampen_form_by_starts(tmp["Form_norm"], starts)
 
+    # Time-blended season component: blend actual points with Rotowire season projections
+    actual_w = season_progress_weight(current_gw)
+    if "SeasonProjection" in tmp.columns and tmp["SeasonProjection"].notna().any():
+        tmp["SeasonProj_norm"] = positional_percentile(
+            tmp, all_players_df, "SeasonProjection",
+            ref_value_col="SeasonProjection" if (all_players_df is not None and "SeasonProjection" in all_players_df.columns) else None,
+            min_minutes=90
+        ).fillna(0.5)
+        tmp["Points_ros_norm"] = actual_w * tmp["Points_norm"] + (1 - actual_w) * tmp["SeasonProj_norm"]
+    else:
+        tmp["Points_ros_norm"] = tmp["Points_norm"]
+
     # ROS rebalancing: shift weight from projection to season (proven track record)
     ros_shift = min(ROS_SEASON_WEIGHT_BOOST, w_proj)  # can't shift more than proj has
     w_proj_ros = w_proj - ros_shift
@@ -401,7 +418,7 @@ def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
         w_proj_ros * tmp["Proj_ros_norm"] +
         w_form * tmp["Form_ros_norm"] +
         w_fdr * tmp["FDREase_norm"] +
-        w_points_ros * tmp["Points_norm"]
+        w_points_ros * tmp["Points_ros_norm"]
     ) / denom
 
     # Positional scarcity boost — GK/FWD are harder to replace
@@ -411,7 +428,7 @@ def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
 
     # Cleanup
     drop_cols = ["Proj_1gw_norm", "Form_norm", "Points_norm", "FDREase", "FDREase_norm",
-                 "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm"]
+                 "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm", "SeasonProj_norm", "Points_ros_norm"]
     return tmp.drop(columns=[c for c in drop_cols if c in tmp.columns])
 
 
@@ -794,9 +811,17 @@ def show_classic_transfers_page():
             all_players, ffp_df, single_gw_col="Projected_Points"
         )
 
+        # Rotowire Season Projections
+        try:
+            season_rankings_df = get_rotowire_season_rankings(config.ROTOWIRE_SEASON_RANKINGS_URL)
+        except Exception:
+            season_rankings_df = None
+        squad_df = merge_season_projections(squad_df, season_rankings_df)
+        all_players = merge_season_projections(all_players, season_rankings_df)
+
         # Compute scores
         squad_df = _compute_keep_score(squad_df, w_proj, w_form, w_fdr, 0.2,
-                                       all_players_df=all_players)
+                                       all_players_df=all_players, current_gw=current_gw)
 
     # Positional depth
     depth_map = {}
