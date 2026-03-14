@@ -33,6 +33,15 @@ _POS_LABELS = {"G": "GK", "D": "DEF", "M": "MID", "F": "FWD"}
 # Keep scores (clipped to 1.0).
 POSITIONAL_SCARCITY = {"G": 1.20, "F": 1.10, "D": 1.00, "M": 1.00}
 
+# =============================================================================
+# ROS WEIGHT REBALANCING
+# =============================================================================
+# For ROS scoring, shift weight from projection toward season points.
+# Rationale: proven season track record is more predictive of long-term value
+# than a single-week projection.  1GW keeps original weights.
+# This amount is shifted from w_proj to w_season (both clipped to ≥ 0).
+ROS_SEASON_WEIGHT_BOOST = 0.15
+
 
 # =============================================================================
 # FORM DAMPENING

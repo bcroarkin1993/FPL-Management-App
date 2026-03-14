@@ -26,6 +26,7 @@ from scripts.common.utils import (
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.analytics import (
     POSITIONAL_SCARCITY,
+    ROS_SEASON_WEIGHT_BOOST,
     compute_healthy_form,
     _fetch_element_history,
     compute_positional_depth,
@@ -391,11 +392,16 @@ def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
     starts = pd.to_numeric(tmp.get("starts", 0), errors="coerce").fillna(0)
     tmp["Form_ros_norm"] = dampen_form_by_starts(tmp["Form_norm"], starts)
 
+    # ROS rebalancing: shift weight from projection to season (proven track record)
+    ros_shift = min(ROS_SEASON_WEIGHT_BOOST, w_proj)  # can't shift more than proj has
+    w_proj_ros = w_proj - ros_shift
+    w_points_ros = w_points + ros_shift
+
     tmp["Keep ROS"] = (
-        w_proj * tmp["Proj_ros_norm"] +
+        w_proj_ros * tmp["Proj_ros_norm"] +
         w_form * tmp["Form_ros_norm"] +
         w_fdr * tmp["FDREase_norm"] +
-        w_points * tmp["Points_norm"]
+        w_points_ros * tmp["Points_norm"]
     ) / denom
 
     # Positional scarcity boost — GK/FWD are harder to replace
