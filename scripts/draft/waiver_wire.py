@@ -1280,12 +1280,14 @@ def _compute_waiver_score(df: pd.DataFrame,
     denom = max(w_proj + w_form + w_fdr + w_season, 1e-9)
 
     # --- 1GW: single-GW projection + raw form ---
+    # FDR is redundant for 1GW (already baked into the GW projection),
+    # so shift FDR weight into projection.
+    w_proj_1gw = w_proj + w_fdr
     tmp["Proj_1gw_norm"] = _min_max_norm(tmp["Points"]).fillna(0.5)
     tmp["1GW"] = (
-        w_proj   * tmp["Proj_1gw_norm"] +
-        w_form   * tmp["Form_norm"] +
-        w_fdr    * tmp["FDREase_norm"] +
-        w_season * tmp["Season_norm"]
+        w_proj_1gw * tmp["Proj_1gw_norm"] +
+        w_form     * tmp["Form_norm"] +
+        w_season   * tmp["Season_norm"]
     ) / denom
 
     # --- ROS: blended multi-GW projection + dampened form ---
@@ -1390,12 +1392,15 @@ def _compute_keep_score(roster_df: pd.DataFrame,
         df, all_players_df, "Projected_Points", ref_value_col="points_per_game"
     ).fillna(0.5)
 
+    # 1GW: FDR is redundant (already baked into the GW projection), so
+    # shift FDR weight into projection for this horizon.
+    w_proj_1gw = w_proj + w_fdr
+
     df["Keep 1GW"] = (
-        w_proj   * df["Proj_1gw_norm"] +
-        w_season * df["Season_norm"] +
-        w_form   * df["Form_norm"] +
-        w_fdr    * df["FDREase_norm"] +
-        w_draft  * df["Draft_norm"]
+        w_proj_1gw * df["Proj_1gw_norm"] +
+        w_season   * df["Season_norm"] +
+        w_form     * df["Form_norm"] +
+        w_draft    * df["Draft_norm"]
     ) / denom
 
     # --- ROS: blended multi-GW projection + dampened form ---

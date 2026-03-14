@@ -317,10 +317,13 @@ def _compute_transfer_score(df: pd.DataFrame, w_proj: float, w_form: float,
         tmp, all_players_df, "Projected_Points", ref_value_col="Projected_Points", min_minutes=90
     ).fillna(0.5)
 
+    # 1GW: FDR is redundant (already baked into the GW projection), so
+    # shift FDR weight into projection for this horizon.
+    w_proj_1gw = w_proj + w_fdr
+
     tmp["Transfer 1GW"] = (
-        w_proj * tmp["Proj_1gw_norm"] +
+        w_proj_1gw * tmp["Proj_1gw_norm"] +
         w_form * tmp["Form_norm"] +
-        w_fdr * tmp["FDREase_norm"] +
         w_price * tmp["Price_norm"]
     ) / denom
 
@@ -380,10 +383,13 @@ def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
         tmp, all_players_df, "Projected_Points", ref_value_col="Projected_Points", min_minutes=90
     ).fillna(0.5)
 
+    # 1GW: FDR is redundant (already baked into the GW projection), so
+    # shift FDR weight into projection for this horizon.
+    w_proj_1gw = w_proj + w_fdr
+
     tmp["Keep 1GW"] = (
-        w_proj * tmp["Proj_1gw_norm"] +
+        w_proj_1gw * tmp["Proj_1gw_norm"] +
         w_form * tmp["Form_norm"] +
-        w_fdr * tmp["FDREase_norm"] +
         w_points * tmp["Points_norm"]
     ) / denom
 
