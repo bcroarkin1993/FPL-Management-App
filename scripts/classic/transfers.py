@@ -33,6 +33,7 @@ from scripts.common.analytics import (
     blend_multi_gw_projections,
     positional_rank,
     merge_season_projections,
+    merge_ffp_single_gw_data,
 )
 from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
 
@@ -276,42 +277,35 @@ def _add_projections(df: pd.DataFrame, projections_df: pd.DataFrame) -> pd.DataF
 def _compute_transfer_score(df: pd.DataFrame,
                             all_players_df: Optional[pd.DataFrame] = None,
                             current_gw: int = 19) -> pd.DataFrame:
-    """Compute dual transfer target scores using positional percentile scoring.
+    """Compute transfer target scores using positional percentile scoring.
 
-    Delegates to shared compute_player_scores() then renames columns
-    and adds a small price-efficiency adjustment for Classic mode
-    (cheaper players get a small boost for transfer targets).
+    Delegates to shared compute_player_scores() with format_context="classic"
+    and adds a small price-efficiency adjustment to Transfer Score only.
     """
-    tmp = compute_player_scores(df, all_players_df, current_gw)
+    tmp = compute_player_scores(df, all_players_df, current_gw, format_context="classic")
 
-    # Classic-specific: small price-efficiency adjustment for transfer targets
+    # Classic-specific: small price-efficiency adjustment for Transfer Score only
     # Cheaper players are more valuable as transfer targets (budget flexibility)
-    if "now_cost" in tmp.columns:
+    if "now_cost" in tmp.columns and "Transfer Score" in tmp.columns:
         max_cost = pd.to_numeric(tmp["now_cost"], errors="coerce").max()
         if pd.notna(max_cost) and max_cost > 0:
             price_bonus = (max_cost - pd.to_numeric(tmp["now_cost"], errors="coerce")) / max_cost * 0.05
-            tmp["1GW"] = (tmp["1GW"] + price_bonus).clip(upper=1.0)
-            tmp["ROS"] = (tmp["ROS"] + price_bonus).clip(upper=1.0)
+            tmp["Transfer Score"] = (tmp["Transfer Score"] + price_bonus).clip(upper=1.0)
 
-    tmp["Transfer 1GW"] = tmp["1GW"]
-    tmp["Transfer ROS"] = tmp["ROS"]
-    tmp.drop(columns=["1GW", "ROS"], inplace=True, errors="ignore")
     return tmp
 
 
 def _compute_keep_score(df: pd.DataFrame,
                         all_players_df: Optional[pd.DataFrame] = None,
-                        current_gw: int = 19) -> pd.DataFrame:
-    """Compute dual keep scores using positional percentile scoring.
+                        current_gw: int = 19,
+                        depth_map: Optional[Dict] = None) -> pd.DataFrame:
+    """Compute keep scores using positional percentile scoring.
 
-    Delegates to shared compute_player_scores() then renames columns
-    from 1GW/ROS to Keep 1GW/Keep ROS.
+    Delegates to shared compute_player_scores() with format_context="classic"
+    and depth_map for squad depth awareness.
     """
-    tmp = compute_player_scores(df, all_players_df, current_gw)
-    tmp["Keep 1GW"] = tmp["1GW"]
-    tmp["Keep ROS"] = tmp["ROS"]
-    tmp.drop(columns=["1GW", "ROS"], inplace=True, errors="ignore")
-    return tmp
+    return compute_player_scores(df, all_players_df, current_gw,
+                                 format_context="classic", depth_map=depth_map)
 
 
 def _format_fixtures_html(fixtures: List[Dict], teams: Dict[int, str], n_show: int = 5) -> str:
@@ -360,7 +354,7 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
     suggestions = []
 
-    lowest_keep = squad_df.nsmallest(top_n, "Keep ROS")
+    lowest_keep = squad_df.nsmallest(top_n, "Keep Score")
 
     for _, drop_row in lowest_keep.iterrows():
         pos = drop_row["Position"]
@@ -376,13 +370,13 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         if candidates.empty:
             continue
 
-        add_row = candidates.iloc[0]  # Already sorted by Transfer ROS desc
+        add_row = candidates.iloc[0]  # Already sorted by Transfer Score desc
 
-        # Calculate score improvement (use ROS for long-term transfer decisions)
-        score_diff = add_row.get("Transfer ROS", 0) - drop_row.get("Keep ROS", 0)
+        # Calculate score improvement using Transfer Score vs Keep Score
+        score_diff = add_row.get("Transfer Score", 0) - drop_row.get("Keep Score", 0)
 
-        # Protect elite players from marginal swaps — scale threshold by Keep ROS
-        keep_score = float(drop_row.get("Keep ROS", 0.5) or 0.5)
+        # Protect elite players from marginal swaps — scale threshold by Keep Score
+        keep_score = float(drop_row.get("Keep Score", 0.5) or 0.5)
         if keep_score > 0.7:
             min_threshold = 0.15
         elif keep_score > 0.5:
@@ -697,8 +691,9 @@ def show_classic_transfers_page():
         squad_df = merge_season_projections(squad_df, season_rankings_df)
         all_players = merge_season_projections(all_players, season_rankings_df)
 
-        # Compute scores
-        squad_df = _compute_keep_score(squad_df, all_players_df=all_players, current_gw=current_gw)
+        # FFP Single-GW Data (Predicted, Start, LongStart)
+        squad_df = merge_ffp_single_gw_data(squad_df, ffp_df)
+        all_players = merge_ffp_single_gw_data(all_players, ffp_df)
 
     # Positional depth
     depth_map = {}
@@ -712,6 +707,11 @@ def show_classic_transfers_page():
                 squad_df["status"] = None
             squad_df.at[idx, "status"] = el.get("status", "a")
         depth_map = compute_positional_depth(squad_df)
+
+    # Compute keep scores (after depth is known)
+    if not squad_df.empty:
+        squad_df = _compute_keep_score(squad_df, all_players_df=all_players,
+                                       current_gw=current_gw, depth_map=depth_map)
 
     # Get squad player IDs for filtering
     squad_ids = set(squad_df["Player_ID"].tolist())
@@ -745,7 +745,7 @@ def show_classic_transfers_page():
 
     # Compute transfer score
     available = _compute_transfer_score(available, all_players_df=all_players, current_gw=current_gw)
-    available = available.sort_values("Transfer ROS", ascending=False)
+    available = available.sort_values("Transfer Score", ascending=False)
 
     # ---------------------------
     # TRANSFER SUGGESTION CARDS
@@ -792,8 +792,8 @@ def show_classic_transfers_page():
     starting_xi = squad_df[squad_df["squad_position"] <= 11].copy()
     bench = squad_df[squad_df["squad_position"] > 11].copy()
 
-    # Show squad with keep scores (sort by ROS for long-term view)
-    squad_display = squad_df.sort_values("Keep ROS", ascending=True).copy()
+    # Show squad with keep scores (sort by Keep Score for holistic view)
+    squad_display = squad_df.sort_values("Keep Score", ascending=True).copy()
 
     # Add fixtures for each player
     fixture_html_list = []
@@ -816,15 +816,14 @@ def show_classic_transfers_page():
     # Format display columns — use HealthyForm if available
     form_display_col = "HealthyForm" if "HealthyForm" in squad_display.columns else "form"
     display_cols = ["Player", "Team", "Position", "Pos_Rank", "now_cost", form_display_col, "total_points",
-                    "Projected_Points", "AvgFDR", "Keep 1GW", "Keep ROS", "Status"]
+                    "Projected_Points", "AvgFDR", "1GW", "ROS", "Keep Score", "Status"]
     display_cols = [c for c in display_cols if c in squad_display.columns]
     squad_show = squad_display[display_cols].copy()
     squad_show["Price"] = squad_show["now_cost"].apply(lambda x: f"£{x/10:.1f}m")
     squad_show["AvgFDR"] = squad_show["AvgFDR"].round(2)
-    if "Keep 1GW" in squad_show.columns:
-        squad_show["Keep 1GW"] = squad_show["Keep 1GW"].round(3)
-    if "Keep ROS" in squad_show.columns:
-        squad_show["Keep ROS"] = squad_show["Keep ROS"].round(3)
+    for sc in ["1GW", "ROS", "Keep Score"]:
+        if sc in squad_show.columns:
+            squad_show[sc] = squad_show[sc].round(3)
     squad_show["Projected_Points"] = squad_show["Projected_Points"].fillna("-")
 
     # Rename for display
@@ -838,9 +837,9 @@ def show_classic_transfers_page():
 
     render_styled_table(
         squad_show[["Player", "Team", "Position", "Pos Rank", "Price", "Form", "Season Pts",
-                    "Proj Pts", "Avg FDR", "Keep 1GW", "Keep ROS", "Status"]],
-        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "Keep 1GW": "{:.3f}", "Keep ROS": "{:.3f}"},
-        positive_color_cols=["Keep 1GW", "Keep ROS"],
+                    "Proj Pts", "Avg FDR", "1GW", "ROS", "Keep Score", "Status"]],
+        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}", "Keep Score": "{:.3f}"},
+        positive_color_cols=["1GW", "ROS", "Keep Score"],
     )
 
     # ---------------------------
@@ -875,17 +874,16 @@ def show_classic_transfers_page():
     target_display_cols = [
         "Player", "Team", "Position", "now_cost", "Price_Change", target_form_col,
         "total_points", "Projected_Points", "selected_by_percent",
-        "AvgFDR", "Transfer 1GW", "Transfer ROS", "Status"
+        "AvgFDR", "1GW", "ROS", "Transfer Score", "Status"
     ]
     target_display_cols = [c for c in target_display_cols if c in top_targets.columns]
     targets_show = top_targets[target_display_cols].copy()
 
     targets_show["Price"] = targets_show["now_cost"].apply(lambda x: f"£{x/10:.1f}m")
     targets_show["AvgFDR"] = targets_show["AvgFDR"].round(2)
-    if "Transfer 1GW" in targets_show.columns:
-        targets_show["Transfer 1GW"] = targets_show["Transfer 1GW"].round(3)
-    if "Transfer ROS" in targets_show.columns:
-        targets_show["Transfer ROS"] = targets_show["Transfer ROS"].round(3)
+    for sc in ["1GW", "ROS", "Transfer Score"]:
+        if sc in targets_show.columns:
+            targets_show[sc] = targets_show[sc].round(3)
     targets_show["Projected_Points"] = targets_show["Projected_Points"].fillna("-")
     targets_show["Ownership"] = targets_show["selected_by_percent"].apply(lambda x: f"{x:.1f}%")
 
@@ -896,15 +894,13 @@ def show_classic_transfers_page():
         "Projected_Points": "Proj Pts",
         "AvgFDR": "Avg FDR",
         "Price_Change": "Δ",
-        "Transfer 1GW": "1GW",
-        "Transfer ROS": "ROS",
     })
 
     render_styled_table(
         targets_show[["Player", "Team", "Position", "Price", "Δ", "Form",
-                      "Season Pts", "Proj Pts", "Ownership", "Avg FDR", "1GW", "ROS", "Status"]],
-        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}"},
-        positive_color_cols=["1GW", "ROS"],
+                      "Season Pts", "Proj Pts", "Ownership", "Avg FDR", "1GW", "ROS", "Transfer Score", "Status"]],
+        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}", "Transfer Score": "{:.3f}"},
+        positive_color_cols=["1GW", "ROS", "Transfer Score"],
         max_height=500,
     )
 
@@ -937,32 +933,30 @@ def show_classic_transfers_page():
             # Format for display
             pos_cols = ["Player", "Team", "now_cost", "form", "total_points",
                         "Projected_Points", "selected_by_percent", "AvgFDR",
-                        "Transfer 1GW", "Transfer ROS"]
+                        "1GW", "ROS", "Transfer Score"]
             pos_cols = [c for c in pos_cols if c in pos_targets.columns]
             pos_show = pos_targets[pos_cols].copy()
 
             pos_show["Price"] = pos_show["now_cost"].apply(lambda x: f"£{x/10:.1f}m")
             pos_show["AvgFDR"] = pos_show["AvgFDR"].round(2)
-            if "Transfer 1GW" in pos_show.columns:
-                pos_show["Transfer 1GW"] = pos_show["Transfer 1GW"].round(3)
-            if "Transfer ROS" in pos_show.columns:
-                pos_show["Transfer ROS"] = pos_show["Transfer ROS"].round(3)
+            for sc in ["1GW", "ROS", "Transfer Score"]:
+                if sc in pos_show.columns:
+                    pos_show[sc] = pos_show[sc].round(3)
             pos_show["Projected_Points"] = pos_show["Projected_Points"].fillna("-")
             pos_show["Own%"] = pos_show["selected_by_percent"].apply(lambda x: f"{x:.1f}%")
 
             pos_display_cols = ["Player", "Team", "Price", "form", "total_points",
-                          "Projected_Points", "Own%", "AvgFDR", "Transfer 1GW", "Transfer ROS"]
+                          "Projected_Points", "Own%", "AvgFDR", "1GW", "ROS", "Transfer Score"]
             pos_display_cols = [c for c in pos_display_cols if c in pos_show.columns]
             pos_display = pos_show[pos_display_cols].copy()
             pos_display = pos_display.rename(columns={
                 "form": "Form", "total_points": "Season Pts",
                 "Projected_Points": "Proj Pts", "AvgFDR": "Avg FDR",
-                "Transfer 1GW": "1GW", "Transfer ROS": "ROS",
             })
             render_styled_table(
                 pos_display,
-                col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}"},
-                positive_color_cols=["1GW", "ROS"],
+                col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}", "Transfer Score": "{:.3f}"},
+                positive_color_cols=["1GW", "ROS", "Transfer Score"],
             )
 
     st.markdown("---")

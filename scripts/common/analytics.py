@@ -162,33 +162,99 @@ def positional_percentile(
     return result
 
 
+def compute_dynamic_alpha(
+    position: str,
+    ros_score: float,
+    format_context: str = "draft",
+    depth_map: Optional[Dict[str, "PositionalDepth"]] = None,
+) -> float:
+    """Compute the dynamic 1GW/ROS blend weight (alpha) for Transfer/Keep Score.
+
+    Score = alpha * 1GW + (1 - alpha) * ROS
+
+    Alpha is adjusted by:
+    1. Format baseline: Draft=0.35 (ROS lean), Classic=0.55 (slight 1GW lean)
+    2. Position: GK -0.10, FWD -0.05 (more ROS-oriented)
+    3. Rank tier (player's ROS): Elite(>0.80) -0.10, Above avg(>0.60) -0.05, Below(<0.40) +0.05
+    4. Squad depth: Critical +0.15, Low +0.10 (urgency → favor 1GW)
+    5. Clamped to [0.15, 0.75]
+
+    Args:
+        position: Position code (G/D/M/F).
+        ros_score: Player's ROS score (0-1).
+        format_context: "draft" or "classic".
+        depth_map: Positional depth map from compute_positional_depth().
+
+    Returns:
+        Alpha value in [0.15, 0.75].
+    """
+    # 1. Format baseline
+    alpha = 0.35 if format_context == "draft" else 0.55
+
+    # 2. Position adjustment
+    if position == "G":
+        alpha -= 0.10
+    elif position == "F":
+        alpha -= 0.05
+
+    # 3. Rank tier adjustment (elite players → protect with more ROS weight)
+    if ros_score > 0.80:
+        alpha -= 0.10
+    elif ros_score > 0.60:
+        alpha -= 0.05
+    elif ros_score < 0.40:
+        alpha += 0.05
+
+    # 4. Squad depth adjustment (low depth → urgency → favor 1GW)
+    if depth_map is not None:
+        depth = depth_map.get(position)
+        if depth is not None:
+            if depth.depth_level == "Critical":
+                alpha += 0.15
+            elif depth.depth_level == "Low":
+                alpha += 0.10
+
+    # 5. Clamp
+    return max(0.15, min(0.75, alpha))
+
+
 def compute_player_scores(
     df: pd.DataFrame,
     all_players_df: Optional[pd.DataFrame],
     current_gw: int,
+    format_context: str = "draft",
+    depth_map: Optional[Dict[str, "PositionalDepth"]] = None,
 ) -> pd.DataFrame:
-    """Compute dual player scores: 1GW (this-week) and ROS (rest-of-season).
+    """Compute player scores: 1GW, ROS, Transfer Score, and Keep Score.
 
     Uses positional percentile scoring against the full FPL player pool.
     A score of 0.85 means "top 15% at this position" — immediately interpretable.
 
-    1GW (fixed weights):
-        0.55 * proj_pctile + 0.25 * form_pctile + 0.20 * season_pts_pctile
+    1GW (pure expected value):
+        blended_projection = avg(Rotowire, FFP_Predicted) — whichever available
+        effective_proj = blended_projection * start_likelihood
+        1GW = positional_percentile(effective_proj)
 
-    ROS (GW-dynamic weights):
+    ROS (multi-GW dominant, dynamic weights):
         season_quality = p * season_pts_pctile + (1-p) * season_proj_pctile
-        Score = w_sq * season_quality + w_mgw * multigw_proj_pctile
-              + w_form * form_dampened_pctile + w_fdr * fdr_ease_pctile
+        w_mgw=0.40-0.10p, w_sq=0.30+0.15p, w_form=0.15-0.05p, w_start=0.10, w_fdr=0.05
+        ROS = w_mgw*multigw + w_sq*season_quality + w_form*form + w_start*start_consistency + w_fdr*fdr
+
+    Transfer/Keep Score (dynamic alpha blend):
+        Score = alpha * 1GW + (1-alpha) * ROS
+        Alpha adapts to format, position, player quality, and squad depth.
 
     Args:
         df: Player DataFrame with columns like Projected_Points/Points, Form,
             Season_Points/total_points, AvgFDRNextN/AvgFDR, MultiGW_Proj,
-            SeasonProjection, starts, Position.
+            SeasonProjection, FFP_Predicted, FFP_Start, FFP_LongStart, starts, Position.
         all_players_df: Full FPL player pool (~700 players) for percentile reference.
         current_gw: Current gameweek number.
+        format_context: "draft" or "classic" — affects alpha baseline.
+        depth_map: Positional depth map for squad depth adjustment.
 
     Returns:
-        df with '1GW' and 'ROS' columns added.
+        df with '1GW', 'ROS', 'Transfer Score', and 'Keep Score' columns added.
     """
     result = df.copy()
 
@@ -208,30 +274,46 @@ def compute_player_scores(
     ref_form_col = "form" if (all_players_df is not None and "form" in all_players_df.columns) else form_col
     ref_season_col = "total_points" if (all_players_df is not None and "total_points" in all_players_df.columns) else season_col
 
-    # --- Shared percentiles ---
-    proj_pctile = positional_percentile(
-        result, all_players_df, proj_col, ref_value_col=proj_col, min_minutes=90
+    # --- 1GW Score (pure expected value) ---
+    # Blend Rotowire projection with FFP Predicted (average if both, whichever if one)
+    rotowire_proj = pd.to_numeric(result.get(proj_col), errors="coerce").fillna(0)
+    ffp_pred = pd.to_numeric(result.get("FFP_Predicted"), errors="coerce") if "FFP_Predicted" in result.columns else pd.Series(np.nan, index=result.index)
+
+    blended_proj = rotowire_proj.copy()
+    both_mask = rotowire_proj.gt(0) & ffp_pred.notna()
+    ffp_only_mask = rotowire_proj.eq(0) & ffp_pred.notna()
+    blended_proj[both_mask] = (rotowire_proj[both_mask] + ffp_pred[both_mask]) / 2
+    blended_proj[ffp_only_mask] = ffp_pred[ffp_only_mask]
+
+    # Start likelihood: FFP_Start (primary), FPL chance_of_playing (fallback), default 100%
+    ffp_start = pd.to_numeric(result.get("FFP_Start"), errors="coerce") if "FFP_Start" in result.columns else pd.Series(np.nan, index=result.index)
+    fpl_chance = pd.to_numeric(result.get("chance_of_playing_next_round"), errors="coerce") if "chance_of_playing_next_round" in result.columns else pd.Series(np.nan, index=result.index)
+
+    start_likelihood = pd.Series(1.0, index=result.index)
+    # Use FFP_Start where available (already a percentage)
+    ffp_mask = ffp_start.notna()
+    start_likelihood[ffp_mask] = ffp_start[ffp_mask] / 100.0
+    # Fallback to FPL chance_of_playing where FFP is missing
+    fpl_mask = ~ffp_mask & fpl_chance.notna()
+    start_likelihood[fpl_mask] = fpl_chance[fpl_mask] / 100.0
+    start_likelihood = start_likelihood.clip(lower=0, upper=1)
+
+    # Effective projected points
+    result["_effective_proj"] = blended_proj * start_likelihood
+
+    # 1GW = positional percentile of effective projected points
+    result["1GW"] = positional_percentile(
+        result, all_players_df, "_effective_proj", ref_value_col=proj_col, min_minutes=90
     ).fillna(0.5)
 
-    form_pctile = positional_percentile(
-        result, all_players_df, form_col, ref_value_col=ref_form_col, min_minutes=90
-    ).fillna(0.5)
+    # --- ROS Score (multi-GW dominant, dynamic weights) ---
+    p = season_progress_weight(current_gw)
 
+    # Season quality: blend actual season points with Rotowire season projection
     season_pts_pctile = positional_percentile(
         result, all_players_df, season_col, ref_value_col=ref_season_col, min_minutes=90
     ).fillna(0.5)
 
-    # --- 1GW Score (fixed weights) ---
-    result["1GW"] = (
-        0.55 * proj_pctile +
-        0.25 * form_pctile +
-        0.20 * season_pts_pctile
-    )
-
-    # --- ROS Score (dynamic weights) ---
-    p = season_progress_weight(current_gw)
-
-    # Season quality: blend actual season points with Rotowire season projection
     if "SeasonProjection" in result.columns and result["SeasonProjection"].notna().any():
         ref_season_proj = "SeasonProjection" if (all_players_df is not None and "SeasonProjection" in all_players_df.columns) else None
         season_proj_pctile = positional_percentile(
@@ -244,8 +326,6 @@ def compute_player_scores(
     season_quality = p * season_pts_pctile + (1 - p) * season_proj_pctile
 
     # Multi-GW projection percentile
-    # MultiGW_Proj is only on roster/available players, not in the reference pool.
-    # Use points_per_game * 3 as proxy in reference pool for fair percentiling.
     if "MultiGW_Proj" not in result.columns:
         result["MultiGW_Proj"] = 0
     result["MultiGW_Proj"] = pd.to_numeric(result["MultiGW_Proj"], errors="coerce").fillna(0)
@@ -261,12 +341,27 @@ def compute_player_scores(
         ).fillna(0.5)
 
     # Form dampened by starts
+    form_pctile = positional_percentile(
+        result, all_players_df, form_col, ref_value_col=ref_form_col, min_minutes=90
+    ).fillna(0.5)
     starts_col = result["starts"] if "starts" in result.columns else pd.Series(0, index=result.index)
     starts = pd.to_numeric(starts_col, errors="coerce").fillna(0)
     form_dampened_pctile = dampen_form_by_starts(form_pctile, starts)
 
+    # Start consistency percentile (FFP LongStart — rewards nailed-on starters)
+    if "FFP_LongStart" in result.columns and result["FFP_LongStart"].notna().any():
+        result["_start_consistency"] = pd.to_numeric(result["FFP_LongStart"], errors="coerce").fillna(50)
+        start_consistency_pctile = positional_percentile(
+            result, all_players_df, "_start_consistency", ref_value_col="_start_consistency", min_minutes=90
+        ).fillna(0.5)
+    else:
+        # Fallback: use starts-based proxy (players with more starts are more nailed-on)
+        result["_start_consistency"] = starts
+        start_consistency_pctile = positional_percentile(
+            result, all_players_df, "_start_consistency", ref_value_col="starts" if (all_players_df is not None and "starts" in all_players_df.columns) else "_start_consistency", min_minutes=90
+        ).fillna(0.5)
+
     # FDR ease percentile (6 - AvgFDR → higher = easier fixtures)
-    # Compute _FDREase on the reference pool too so we get a true positional percentile.
     result["_FDREase"] = 6 - result[fdr_col]
     if all_players_df is not None and fdr_col in all_players_df.columns:
         ref_fdr = all_players_df.copy()
@@ -278,20 +373,38 @@ def compute_player_scores(
         fdr_ease_pctile = _min_max_norm_series(result["_FDREase"]).fillna(0.5)
 
     # Dynamic ROS weights (sum = 1.0 at all gameweeks)
-    w_sq = 0.50 + 0.15 * p
-    w_mgw = 0.20 - 0.05 * p
-    w_form = 0.20 - 0.05 * p
-    w_fdr = 0.10 - 0.05 * p
+    w_mgw = 0.40 - 0.10 * p    # 40% → 30% (multi-GW projections dominant)
+    w_sq = 0.30 + 0.15 * p     # 30% → 45% (season quality grows)
+    w_form = 0.15 - 0.05 * p   # 15% → 10% (trajectory indicator)
+    w_start = 0.10             # 10% constant (start consistency)
+    w_fdr = 0.05               #  5% constant (supplementary fixture signal)
 
     result["ROS"] = (
-        w_sq * season_quality +
         w_mgw * multigw_pctile +
+        w_sq * season_quality +
         w_form * form_dampened_pctile +
+        w_start * start_consistency_pctile +
         w_fdr * fdr_ease_pctile
     )
 
+    # --- Transfer Score / Keep Score (dynamic alpha blend) ---
+    # Compute per-player alpha based on position, ROS quality, format, and depth
+    transfer_score = pd.Series(0.0, index=result.index)
+    keep_score = pd.Series(0.0, index=result.index)
+
+    for idx in result.index:
+        pos = str(result.at[idx, "Position"]) if "Position" in result.columns else "M"
+        ros_val = float(result.at[idx, "ROS"])
+        alpha = compute_dynamic_alpha(pos, ros_val, format_context, depth_map)
+        blended = alpha * float(result.at[idx, "1GW"]) + (1 - alpha) * ros_val
+        transfer_score.at[idx] = blended
+        keep_score.at[idx] = blended
+
+    result["Transfer Score"] = transfer_score
+    result["Keep Score"] = keep_score
+
     # Cleanup temp columns
-    result.drop(columns=["_FDREase"], inplace=True, errors="ignore")
+    result.drop(columns=["_FDREase", "_effective_proj", "_start_consistency"], inplace=True, errors="ignore")
 
     return result
 
@@ -654,6 +767,72 @@ def merge_season_projections(
         key = (norm_name, team_short)
         if key in lookup:
             result.at[idx, output_col] = lookup[key]
+
+    result.drop(columns=["__norm"], inplace=True, errors="ignore")
+    return result
+
+
+def merge_ffp_single_gw_data(
+    player_df: pd.DataFrame,
+    ffp_df: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    """Merge FFP single-GW data (Predicted, Start, LongStart) onto a player DataFrame.
+
+    Matches by normalized name + team short code, following the same pattern as
+    blend_multi_gw_projections().
+
+    Args:
+        player_df: DataFrame with player names and Team column.
+        ffp_df: FFP projections DataFrame with Name, Team, Predicted, Start, LongStart.
+
+    Returns:
+        player_df with FFP_Predicted, FFP_Start, FFP_LongStart columns added (NaN if unmatched).
+    """
+    result = player_df.copy()
+    result["FFP_Predicted"] = np.nan
+    result["FFP_Start"] = np.nan
+    result["FFP_LongStart"] = np.nan
+
+    name_col = "Player" if "Player" in result.columns else "Name" if "Name" in result.columns else None
+    if ffp_df is None or ffp_df.empty or name_col is None:
+        return result
+
+    # Check that at least one useful column exists
+    ffp_cols = [c for c in ("Predicted", "Start", "LongStart") if c in ffp_df.columns]
+    if not ffp_cols or "Name" not in ffp_df.columns:
+        return result
+
+    # Build lookup: (normalized_name, team_short) -> {Predicted, Start, LongStart}
+    ffp = ffp_df[["Name", "Team"] + ffp_cols].copy()
+    ffp["__norm"] = ffp["Name"].apply(canonical_normalize)
+    ffp["__team_short"] = ffp["Team"].replace(TEAM_FULL_TO_SHORT)
+    for col in ffp_cols:
+        ffp[col] = pd.to_numeric(ffp[col], errors="coerce")
+
+    lookup = {}
+    for _, row in ffp.iterrows():
+        key = (row["__norm"], str(row["__team_short"]))
+        lookup[key] = {col: row[col] for col in ffp_cols if pd.notna(row[col])}
+
+    if not lookup:
+        return result
+
+    # Match players
+    result["__norm"] = result[name_col].apply(canonical_normalize)
+    team_col = "Team" if "Team" in result.columns else None
+
+    col_map = {"Predicted": "FFP_Predicted", "Start": "FFP_Start", "LongStart": "FFP_LongStart"}
+
+    for idx in result.index:
+        norm_name = result.at[idx, "__norm"]
+        team_short = str(result.at[idx, team_col]) if team_col else ""
+        team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
+
+        key = (norm_name, team_short)
+        if key in lookup:
+            for src_col, dst_col in col_map.items():
+                if src_col in lookup[key]:
+                    result.at[idx, dst_col] = lookup[key][src_col]
 
     result.drop(columns=["__norm"], inplace=True, errors="ignore")
     return result

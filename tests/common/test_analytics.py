@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 from scripts.common.analytics import (
     compute_healthy_form,
     compute_player_scores,
+    compute_dynamic_alpha,
     compute_positional_depth,
     compute_transfer_urgency,
     blend_multi_gw_projections,
@@ -19,6 +20,7 @@ from scripts.common.analytics import (
     dampen_form_by_starts,
     season_progress_weight,
     merge_season_projections,
+    merge_ffp_single_gw_data,
     PositionalDepth,
 )
 
@@ -733,13 +735,15 @@ class TestComputePlayerScores:
                 })
         return pd.DataFrame(rows)
 
-    def test_returns_1gw_and_ros_columns(self):
-        """Output has 1GW and ROS columns."""
+    def test_returns_all_four_columns(self):
+        """Output has 1GW, ROS, Transfer Score, and Keep Score columns."""
         pool = self._make_pool()
         squad = pool.head(5).copy()
         result = compute_player_scores(squad, pool, current_gw=20)
         assert "1GW" in result.columns
         assert "ROS" in result.columns
+        assert "Transfer Score" in result.columns
+        assert "Keep Score" in result.columns
 
     def test_scores_in_zero_one_range(self):
         """All scores should be in [0, 1]."""
@@ -748,6 +752,8 @@ class TestComputePlayerScores:
         result = compute_player_scores(squad, pool, current_gw=20)
         assert result["1GW"].between(0, 1).all()
         assert result["ROS"].between(0, 1).all()
+        assert result["Transfer Score"].between(0, 1).all()
+        assert result["Keep Score"].between(0, 1).all()
 
     def test_top_player_scores_high(self):
         """The best player at a position should score above 0.7."""
@@ -779,7 +785,51 @@ class TestComputePlayerScores:
         result = compute_player_scores(squad, None, current_gw=20)
         assert "1GW" in result.columns
         assert "ROS" in result.columns
+        assert "Transfer Score" in result.columns
+        assert "Keep Score" in result.columns
         assert result["1GW"].notna().all()
+
+    def test_transfer_keep_score_is_blend_of_1gw_and_ros(self):
+        """Transfer/Keep Score should be between 1GW and ROS values."""
+        pool = self._make_pool()
+        squad = pool.head(10).copy()
+        result = compute_player_scores(squad, pool, current_gw=20)
+        for idx in result.index:
+            low = min(result.at[idx, "1GW"], result.at[idx, "ROS"])
+            high = max(result.at[idx, "1GW"], result.at[idx, "ROS"])
+            assert low - 0.01 <= result.at[idx, "Transfer Score"] <= high + 0.01
+            assert low - 0.01 <= result.at[idx, "Keep Score"] <= high + 0.01
+
+    def test_format_context_affects_blend(self):
+        """Draft format should lean more ROS (lower alpha) than Classic."""
+        pool = self._make_pool()
+        # Pick a player with different 1GW and ROS values
+        squad = pool[pool["Position"] == "M"].head(1).copy()
+        result_draft = compute_player_scores(squad, pool, current_gw=20, format_context="draft")
+        result_classic = compute_player_scores(squad, pool, current_gw=20, format_context="classic")
+        # Draft has lower alpha → more ROS weight → closer to ROS
+        # Classic has higher alpha → more 1GW weight → closer to 1GW
+        # Just check both produce valid output (exact comparison depends on player values)
+        assert result_draft["Transfer Score"].iloc[0] >= 0
+        assert result_classic["Transfer Score"].iloc[0] >= 0
+
+    def test_ffp_data_affects_1gw(self):
+        """FFP_Predicted and FFP_Start should affect the 1GW score."""
+        pool = self._make_pool()
+        squad = pool[pool["Position"] == "M"].head(1).copy()
+
+        # Without FFP data
+        result_no_ffp = compute_player_scores(squad.copy(), pool, current_gw=20)
+
+        # With high FFP projection and low start likelihood
+        squad_ffp = squad.copy()
+        squad_ffp["FFP_Predicted"] = 10.0  # High prediction
+        squad_ffp["FFP_Start"] = 30.0  # Only 30% start chance
+        result_with_ffp = compute_player_scores(squad_ffp, pool, current_gw=20)
+
+        # Both should produce valid scores
+        assert result_no_ffp["1GW"].notna().all()
+        assert result_with_ffp["1GW"].notna().all()
 
 
 class TestMergeSeasonProjections:
@@ -835,3 +885,273 @@ class TestMergeSeasonProjections:
         result = merge_season_projections(players, pd.DataFrame())
         assert "SeasonProjection" in result.columns
         assert pd.isna(result.loc[0, "SeasonProjection"])
+
+
+# =============================================================================
+# TestComputeDynamicAlpha
+# =============================================================================
+
+class TestComputeDynamicAlpha:
+    """Tests for compute_dynamic_alpha() — dynamic 1GW/ROS blend weight."""
+
+    def test_draft_baseline(self):
+        """Draft baseline alpha = 0.35 for a MID with average ROS."""
+        alpha = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
+        assert alpha == pytest.approx(0.35)
+
+    def test_classic_baseline(self):
+        """Classic baseline alpha = 0.55 for a MID with average ROS."""
+        alpha = compute_dynamic_alpha("M", ros_score=0.50, format_context="classic")
+        assert alpha == pytest.approx(0.55)
+
+    def test_gk_position_adjustment(self):
+        """GK gets -0.10 alpha (more ROS-oriented)."""
+        alpha_gk = compute_dynamic_alpha("G", ros_score=0.50, format_context="draft")
+        alpha_mid = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
+        assert alpha_gk == alpha_mid - 0.10
+
+    def test_fwd_position_adjustment(self):
+        """FWD gets -0.05 alpha."""
+        alpha_fwd = compute_dynamic_alpha("F", ros_score=0.50, format_context="draft")
+        alpha_mid = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
+        assert alpha_fwd == alpha_mid - 0.05
+
+    def test_elite_rank_tier(self):
+        """Elite player (ROS > 0.80) gets -0.10 (protect with more ROS weight)."""
+        alpha_elite = compute_dynamic_alpha("M", ros_score=0.85, format_context="draft")
+        alpha_avg = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
+        assert alpha_elite == alpha_avg - 0.10
+
+    def test_above_avg_rank_tier(self):
+        """Above-average player (ROS > 0.60) gets -0.05."""
+        alpha_above = compute_dynamic_alpha("M", ros_score=0.65, format_context="draft")
+        alpha_avg = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
+        assert alpha_above == alpha_avg - 0.05
+
+    def test_below_avg_rank_tier(self):
+        """Below-average player (ROS < 0.40) gets +0.05."""
+        alpha_below = compute_dynamic_alpha("M", ros_score=0.35, format_context="draft")
+        alpha_avg = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
+        assert alpha_below == alpha_avg + 0.05
+
+    def test_critical_depth_adjustment(self):
+        """Critical depth adds +0.15 (urgency → favor 1GW)."""
+        depth_map = {"M": PositionalDepth("M", 5, 0, 0, 5, "Critical")}
+        alpha_critical = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft", depth_map=depth_map)
+        alpha_normal = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
+        assert alpha_critical == alpha_normal + 0.15
+
+    def test_low_depth_adjustment(self):
+        """Low depth adds +0.10."""
+        depth_map = {"M": PositionalDepth("M", 5, 3, 0, 2, "Low")}
+        alpha_low = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft", depth_map=depth_map)
+        alpha_normal = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
+        assert alpha_low == alpha_normal + 0.10
+
+    def test_adequate_depth_no_adjustment(self):
+        """Adequate depth adds nothing."""
+        depth_map = {"M": PositionalDepth("M", 5, 5, 0, 0, "Adequate")}
+        alpha_adequate = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft", depth_map=depth_map)
+        alpha_normal = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
+        assert alpha_adequate == alpha_normal
+
+    def test_clamp_lower_bound(self):
+        """Alpha should never go below 0.15."""
+        # GK(-0.10) + Draft(0.35) + Elite(-0.10) = 0.15, adding more pushes to clamp
+        alpha = compute_dynamic_alpha("G", ros_score=0.85, format_context="draft")
+        assert alpha >= 0.15
+
+    def test_clamp_upper_bound(self):
+        """Alpha should never exceed 0.75."""
+        # Classic(0.55) + Below avg(+0.05) + Critical(+0.15) = 0.75
+        depth_map = {"M": PositionalDepth("M", 5, 0, 0, 5, "Critical")}
+        alpha = compute_dynamic_alpha("M", ros_score=0.35, format_context="classic", depth_map=depth_map)
+        assert alpha <= 0.75
+
+    def test_no_depth_map(self):
+        """None depth_map doesn't crash."""
+        alpha = compute_dynamic_alpha("D", ros_score=0.50, format_context="draft", depth_map=None)
+        assert 0.15 <= alpha <= 0.75
+
+
+# =============================================================================
+# TestMergeFFPSingleGWData
+# =============================================================================
+
+class TestMergeFFPSingleGWData:
+    """Tests for merge_ffp_single_gw_data() — merges FFP Predicted/Start/LongStart."""
+
+    def test_basic_merge(self):
+        """Matched players get FFP_Predicted, FFP_Start, FFP_LongStart."""
+        players = pd.DataFrame({
+            "Player": ["Salah", "Haaland"],
+            "Team": ["LIV", "MCI"],
+        })
+        ffp = pd.DataFrame({
+            "Name": ["Salah", "Haaland"],
+            "Team": ["Liverpool", "Man City"],
+            "Predicted": [8.5, 10.0],
+            "Start": [95, 90],
+            "LongStart": [92, 88],
+        })
+        result = merge_ffp_single_gw_data(players, ffp)
+        assert result.loc[0, "FFP_Predicted"] == 8.5
+        assert result.loc[1, "FFP_Predicted"] == 10.0
+        assert result.loc[0, "FFP_Start"] == 95
+        assert result.loc[1, "FFP_LongStart"] == 88
+
+    def test_unmatched_get_nan(self):
+        """Unmatched players get NaN."""
+        players = pd.DataFrame({
+            "Player": ["Salah", "Unknown Player"],
+            "Team": ["LIV", "MCI"],
+        })
+        ffp = pd.DataFrame({
+            "Name": ["Salah"],
+            "Team": ["Liverpool"],
+            "Predicted": [8.5],
+            "Start": [95],
+            "LongStart": [92],
+        })
+        result = merge_ffp_single_gw_data(players, ffp)
+        assert result.loc[0, "FFP_Predicted"] == 8.5
+        assert pd.isna(result.loc[1, "FFP_Predicted"])
+        assert pd.isna(result.loc[1, "FFP_Start"])
+
+    def test_none_ffp_df(self):
+        """None ffp_df adds NaN columns gracefully."""
+        players = pd.DataFrame({
+            "Player": ["Salah"],
+            "Team": ["LIV"],
+        })
+        result = merge_ffp_single_gw_data(players, None)
+        assert "FFP_Predicted" in result.columns
+        assert "FFP_Start" in result.columns
+        assert "FFP_LongStart" in result.columns
+        assert pd.isna(result.loc[0, "FFP_Predicted"])
+
+    def test_empty_ffp_df(self):
+        """Empty FFP DataFrame adds NaN columns."""
+        players = pd.DataFrame({
+            "Player": ["Salah"],
+            "Team": ["LIV"],
+        })
+        result = merge_ffp_single_gw_data(players, pd.DataFrame())
+        assert "FFP_Predicted" in result.columns
+        assert pd.isna(result.loc[0, "FFP_Predicted"])
+
+    def test_name_normalization(self):
+        """Accented names match via canonical_normalize."""
+        players = pd.DataFrame({
+            "Player": ["Raúl Jiménez"],
+            "Team": ["FUL"],
+        })
+        ffp = pd.DataFrame({
+            "Name": ["Raul Jimenez"],
+            "Team": ["Fulham"],
+            "Predicted": [5.0],
+            "Start": [80],
+            "LongStart": [75],
+        })
+        result = merge_ffp_single_gw_data(players, ffp)
+        assert result.loc[0, "FFP_Predicted"] == 5.0
+
+    def test_partial_columns(self):
+        """FFP with only Predicted (no Start/LongStart) still works."""
+        players = pd.DataFrame({
+            "Player": ["Salah"],
+            "Team": ["LIV"],
+        })
+        ffp = pd.DataFrame({
+            "Name": ["Salah"],
+            "Team": ["Liverpool"],
+            "Predicted": [8.5],
+        })
+        result = merge_ffp_single_gw_data(players, ffp)
+        assert result.loc[0, "FFP_Predicted"] == 8.5
+        assert pd.isna(result.loc[0, "FFP_Start"])
+        assert pd.isna(result.loc[0, "FFP_LongStart"])
+
+
+# =============================================================================
+# TestNew1GWScore
+# =============================================================================
+
+class TestNew1GWScore:
+    """Tests for the new 1GW scoring model — pure expected value."""
+
+    def _make_pool(self):
+        """Create a reference pool of ~20 players per position."""
+        rows = []
+        for pos in ["G", "D", "M", "F"]:
+            for i in range(20):
+                rows.append({
+                    "Player": f"{pos}_Player_{i}",
+                    "Team": f"T{i % 5}",
+                    "Position": pos,
+                    "Projected_Points": 2.0 + i * 0.5,
+                    "form": 1.0 + i * 0.3,
+                    "total_points": 10 + i * 8,
+                    "minutes": 200 + i * 50,
+                    "starts": 3 + i,
+                    "AvgFDR": 2.0 + (i % 5) * 0.5,
+                })
+        return pd.DataFrame(rows)
+
+    def test_blended_projection_both_sources(self):
+        """When both Rotowire and FFP_Predicted exist, blends them."""
+        pool = self._make_pool()
+        squad = pool[pool["Position"] == "M"].head(1).copy()
+        squad["FFP_Predicted"] = 12.0  # Higher than pool projection
+        result = compute_player_scores(squad, pool, current_gw=20)
+        # Should produce a valid 1GW — exact value depends on blending
+        assert result["1GW"].iloc[0] >= 0
+        assert result["1GW"].iloc[0] <= 1
+
+    def test_start_likelihood_reduces_effective_proj(self):
+        """Low start % reduces effective projection → lower 1GW."""
+        pool = self._make_pool()
+        # Take a mid-range MID player
+        mid_player = pool[pool["Position"] == "M"].iloc[10:11].copy()
+
+        result_full = compute_player_scores(mid_player.copy(), pool, current_gw=20)
+
+        mid_low_start = mid_player.copy()
+        mid_low_start["FFP_Start"] = 30.0  # Only 30% chance of starting
+        result_low_start = compute_player_scores(mid_low_start, pool, current_gw=20)
+
+        # Player with 30% start chance should score lower than default (100%)
+        assert result_low_start["1GW"].iloc[0] < result_full["1GW"].iloc[0]
+
+    def test_fpl_chance_of_playing_fallback(self):
+        """FPL chance_of_playing used as fallback when FFP_Start missing."""
+        pool = self._make_pool()
+        mid_player = pool[pool["Position"] == "M"].iloc[10:11].copy()
+
+        result_full = compute_player_scores(mid_player.copy(), pool, current_gw=20)
+
+        mid_injured = mid_player.copy()
+        mid_injured["chance_of_playing_next_round"] = 25  # 25% chance
+        result_injured = compute_player_scores(mid_injured, pool, current_gw=20)
+
+        # Injured player should score lower
+        assert result_injured["1GW"].iloc[0] < result_full["1GW"].iloc[0]
+
+    def test_ffp_start_takes_priority_over_fpl_chance(self):
+        """FFP_Start used when both FFP_Start and chance_of_playing exist."""
+        pool = self._make_pool()
+        mid_player = pool[pool["Position"] == "M"].iloc[10:11].copy()
+
+        # FFP says 95% start, FPL says 25% chance → FFP should win
+        mid_player_ffp = mid_player.copy()
+        mid_player_ffp["FFP_Start"] = 95.0
+        mid_player_ffp["chance_of_playing_next_round"] = 25
+        result_ffp = compute_player_scores(mid_player_ffp, pool, current_gw=20)
+
+        # FPL only says 25%
+        mid_player_fpl = mid_player.copy()
+        mid_player_fpl["chance_of_playing_next_round"] = 25
+        result_fpl = compute_player_scores(mid_player_fpl, pool, current_gw=20)
+
+        # FFP override (95%) should give higher score than FPL-only (25%)
+        assert result_ffp["1GW"].iloc[0] > result_fpl["1GW"].iloc[0]

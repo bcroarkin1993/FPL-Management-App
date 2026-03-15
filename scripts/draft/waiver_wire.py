@@ -33,6 +33,7 @@ from scripts.common.player_matching import canonical_normalize, get_player_regis
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.analytics import (
     compute_player_scores,
+    compute_dynamic_alpha,
     compute_healthy_form,
     compute_positional_depth,
     compute_transfer_urgency,
@@ -40,6 +41,7 @@ from scripts.common.analytics import (
     positional_rank,
     dampen_form_by_starts,
     merge_season_projections,
+    merge_ffp_single_gw_data,
 )
 from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
 
@@ -969,18 +971,15 @@ def _compute_transfer_suggestions(
     top_n: int = 3,
     depth_map: Optional[Dict] = None,
 ) -> List[Dict]:
-    """Core suggestion logic: position-locked swaps with context-aware injury handling.
+    """Core suggestion logic: position-locked swaps using pre-computed Transfer/Keep Scores.
 
-    Uses fixed internal weights for asymmetric add/drop scoring:
-    - Adds favor projections (immediate impact)
-    - Drops favor season points (proven value)
+    Uses Transfer Score (available players) and Keep Score (roster players) from
+    compute_player_scores() with dynamic alpha blending. Injury adjustments are
+    applied on top of these pre-computed scores.
     """
     suggestions = []
 
-    # Fixed internal weights for suggestion scoring
-    W_PROJ, W_FORM, W_FDR, W_SEASON = 0.35, 0.25, 0.20, 0.20
-
-    # Season points for percentile calculation (across entire roster)
+    # Season points for injury hold logic
     roster_season_pts = pd.to_numeric(
         roster_df.get('Season_Points', pd.Series(dtype=float)), errors='coerce'
     ).dropna()
@@ -993,111 +992,49 @@ def _compute_transfer_suggestions(
         if len(roster_pos) <= 1 or len(avail_pos) == 0:
             continue
 
-        # Normalize projected points column for roster (may be Projected_Points)
-        if 'Points' not in roster_pos.columns and 'Projected_Points' in roster_pos.columns:
-            roster_pos['Points'] = roster_pos['Projected_Points']
-        elif 'Projected_Points' in roster_pos.columns:
-            roster_pos['Points'] = roster_pos['Points'].fillna(roster_pos['Projected_Points'])
+        # Apply injury adjustments to pre-computed scores
+        for idx in avail_pos.index:
+            row = avail_pos.loc[idx]
+            mult = _availability_multiplier(
+                row.get('chance_of_playing_next_round'),
+                row.get('status')
+            )
+            base_score = float(row.get('Transfer Score', 0) or 0)
+            avail_pos.loc[idx, '_adj_value'] = base_score * mult
 
-        # Combine for joint normalization
-        roster_pos['_source'] = 'roster'
-        avail_pos['_source'] = 'avail'
-        combined = pd.concat([roster_pos, avail_pos], ignore_index=True)
-
-        # Ensure numeric columns
-        combined['Points'] = pd.to_numeric(combined.get('Points'), errors='coerce').fillna(0)
-        combined['Form'] = pd.to_numeric(combined.get('Form'), errors='coerce').fillna(0)
-        combined['AvgFDRNextN'] = pd.to_numeric(combined.get('AvgFDRNextN'), errors='coerce').fillna(3)
-        combined['Season_Points'] = pd.to_numeric(combined.get('Season_Points'), errors='coerce').fillna(0)
-
-        # Joint min-max normalization
-        combined['Proj_norm'] = _min_max_norm(combined['Points']).fillna(0.5)
-        combined['Form_raw_norm'] = _min_max_norm(combined['Form']).fillna(0.5)
-        combined['FDREase'] = 6 - combined['AvgFDRNextN']
-        combined['FDREase_norm'] = _min_max_norm(combined['FDREase']).fillna(0.5)
-        combined['Season_norm'] = _min_max_norm(combined['Season_Points']).fillna(0.5)
-
-        # Dampen form by starts (ROS-oriented — suggestions are long-term moves)
-        starts = pd.to_numeric(combined.get('starts', 0), errors='coerce').fillna(0)
-        combined['Form_norm'] = dampen_form_by_starts(combined['Form_raw_norm'], starts)
-
-        # Multi-GW projection blend (40% single-GW, 60% multi-GW)
-        combined['MultiGW_Proj'] = pd.to_numeric(combined.get('MultiGW_Proj', 0), errors='coerce').fillna(0)
-        combined['MultiGW_norm'] = _min_max_norm(combined['MultiGW_Proj']).fillna(0.5)
-        combined['BlendedProj_norm'] = 0.4 * combined['Proj_norm'] + 0.6 * combined['MultiGW_norm']
-
-        # Asymmetric weight tilt: adds favor projections (immediate impact),
-        # drops favor season points (proven value; low projection may just be
-        # rotation or a tough matchup).  Tilt redistributes weight between
-        # proj and season while keeping form/FDR unchanged.
-        TILT = 0.5  # portion of the "other" weight to redistribute
-        w_proj_add   = W_PROJ   + TILT * W_SEASON
-        w_season_add = W_SEASON * (1 - TILT)
-        w_proj_drop   = W_PROJ   * (1 - TILT)
-        w_season_drop = W_SEASON + TILT * W_PROJ
-
-        denom_add  = max(w_proj_add  + W_FORM + W_FDR + w_season_add,  1e-9)
-        denom_drop = max(w_proj_drop + W_FORM + W_FDR + w_season_drop, 1e-9)
-
-        # Compute context-aware base values per source (using blended multi-GW projections)
-        combined['base_value_add'] = (
-            w_proj_add   * combined['BlendedProj_norm'] +
-            W_FORM       * combined['Form_norm'] +
-            W_FDR        * combined['FDREase_norm'] +
-            w_season_add * combined['Season_norm']
-        ) / denom_add
-
-        combined['base_value_drop'] = (
-            w_proj_drop   * combined['BlendedProj_norm'] +
-            W_FORM        * combined['Form_norm'] +
-            W_FDR         * combined['FDREase_norm'] +
-            w_season_drop * combined['Season_norm']
-        ) / denom_drop
-
-        # Apply injury adjustments using the appropriate base value
-        combined['player_value'] = 0.0
-
-        for idx in combined.index:
-            row = combined.loc[idx]
-            if row['_source'] == 'avail':
-                mult = _availability_multiplier(
-                    row.get('chance_of_playing_next_round'),
-                    row.get('status')
-                )
-                combined.loc[idx, 'player_value'] = row['base_value_add'] * mult
+        for idx in roster_pos.index:
+            row = roster_pos.loc[idx]
+            sp = pd.to_numeric(row.get('Season_Points'), errors='coerce')
+            if not pd.isna(sp) and not roster_season_pts.empty:
+                pctile = float((roster_season_pts < sp).sum()) / len(roster_season_pts)
             else:
-                # Roster: context-aware hold logic
-                sp = pd.to_numeric(row.get('Season_Points'), errors='coerce')
-                if not pd.isna(sp) and not roster_season_pts.empty:
-                    pctile = float((roster_season_pts < sp).sum()) / len(roster_season_pts)
-                else:
-                    pctile = 0.5
-                factor = _roster_injury_factor(
-                    row.get('chance_of_playing_next_round'),
-                    row.get('status'),
-                    row.get('news'),
-                    pctile
-                )
-                combined.loc[idx, 'player_value'] = row['base_value_drop'] * factor
+                pctile = 0.5
+            factor = _roster_injury_factor(
+                row.get('chance_of_playing_next_round'),
+                row.get('status'),
+                row.get('news'),
+                pctile
+            )
+            base_score = float(row.get('Keep Score', 0) or 0)
+            roster_pos.loc[idx, '_adj_value'] = base_score * factor
 
         # Find worst roster player and best available player
-        roster_vals = combined[combined['_source'] == 'roster'].sort_values('player_value')
-        avail_vals = combined[combined['_source'] == 'avail'].sort_values('player_value', ascending=False)
+        roster_sorted = roster_pos.sort_values('_adj_value')
+        avail_sorted = avail_pos.sort_values('_adj_value', ascending=False)
 
-        if roster_vals.empty or avail_vals.empty:
+        if roster_sorted.empty or avail_sorted.empty:
             continue
 
-        worst_roster = roster_vals.iloc[0]
-        best_avail = avail_vals.iloc[0]
+        worst_roster = roster_sorted.iloc[0]
+        best_avail = avail_sorted.iloc[0]
 
-        txn_score = best_avail['player_value'] - worst_roster['player_value']
+        txn_score = best_avail['_adj_value'] - worst_roster['_adj_value']
 
-        # Minimum threshold scaled by drop player quality — protect elite players
-        # from marginal swaps (e.g., don't suggest dropping Pickford for a tiny edge)
-        drop_season = float(worst_roster.get('Season_norm', 0.5) or 0.5)
-        if drop_season > 0.75:
+        # Minimum threshold scaled by drop player Keep Score — protect elite players
+        keep_val = float(worst_roster.get('Keep Score', 0.5) or 0.5)
+        if keep_val > 0.7:
             min_threshold = 0.15  # elite: need 15%+ improvement
-        elif drop_season > 0.5:
+        elif keep_val > 0.5:
             min_threshold = 0.08  # above-avg: need 8%+ improvement
         else:
             min_threshold = 0.02  # weak players: 2% is enough
@@ -1109,7 +1046,7 @@ def _compute_transfer_suggestions(
                 'drop_player': str(worst_roster.get('Player', '')),
                 'drop_team': str(worst_roster.get('Team', '')),
                 'drop_position': pos,
-                'drop_value': round(float(worst_roster['player_value']), 3),
+                'drop_value': round(float(worst_roster.get('Keep Score', 0)), 3),
                 'drop_form': round(float(worst_roster.get('Form', 0) or 0), 1),
                 'drop_season_pts': int(float(worst_roster.get('Season_Points', 0) or 0)),
                 'drop_injury': _format_availability(
@@ -1120,7 +1057,7 @@ def _compute_transfer_suggestions(
                 'add_player': str(best_avail.get('Player', '')),
                 'add_team': str(best_avail.get('Team', '')),
                 'add_position': pos,
-                'add_value': round(float(best_avail['player_value']), 3),
+                'add_value': round(float(best_avail.get('Transfer Score', 0)), 3),
                 'add_proj_pts': round(float(best_avail.get('Points', 0) or 0), 1),
                 'add_form': round(float(best_avail.get('Form', 0) or 0), 1),
                 'add_injury': _format_availability(
@@ -1258,26 +1195,24 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
 def _compute_waiver_score(df: pd.DataFrame,
                           all_players_df: Optional[pd.DataFrame],
                           current_gw: int = 19) -> pd.DataFrame:
-    """Compute dual waiver scores using positional percentile scoring.
+    """Compute waiver scores using positional percentile scoring.
 
-    Delegates to shared compute_player_scores() — scores are positional
-    percentiles (0-1) where 0.85 = top 15% at this position.
+    Delegates to shared compute_player_scores() with format_context="draft".
+    Returns 1GW, ROS, Transfer Score, and Keep Score columns.
     """
-    return compute_player_scores(df, all_players_df, current_gw)
+    return compute_player_scores(df, all_players_df, current_gw, format_context="draft")
 
 def _compute_keep_score(roster_df: pd.DataFrame,
                         all_players_df: Optional[pd.DataFrame],
-                        current_gw: int = 19) -> pd.DataFrame:
-    """Compute dual keep scores using positional percentile scoring.
+                        current_gw: int = 19,
+                        depth_map: Optional[Dict] = None) -> pd.DataFrame:
+    """Compute keep scores using positional percentile scoring.
 
-    Delegates to shared compute_player_scores() then renames columns
-    from 1GW/ROS to Keep 1GW/Keep ROS.
+    Delegates to shared compute_player_scores() with format_context="draft"
+    and depth_map for squad depth awareness.
     """
-    df = compute_player_scores(roster_df, all_players_df, current_gw)
-    df["Keep 1GW"] = df["1GW"]
-    df["Keep ROS"] = df["ROS"]
-    df.drop(columns=["1GW", "ROS"], inplace=True, errors="ignore")
-    return df
+    return compute_player_scores(roster_df, all_players_df, current_gw,
+                                 format_context="draft", depth_map=depth_map)
 
 # ---------------------------
 # AZURE OPENAI (OPTIONAL)
@@ -1299,17 +1234,17 @@ def _azure_suggest_moves(available_df: pd.DataFrame,
             base_url=f"{endpoint}/openai/deployments/{deployment}",
             api_key=api_key,
         )
-        avail_cols = ["Player", "Team", "Position", "Points", "Form", "AvgFDRNextN", "1GW", "ROS"]
+        avail_cols = ["Player", "Team", "Position", "Points", "Form", "AvgFDRNextN", "1GW", "ROS", "Transfer Score"]
         avail_cols = [c for c in avail_cols if c in available_df.columns]
         top_adds = available_df.head(top_k)[avail_cols]
-        drop_cols = ["Player", "Team", "Position", "Season_Points", "Form", "AvgFDRNextN", "Keep 1GW", "Keep ROS"]
+        drop_cols = ["Player", "Team", "Position", "Season_Points", "Form", "AvgFDRNextN", "1GW", "ROS", "Keep Score"]
         drop_cols = [c for c in drop_cols if c in roster_df.columns]
-        top_drops = roster_df.nsmallest(top_k, "Keep ROS")[drop_cols]
+        top_drops = roster_df.nsmallest(top_k, "Keep Score")[drop_cols]
 
         prompt = (
-            "You are an FPL Draft assistant. Based on ROS score (adds) and Keep ROS (drops), "
-            "suggest the best 3 add/drop pairs. Prefer players with higher ROS to add, and "
-            "players with lower Keep ROS to drop. Keep positional balance where possible.\n\n"
+            "You are an FPL Draft assistant. Based on Transfer Score (adds) and Keep Score (drops), "
+            "suggest the best 3 add/drop pairs. Prefer players with higher Transfer Score to add, and "
+            "players with lower Keep Score to drop. Keep positional balance where possible.\n\n"
             f"Top Adds:\n{top_adds.to_string(index=False)}\n\n"
             f"Potential Drops:\n{top_drops.to_string(index=False)}\n\n"
             "Return 3 bullet points like: "
@@ -1745,15 +1680,24 @@ def show_waiver_wire_page():
     if not my_roster.empty:
         my_roster = merge_season_projections(my_roster, season_rankings_df)
 
+    # --- FFP Single-GW Data (Predicted, Start, LongStart) ---
+    if not avail_all.empty:
+        avail_all = merge_ffp_single_gw_data(avail_all, ffp_df)
+    if not my_roster.empty:
+        my_roster = merge_ffp_single_gw_data(my_roster, ffp_df)
+
     # --- Positional Depth ---
     depth_map = {}
     if not my_roster.empty:
         depth_map = compute_positional_depth(my_roster)
 
     # --- Compute transfer suggestions (before rendering) ---
+    # Pre-compute scores on both pools so _compute_transfer_suggestions can use them
     suggestions = []
     if not my_roster.empty and not avail_all.empty:
         try:
+            avail_all = _compute_waiver_score(avail_all, fpl_stats, current_gw=current_gw)
+            my_roster = _compute_keep_score(my_roster, fpl_stats, current_gw=current_gw, depth_map=depth_map)
             suggestions = _compute_transfer_suggestions(
                 avail_all, my_roster,
                 top_n=3, depth_map=depth_map,
@@ -1771,8 +1715,10 @@ def show_waiver_wire_page():
     # MY ROSTER SECTION (with depth card)
     # ---------------------------
     if not my_roster.empty:
-        my_roster = _compute_keep_score(my_roster, fpl_stats, current_gw=current_gw)
-        my_roster = my_roster.sort_values("Keep ROS", ascending=False).reset_index(drop=True)
+        # Scores already computed above; compute if not yet done (e.g. empty avail_all path)
+        if "Keep Score" not in my_roster.columns:
+            my_roster = _compute_keep_score(my_roster, fpl_stats, current_gw=current_gw, depth_map=depth_map)
+        my_roster = my_roster.sort_values("Keep Score", ascending=False).reset_index(drop=True)
 
         st.subheader(f"Your Squad — {my_team.get('team_name', '(unknown)')}")
 
@@ -1787,14 +1733,14 @@ def show_waiver_wire_page():
         for col in _display_roster.select_dtypes(include=[np.number]).columns:
             _display_roster[col] = _display_roster[col].round(2)
 
-        display_cols_roster = ["Player", "Team", "Position", "Pos_Rank", "Season_Points", "Projected_Points", "Form", "AvgFDRNextN", "Keep 1GW", "Keep ROS"]
+        display_cols_roster = ["Player", "Team", "Position", "Pos_Rank", "Season_Points", "Projected_Points", "Form", "AvgFDRNextN", "1GW", "ROS", "Keep Score"]
         display_cols_roster = [c for c in display_cols_roster if c in _display_roster.columns]
         roster_show = _display_roster[display_cols_roster].rename(columns={"Pos_Rank": "Pos Rank"})
         render_styled_table(
             roster_show,
             col_formats={"Projected_Points": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}",
-                         "Keep 1GW": "{:.2f}", "Keep ROS": "{:.2f}"},
-            positive_color_cols=["Keep 1GW", "Keep ROS"],
+                         "1GW": "{:.2f}", "ROS": "{:.2f}", "Keep Score": "{:.2f}"},
+            positive_color_cols=["1GW", "ROS", "Keep Score"],
         )
     else:
         st.subheader(f"Your Squad — {my_team.get('team_name', '(unknown)')}")
@@ -1809,21 +1755,23 @@ def show_waiver_wire_page():
     avail_display = avail_all.copy()
     if pos_filter:
         avail_display = avail_display[avail_display["Position"].isin(pos_filter)]
-    avail_display = _compute_waiver_score(avail_display, fpl_stats, current_gw=current_gw)
-    avail_display = avail_display.sort_values("ROS", ascending=False).reset_index(drop=True)
+    # Scores already computed above; compute if not yet done
+    if "Transfer Score" not in avail_display.columns:
+        avail_display = _compute_waiver_score(avail_display, fpl_stats, current_gw=current_gw)
+    avail_display = avail_display.sort_values("Transfer Score", ascending=False).reset_index(drop=True)
 
     _display_avail = avail_display.copy()
     for col in _display_avail.select_dtypes(include=[np.number]).columns:
         _display_avail[col] = _display_avail[col].round(2)
 
     st.subheader("Available Players (ranked)")
-    display_cols_avail = ["Player", "Team", "Position", "Points", "Form", "AvgFDRNextN", "Season_Points", "1GW", "ROS"]
+    display_cols_avail = ["Player", "Team", "Position", "Points", "Form", "AvgFDRNextN", "Season_Points", "1GW", "ROS", "Transfer Score"]
     display_cols_avail = [c for c in display_cols_avail if c in _display_avail.columns]
     render_styled_table(
         _display_avail[display_cols_avail].reset_index(drop=True),
         col_formats={"Points": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}",
-                     "1GW": "{:.2f}", "ROS": "{:.2f}"},
-        positive_color_cols=["1GW", "ROS"],
+                     "1GW": "{:.2f}", "ROS": "{:.2f}", "Transfer Score": "{:.2f}"},
+        positive_color_cols=["1GW", "ROS", "Transfer Score"],
         max_height=500,
     )
 
