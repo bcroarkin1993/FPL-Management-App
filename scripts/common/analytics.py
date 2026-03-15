@@ -244,12 +244,21 @@ def compute_player_scores(
     season_quality = p * season_pts_pctile + (1 - p) * season_proj_pctile
 
     # Multi-GW projection percentile
+    # MultiGW_Proj is only on roster/available players, not in the reference pool.
+    # Use points_per_game * 3 as proxy in reference pool for fair percentiling.
     if "MultiGW_Proj" not in result.columns:
         result["MultiGW_Proj"] = 0
     result["MultiGW_Proj"] = pd.to_numeric(result["MultiGW_Proj"], errors="coerce").fillna(0)
-    multigw_pctile = positional_percentile(
-        result, all_players_df, "MultiGW_Proj", ref_value_col="MultiGW_Proj", min_minutes=90
-    ).fillna(0.5)
+    if all_players_df is not None and "MultiGW_Proj" not in all_players_df.columns and "points_per_game" in all_players_df.columns:
+        ref_mgw = all_players_df.copy()
+        ref_mgw["_mgw_proxy"] = pd.to_numeric(ref_mgw["points_per_game"], errors="coerce").fillna(0) * 3
+        multigw_pctile = positional_percentile(
+            result, ref_mgw, "MultiGW_Proj", ref_value_col="_mgw_proxy", min_minutes=90
+        ).fillna(0.5)
+    else:
+        multigw_pctile = positional_percentile(
+            result, all_players_df, "MultiGW_Proj", ref_value_col="MultiGW_Proj", min_minutes=90
+        ).fillna(0.5)
 
     # Form dampened by starts
     starts_col = result["starts"] if "starts" in result.columns else pd.Series(0, index=result.index)
@@ -257,12 +266,15 @@ def compute_player_scores(
     form_dampened_pctile = dampen_form_by_starts(form_pctile, starts)
 
     # FDR ease percentile (6 - AvgFDR → higher = easier fixtures)
+    # Compute _FDREase on the reference pool too so we get a true positional percentile.
     result["_FDREase"] = 6 - result[fdr_col]
-    fdr_ease_pctile = positional_percentile(
-        result, all_players_df, "_FDREase", ref_value_col="_FDREase", min_minutes=90
-    ).fillna(0.5)
-    # FDR ease is position-agnostic so fall back to min-max if percentile gave 0.5 everywhere
-    if all_players_df is None or "_FDREase" not in all_players_df.columns:
+    if all_players_df is not None and fdr_col in all_players_df.columns:
+        ref_fdr = all_players_df.copy()
+        ref_fdr["_FDREase"] = 6 - pd.to_numeric(ref_fdr[fdr_col], errors="coerce").fillna(3)
+        fdr_ease_pctile = positional_percentile(
+            result, ref_fdr, "_FDREase", ref_value_col="_FDREase", min_minutes=90
+        ).fillna(0.5)
+    else:
         fdr_ease_pctile = _min_max_norm_series(result["_FDREase"]).fillna(0.5)
 
     # Dynamic ROS weights (sum = 1.0 at all gameweeks)
