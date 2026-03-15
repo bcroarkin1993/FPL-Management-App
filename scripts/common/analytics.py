@@ -26,54 +26,6 @@ _POS_LABELS = {"G": "GK", "D": "DEF", "M": "MID", "F": "FWD"}
 
 
 # =============================================================================
-# POSITIONAL SCARCITY
-# =============================================================================
-# GK and FWD have fewer lineup slots and less rotation, making quality players
-# at those positions harder to replace.  Applied as a multiplicative boost to
-# Keep scores (clipped to 1.0).
-POSITIONAL_SCARCITY = {"G": 1.20, "F": 1.10, "D": 1.00, "M": 1.00}
-
-# =============================================================================
-# ROS WEIGHT REBALANCING
-# =============================================================================
-# For ROS scoring, dynamically shift weight from projection + form toward
-# season points as the season progresses.  Early season: small shift (projections
-# still matter).  Late season: large shift (track record dominates).
-
-def ros_rebalanced_weights(
-    w_proj: float, w_form: float, w_fdr: float, w_season: float,
-    current_gw: int, w_extra: float = 0.0,
-) -> tuple:
-    """Compute ROS-rebalanced weights based on season progress.
-
-    Shifts weight from projection (60%) and form (40%) toward season points.
-    The total shift scales linearly with gameweek progress:
-      - GW  1: shift ≈ 0.08  (minimal)
-      - GW 19: shift ≈ 0.20  (moderate)
-      - GW 30: shift ≈ 0.30  (significant — season track record dominates)
-      - GW 38: shift ≈ 0.37  (near-maximum)
-
-    Returns:
-        (w_proj_ros, w_form_ros, w_fdr, w_season_ros, w_extra) — same order as inputs.
-    """
-    progress = season_progress_weight(current_gw)
-    total_shift = 0.05 + 0.35 * progress  # 0.085 at GW1 → 0.365 at GW38
-
-    # Take 60% from projection, 40% from form, respecting 0.05 minimums
-    proj_shift = min(total_shift * 0.6, max(w_proj - 0.05, 0))
-    form_shift = min(total_shift * 0.4, max(w_form - 0.05, 0))
-    actual_shift = proj_shift + form_shift
-
-    return (
-        w_proj - proj_shift,
-        w_form - form_shift,
-        w_fdr,
-        w_season + actual_shift,
-        w_extra,
-    )
-
-
-# =============================================================================
 # SEASON PROGRESS — TIME-DECAY BLEND
 # =============================================================================
 # Early season: trust Rotowire season projections more (small sample of actuals).
@@ -206,6 +158,128 @@ def positional_percentile(
         pool = pos_values[pos]
         n_below = np.sum(pool < val)
         result.at[idx] = float(n_below) / len(pool)
+
+    return result
+
+
+def compute_player_scores(
+    df: pd.DataFrame,
+    all_players_df: Optional[pd.DataFrame],
+    current_gw: int,
+) -> pd.DataFrame:
+    """Compute dual player scores: 1GW (this-week) and ROS (rest-of-season).
+
+    Uses positional percentile scoring against the full FPL player pool.
+    A score of 0.85 means "top 15% at this position" — immediately interpretable.
+
+    1GW (fixed weights):
+        0.55 * proj_pctile + 0.25 * form_pctile + 0.20 * season_pts_pctile
+
+    ROS (GW-dynamic weights):
+        season_quality = p * season_pts_pctile + (1-p) * season_proj_pctile
+        Score = w_sq * season_quality + w_mgw * multigw_proj_pctile
+              + w_form * form_dampened_pctile + w_fdr * fdr_ease_pctile
+
+    Args:
+        df: Player DataFrame with columns like Projected_Points/Points, Form,
+            Season_Points/total_points, AvgFDRNextN/AvgFDR, MultiGW_Proj,
+            SeasonProjection, starts, Position.
+        all_players_df: Full FPL player pool (~700 players) for percentile reference.
+        current_gw: Current gameweek number.
+
+    Returns:
+        df with '1GW' and 'ROS' columns added.
+    """
+    result = df.copy()
+
+    # --- Resolve column names (Draft vs Classic use different naming) ---
+    proj_col = "Projected_Points" if "Projected_Points" in result.columns else "Points"
+    season_col = "Season_Points" if "Season_Points" in result.columns else "total_points"
+    form_col = "HealthyForm" if "HealthyForm" in result.columns else "Form" if "Form" in result.columns else "form"
+    fdr_col = "AvgFDRNextN" if "AvgFDRNextN" in result.columns else "AvgFDR"
+
+    # Coerce numerics
+    result[proj_col] = pd.to_numeric(result.get(proj_col), errors="coerce").fillna(0)
+    result[season_col] = pd.to_numeric(result.get(season_col), errors="coerce").fillna(0)
+    result[form_col] = pd.to_numeric(result.get(form_col), errors="coerce").fillna(0)
+    result[fdr_col] = pd.to_numeric(result.get(fdr_col), errors="coerce").fillna(3)
+
+    # Resolve reference column names in all_players_df
+    ref_form_col = "form" if (all_players_df is not None and "form" in all_players_df.columns) else form_col
+    ref_season_col = "total_points" if (all_players_df is not None and "total_points" in all_players_df.columns) else season_col
+
+    # --- Shared percentiles ---
+    proj_pctile = positional_percentile(
+        result, all_players_df, proj_col, ref_value_col=proj_col, min_minutes=90
+    ).fillna(0.5)
+
+    form_pctile = positional_percentile(
+        result, all_players_df, form_col, ref_value_col=ref_form_col, min_minutes=90
+    ).fillna(0.5)
+
+    season_pts_pctile = positional_percentile(
+        result, all_players_df, season_col, ref_value_col=ref_season_col, min_minutes=90
+    ).fillna(0.5)
+
+    # --- 1GW Score (fixed weights) ---
+    result["1GW"] = (
+        0.55 * proj_pctile +
+        0.25 * form_pctile +
+        0.20 * season_pts_pctile
+    )
+
+    # --- ROS Score (dynamic weights) ---
+    p = season_progress_weight(current_gw)
+
+    # Season quality: blend actual season points with Rotowire season projection
+    if "SeasonProjection" in result.columns and result["SeasonProjection"].notna().any():
+        ref_season_proj = "SeasonProjection" if (all_players_df is not None and "SeasonProjection" in all_players_df.columns) else None
+        season_proj_pctile = positional_percentile(
+            result, all_players_df, "SeasonProjection",
+            ref_value_col=ref_season_proj, min_minutes=90
+        ).fillna(0.5)
+    else:
+        season_proj_pctile = season_pts_pctile  # fallback to actuals
+
+    season_quality = p * season_pts_pctile + (1 - p) * season_proj_pctile
+
+    # Multi-GW projection percentile
+    if "MultiGW_Proj" not in result.columns:
+        result["MultiGW_Proj"] = 0
+    result["MultiGW_Proj"] = pd.to_numeric(result["MultiGW_Proj"], errors="coerce").fillna(0)
+    multigw_pctile = positional_percentile(
+        result, all_players_df, "MultiGW_Proj", ref_value_col="MultiGW_Proj", min_minutes=90
+    ).fillna(0.5)
+
+    # Form dampened by starts
+    starts_col = result["starts"] if "starts" in result.columns else pd.Series(0, index=result.index)
+    starts = pd.to_numeric(starts_col, errors="coerce").fillna(0)
+    form_dampened_pctile = dampen_form_by_starts(form_pctile, starts)
+
+    # FDR ease percentile (6 - AvgFDR → higher = easier fixtures)
+    result["_FDREase"] = 6 - result[fdr_col]
+    fdr_ease_pctile = positional_percentile(
+        result, all_players_df, "_FDREase", ref_value_col="_FDREase", min_minutes=90
+    ).fillna(0.5)
+    # FDR ease is position-agnostic so fall back to min-max if percentile gave 0.5 everywhere
+    if all_players_df is None or "_FDREase" not in all_players_df.columns:
+        fdr_ease_pctile = _min_max_norm_series(result["_FDREase"]).fillna(0.5)
+
+    # Dynamic ROS weights (sum = 1.0 at all gameweeks)
+    w_sq = 0.50 + 0.15 * p
+    w_mgw = 0.20 - 0.05 * p
+    w_form = 0.20 - 0.05 * p
+    w_fdr = 0.10 - 0.05 * p
+
+    result["ROS"] = (
+        w_sq * season_quality +
+        w_mgw * multigw_pctile +
+        w_form * form_dampened_pctile +
+        w_fdr * fdr_ease_pctile
+    )
+
+    # Cleanup temp columns
+    result.drop(columns=["_FDREase"], inplace=True, errors="ignore")
 
     return result
 

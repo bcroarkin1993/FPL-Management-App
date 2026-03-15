@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 from scripts.common.analytics import (
     compute_healthy_form,
+    compute_player_scores,
     compute_positional_depth,
     compute_transfer_urgency,
     blend_multi_gw_projections,
@@ -17,7 +18,6 @@ from scripts.common.analytics import (
     positional_rank,
     dampen_form_by_starts,
     season_progress_weight,
-    ros_rebalanced_weights,
     merge_season_projections,
     PositionalDepth,
 )
@@ -712,38 +712,74 @@ class TestSeasonProgressWeight:
         assert w <= 0.95
 
 
-class TestRosRebalancedWeights:
-    """Tests for ros_rebalanced_weights()."""
+class TestComputePlayerScores:
+    """Tests for compute_player_scores()."""
 
-    def test_early_season_small_shift(self):
-        """GW 1: minimal shift from proj+form to season."""
-        p, f, fdr, s, ex = ros_rebalanced_weights(0.35, 0.25, 0.20, 0.20, 1)
-        assert p < 0.35  # proj reduced
-        assert f < 0.25  # form reduced
-        assert s > 0.20  # season increased
-        assert fdr == 0.20  # FDR unchanged
-        total_shift = (0.35 - p) + (0.25 - f)
-        assert total_shift < 0.15  # small shift early
+    def _make_pool(self):
+        """Create a reference pool of ~20 players per position."""
+        rows = []
+        for pos in ["G", "D", "M", "F"]:
+            for i in range(20):
+                rows.append({
+                    "Player": f"{pos}_Player_{i}",
+                    "Team": f"T{i % 5}",
+                    "Position": pos,
+                    "Projected_Points": 2.0 + i * 0.5,
+                    "form": 1.0 + i * 0.3,
+                    "total_points": 10 + i * 8,
+                    "minutes": 200 + i * 50,
+                    "starts": 3 + i,
+                    "AvgFDR": 2.0 + (i % 5) * 0.5,
+                })
+        return pd.DataFrame(rows)
 
-    def test_late_season_large_shift(self):
-        """GW 30: significant shift — season dominates."""
-        p, f, fdr, s, ex = ros_rebalanced_weights(0.35, 0.25, 0.20, 0.20, 30)
-        assert s > 0.45  # season gets majority
-        assert p < 0.20  # proj heavily reduced
-        assert f < 0.15  # form reduced
-        assert fdr == 0.20
+    def test_returns_1gw_and_ros_columns(self):
+        """Output has 1GW and ROS columns."""
+        pool = self._make_pool()
+        squad = pool.head(5).copy()
+        result = compute_player_scores(squad, pool, current_gw=20)
+        assert "1GW" in result.columns
+        assert "ROS" in result.columns
 
-    def test_weight_conservation(self):
-        """Total weights are preserved (no weight created or destroyed)."""
-        for gw in [1, 10, 19, 30, 38]:
-            p, f, fdr, s, ex = ros_rebalanced_weights(0.35, 0.25, 0.20, 0.20, gw)
-            assert p + f + fdr + s + ex == pytest.approx(1.0, abs=0.001)
+    def test_scores_in_zero_one_range(self):
+        """All scores should be in [0, 1]."""
+        pool = self._make_pool()
+        squad = pool.head(10).copy()
+        result = compute_player_scores(squad, pool, current_gw=20)
+        assert result["1GW"].between(0, 1).all()
+        assert result["ROS"].between(0, 1).all()
 
-    def test_minimums_respected(self):
-        """Proj and form never go below 0.05."""
-        p, f, _, _, _ = ros_rebalanced_weights(0.35, 0.25, 0.20, 0.20, 38)
-        assert p >= 0.05
-        assert f >= 0.05
+    def test_top_player_scores_high(self):
+        """The best player at a position should score above 0.7."""
+        pool = self._make_pool()
+        # Take the best MID from pool
+        best_mid = pool[pool["Position"] == "M"].nlargest(1, "total_points").copy()
+        result = compute_player_scores(best_mid, pool, current_gw=20)
+        assert result["1GW"].iloc[0] > 0.7
+        assert result["ROS"].iloc[0] > 0.7
+
+    def test_weak_player_scores_low(self):
+        """The worst player at a position should score below 0.3."""
+        pool = self._make_pool()
+        worst_mid = pool[pool["Position"] == "M"].nsmallest(1, "total_points").copy()
+        result = compute_player_scores(worst_mid, pool, current_gw=20)
+        assert result["ROS"].iloc[0] < 0.3
+
+    def test_no_reference_df_graceful_fallback(self):
+        """Works without reference DataFrame (falls back to min-max)."""
+        squad = pd.DataFrame({
+            "Player": ["A", "B"],
+            "Team": ["X", "Y"],
+            "Position": ["M", "M"],
+            "Projected_Points": [5.0, 3.0],
+            "Form": [4.0, 2.0],
+            "Season_Points": [100, 60],
+            "AvgFDRNextN": [3.0, 3.0],
+        })
+        result = compute_player_scores(squad, None, current_gw=20)
+        assert "1GW" in result.columns
+        assert "ROS" in result.columns
+        assert result["1GW"].notna().all()
 
 
 class TestMergeSeasonProjections:

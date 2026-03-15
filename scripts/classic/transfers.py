@@ -25,17 +25,13 @@ from scripts.common.utils import (
 )
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.analytics import (
-    POSITIONAL_SCARCITY,
-    ros_rebalanced_weights,
+    compute_player_scores,
     compute_healthy_form,
     _fetch_element_history,
     compute_positional_depth,
     compute_transfer_urgency,
     blend_multi_gw_projections,
-    positional_percentile,
     positional_rank,
-    dampen_form_by_starts,
-    season_progress_weight,
     merge_season_projections,
 )
 from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
@@ -276,166 +272,46 @@ def _add_projections(df: pd.DataFrame, projections_df: pd.DataFrame) -> pd.DataF
     return df
 
 
-def _min_max_norm(series: pd.Series) -> pd.Series:
-    """Min-max normalization to [0,1]."""
-    s = pd.to_numeric(series, errors="coerce")
-    lo, hi = s.min(), s.max()
-    if pd.isna(lo) or pd.isna(hi) or hi == lo:
-        return pd.Series([0.5] * len(s), index=s.index)
-    return (s - lo) / (hi - lo)
 
+def _compute_transfer_score(df: pd.DataFrame,
+                            all_players_df: Optional[pd.DataFrame] = None,
+                            current_gw: int = 19) -> pd.DataFrame:
+    """Compute dual transfer target scores using positional percentile scoring.
 
-def _compute_transfer_score(df: pd.DataFrame, w_proj: float, w_form: float,
-                            w_fdr: float, w_price: float,
-                            all_players_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    """Compute dual transfer target scores: 1GW and ROS.
-
-    1GW uses single-GW projection + raw form.
-    ROS uses blended multi-GW projection + form dampened by starts.
+    Delegates to shared compute_player_scores() then renames columns
+    and adds a small price-efficiency adjustment for Classic mode
+    (cheaper players get a small boost for transfer targets).
     """
-    tmp = df.copy()
+    tmp = compute_player_scores(df, all_players_df, current_gw)
 
-    # Shared components
-    form_col = "HealthyForm" if "HealthyForm" in tmp.columns else "form"
-    tmp["Form_norm"] = positional_percentile(
-        tmp, all_players_df, form_col, ref_value_col="form", min_minutes=90
-    ).fillna(0.5)
+    # Classic-specific: small price-efficiency adjustment for transfer targets
+    # Cheaper players are more valuable as transfer targets (budget flexibility)
+    if "now_cost" in tmp.columns:
+        max_cost = pd.to_numeric(tmp["now_cost"], errors="coerce").max()
+        if pd.notna(max_cost) and max_cost > 0:
+            price_bonus = (max_cost - pd.to_numeric(tmp["now_cost"], errors="coerce")) / max_cost * 0.05
+            tmp["1GW"] = (tmp["1GW"] + price_bonus).clip(upper=1.0)
+            tmp["ROS"] = (tmp["ROS"] + price_bonus).clip(upper=1.0)
 
-    # Invert FDR (lower is better) — stays global (fixtures are position-agnostic)
-    tmp["FDREase"] = 6 - pd.to_numeric(tmp["AvgFDR"], errors="coerce")
-    tmp["FDREase_norm"] = _min_max_norm(tmp["FDREase"]).fillna(0.5)
-
-    # Invert price (lower price = more value) — stays global
-    max_cost = tmp["now_cost"].max()
-    tmp["PriceValue"] = max_cost - tmp["now_cost"]
-    tmp["Price_norm"] = _min_max_norm(tmp["PriceValue"]).fillna(0.5)
-
-    denom = max(w_proj + w_form + w_fdr + w_price, 1e-9)
-
-    # --- 1GW: single-GW projection + raw form ---
-    tmp["Proj_1gw_norm"] = positional_percentile(
-        tmp, all_players_df, "Projected_Points", ref_value_col="Projected_Points", min_minutes=90
-    ).fillna(0.5)
-
-    # 1GW: FDR is redundant (already baked into the GW projection), so
-    # shift FDR weight into projection for this horizon.
-    w_proj_1gw = w_proj + w_fdr
-
-    tmp["Transfer 1GW"] = (
-        w_proj_1gw * tmp["Proj_1gw_norm"] +
-        w_form * tmp["Form_norm"] +
-        w_price * tmp["Price_norm"]
-    ) / denom
-
-    # --- ROS: blended multi-GW projection + dampened form ---
-    tmp["MultiGW_Proj"] = pd.to_numeric(tmp.get("MultiGW_Proj", 0), errors="coerce").fillna(0)
-    tmp["MultiGW_norm"] = positional_percentile(
-        tmp, all_players_df, "MultiGW_Proj", ref_value_col="MultiGW_Proj", min_minutes=90
-    ).fillna(0.5)
-    tmp["Proj_ros_norm"] = 0.4 * tmp["Proj_1gw_norm"] + 0.6 * tmp["MultiGW_norm"]
-
-    starts = pd.to_numeric(tmp.get("starts", 0), errors="coerce").fillna(0)
-    tmp["Form_ros_norm"] = dampen_form_by_starts(tmp["Form_norm"], starts)
-
-    tmp["Transfer ROS"] = (
-        w_proj * tmp["Proj_ros_norm"] +
-        w_form * tmp["Form_ros_norm"] +
-        w_fdr * tmp["FDREase_norm"] +
-        w_price * tmp["Price_norm"]
-    ) / denom
-
-    # Cleanup
-    drop_cols = ["Proj_1gw_norm", "Form_norm", "FDREase", "FDREase_norm", "PriceValue", "Price_norm",
-                 "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm"]
-    return tmp.drop(columns=[c for c in drop_cols if c in tmp.columns])
+    tmp["Transfer 1GW"] = tmp["1GW"]
+    tmp["Transfer ROS"] = tmp["ROS"]
+    tmp.drop(columns=["1GW", "ROS"], inplace=True, errors="ignore")
+    return tmp
 
 
-def _compute_keep_score(df: pd.DataFrame, w_proj: float, w_form: float,
-                        w_fdr: float, w_points: float,
+def _compute_keep_score(df: pd.DataFrame,
                         all_players_df: Optional[pd.DataFrame] = None,
                         current_gw: int = 19) -> pd.DataFrame:
-    """Compute dual keep scores: Keep 1GW and Keep ROS.
+    """Compute dual keep scores using positional percentile scoring.
 
-    Keep 1GW: single-GW projection + raw form (who's best THIS week)
-    Keep ROS: blended multi-GW projection + dampened form (long-term value)
-             Season component blends actual points with Rotowire season
-             projections based on gameweek progress.
+    Delegates to shared compute_player_scores() then renames columns
+    from 1GW/ROS to Keep 1GW/Keep ROS.
     """
-    tmp = df.copy()
-
-    # Shared components
-    form_col = "HealthyForm" if "HealthyForm" in tmp.columns else "form"
-    tmp["Form_norm"] = positional_percentile(
-        tmp, all_players_df, form_col, ref_value_col="form", min_minutes=90
-    ).fillna(0.5)
-    tmp["Points_norm"] = positional_percentile(
-        tmp, all_players_df, "total_points", ref_value_col="total_points", min_minutes=90
-    ).fillna(0.5)
-
-    # Invert FDR — stays global (fixtures are position-agnostic)
-    tmp["FDREase"] = 6 - pd.to_numeric(tmp["AvgFDR"], errors="coerce")
-    tmp["FDREase_norm"] = _min_max_norm(tmp["FDREase"]).fillna(0.5)
-
-    denom = max(w_proj + w_form + w_fdr + w_points, 1e-9)
-
-    # --- 1GW: single-GW projection + raw form ---
-    tmp["Proj_1gw_norm"] = positional_percentile(
-        tmp, all_players_df, "Projected_Points", ref_value_col="Projected_Points", min_minutes=90
-    ).fillna(0.5)
-
-    # 1GW: FDR is redundant (already baked into the GW projection), so
-    # shift FDR weight into projection for this horizon.
-    w_proj_1gw = w_proj + w_fdr
-
-    tmp["Keep 1GW"] = (
-        w_proj_1gw * tmp["Proj_1gw_norm"] +
-        w_form * tmp["Form_norm"] +
-        w_points * tmp["Points_norm"]
-    ) / denom
-
-    # --- ROS: blended multi-GW projection + dampened form ---
-    tmp["MultiGW_Proj"] = pd.to_numeric(tmp.get("MultiGW_Proj", 0), errors="coerce").fillna(0)
-    tmp["MultiGW_norm"] = positional_percentile(
-        tmp, all_players_df, "MultiGW_Proj", ref_value_col="MultiGW_Proj", min_minutes=90
-    ).fillna(0.5)
-    tmp["Proj_ros_norm"] = 0.4 * tmp["Proj_1gw_norm"] + 0.6 * tmp["MultiGW_norm"]
-
-    starts = pd.to_numeric(tmp.get("starts", 0), errors="coerce").fillna(0)
-    tmp["Form_ros_norm"] = dampen_form_by_starts(tmp["Form_norm"], starts)
-
-    # Time-blended season component: blend actual points with Rotowire season projections
-    actual_w = season_progress_weight(current_gw)
-    if "SeasonProjection" in tmp.columns and tmp["SeasonProjection"].notna().any():
-        tmp["SeasonProj_norm"] = positional_percentile(
-            tmp, all_players_df, "SeasonProjection",
-            ref_value_col="SeasonProjection" if (all_players_df is not None and "SeasonProjection" in all_players_df.columns) else None,
-            min_minutes=90
-        ).fillna(0.5)
-        tmp["Points_ros_norm"] = actual_w * tmp["Points_norm"] + (1 - actual_w) * tmp["SeasonProj_norm"]
-    else:
-        tmp["Points_ros_norm"] = tmp["Points_norm"]
-
-    # Dynamic ROS rebalancing: shift from proj+form → season based on GW progress
-    w_proj_ros, w_form_ros, _, w_points_ros, _ = ros_rebalanced_weights(
-        w_proj, w_form, w_fdr, w_points, current_gw
-    )
-
-    tmp["Keep ROS"] = (
-        w_proj_ros * tmp["Proj_ros_norm"] +
-        w_form_ros * tmp["Form_ros_norm"] +
-        w_fdr * tmp["FDREase_norm"] +
-        w_points_ros * tmp["Points_ros_norm"]
-    ) / denom
-
-    # Positional scarcity boost — GK/FWD are harder to replace
-    scarcity = tmp["Position"].map(POSITIONAL_SCARCITY).fillna(1.0)
-    tmp["Keep 1GW"] = (tmp["Keep 1GW"] * scarcity).clip(upper=1.0)
-    tmp["Keep ROS"] = (tmp["Keep ROS"] * scarcity).clip(upper=1.0)
-
-    # Cleanup
-    drop_cols = ["Proj_1gw_norm", "Form_norm", "Points_norm", "FDREase", "FDREase_norm",
-                 "MultiGW_norm", "Proj_ros_norm", "Form_ros_norm", "SeasonProj_norm", "Points_ros_norm"]
-    return tmp.drop(columns=[c for c in drop_cols if c in tmp.columns])
+    tmp = compute_player_scores(df, all_players_df, current_gw)
+    tmp["Keep 1GW"] = tmp["1GW"]
+    tmp["Keep ROS"] = tmp["ROS"]
+    tmp.drop(columns=["1GW", "ROS"], inplace=True, errors="ignore")
+    return tmp
 
 
 def _format_fixtures_html(fixtures: List[Dict], teams: Dict[int, str], n_show: int = 5) -> str:
@@ -743,7 +619,7 @@ def show_classic_transfers_page():
     transfer_cost = entry_history.get("event_transfers_cost", 0)
 
     # Controls
-    with st.expander("Filters & Weights", expanded=True):
+    with st.expander("Filters", expanded=True):
         col_a, col_b, col_c = st.columns(3)
 
         with col_a:
@@ -763,12 +639,8 @@ def show_classic_transfers_page():
                 format="£%.1fm"
             )
 
-        st.markdown("**Transfer Score Weights:**")
-        wcol1, wcol2, wcol3, wcol4 = st.columns(4)
-        w_proj = float(wcol1.slider("Projections", 0.0, 1.0, 0.4, 0.05, key="w_proj"))
-        w_form = float(wcol2.slider("Form", 0.0, 1.0, 0.3, 0.05, key="w_form"))
-        w_fdr = float(wcol3.slider("Fixture Ease", 0.0, 1.0, 0.2, 0.05, key="w_fdr"))
-        w_price = float(wcol4.slider("Value (Price)", 0.0, 1.0, 0.1, 0.05, key="w_price"))
+        st.caption("Scores use positional percentiles (0-1) against the full FPL pool. "
+                   "A score of 0.85 = top 15% at this position. Weights auto-adjust by gameweek.")
 
     # Build DataFrames
     with st.spinner("Analyzing players..."):
@@ -826,8 +698,7 @@ def show_classic_transfers_page():
         all_players = merge_season_projections(all_players, season_rankings_df)
 
         # Compute scores
-        squad_df = _compute_keep_score(squad_df, w_proj, w_form, w_fdr, 0.2,
-                                       all_players_df=all_players, current_gw=current_gw)
+        squad_df = _compute_keep_score(squad_df, all_players_df=all_players, current_gw=current_gw)
 
     # Positional depth
     depth_map = {}
@@ -873,8 +744,7 @@ def show_classic_transfers_page():
     available["HealthyForm"] = available["HealthyForm"].fillna(available["form"])
 
     # Compute transfer score
-    available = _compute_transfer_score(available, w_proj, w_form, w_fdr, w_price,
-                                        all_players_df=all_players)
+    available = _compute_transfer_score(available, all_players_df=all_players, current_gw=current_gw)
     available = available.sort_values("Transfer ROS", ascending=False)
 
     # ---------------------------
