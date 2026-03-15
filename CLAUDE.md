@@ -47,6 +47,7 @@ The Odds API ────────────┘
 **scripts/common/** - Shared utilities:
 - `utils.py` - FPL API fetching, Rotowire scraping, player matching, fixture analysis
 - `player_matching.py` - `canonical_normalize()`, `PlayerRegistry` for centralized player lookups
+- `analytics.py` - `compute_player_scores()` (shared Keep/Transfer scoring via positional percentiles), `positional_percentile()`, `positional_rank()`, form dampening, multi-GW blending, season projection merging
 - `waiver_alerts.py` - Discord notification system for Draft waiver and Classic transfer deadlines
 
 **main.py** - Streamlit entry point with three-section navigation:
@@ -200,3 +201,4 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Season History for Team Analysis | Classic: Season History section with tabbed Plotly charts (Overall Rank, Total Points by season) and formatted data table; Draft: League Standing section with position, record, points for/against, and league points metrics |
 | Styled Tables UI Refresh | Dark-themed HTML tables via shared `styled_tables.py` replacing ~35 `st.dataframe()` calls; dark gradient cards replacing `st.metric()` across all pages; Plotly charts with consistent `_DARK_CHART_LAYOUT` (dark bg, white text, green accents); FDR heatmap with distinct 5-level palette and continuous Avg FDR color interpolation; Match Odds proportional bars; side-by-side Points by Position charts; muted Injury Watchlist; sort-by-column on Advanced Stats and Rotowire Projections |
 | Gameweek Review/Recap | Cross-format GW review page under FPL App Home. GW selector (defaults to last completed), top 10 scorers and notable blankers, Classic review (summary cards, squad table with captain, captain vs best-captain analysis, optimal lineup with best captaincy), Draft review (squad table, optimal lineup). Reuses `find_optimal_gw_lineup()` from `bench_analysis.py`. |
+| Keep/Transfer Score Redesign | Replaced min-max normalization + user weight sliders with shared `compute_player_scores()` using positional percentiles against full FPL pool (~700 players). 1GW: fixed weights (0.55 proj + 0.25 form + 0.20 season). ROS: GW-dynamic weights shifting toward season quality. Scores directly interpretable (0.85 = top 15% at position). Removed `POSITIONAL_SCARCITY`, `ros_rebalanced_weights`, and 4-5 weight sliders from both Draft and Classic UI. |
