@@ -47,7 +47,7 @@ The Odds API ────────────┘
 **scripts/common/** - Shared utilities:
 - `utils.py` - FPL API fetching, Rotowire scraping, player matching, fixture analysis
 - `player_matching.py` - `canonical_normalize()`, `PlayerRegistry` for centralized player lookups
-- `analytics.py` - `compute_player_scores()` (shared Keep/Transfer scoring via positional percentiles), `positional_percentile()`, `positional_rank()`, form dampening, multi-GW blending, season projection merging
+- `analytics.py` - `compute_player_scores()` (shared Keep/Transfer scoring via positional percentiles — see "Transfer Scoring Model" section), `compute_dynamic_alpha()`, `merge_ffp_single_gw_data()`, `positional_percentile()`, `positional_rank()`, form dampening, multi-GW blending, season projection merging
 - `waiver_alerts.py` - Discord notification system for Draft waiver and Classic transfer deadlines
 
 **main.py** - Streamlit entry point with three-section navigation:
@@ -94,6 +94,108 @@ Two-tier caching strategy for fast page navigation:
    - 5 minutes: bootstrap static, league standings, ownership data
 
 Gameweek is cached at module level in config.py via lazy loading.
+
+## Transfer Scoring Model — Design Reference
+
+This section documents the philosophy, reasoning, and specification behind the transfer/keep scoring system used in both Draft Waiver Wire and Classic Transfers. It serves as a reference for future modifications.
+
+### Core Philosophy
+
+The scoring model answers two questions: **"Who should I pick up?"** (Transfer Score) and **"Who should I hold?"** (Keep Score). Rather than a single opaque number, the system exposes four transparent columns: **1GW** (this-gameweek value), **ROS** (rest-of-season value), **Transfer Score**, and **Keep Score** (dynamic blends of 1GW + ROS that adapt to context).
+
+### 1GW Score — Pure Expected Value
+
+**Principle**: 1GW should reflect *expected points this gameweek* and nothing else. Form, season points, and FDR are intentionally excluded because Rotowire and FFP projections already incorporate those signals — adding them again would double-count.
+
+```
+blended_projection = avg(Rotowire, FFP Predicted)  — use whichever is available
+start_likelihood   = FFP Start% (primary) | FPL chance_of_playing (fallback) | 100%
+effective_proj     = blended_projection × start_likelihood
+
+1GW = positional_percentile(effective_proj)
+```
+
+**Key design decisions**:
+- **Start likelihood is critical**: A player with 5.0 projected but 50% start chance is really worth 2.5. The old model ignored this entirely.
+- **FFP Start% is primary** because it provides continuous 0-100 granularity. FPL's `chance_of_playing` is coarse and often missing. Rotowire is binary (in/out).
+- **No form weight**: Projections already embed form. Adding it separately inflates recent-hot players beyond what the data supports.
+- **No FDR weight**: Projections already adjust for opponent strength.
+- **Rotowire + FFP blend**: Rotowire covers projected starters only (expert opinion); FFP covers everyone who might play. The absence of a Rotowire projection is itself a signal. When both exist, average them; when only one exists, use it.
+
+### ROS Score — Multi-GW Dominant, Dynamic Weights
+
+**Principle**: ROS represents long-term player value. Multi-GW projections (FFP Next3GWs) are the strongest forward-looking signal and should be the dominant input, especially early season. As the season progresses, actual performance data (season points) becomes more trustworthy.
+
+```
+p = season_progress_weight(current_gw)  // 0.10 at GW1 → 0.95 at GW38
+
+season_quality = p × season_pts_pctile + (1-p) × season_proj_pctile
+
+w_mgw   = 0.40 - 0.10×p   // 40% → 30%  (multi-GW projections — FFP Next3GWs)
+w_sq    = 0.30 + 0.15×p   // 30% → 45%  (season quality — actual + projected blend)
+w_form  = 0.15 - 0.05×p   // 15% → 10%  (trajectory indicator)
+w_start = 0.10            // 10% constant (start consistency — nailed-on starters)
+w_fdr   = 0.05            //  5% constant (supplementary fixture signal)
+
+ROS = w_mgw × multigw_pctile + w_sq × season_quality
+    + w_form × form_dampened_pctile + w_start × start_consistency_pctile
+    + w_fdr × fdr_ease_pctile
+```
+
+**Key design decisions**:
+- **Multi-GW at ~40%** (was 20%): FFP's 3-week window captures upcoming fixture runs and is the most actionable forward-looking signal. 3 GWs is the sweet spot — long enough to capture a fixture run, short enough to be reliable.
+- **Season quality grows over time**: Early season, trust preseason projections; late season, trust actual performance. The `season_progress_weight` concave curve shifts this trust faster than linear.
+- **Form is a trajectory indicator** (15→10%): A player at #10 in their position on strong form is likely heading to #8 soon. Form matters *more* for ROS than 1GW because it signals where positional ranking is heading. Dampened by starts to avoid overvaluing small-sample hot streaks.
+- **Start consistency at 10%** (constant): Uses FFP `LongStart` (long-term start %) to reward nailed-on starters. A rotation player who starts 50% of games should be worth less for ROS even if per-game stats are good. Critical for Draft where dropped players go to the waiver wire.
+- **FDR at 5%** (small, constant): Fixtures beyond the multi-GW window are supplementary — most of the fixture signal is already captured by multi-GW projections.
+
+### Transfer Score / Keep Score — Dynamic Alpha Blend
+
+**Principle**: The optimal blend of 1GW and ROS depends on context — format, position, player quality, and squad depth. Rather than fixed weights or the old TILT mechanism, a dynamic alpha adapts the blend per player.
+
+```
+Score = α × 1GW + (1-α) × ROS
+```
+
+**Alpha adjustments** (applied in order, then clamped to [0.15, 0.75]):
+
+| Factor | Adjustment | Reasoning |
+|--------|-----------|-----------|
+| **Format baseline** | Draft α=0.35, Classic α=0.55 | Draft players are harder to replace — ROS stability matters more. Classic allows easy weekly transfers, so 1GW impact matters more. |
+| **Position: GK** | α -= 0.10 | GK waiver wire is extremely thin. Dropping a starting GK for a short-term upgrade is dangerous — the sub will lose their spot when the injured player returns, and finding a new starting GK is nearly impossible. |
+| **Position: FWD** | α -= 0.05 | Similar but less extreme depth concern as GK. Only 3 FWD slots. |
+| **Position: DEF/MID** | No change | Deeper pools, more roster flexibility. |
+| **Elite player (ROS > 0.80)** | α -= 0.10 | Elite positional players are irreplaceable. We hold them through injuries and bad fixtures. A top-5 MID having one bad GW is not a reason to drop. |
+| **Above avg (ROS > 0.60)** | α -= 0.05 | Good players deserve some protection but less than elite. |
+| **Below avg (ROS < 0.40)** | α += 0.05 | Replacement-level players — 1GW matters more. If they aren't performing now, there's no long-term value to protect. |
+| **Critical squad depth** | α += 0.15 | Urgency — we need someone who plays THIS week. |
+| **Low squad depth** | α += 0.10 | Moderate urgency to fill the gap. |
+
+**Why TILT was removed**: The old TILT mechanism explicitly tilted add/drop scoring differently (adds favored projections, drops favored season points). The dynamic alpha blend achieves the same protective behavior naturally — an elite ROS player on your roster gets high ROS weight (protected from panic drops), while a low-depth position triggers high 1GW weight (targets someone who plays NOW). The dynamic blend is more elegant and handles more edge cases than the fixed asymmetry.
+
+### Data Source Hierarchy
+
+| Signal | Primary Source | Fallback | Used In |
+|--------|---------------|----------|---------|
+| Single-GW projection | Rotowire + FFP Predicted (blended) | Rotowire only or FFP only | 1GW |
+| Start likelihood | FFP Start % | FPL chance_of_playing → 100% | 1GW |
+| Multi-GW projection | FFP Next3GWs | single_gw × 3 | ROS |
+| Season projection | Rotowire Season Rankings | Season points (actuals) | ROS (season_quality) |
+| Start consistency | FFP LongStart | FPL starts count | ROS |
+| Form | HealthyForm (element-summary) | FPL form → points_per_game | ROS |
+| FDR | AvgFDRNextN / AvgFDR | Default 3.0 | ROS |
+
+### Implementation Reference
+
+| Function | File | Purpose |
+|----------|------|---------|
+| `compute_player_scores()` | `scripts/common/analytics.py` | Core scoring — computes all 4 columns |
+| `compute_dynamic_alpha()` | `scripts/common/analytics.py` | Per-player alpha based on context |
+| `merge_ffp_single_gw_data()` | `scripts/common/analytics.py` | Merges FFP Predicted/Start/LongStart onto player DataFrames |
+| `positional_percentile()` | `scripts/common/analytics.py` | Within-position percentile against full FPL pool |
+| `season_progress_weight()` | `scripts/common/analytics.py` | Concave GW→weight curve for season quality blend |
+
+All scores are **positional percentiles** (0-1) computed against the full FPL player pool (~700 players). A score of 0.85 means "top 15% at this position" — immediately interpretable regardless of position.
 
 ## Environment Variables
 
@@ -202,3 +304,4 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Styled Tables UI Refresh | Dark-themed HTML tables via shared `styled_tables.py` replacing ~35 `st.dataframe()` calls; dark gradient cards replacing `st.metric()` across all pages; Plotly charts with consistent `_DARK_CHART_LAYOUT` (dark bg, white text, green accents); FDR heatmap with distinct 5-level palette and continuous Avg FDR color interpolation; Match Odds proportional bars; side-by-side Points by Position charts; muted Injury Watchlist; sort-by-column on Advanced Stats and Rotowire Projections |
 | Gameweek Review/Recap | Cross-format GW review page under FPL App Home. GW selector (defaults to last completed), top 10 scorers and notable blankers, Classic review (summary cards, squad table with captain, captain vs best-captain analysis, optimal lineup with best captaincy), Draft review (squad table, optimal lineup). Reuses `find_optimal_gw_lineup()` from `bench_analysis.py`. |
 | Keep/Transfer Score Redesign | Replaced min-max normalization + user weight sliders with shared `compute_player_scores()` using positional percentiles against full FPL pool (~700 players). 1GW: fixed weights (0.55 proj + 0.25 form + 0.20 season). ROS: GW-dynamic weights shifting toward season quality. Scores directly interpretable (0.85 = top 15% at position). Removed `POSITIONAL_SCARCITY`, `ros_rebalanced_weights`, and 4-5 weight sliders from both Draft and Classic UI. |
+| Transfer Scoring Model Redesign v2 | Pure EV-based 1GW (blended projections × start likelihood), multi-GW dominant ROS (40% MGW, 30% season quality, 15% form, 10% start consistency, 5% FDR), dynamic alpha blend for Transfer/Keep Score (adapts to format, position, player quality tier, squad depth). Removed TILT mechanism. Added `merge_ffp_single_gw_data()`, `compute_dynamic_alpha()`. 4-column output: 1GW, ROS, Transfer Score, Keep Score. See "Transfer Scoring Model — Design Reference" section above for full specification. |
