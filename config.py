@@ -194,14 +194,21 @@ def _discover_rotowire_article(gw: int):
         resp = requests.get(index_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "html.parser")
-        anchors = soup.select('a[href*="fantasy-premier-league-player-rankings-gameweek-"]')
+        anchors = soup.select(
+            'a[href*="fantasy-premier-league-player-rankings-gameweek-"], '
+            'a[href*="/soccer/article/fpl-gw"]'
+        )
 
         # Multiple regex patterns for robustness (most specific to least)
         patterns = [
-            # Standard format: gameweek-N-articleID
+            # Old format: ...gameweek-NN-...-ARTICLEID
             re.compile(r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?-(\d+)$"),
-            # Alternate format without trailing article ID
+            # New format (GW33+): fpl-gwNN-...-ARTICLEID
+            re.compile(r"/soccer/article/fpl-gw(\d+)-[a-z0-9-]+-(\d+)$"),
+            # Old format without article ID (fallback)
             re.compile(r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?$"),
+            # New format without article ID (fallback)
+            re.compile(r"/soccer/article/fpl-gw(\d+)-[a-z0-9-]+$"),
         ]
 
         candidates = []

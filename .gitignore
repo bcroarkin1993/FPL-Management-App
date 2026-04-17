@@ -34,5 +34,8 @@ Thumbs.db
 # SQLite cache
 *.db
 
+# Scoring test script cache
+.scoring_test_cache/
+
 # Environment configuration (sensitive values go in .env, not config.py)
 .env

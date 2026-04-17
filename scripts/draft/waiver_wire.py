@@ -30,6 +30,7 @@ from scripts.common.utils import (
     TEAM_FULL_TO_SHORT
 )
 from scripts.common.player_matching import canonical_normalize, get_player_registry
+from scripts.common.text_helpers import _strip_accents
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.analytics import (
     compute_player_scores,
@@ -42,6 +43,7 @@ from scripts.common.analytics import (
     dampen_form_by_starts,
     merge_season_projections,
     merge_ffp_single_gw_data,
+    enrich_reference_with_projections,
 )
 from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
 
@@ -951,8 +953,10 @@ def _build_rationale(drop: pd.Series, add: pd.Series) -> str:
 
     add_multi = float(add.get('MultiGW_Proj', 0) or 0)
     drop_multi = float(drop.get('MultiGW_Proj', 0) or 0)
-    if add_multi > drop_multi and add_multi > 0:
+    if add_multi > drop_multi and add_multi > 0 and drop_multi > 0:
         parts.append(f"3GW outlook: {add_multi:.1f} vs {drop_multi:.1f} pts")
+    elif add_multi > 0 and drop_multi == 0:
+        parts.append(f"3GW outlook: {add_multi:.1f} pts")
 
     drop_avail = _format_availability(
         drop.get('chance_of_playing_next_round'),
@@ -1043,7 +1047,7 @@ def _compute_transfer_suggestions(
             rationale = _build_rationale(worst_roster, best_avail)
             urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
             suggestions.append({
-                'drop_player': str(worst_roster.get('Player', '')),
+                'drop_player': _strip_accents(str(worst_roster.get('Player', ''))),
                 'drop_team': str(worst_roster.get('Team', '')),
                 'drop_position': pos,
                 'drop_value': round(float(worst_roster.get('Keep Score', 0)), 3),
@@ -1054,7 +1058,7 @@ def _compute_transfer_suggestions(
                     worst_roster.get('status'),
                     worst_roster.get('news')
                 ),
-                'add_player': str(best_avail.get('Player', '')),
+                'add_player': _strip_accents(str(best_avail.get('Player', ''))),
                 'add_team': str(best_avail.get('Team', '')),
                 'add_position': pos,
                 'add_value': round(float(best_avail.get('Transfer Score', 0)), 3),
@@ -1532,7 +1536,14 @@ def show_waiver_wire_page():
             "No owned players detected. If the season hasn't started or the API returns no element owners, this is expected.")
 
     # Projections & FPL stats
-    projections_raw = get_rotowire_player_projections(config.ROTOWIRE_URL)
+    rotowire_url = config.ROTOWIRE_URL
+    if not rotowire_url:
+        st.warning(
+            "⚠️ Rotowire player projections are unavailable — the app could not discover the current "
+            "rankings article URL. Rotowire may have changed their URL format. "
+            "To fix immediately, add `ROTOWIRE_URL=<article URL>` to your `.env` file and restart the app."
+        )
+    projections_raw = get_rotowire_player_projections(rotowire_url)
     fpl_stats_raw = pull_fpl_player_stats()
 
     # Normalize both to a unified schema (and enforce minimal columns)
@@ -1686,6 +1697,15 @@ def show_waiver_wire_page():
     if not my_roster.empty:
         my_roster = merge_ffp_single_gw_data(my_roster, ffp_df)
 
+    # --- Enrich reference pool with same data sources ---
+    # fpl_stats is used as the reference pool for positional_percentile().
+    # It must have the same enrichment columns (MultiGW_Proj, SeasonProjection, FFP_*)
+    # as the scoring datasets for percentile comparisons to be meaningful.
+    fpl_stats = blend_multi_gw_projections(fpl_stats, ffp_df, single_gw_col="points_per_game")
+    fpl_stats = merge_season_projections(fpl_stats, season_rankings_df)
+    fpl_stats = merge_ffp_single_gw_data(fpl_stats, ffp_df)
+    fpl_stats = enrich_reference_with_projections(fpl_stats, proj)
+
     # --- Positional Depth ---
     depth_map = {}
     if not my_roster.empty:
@@ -1727,6 +1747,8 @@ def show_waiver_wire_page():
             _render_depth_card(depth_map)
 
         _display_roster = my_roster.copy()
+        # Strip accents for clean display names (e.g. "Daniel Muñoz Mejía" → "Daniel Munoz Mejia")
+        _display_roster["Player"] = _display_roster["Player"].apply(_strip_accents)
         _display_roster["Pos_Rank"] = positional_rank(
             _display_roster, fpl_stats, "Season_Points", ref_value_col="Season_Points"
         )
@@ -1742,6 +1764,7 @@ def show_waiver_wire_page():
                          "1GW": "{:.2f}", "ROS": "{:.2f}", "Keep Score": "{:.2f}"},
             positive_color_cols=["1GW", "ROS", "Keep Score"],
         )
+
     else:
         st.subheader(f"Your Squad — {my_team.get('team_name', '(unknown)')}")
         st.info("No roster data available for this team.")
@@ -1761,6 +1784,8 @@ def show_waiver_wire_page():
     avail_display = avail_display.sort_values("Transfer Score", ascending=False).reset_index(drop=True)
 
     _display_avail = avail_display.copy()
+    # Strip accents for clean display names
+    _display_avail["Player"] = _display_avail["Player"].apply(_strip_accents)
     for col in _display_avail.select_dtypes(include=[np.number]).columns:
         _display_avail[col] = _display_avail[col].round(2)
 

@@ -4,6 +4,7 @@ Web Scraping & External Data Source Functions.
 Rotowire scraping, Fantasy Football Pundit data, and The Odds API integration.
 """
 
+import os
 import re
 
 from bs4 import BeautifulSoup
@@ -69,6 +70,10 @@ def get_rotowire_player_projections(url, limit=None):
         table = soup.select_one("table.article-table__tablesorter")
         if table:
             _logger.info("Rotowire: Using fallback table selector (article-table__tablesorter)")
+    if table is None:
+        table = soup.select_one("table.ck-table-resized")
+        if table:
+            _logger.info("Rotowire: Using ck-table-resized selector")
     if table is None:
         table = soup.find("table")
         if table:
@@ -183,15 +188,22 @@ def get_rotowire_rankings_url(current_gameweek=None, timeout=15):
 
     soup = BeautifulSoup(resp.content, "html.parser")
 
-    # Find any anchors whose href contains our base slug
-    anchors = soup.select('a[href*="fantasy-premier-league-player-rankings-gameweek-"]')
+    # Find any anchors whose href contains our base slug (matches both old and new fpl-gwNN format)
+    anchors = soup.select(
+        'a[href*="fantasy-premier-league-player-rankings-gameweek-"], '
+        'a[href*="/soccer/article/fpl-gw"]'
+    )
 
     # Regex patterns to try (most specific to least specific)
-    # Pattern 1: Standard format with optional slug words
     patterns = [
+        # Old format: ...gameweek-NN-...-ARTICLEID
         re.compile(r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?-(\d+)$"),
-        # Pattern 2: Alternate format without trailing article ID
+        # New format (GW33+): fpl-gwNN-...-ARTICLEID
+        re.compile(r"/soccer/article/fpl-gw(\d+)-[a-z0-9-]+-(\d+)$"),
+        # Old format without article ID (fallback)
         re.compile(r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?$"),
+        # New format without article ID (fallback)
+        re.compile(r"/soccer/article/fpl-gw(\d+)-[a-z0-9-]+$"),
     ]
 
     candidates = []
@@ -210,11 +222,29 @@ def get_rotowire_rankings_url(current_gameweek=None, timeout=15):
                 break  # Don't try other patterns if one matched
 
     if not candidates:
+        total_anchors = len(soup.find_all("a"))
         _logger.warning(
             "Rotowire URL discovery failed - no matching articles found. "
-            "HTML structure may have changed. Found %d anchors on page.",
-            len(anchors)
+            "Rotowire may have changed their URL format again. "
+            "Fix: update regex patterns in scraping.py and config.py, "
+            "or pin ROTOWIRE_URL in .env. "
+            "Matched anchors: %d, total anchors on page: %d",
+            len(anchors),
+            total_anchors,
         )
+        webhook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+        if webhook:
+            msg = (
+                "⚠️ **Rotowire URL Discovery Failed** — Rotowire may have changed their article URL format.\n"
+                "The app cannot load player projections until this is fixed.\n"
+                "**Quick fix**: Add to `.env`:\n"
+                "`ROTOWIRE_URL=<paste current article URL here>`\n"
+                "Then update the regex patterns in `scraping.py` and `config.py` for future GWs."
+            )
+            try:
+                requests.post(webhook, json={"content": msg}, timeout=10)
+            except Exception:
+                pass
         return None
 
     _logger.debug("Rotowire: Found %d candidate articles for GW %s", len(candidates), current_gameweek)
@@ -266,7 +296,11 @@ def get_rotowire_season_rankings(url: str, limit: Optional[int] = None) -> pd.Da
 
     table = soup.select_one("table.article-table__tablesorter.article-table__standard.article-table__figure")
     if table is None:
-        table = soup.select_one("table.article-table__tablesorter") or soup.find("table")
+        table = soup.select_one("table.article-table__tablesorter")
+    if table is None:
+        table = soup.select_one("table.ck-table-resized")
+    if table is None:
+        table = soup.find("table")
     if table is None:
         raise ValueError("Could not locate a rankings table on the page.")
 

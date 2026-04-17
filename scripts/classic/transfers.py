@@ -653,6 +653,12 @@ def show_classic_transfers_page():
             rotowire_url = config.ROTOWIRE_URL
             if rotowire_url:
                 projections_df = get_rotowire_player_projections(rotowire_url)
+            else:
+                st.warning(
+                    "⚠️ Rotowire player projections are unavailable — the app could not discover the current "
+                    "rankings article URL. Rotowire may have changed their URL format. "
+                    "To fix immediately, add `ROTOWIRE_URL=<article URL>` to your `.env` file and restart the app."
+                )
         except Exception as e:
             st.warning(f"Could not load projections: {e}")
 

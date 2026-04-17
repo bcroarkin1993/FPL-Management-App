@@ -92,6 +92,42 @@ def _min_max_norm_series(series: pd.Series) -> pd.Series:
     return (s - lo) / (hi - lo)
 
 
+def enrich_reference_with_projections(
+    fpl_stats: pd.DataFrame,
+    projections_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Merge Rotowire projection values onto the reference pool for 1GW scoring.
+
+    ``compute_player_scores()`` compares each player's single-GW projection
+    against the reference pool.  Without projections in the reference, the
+    comparison is projections-vs-ppg (scale mismatch).  Merging projections
+    into the reference pool enables apples-to-apples comparison.
+
+    Classic's ``all_players`` already has ``Projected_Points`` from its own
+    merge step, so this helper is primarily needed for the Draft pipeline
+    where ``fpl_stats`` lacks Rotowire projections.
+    """
+    if projections_df is None or projections_df.empty:
+        return fpl_stats
+    # Don't overwrite if already present
+    if "Projected_Points" in fpl_stats.columns and fpl_stats["Projected_Points"].notna().any():
+        return fpl_stats
+
+    result = fpl_stats.copy()
+    proj_slim = projections_df[["Player", "Team", "Position", "Points"]].copy()
+    proj_slim.rename(columns={"Points": "Projected_Points"}, inplace=True)
+    proj_slim["_cn"] = proj_slim["Player"].apply(canonical_normalize)
+    result["_cn"] = result["Player"].apply(canonical_normalize)
+
+    result = result.merge(
+        proj_slim[["_cn", "Team", "Position", "Projected_Points"]],
+        on=["_cn", "Team", "Position"],
+        how="left",
+    )
+    result.drop(columns=["_cn"], inplace=True)
+    return result
+
+
 def positional_percentile(
     df: pd.DataFrame,
     reference_df: Optional[pd.DataFrame],
@@ -280,8 +316,9 @@ def compute_player_scores(
     ffp_pred = pd.to_numeric(result.get("FFP_Predicted"), errors="coerce") if "FFP_Predicted" in result.columns else pd.Series(np.nan, index=result.index)
 
     blended_proj = rotowire_proj.copy()
-    both_mask = rotowire_proj.gt(0) & ffp_pred.notna()
-    ffp_only_mask = rotowire_proj.eq(0) & ffp_pred.notna()
+    # Treat FFP_Predicted <= 0 as missing (FFP publishes 0 when predictions aren't available)
+    both_mask = rotowire_proj.gt(0) & ffp_pred.gt(0)
+    ffp_only_mask = rotowire_proj.eq(0) & ffp_pred.gt(0)
     blended_proj[both_mask] = (rotowire_proj[both_mask] + ffp_pred[both_mask]) / 2
     blended_proj[ffp_only_mask] = ffp_pred[ffp_only_mask]
 
@@ -301,10 +338,88 @@ def compute_player_scores(
     # Effective projected points
     result["_effective_proj"] = blended_proj * start_likelihood
 
-    # 1GW = positional percentile of effective projected points
-    result["1GW"] = positional_percentile(
-        result, all_players_df, "_effective_proj", ref_value_col=proj_col, min_minutes=90
-    ).fillna(0.5)
+    # Detect blank-GW players: 0 projection from ALL sources but not clearly injured/suspended.
+    # These are players whose team has no fixture this GW — they deserve neutral 1GW (0.5),
+    # not near-0 which would trigger false drop recommendations for elite players.
+    # Use a blacklist approach: only exclude players who are clearly injured/suspended/unavailable.
+    _status_col = result["status"] if "status" in result.columns else pd.Series(np.nan, index=result.index)
+    _chance_col = (
+        pd.to_numeric(result["chance_of_playing_next_round"], errors="coerce")
+        if "chance_of_playing_next_round" in result.columns
+        else pd.Series(np.nan, index=result.index)
+    )
+    _clearly_unavailable = (
+        _status_col.isin(["i", "s", "u"])  # Injured, suspended, unavailable
+        | (_chance_col.notna() & _chance_col.lt(50))  # < 50% chance → genuinely doubtful
+    )
+    blank_gw_mask = (
+        (result["_effective_proj"] == 0)
+        & (blended_proj == 0)           # No projection from any source
+        & ~_clearly_unavailable         # Not injured/suspended/unavailable
+    )
+    result.loc[blank_gw_mask, "_effective_proj"] = np.nan
+
+    # 1GW = two-tier positional percentile of effective projected points.
+    #
+    # Tier 1 (projected to play, effective_proj > 0):
+    #   Rank among all projected players at same position → [0.50, 1.00].
+    #   Uses Projected_Points from reference pool (Rotowire projections merged onto
+    #   fpl_stats via enrich_reference_with_projections).  This avoids the scale
+    #   mismatch of comparing single-GW projections against season-average ppg.
+    #   Percentile: n_at_or_below / total → guarantees top player = 1.00.
+    #
+    # Tier 2 (not projected, effective_proj ≤ 0):
+    #   Season points percentile vs full pool → [0.00, 0.50].
+    #   Non-starters deserve lower 1GW scores, differentiated by underlying quality.
+    #
+    # Blank GW (effective_proj = NaN): neutral 0.50 (no information).
+    result["1GW"] = 0.50  # default
+
+    # Detect if reference pool has projection values for 1GW comparison
+    _ref_proj_col = None
+    if all_players_df is not None:
+        for _cand in ("Projected_Points", "Points"):
+            if _cand in all_players_df.columns and all_players_df[_cand].notna().any():
+                _ref_proj_col = _cand
+                break
+
+    for pos in result["Position"].dropna().unique():
+        pos_mask = result["Position"] == pos
+        projected = pos_mask & result["_effective_proj"].gt(0)
+        not_projected = pos_mask & result["_effective_proj"].eq(0)
+
+        # Tier 1: projected players → [0.50, 1.00]
+        if projected.sum() > 0:
+            if _ref_proj_col is not None:
+                # Compare effective_proj against reference projections (apples-to-apples)
+                ref_pos = all_players_df[all_players_df["Position"] == pos]
+                ref_vals = pd.to_numeric(ref_pos[_ref_proj_col], errors="coerce").dropna()
+                ref_vals = ref_vals[ref_vals.gt(0)].values
+            else:
+                ref_vals = np.array([])
+
+            if len(ref_vals) > 0:
+                for idx in result.loc[projected].index:
+                    val = result.at[idx, "_effective_proj"]
+                    n_at_or_below = int(np.sum(ref_vals <= val))
+                    pctile = n_at_or_below / len(ref_vals)
+                    result.at[idx, "1GW"] = 0.50 + 0.50 * min(pctile, 1.0)
+            else:
+                # Fallback: self-rank among projected players in scoring set
+                n_proj = projected.sum()
+                if n_proj == 1:
+                    result.loc[projected, "1GW"] = 0.75
+                else:
+                    rank_pctile = result.loc[projected, "_effective_proj"].rank(pct=True)
+                    result.loc[projected, "1GW"] = 0.50 + 0.50 * rank_pctile
+
+        # Tier 2: non-projected → season points percentile vs full pool → [0.00, 0.50]
+        if not_projected.sum() > 0 and all_players_df is not None:
+            ppg_pctile = positional_percentile(
+                result.loc[not_projected], all_players_df, season_col,
+                ref_value_col=ref_season_col, min_minutes=90,
+            ).fillna(0.25)
+            result.loc[not_projected, "1GW"] = ppg_pctile * 0.50
 
     # --- ROS Score (multi-GW dominant, dynamic weights) ---
     p = season_progress_weight(current_gw)
@@ -314,14 +429,15 @@ def compute_player_scores(
         result, all_players_df, season_col, ref_value_col=ref_season_col, min_minutes=90
     ).fillna(0.5)
 
-    if "SeasonProjection" in result.columns and result["SeasonProjection"].notna().any():
-        ref_season_proj = "SeasonProjection" if (all_players_df is not None and "SeasonProjection" in all_players_df.columns) else None
+    if ("SeasonProjection" in result.columns and result["SeasonProjection"].notna().any()
+            and all_players_df is not None and "SeasonProjection" in all_players_df.columns):
         season_proj_pctile = positional_percentile(
             result, all_players_df, "SeasonProjection",
-            ref_value_col=ref_season_proj, min_minutes=90
+            ref_value_col="SeasonProjection", min_minutes=90
         ).fillna(0.5)
     else:
-        season_proj_pctile = season_pts_pctile  # fallback to actuals
+        # SeasonProjection not in reference pool → use actual season points as proxy
+        season_proj_pctile = season_pts_pctile
 
     season_quality = p * season_pts_pctile + (1 - p) * season_proj_pctile
 
@@ -349,17 +465,27 @@ def compute_player_scores(
     form_dampened_pctile = dampen_form_by_starts(form_pctile, starts)
 
     # Start consistency percentile (FFP LongStart — rewards nailed-on starters)
+    # Prefer FFP_LongStart in reference (same scale as candidate). Fall back to "starts".
+    if (all_players_df is not None
+            and "FFP_LongStart" in all_players_df.columns
+            and all_players_df["FFP_LongStart"].notna().any()):
+        ref_starts_col = "FFP_LongStart"
+    elif all_players_df is not None and "starts" in all_players_df.columns:
+        ref_starts_col = "starts"
+    else:
+        ref_starts_col = None
+
     if "FFP_LongStart" in result.columns and result["FFP_LongStart"].notna().any():
         result["_start_consistency"] = pd.to_numeric(result["FFP_LongStart"], errors="coerce").fillna(50)
+    else:
+        result["_start_consistency"] = starts
+
+    if ref_starts_col:
         start_consistency_pctile = positional_percentile(
-            result, all_players_df, "_start_consistency", ref_value_col="_start_consistency", min_minutes=90
+            result, all_players_df, "_start_consistency", ref_value_col=ref_starts_col, min_minutes=90
         ).fillna(0.5)
     else:
-        # Fallback: use starts-based proxy (players with more starts are more nailed-on)
-        result["_start_consistency"] = starts
-        start_consistency_pctile = positional_percentile(
-            result, all_players_df, "_start_consistency", ref_value_col="starts" if (all_players_df is not None and "starts" in all_players_df.columns) else "_start_consistency", min_minutes=90
-        ).fillna(0.5)
+        start_consistency_pctile = _min_max_norm_series(result["_start_consistency"]).fillna(0.5)
 
     # FDR ease percentile (6 - AvgFDR → higher = easier fixtures)
     result["_FDREase"] = 6 - result[fdr_col]
@@ -666,14 +792,25 @@ def blend_multi_gw_projections(
     # Determine the player name column
     name_col = "Player" if "Player" in result.columns else "Name" if "Name" in result.columns else None
 
-    # Fallback: single_gw * 3
+    # Fallback: single_gw * 3, then points_per_game * 3 if still 0
     single_vals = pd.to_numeric(result.get(single_gw_col, 0), errors="coerce").fillna(0)
     result[output_col] = single_vals * 3
+    # Second fallback: players with 0 single-GW proj (e.g. name merge failed) but valid ppg
+    if "points_per_game" in result.columns:
+        ppg = pd.to_numeric(result["points_per_game"], errors="coerce").fillna(0)
+        zero_mask = result[output_col].eq(0) & ppg.gt(0)
+        result.loc[zero_mask, output_col] = ppg[zero_mask] * 3
 
     if ffp_df is None or ffp_df.empty or name_col is None:
         return result
 
     if "Next3GWs" not in ffp_df.columns or "Name" not in ffp_df.columns:
+        return result
+
+    # Check if FFP multi-GW predictions are available (all-zero = not published yet)
+    ffp_next3 = pd.to_numeric(ffp_df["Next3GWs"], errors="coerce")
+    if not ffp_next3.gt(0).any():
+        _logger.info("FFP Next3GWs not ready (all zero) — using fallback projections")
         return result
 
     # Build lookup from FFP data: (normalized_name, team_short) -> Next3GWs
@@ -682,12 +819,12 @@ def blend_multi_gw_projections(
     ffp["__team_short"] = ffp["Team"].replace(TEAM_FULL_TO_SHORT)
     ffp["Next3GWs"] = pd.to_numeric(ffp["Next3GWs"], errors="coerce")
 
-    # Build lookup dict
+    # Build lookup dict (individual zeros still skipped as defense-in-depth)
     lookup = {}
     for _, row in ffp.iterrows():
         key = (row["__norm"], str(row["__team_short"]))
         val = row["Next3GWs"]
-        if pd.notna(val):
+        if pd.notna(val) and val > 0:
             lookup[key] = val
 
     if not lookup:
@@ -801,6 +938,16 @@ def merge_ffp_single_gw_data(
     ffp_cols = [c for c in ("Predicted", "Start", "LongStart") if c in ffp_df.columns]
     if not ffp_cols or "Name" not in ffp_df.columns:
         return result
+
+    # Skip prediction columns that aren't ready (all-zero = FFP hasn't published yet).
+    # Start/LongStart can legitimately be 0 for individual players, so only check Predicted.
+    if "Predicted" in ffp_cols:
+        pred_vals = pd.to_numeric(ffp_df["Predicted"], errors="coerce")
+        if not pred_vals.gt(0).any():
+            _logger.info("FFP Predicted not ready (all zero) — skipping single-GW predictions")
+            ffp_cols = [c for c in ffp_cols if c != "Predicted"]
+            if not ffp_cols:
+                return result
 
     # Build lookup: (normalized_name, team_short) -> {Predicted, Start, LongStart}
     ffp = ffp_df[["Name", "Team"] + ffp_cols].copy()
