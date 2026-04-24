@@ -345,19 +345,415 @@ def _get_availability_indicator(chance: Optional[int], news: str) -> str:
         return "✓"
 
 
+def _parse_chip_status(history: dict, current_gw: int) -> dict:
+    """Parse chip usage and availability from team history."""
+    chips_used = history.get("chips", []) if history else []
+
+    used: Dict[str, Any] = {"wildcard": [], "bboost": None, "freehit": None, "3xc": None}
+    for chip in chips_used:
+        name = chip.get("name", "")
+        event = chip.get("event", 0)
+        if name == "wildcard":
+            used["wildcard"].append(event)
+        elif name in used:
+            used[name] = event
+
+    wildcard_1_used = any(e < 20 for e in used["wildcard"])
+    wildcard_2_used = any(e >= 20 for e in used["wildcard"])
+    wildcard_available = not wildcard_1_used or not wildcard_2_used
+
+    available = []
+    if wildcard_available:
+        available.append("wildcard")
+    if used["bboost"] is None:
+        available.append("bboost")
+    if used["freehit"] is None:
+        available.append("freehit")
+    if used["3xc"] is None:
+        available.append("3xc")
+
+    return {
+        "used": used,
+        "available": available,
+        "wildcard_1_used": wildcard_1_used,
+        "wildcard_2_used": wildcard_2_used,
+        "wildcard_available": wildcard_available,
+    }
+
+
+def _compute_free_transfers(history: dict, entry_history: dict, current_gw: int) -> int:
+    """Compute free transfers available this gameweek.
+
+    FPL rules: 1 FT per GW, bank 1 extra if 0 transfers last GW (max 2 banked).
+    """
+    if not history:
+        return 1
+
+    gw_history = history.get("current", [])
+
+    # Check if a hit was taken this GW already
+    transfer_cost = entry_history.get("event_transfers_cost", 0)
+    if transfer_cost and transfer_cost < 0:
+        return 0
+
+    # Look at last completed GW (second-to-last entry, since current GW may be live)
+    if len(gw_history) >= 2:
+        last_gw = gw_history[-2]
+        if last_gw.get("event_transfers", 1) == 0:
+            return 2  # Banked from last GW
+
+    return 1
+
+
+def _ownership_badge(pct: float) -> str:
+    """Return HTML ownership badge for template (>20%) or differential (<5%) players."""
+    pct = float(pct or 0)
+    if pct >= 20:
+        return ('<span style="background:#7c3aed;color:#fff;padding:2px 8px;border-radius:10px;'
+                'font-size:0.75em;font-weight:bold;">Template</span>')
+    elif pct <= 5:
+        return ('<span style="background:#0891b2;color:#fff;padding:2px 8px;border-radius:10px;'
+                'font-size:0.75em;font-weight:bold;">Differential</span>')
+    return ""
+
+
+def _format_price_trend(cost_change_event: int, transfers_in_event: int,
+                         transfers_out_event: int) -> dict:
+    """Format price trend badge from GW transfer activity."""
+    cost_change = int(cost_change_event or 0)
+    t_in = int(transfers_in_event or 0)
+    t_out = int(transfers_out_event or 0)
+
+    if cost_change > 0:
+        indicator = "Rising"
+        badge_html = (f'<span style="color:#4ecca3;font-size:0.78em;font-weight:bold;">'
+                      f'&#8593; Rising +£{cost_change/10:.1f}m</span>')
+    elif cost_change < 0:
+        indicator = "Falling"
+        badge_html = (f'<span style="color:#f87171;font-size:0.78em;font-weight:bold;">'
+                      f'&#8595; Falling £{cost_change/10:.1f}m</span>')
+    elif t_in > t_out * 1.5 and t_in > 50_000:
+        indicator = "Likely Rising"
+        badge_html = '<span style="color:#86efac;font-size:0.78em;">&#8593; Likely Rising</span>'
+    else:
+        indicator = "Stable"
+        badge_html = ""
+
+    rush_html = ""
+    if t_in > 200_000:
+        rush_html = ('<span style="background:#d97706;color:#fff;padding:1px 6px;border-radius:8px;'
+                     'font-size:0.72em;font-weight:bold;margin-left:4px;">Transfer Rush</span>')
+
+    return {"indicator": indicator, "badge_html": badge_html, "rush_html": rush_html}
+
+
+def _compute_hit_verdict(ep_delta: float, is_hit: bool) -> dict:
+    """Determine whether a transfer is worth a -4 hit based on FPL expected points delta."""
+    net_gain = ep_delta - 4.0 if is_hit else ep_delta
+
+    if not is_hit:
+        verdict = "FREE"
+        verdict_color = "#4ecca3"
+    elif net_gain >= 2.0:
+        verdict = "YES"
+        verdict_color = "#4ecca3"
+    elif net_gain >= 0:
+        verdict = "MARGINAL"
+        verdict_color = "#fbbf24"
+    else:
+        verdict = "NO"
+        verdict_color = "#f87171"
+
+    sign = "+" if net_gain >= 0 else ""
+    hit_label = " (hit)" if is_hit else " (free)"
+    display_str = f"{sign}{net_gain:.1f} pts net{hit_label}"
+
+    return {
+        "net_gain": net_gain,
+        "verdict": verdict,
+        "verdict_color": verdict_color,
+        "display_str": display_str,
+    }
+
+
+def _render_transfer_status_panel(bank: int, squad_value: int, free_transfers: int,
+                                   chip_status: dict, active_chip: Optional[str]):
+    """Render a top-of-page status panel: free transfers, bank, chips."""
+    chip_names = {"wildcard": "Wildcard", "bboost": "Bench Boost",
+                  "freehit": "Free Hit", "3xc": "Triple Captain"}
+    chip_colors = {"wildcard": "#7c3aed", "bboost": "#2563eb",
+                   "freehit": "#0891b2", "3xc": "#d97706"}
+
+    def stat_card_html(label: str, value: str, accent: str = "#00ff87", subtitle: str = "") -> str:
+        sub = (f'<div style="color:#aaa;font-size:11px;margin-top:4px;">{subtitle}</div>'
+               if subtitle else "")
+        return (
+            f'<div style="border:1px solid #333;border-radius:10px;padding:14px;'
+            f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);'
+            f'text-align:center;color:#e0e0e0;height:100%;">'
+            f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+            f'letter-spacing:0.5px;margin-bottom:6px;">{label}</div>'
+            f'<div style="color:{accent};font-size:20px;font-weight:700;">{value}</div>'
+            f'{sub}</div>'
+        )
+
+    # Free transfer card
+    if free_transfers == 2:
+        ft_val, ft_color, ft_sub = "2 FTs Banked", "#4ecca3", "Both transfers are free"
+    elif free_transfers == 1:
+        ft_val, ft_color, ft_sub = "1 Free Transfer", "#00ff87", "Next costs &minus;4 pts"
+    else:
+        ft_val, ft_color, ft_sub = "0 FTs (Hit GW)", "#f87171", "&minus;4 pts per transfer"
+
+    # Active chip card
+    if active_chip:
+        active_val = chip_names.get(active_chip, active_chip)
+        active_color = chip_colors.get(active_chip, "#fbbf24")
+        active_sub = "Currently active!"
+    else:
+        active_val, active_color, active_sub = "None Active", "#6b7280", ""
+
+    # Available chips card (with pill badges)
+    avail = chip_status.get("available", [])
+    if avail:
+        badges = "".join(
+            f'<span style="background:{chip_colors.get(c, "#444")};color:#fff;'
+            f'padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:bold;margin:2px;">'
+            f'{chip_names.get(c, c)}</span>'
+            for c in avail
+        )
+        chips_card = (
+            f'<div style="border:1px solid #333;border-radius:10px;padding:14px;'
+            f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);'
+            f'text-align:center;color:#e0e0e0;">'
+            f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+            f'letter-spacing:0.5px;margin-bottom:8px;">Chips Available</div>'
+            f'<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:4px;">{badges}</div>'
+            f'</div>'
+        )
+    else:
+        chips_card = stat_card_html("Chips Available", "All Used", "#6b7280")
+
+    cols = st.columns(5)
+    with cols[0]:
+        st.markdown(stat_card_html("Free Transfers", ft_val, ft_color, ft_sub),
+                    unsafe_allow_html=True)
+    with cols[1]:
+        st.markdown(stat_card_html("In the Bank", _format_money(bank)), unsafe_allow_html=True)
+    with cols[2]:
+        st.markdown(stat_card_html("Squad Value", _format_money(squad_value)),
+                    unsafe_allow_html=True)
+    with cols[3]:
+        st.markdown(stat_card_html("Active Chip", active_val, active_color, active_sub),
+                    unsafe_allow_html=True)
+    with cols[4]:
+        st.markdown(chips_card, unsafe_allow_html=True)
+
+    st.markdown("")  # spacing
+
+
+def _render_chip_advisor(chip_status: dict, squad_df: pd.DataFrame, current_gw: int):
+    """Render chip strategy advisor with rule-based advice."""
+    chip_names = {"wildcard": "Wildcard", "bboost": "Bench Boost",
+                  "freehit": "Free Hit", "3xc": "Triple Captain"}
+    chip_colors = {"wildcard": "#7c3aed", "bboost": "#2563eb",
+                   "freehit": "#0891b2", "3xc": "#d97706"}
+    chip_used_events = chip_status.get("used", {})
+
+    with st.expander("Chip Strategy", expanded=False):
+        # Chip status display
+        avail = chip_status.get("available", [])
+        all_chips = ["wildcard", "bboost", "freehit", "3xc"]
+
+        avail_html = ""
+        for c in all_chips:
+            if c in avail:
+                avail_html += (
+                    f'<span style="background:{chip_colors.get(c, "#444")};color:#fff;'
+                    f'padding:3px 10px;border-radius:12px;font-size:0.8em;font-weight:bold;margin:3px;">'
+                    f'{chip_names.get(c, c)}</span>'
+                )
+            else:
+                events = chip_used_events.get(c)
+                if isinstance(events, list):
+                    used_label = f'GW{events[0]}' if events else '?'
+                else:
+                    used_label = f'GW{events}' if events else 'Used'
+                avail_html += (
+                    f'<span style="background:#2d2d2d;color:#666;'
+                    f'padding:3px 10px;border-radius:12px;font-size:0.8em;margin:3px;">'
+                    f'{chip_names.get(c, c)} ({used_label})</span>'
+                )
+
+        st.markdown(
+            f'<div style="margin-bottom:10px;color:#e0e0e0;">{avail_html}</div>',
+            unsafe_allow_html=True
+        )
+
+        # Rule-based advice
+        if "Keep Score" in squad_df.columns and not squad_df.empty:
+            avg_keep = float(squad_df["Keep Score"].mean())
+            weak_count = int((squad_df["Keep Score"] < 0.50).sum())
+
+            if chip_status["wildcard_available"] and current_gw >= 25 and avg_keep < 0.45:
+                st.warning(
+                    f"**Wildcard Alert:** Your squad's avg Keep Score is {avg_keep:.2f} (below 0.45). "
+                    "Consider using your Wildcard to rebuild with a stronger set of players."
+                )
+            elif chip_status["wildcard_available"] and weak_count >= 6:
+                st.warning(
+                    f"**Wildcard Alert:** {weak_count} players have Keep Score below 0.50. "
+                    "A Wildcard rebuild could significantly improve your squad quality."
+                )
+
+            if not chip_status["wildcard_2_used"] and current_gw >= 30:
+                st.info(
+                    f"**WC2 available** — your second Wildcard has not been used yet. "
+                    "Best deployed in GW30–35 for the run-in."
+                )
+
+        if not avail:
+            st.success("All chips used — focus on optimizing weekly transfers.")
+
+
+def _build_multi_transfer_plan(squad_df: pd.DataFrame, available_df: pd.DataFrame,
+                                bank: int, depth_map: Optional[Dict] = None) -> List[Dict]:
+    """Find optimal 2-player swap when both transfers are free."""
+    if squad_df.empty or available_df.empty or "Keep Score" not in squad_df.columns:
+        return []
+
+    pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
+
+    # Bottom-6 Keep Score as drop candidates
+    drop_candidates = squad_df.nsmallest(6, "Keep Score")
+
+    best_score = -999.0
+    best_plan: List[Dict] = []
+
+    drop_list = list(drop_candidates.iterrows())
+    for i, (_, drop1) in enumerate(drop_list):
+        for _, drop2 in drop_list[i + 1:]:
+            if drop1["Player_ID"] == drop2["Player_ID"]:
+                continue
+
+            combined_budget = bank + drop1.get("selling_price", drop1.get("now_cost", 0)) + \
+                              drop2.get("selling_price", drop2.get("now_cost", 0))
+
+            # Find best add for each drop position independently
+            pair_suggestions = []
+            for drop_row in [drop1, drop2]:
+                pos = drop_row["Position"]
+                cands = available_df[
+                    (available_df["Position"] == pos) &
+                    (available_df["now_cost"] <= combined_budget)
+                ].head(10)
+
+                found = None
+                for _, add_row in cands.iterrows():
+                    # Club rule check
+                    squad_without = squad_df[
+                        ~squad_df["Player_ID"].isin([drop1["Player_ID"], drop2["Player_ID"]])
+                    ]
+                    add_team = add_row.get("Team")
+                    if (squad_without["Team"] == add_team).sum() >= 3:
+                        continue
+                    found = add_row
+                    break
+
+                if found is None:
+                    break
+
+                add_form_col = "HealthyForm" if "HealthyForm" in found.index else "form"
+                proj = pd.to_numeric(found.get("Projected_Points"), errors="coerce")
+                pair_suggestions.append({
+                    "position": pos_labels.get(pos, pos),
+                    "score_diff": float(found.get("Transfer Score", 0)) - float(drop_row.get("Keep Score", 0)),
+                    "drop_player": drop_row["Player"],
+                    "drop_team": drop_row["Team"],
+                    "drop_price": f"£{drop_row['now_cost']/10:.1f}m",
+                    "drop_form": f"{float(drop_row.get('HealthyForm' if 'HealthyForm' in drop_row.index else 'form', 0) or 0):.1f}",
+                    "drop_season_pts": drop_row.get("total_points", 0),
+                    "drop_injury": _get_availability_indicator(
+                        drop_row.get("chance_of_playing_next_round"), drop_row.get("news", "")),
+                    "add_player": found["Player"],
+                    "add_team": found["Team"],
+                    "add_price": f"£{found['now_cost']/10:.1f}m",
+                    "add_form": f"{float(found.get(add_form_col, 0) or 0):.1f}",
+                    "add_proj_pts": f"{proj:.1f}" if pd.notna(proj) else "N/A",
+                    "add_injury": _get_availability_indicator(
+                        found.get("chance_of_playing_next_round"), found.get("news", "")),
+                    "rationale": "Part of optimal 2-transfer plan",
+                    "urgency": compute_transfer_urgency(pos, depth_map) if depth_map else "",
+                    "ep_delta": None,
+                    "price_trend": None,
+                    "add_ownership_badge": _ownership_badge(found.get("selected_by_percent", 0)),
+                    "hit_verdict": None,
+                    "plan_label": "2-Transfer Plan (Both Free)",
+                })
+
+            if len(pair_suggestions) == 2:
+                combined_score = sum(s["score_diff"] for s in pair_suggestions)
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_plan = pair_suggestions
+
+    return best_plan
+
+
+def _render_multi_transfer_plan(plan: List[Dict]):
+    """Render the optimal 2-transfer plan side-by-side."""
+    if not plan:
+        return
+
+    st.subheader("2-Transfer Plan (Both Free)")
+    st.caption("Optimal pair of transfers when you have 2 free transfers banked.")
+
+    cols = st.columns(2)
+    for col, s in zip(cols, plan):
+        with col:
+            card_html = f"""
+            <div style="border: 1px solid #444; border-radius: 10px; padding: 16px; margin-bottom: 12px;
+                        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #e0e0e0;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                    <span style="background: #0f3460; color: #e0e0e0; padding: 3px 12px; border-radius: 12px;
+                                 font-size: 0.85em; font-weight: bold;">{s['position']}</span>
+                    <span style="background: #1a472a; color: #4ecca3; padding: 3px 12px; border-radius: 12px;
+                                 font-size: 0.85em; font-weight: bold;">+{s['score_diff']:.3f}</span>
+                </div>
+                <div style="color: #e74c3c; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">DROP</div>
+                <div style="color: #e0e0e0; font-weight: bold;">{s['drop_player']} ({s['drop_team']})</div>
+                <div style="color: #999; font-size: 0.82em; margin-bottom: 8px;">
+                    {s['drop_price']} &bull; Form: {s['drop_form']} &bull; {s['drop_injury']}
+                </div>
+                <div style="color: #4ecca3; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">ADD</div>
+                <div style="color: #e0e0e0; font-weight: bold;">{s['add_player']} ({s['add_team']})</div>
+                <div style="color: #999; font-size: 0.82em;">
+                    {s['add_price']} &bull; Proj: {s['add_proj_pts']} &bull; {s['add_injury']}
+                    {s.get('add_ownership_badge', '')}
+                </div>
+            </div>
+            """
+            st.markdown(card_html, unsafe_allow_html=True)
+
+    st.caption("Both transfers are free this gameweek — optimal pair based on Transfer/Keep Scores.")
+
+
 def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFrame,
-                                 bank: int, top_n: int = 3, depth_map: Optional[Dict] = None) -> List[Dict]:
+                                 bank: int, top_n: int = 3, depth_map: Optional[Dict] = None,
+                                 free_transfers: int = 1) -> List[Dict]:
     """Build transfer suggestions pairing lowest-keep-score squad players with best replacements."""
     if squad_df.empty or available_df.empty:
         return []
 
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
     suggestions = []
+    remaining_ft = free_transfers
 
     lowest_keep = squad_df.nsmallest(top_n, "Keep Score")
 
     for _, drop_row in lowest_keep.iterrows():
         pos = drop_row["Position"]
+        drop_id = drop_row["Player_ID"]
         selling_price = drop_row.get("selling_price", drop_row.get("now_cost", 0))
         budget = bank + selling_price
 
@@ -370,7 +766,18 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         if candidates.empty:
             continue
 
-        add_row = candidates.iloc[0]  # Already sorted by Transfer Score desc
+        # Club rule: max 3 players from same club — skip candidates that would breach it
+        squad_without_drop = squad_df[squad_df["Player_ID"] != drop_id]
+        add_row = None
+        for _, candidate in candidates.head(10).iterrows():
+            cand_team = candidate.get("Team")
+            if (squad_without_drop["Team"] == cand_team).sum() >= 3:
+                continue  # would violate 3-per-club rule
+            add_row = candidate
+            break
+
+        if add_row is None:
+            add_row = candidates.iloc[0]  # Fallback if all top-10 breach rule
 
         # Calculate score improvement using Transfer Score vs Keep Score
         score_diff = add_row.get("Transfer Score", 0) - drop_row.get("Keep Score", 0)
@@ -424,6 +831,25 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         add_form_val = float(add_row.get(add_form_col, 0) or 0)
         drop_form_val = float(drop_row.get(drop_form_col, 0) or 0)
 
+        # ep_next delta (FPL's own expected points signal)
+        ep_next_add = float(add_row.get("ep_next", 0) or 0)
+        ep_next_drop = float(drop_row.get("ep_next", 0) or 0)
+        ep_delta = ep_next_add - ep_next_drop
+
+        # Price trend and ownership intelligence
+        price_trend = _format_price_trend(
+            add_row.get("cost_change_event", 0),
+            add_row.get("transfers_in_event", 0),
+            add_row.get("transfers_out_event", 0),
+        )
+        add_ownership_badge = _ownership_badge(add_row.get("selected_by_percent", 0))
+        add_ownership_pct = float(add_row.get("selected_by_percent", 0) or 0)
+
+        # Hit verdict
+        is_hit = remaining_ft <= 0
+        hit_verdict = _compute_hit_verdict(ep_delta, is_hit)
+        remaining_ft = max(0, remaining_ft - 1)
+
         suggestions.append({
             "position": pos_labels.get(pos, pos),
             "score_diff": score_diff,
@@ -441,6 +867,13 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
             "add_injury": add_injury,
             "rationale": rationale,
             "urgency": urgency,
+            "ep_delta": ep_delta,
+            "ep_next_add": ep_next_add,
+            "ep_next_drop": ep_next_drop,
+            "price_trend": price_trend,
+            "add_ownership_badge": add_ownership_badge,
+            "add_ownership_pct": add_ownership_pct,
+            "hit_verdict": hit_verdict,
         })
 
     return suggestions
@@ -499,7 +932,59 @@ def _render_depth_card(depth_map: Dict):
         st.markdown(card, unsafe_allow_html=True)
 
 
-def _render_transfer_suggestions(suggestions: List[Dict]):
+def _build_hit_verdict_row(s: dict) -> str:
+    """Build the hit verdict HTML row for a suggestion card."""
+    verdict_data = s.get("hit_verdict")
+    if not verdict_data:
+        return ""
+    ep_add = s.get("ep_next_add", 0)
+    ep_drop = s.get("ep_next_drop", 0)
+    ep_delta = s.get("ep_delta", 0)
+    sign = "+" if ep_delta >= 0 else ""
+    color = verdict_data["verdict_color"]
+    verdict = verdict_data["verdict"]
+    display = verdict_data["display_str"]
+    return (
+        f'<div style="display:flex;justify-content:space-between;align-items:center;'
+        f'margin-top:6px;padding-top:6px;border-top:1px solid #2d2d2d;">'
+        f'<span style="color:#9ca3af;font-size:0.78em;">'
+        f'FPL xPts: {ep_add:.1f} &minus; {ep_drop:.1f} = <b style="color:#e0e0e0;">{sign}{ep_delta:.1f}</b>'
+        f'</span>'
+        f'<span style="background:{color};color:#0d1117;padding:2px 10px;border-radius:10px;'
+        f'font-size:0.78em;font-weight:bold;">{verdict} &nbsp; {display}</span>'
+        f'</div>'
+    )
+
+
+def _build_trend_ownership_row(s: dict) -> str:
+    """Build the price trend + ownership HTML row for a suggestion card."""
+    pt = s.get("price_trend")
+    badge = s.get("add_ownership_badge", "")
+    pct = s.get("add_ownership_pct", 0)
+
+    badges = []
+    if pt:
+        if pt.get("badge_html"):
+            badges.append(pt["badge_html"])
+        if pt.get("rush_html"):
+            badges.append(pt["rush_html"])
+    if pct:
+        badges.append(
+            f'<span style="color:#9ca3af;font-size:0.78em;">Own: {pct:.1f}%</span>'
+        )
+    if badge:
+        badges.append(badge)
+
+    if not badges:
+        return ""
+    return (
+        f'<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:4px;">'
+        + "".join(badges)
+        + "</div>"
+    )
+
+
+def _render_transfer_suggestions(suggestions: List[Dict], free_transfers: int = 1):
     """Render transfer suggestion cards using styled HTML."""
     if not suggestions:
         st.info("No beneficial transfers found. Your squad looks strong at all positions.")
@@ -550,6 +1035,8 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
             </div>
             <div style="color: #aaa; font-size: 0.82em; font-style: italic; border-top: 1px solid #333;
                         padding-top: 6px;">{s['rationale']}</div>
+            {_build_hit_verdict_row(s)}
+            {_build_trend_ownership_row(s)}
         </div>
         """
         st.markdown(card_html, unsafe_allow_html=True)
@@ -605,12 +1092,20 @@ def show_classic_transfers_page():
         return
 
     picks = picks_data.get("picks", [])
+    active_chip = picks_data.get("active_chip")  # e.g., "wildcard", "freehit", "bboost", "3xc"
     entry_history = picks_data.get("entry_history", {})
 
     bank = entry_history.get("bank", 0)
     squad_value = entry_history.get("value", 0)
     transfers_made = entry_history.get("event_transfers", 0)
     transfer_cost = entry_history.get("event_transfers_cost", 0)
+
+    # Compute chip status and free transfers
+    chip_status = _parse_chip_status(history, current_gw)
+    free_transfers = _compute_free_transfers(history, entry_history, current_gw)
+
+    # Status panel — shown before filters so users see FT count immediately
+    _render_transfer_status_panel(bank, squad_value, free_transfers, chip_status, active_chip)
 
     # Controls
     with st.expander("Filters", expanded=True):
@@ -719,6 +1214,9 @@ def show_classic_transfers_page():
         squad_df = _compute_keep_score(squad_df, all_players_df=all_players,
                                        current_gw=current_gw, depth_map=depth_map)
 
+    # Chip strategy advisor (needs Keep Scores to be computed first)
+    _render_chip_advisor(chip_status, squad_df, current_gw)
+
     # Get squad player IDs for filtering
     squad_ids = set(squad_df["Player_ID"].tolist())
     teams_map = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
@@ -756,8 +1254,17 @@ def show_classic_transfers_page():
     # ---------------------------
     # TRANSFER SUGGESTION CARDS
     # ---------------------------
-    suggestions = _build_transfer_suggestions(squad_df, available, bank, top_n=3, depth_map=depth_map)
-    _render_transfer_suggestions(suggestions)
+    suggestions = _build_transfer_suggestions(
+        squad_df, available, bank, top_n=3, depth_map=depth_map, free_transfers=free_transfers
+    )
+    _render_transfer_suggestions(suggestions, free_transfers=free_transfers)
+
+    # 2-Transfer Plan (only when both FTs banked)
+    if free_transfers >= 2:
+        multi_plan = _build_multi_transfer_plan(squad_df, available, bank, depth_map=depth_map)
+        if multi_plan:
+            st.markdown("")
+            _render_multi_transfer_plan(multi_plan)
 
     st.markdown("---")
 
@@ -875,10 +1382,15 @@ def show_classic_transfers_page():
     # Add price change indicator
     top_targets["Price_Change"] = top_targets["cost_change_event"].apply(_format_price_change)
 
+    # Add transfer rush indicator
+    top_targets["Rush"] = top_targets["transfers_in_event"].apply(
+        lambda x: "🔥" if int(x or 0) > 200_000 else ""
+    )
+
     # Format for display — use HealthyForm if available
     target_form_col = "HealthyForm" if "HealthyForm" in top_targets.columns else "form"
     target_display_cols = [
-        "Player", "Team", "Position", "now_cost", "Price_Change", target_form_col,
+        "Player", "Team", "Position", "now_cost", "Price_Change", "Rush", target_form_col,
         "total_points", "Projected_Points", "selected_by_percent",
         "AvgFDR", "1GW", "ROS", "Transfer Score", "Status"
     ]
@@ -902,9 +1414,12 @@ def show_classic_transfers_page():
         "Price_Change": "Δ",
     })
 
+    display_cols_final = ["Player", "Team", "Position", "Price", "Δ", "Rush", "Form",
+                          "Season Pts", "Proj Pts", "Ownership", "Avg FDR",
+                          "1GW", "ROS", "Transfer Score", "Status"]
+    display_cols_final = [c for c in display_cols_final if c in targets_show.columns]
     render_styled_table(
-        targets_show[["Player", "Team", "Position", "Price", "Δ", "Form",
-                      "Season Pts", "Proj Pts", "Ownership", "Avg FDR", "1GW", "ROS", "Transfer Score", "Status"]],
+        targets_show[display_cols_final],
         col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}", "Transfer Score": "{:.3f}"},
         positive_color_cols=["1GW", "ROS", "Transfer Score"],
         max_height=500,
