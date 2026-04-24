@@ -415,9 +415,10 @@ def _compute_free_transfers(history: dict, entry_history: dict, current_gw: int)
     if transfer_cost and transfer_cost < 0:
         return 0
 
-    # Look at last completed GW (second-to-last entry, since current GW may be live)
-    if len(gw_history) >= 2:
-        last_gw = gw_history[-2]
+    # history["current"] only contains completed GWs — [-1] is the last finished GW.
+    # If 0 transfers were made last GW, 1 FT was banked → 2 FTs available now.
+    if len(gw_history) >= 1:
+        last_gw = gw_history[-1]
         if last_gw.get("event_transfers", 1) == 0:
             return 2  # Banked from last GW
 
