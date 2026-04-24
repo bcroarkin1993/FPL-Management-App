@@ -346,26 +346,42 @@ def _get_availability_indicator(chance: Optional[int], news: str) -> str:
 
 
 def _parse_chip_status(history: dict, current_gw: int) -> dict:
-    """Parse chip usage and availability from team history."""
+    """Parse chip usage and availability from team history.
+
+    Both Wildcard and Bench Boost are now double-use chips:
+      - Slot 1: used before GW20 (event < 20)
+      - Slot 2: used in GW20+ (event >= 20)
+    Free Hit and Triple Captain remain single-use.
+    """
     chips_used = history.get("chips", []) if history else []
 
-    used: Dict[str, Any] = {"wildcard": [], "bboost": None, "freehit": None, "3xc": None}
+    # Wildcard and Bench Boost are tracked as lists (double-use)
+    used: Dict[str, Any] = {"wildcard": [], "bboost": [], "freehit": None, "3xc": None}
     for chip in chips_used:
         name = chip.get("name", "")
         event = chip.get("event", 0)
-        if name == "wildcard":
-            used["wildcard"].append(event)
+        if name in ("wildcard", "bboost"):
+            used[name].append(event)
         elif name in used:
             used[name] = event
 
+    def _double_chip_available(events: list) -> bool:
+        slot1_used = any(e < 20 for e in events)
+        slot2_used = any(e >= 20 for e in events)
+        return not slot1_used or not slot2_used
+
     wildcard_1_used = any(e < 20 for e in used["wildcard"])
     wildcard_2_used = any(e >= 20 for e in used["wildcard"])
-    wildcard_available = not wildcard_1_used or not wildcard_2_used
+    wildcard_available = _double_chip_available(used["wildcard"])
+
+    bboost_1_used = any(e < 20 for e in used["bboost"])
+    bboost_2_used = any(e >= 20 for e in used["bboost"])
+    bboost_available = _double_chip_available(used["bboost"])
 
     available = []
     if wildcard_available:
         available.append("wildcard")
-    if used["bboost"] is None:
+    if bboost_available:
         available.append("bboost")
     if used["freehit"] is None:
         available.append("freehit")
@@ -378,6 +394,9 @@ def _parse_chip_status(history: dict, current_gw: int) -> dict:
         "wildcard_1_used": wildcard_1_used,
         "wildcard_2_used": wildcard_2_used,
         "wildcard_available": wildcard_available,
+        "bboost_1_used": bboost_1_used,
+        "bboost_2_used": bboost_2_used,
+        "bboost_available": bboost_available,
     }
 
 
@@ -481,7 +500,7 @@ def _render_transfer_status_panel(bank: int, squad_value: int, free_transfers: i
     """Render a top-of-page status panel: free transfers, bank, chips."""
     chip_names = {"wildcard": "Wildcard", "bboost": "Bench Boost",
                   "freehit": "Free Hit", "3xc": "Triple Captain"}
-    chip_colors = {"wildcard": "#7c3aed", "bboost": "#2563eb",
+    chip_colors = {"wildcard": "#7c3aed", "bboost": "#166534",
                    "freehit": "#0891b2", "3xc": "#d97706"}
 
     def stat_card_html(label: str, value: str, accent: str = "#00ff87", subtitle: str = "") -> str:
@@ -556,7 +575,7 @@ def _render_chip_advisor(chip_status: dict, squad_df: pd.DataFrame, current_gw: 
     """Render chip strategy advisor with rule-based advice."""
     chip_names = {"wildcard": "Wildcard", "bboost": "Bench Boost",
                   "freehit": "Free Hit", "3xc": "Triple Captain"}
-    chip_colors = {"wildcard": "#7c3aed", "bboost": "#2563eb",
+    chip_colors = {"wildcard": "#7c3aed", "bboost": "#166534",
                    "freehit": "#0891b2", "3xc": "#d97706"}
     chip_used_events = chip_status.get("used", {})
 
