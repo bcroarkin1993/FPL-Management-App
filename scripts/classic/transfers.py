@@ -769,9 +769,19 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
     suggestions = []
     remaining_ft = free_transfers
 
-    lowest_keep = squad_df.nsmallest(top_n, "Keep Score")
+    # Pick at most one drop candidate per position — prevents e.g. two GK suggestions
+    # both recommending the same replacement (like Areola twice).
+    seen_positions: set = set()
+    drop_candidates = []
+    for _, row in squad_df.nsmallest(top_n * 4, "Keep Score").iterrows():
+        pos = row["Position"]
+        if pos not in seen_positions:
+            seen_positions.add(pos)
+            drop_candidates.append(row)
+        if len(drop_candidates) == top_n:
+            break
 
-    for _, drop_row in lowest_keep.iterrows():
+    for drop_row in drop_candidates:
         pos = drop_row["Position"]
         drop_id = drop_row["Player_ID"]
         selling_price = drop_row.get("selling_price", drop_row.get("now_cost", 0))
@@ -1101,15 +1111,34 @@ def show_classic_transfers_page():
     # Team name (used in squad header below)
     team_name = entry.get("name", "Unknown Team")
 
-    # Get current squad
-    picks_data = get_classic_team_picks(team_id, current_gw)
-    if not picks_data:
-        # Try previous gameweek
-        picks_data = get_classic_team_picks(team_id, current_gw - 1)
+    # Get current squad — skipping any GW where Free Hit was active.
+    # After a Free Hit GW the squad REVERTS to the pre-FH squad, so loading
+    # picks from a Free Hit GW would show the wrong (temporary) 15 players.
+    chips_list = history.get("chips", []) if history else []
+    fh_gws = {c["event"] for c in chips_list if c.get("name") == "freehit"}
+
+    picks_data = None
+    picks_source_gw = None
+    for try_gw in [current_gw, current_gw - 1, current_gw - 2, current_gw - 3]:
+        if try_gw < 1:
+            break
+        if try_gw in fh_gws:
+            continue  # Free Hit GW — squad is temporary, skip it
+        candidate = get_classic_team_picks(team_id, try_gw)
+        if candidate:
+            picks_data = candidate
+            picks_source_gw = try_gw
+            break
 
     if not picks_data:
         show_api_error("loading your current squad")
         return
+
+    if picks_source_gw and picks_source_gw < current_gw - 1:
+        st.info(
+            f"Squad loaded from GW{picks_source_gw} — GW{picks_source_gw + 1} used a Free Hit "
+            f"(squad reverted after that GW)."
+        )
 
     picks = picks_data.get("picks", [])
     active_chip = picks_data.get("active_chip")  # e.g., "wildcard", "freehit", "bboost", "3xc"
@@ -1139,7 +1168,9 @@ def show_classic_transfers_page():
             )
 
         with col_b:
-            fdr_weeks = st.slider("FDR Lookahead (weeks)", 1, 8, 5)
+            # Default lookahead shrinks near end of season (no point looking past GW38)
+            default_fdr = min(5, max(2, 38 - current_gw))
+            fdr_weeks = st.slider("FDR Lookahead (weeks)", 1, 8, default_fdr)
 
         with col_c:
             max_price = st.slider(
@@ -1180,6 +1211,13 @@ def show_classic_transfers_page():
         # Add projections
         all_players = _add_projections(all_players, projections_df)
         squad_df = _add_projections(squad_df, projections_df)
+
+        # Fallback: when Rotowire hasn't published yet, use FPL's own ep_next so
+        # players don't all land on the neutral 0.5 in the 1GW score.
+        for _df in [all_players, squad_df]:
+            if "ep_next" in _df.columns and "Projected_Points" in _df.columns:
+                mask = _df["Projected_Points"].isna() & (_df["ep_next"] > 0)
+                _df.loc[mask, "Projected_Points"] = _df.loc[mask, "ep_next"]
 
         # Compute healthy form for squad players (15 players — fast)
         for idx, row in squad_df.iterrows():
