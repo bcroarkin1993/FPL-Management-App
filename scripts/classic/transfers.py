@@ -758,12 +758,66 @@ def _render_multi_transfer_plan(plan: List[Dict]):
     st.caption("Both transfers are free this gameweek — optimal pair based on Transfer/Keep Scores.")
 
 
+def _get_blanking_team_ids(current_gw: int, bootstrap: dict) -> set:
+    """Return team IDs with no fixture in the current GW (blank GW teams)."""
+    all_team_ids = {t["id"] for t in bootstrap.get("teams", [])}
+    fixtures = _load_future_fixtures()
+    if fixtures.empty:
+        return set()
+    gw_fixtures = fixtures[fixtures["event"] == current_gw]
+    teams_with_fixture: set = set()
+    for _, row in gw_fixtures.iterrows():
+        if pd.notna(row.get("team_h")):
+            teams_with_fixture.add(int(row["team_h"]))
+        if pd.notna(row.get("team_a")):
+            teams_with_fixture.add(int(row["team_a"]))
+    return all_team_ids - teams_with_fixture
+
+
+def _render_blank_gw_alert(squad_df: pd.DataFrame, blanking_team_ids: set, current_gw: int):
+    """Warn when starting XI players have blank GWs and surface hit-value context."""
+    if not blanking_team_ids or squad_df.empty or "squad_position" not in squad_df.columns:
+        return
+    blanking_starters = squad_df[
+        squad_df["Team_ID"].isin(blanking_team_ids) &
+        (squad_df["squad_position"] <= 11)
+    ]
+    if blanking_starters.empty:
+        return
+
+    names = ", ".join(
+        f"**{r['Player']}** ({r['Team']})" for _, r in blanking_starters.iterrows()
+    )
+    ep_vals = [float(r.get("ep_next", 0) or 0) for _, r in blanking_starters.iterrows()]
+    max_ep = max(ep_vals) if ep_vals else 0
+
+    msg = (
+        f"**GW{current_gw} Blank Alert — {len(blanking_starters)} starter(s) have no fixture:** "
+        f"{names}. "
+    )
+    if max_ep >= 4.0:
+        msg += (
+            f"Best replacement EP: ~{max_ep:.1f} pts — worth a **−4 hit** "
+            f"(net +{max_ep - 4:.1f} pts)."
+        )
+    elif max_ep > 0:
+        msg += (
+            f"Best replacement EP: ~{max_ep:.1f} pts — marginally worth a hit "
+            f"(net {max_ep - 4:+.1f} pts)."
+        )
+    st.warning(msg)
+
+
 def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFrame,
                                  bank: int, top_n: int = 3, depth_map: Optional[Dict] = None,
-                                 free_transfers: int = 1) -> List[Dict]:
+                                 free_transfers: int = 1,
+                                 blanking_team_ids: Optional[set] = None) -> List[Dict]:
     """Build transfer suggestions pairing lowest-keep-score squad players with best replacements."""
     if squad_df.empty or available_df.empty:
         return []
+
+    if blanking_team_ids is None:
+        blanking_team_ids = set()
 
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
     suggestions = []
@@ -812,9 +866,37 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         # Calculate score improvement using Transfer Score vs Keep Score
         score_diff = add_row.get("Transfer Score", 0) - drop_row.get("Keep Score", 0)
 
-        # Protect elite players from marginal swaps — scale threshold by Keep Score
+        # --- Threshold logic ---
         keep_score = float(drop_row.get("Keep Score", 0.5) or 0.5)
-        if keep_score > 0.7:
+        drop_chance = drop_row.get("chance_of_playing_next_round")
+        drop_status = drop_row.get("status", "a")
+
+        # Season-ending / 0% injury: bypass elite protection entirely
+        is_unavailable = (
+            (drop_chance is not None and float(drop_chance) == 0) and
+            drop_status in ("i", "u", "s")
+        )
+
+        # Blank GW for a starting XI player
+        is_starter = int(drop_row.get("squad_position", 12) or 12) <= 11
+        has_blank = drop_row.get("Team_ID") in blanking_team_ids and is_starter
+
+        # Check if same position has a non-blanking backup (position is covered)
+        squad_same_pos = squad_df[
+            (squad_df["Position"] == pos) & (squad_df["Player_ID"] != drop_id)
+        ]
+        has_non_blanking_backup = any(
+            r["Team_ID"] not in blanking_team_ids
+            for _, r in squad_same_pos.iterrows()
+        )
+
+        if is_unavailable:
+            min_threshold = 0.01   # Always suggest — they're not playing at all
+        elif has_blank and not has_non_blanking_backup:
+            min_threshold = 0.01   # No cover for this blank — treat like unavailable
+        elif has_blank and has_non_blanking_backup:
+            min_threshold = 0.20   # Covered by a teammate — very low priority
+        elif keep_score > 0.7:
             min_threshold = 0.15
         elif keep_score > 0.5:
             min_threshold = 0.08
@@ -825,7 +907,6 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
             continue
 
         # Availability info
-        drop_chance = drop_row.get("chance_of_playing_next_round")
         drop_news = drop_row.get("news", "")
         drop_injury = _get_availability_indicator(drop_chance, drop_news)
 
@@ -837,6 +918,15 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         reasons = []
         add_form_col = "HealthyForm" if "HealthyForm" in add_row.index else "form"
         drop_form_col = "HealthyForm" if "HealthyForm" in drop_row.index else "form"
+
+        if is_unavailable:
+            reasons.append("out for the season / unavailable — empty squad spot")
+        elif has_blank and not has_non_blanking_backup:
+            reasons.append(f"blank GW{drop_row.get('Team', '')} — no cover in this position")
+        elif has_blank and has_non_blanking_backup:
+            backup = squad_same_pos[~squad_same_pos["Team_ID"].isin(blanking_team_ids)].iloc[0]
+            reasons.append(f"covered by {backup['Player']} this week — low priority")
+
         form_diff = float(add_row.get(add_form_col, 0) or 0) - float(drop_row.get(drop_form_col, 0) or 0)
         if form_diff > 0:
             reasons.append(f"+{form_diff:.1f} form improvement")
@@ -852,18 +942,29 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         drop_fdr = drop_row.get("AvgFDR")
         if pd.notna(add_fdr) and pd.notna(drop_fdr) and add_fdr < drop_fdr:
             reasons.append("easier upcoming fixtures")
-        if drop_news:
+        if drop_news and not is_unavailable:
             reasons.append(f"current player: {drop_news[:40]}")
 
         rationale = " • ".join(reasons) if reasons else "Better overall transfer score"
-        urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
+
+        if is_unavailable:
+            urgency = "URGENT"
+        elif has_blank and not has_non_blanking_backup:
+            urgency = "BLANK GW"
+        elif has_blank and has_non_blanking_backup:
+            urgency = "LOW PRIORITY"
+        else:
+            urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
 
         add_form_val = float(add_row.get(add_form_col, 0) or 0)
         drop_form_val = float(drop_row.get(drop_form_col, 0) or 0)
 
-        # ep_next delta (FPL's own expected points signal)
+        # ep_next delta — use 0 for the drop player if they're blanking or unavailable
         ep_next_add = float(add_row.get("ep_next", 0) or 0)
-        ep_next_drop = float(drop_row.get("ep_next", 0) or 0)
+        if is_unavailable or (has_blank and is_starter):
+            ep_next_drop = 0.0  # Blank/unavailable players score nothing this week
+        else:
+            ep_next_drop = float(drop_row.get("ep_next", 0) or 0)
         ep_delta = ep_next_add - ep_next_drop
 
         # Price trend and ownership intelligence
@@ -1029,6 +1130,12 @@ def _render_transfer_suggestions(suggestions: List[Dict], free_transfers: int = 
         if urgency == "URGENT":
             urgency_html = ('<span style="background:#dc3545;color:#fff;padding:3px 10px;border-radius:12px;'
                             'font-size:0.8em;font-weight:bold;margin-left:8px;">URGENT</span>')
+        elif urgency == "BLANK GW":
+            urgency_html = ('<span style="background:#7c3aed;color:#fff;padding:3px 10px;border-radius:12px;'
+                            'font-size:0.8em;font-weight:bold;margin-left:8px;">BLANK GW</span>')
+        elif urgency == "LOW PRIORITY":
+            urgency_html = ('<span style="background:#374151;color:#9ca3af;padding:3px 10px;border-radius:12px;'
+                            'font-size:0.8em;font-weight:bold;margin-left:8px;">LOW PRIORITY</span>')
         elif urgency == "LOW DEPTH":
             urgency_html = ('<span style="background:#ff9800;color:#fff;padding:3px 10px;border-radius:12px;'
                             'font-size:0.8em;font-weight:bold;margin-left:8px;">LOW DEPTH</span>')
@@ -1254,6 +1361,9 @@ def show_classic_transfers_page():
         squad_df = merge_ffp_single_gw_data(squad_df, ffp_df)
         all_players = merge_ffp_single_gw_data(all_players, ffp_df)
 
+    # Blank GW detection — which teams have no fixture this GW
+    blanking_team_ids = _get_blanking_team_ids(current_gw, bootstrap)
+
     # Positional depth
     depth_map = {}
     if not squad_df.empty:
@@ -1312,8 +1422,11 @@ def show_classic_transfers_page():
     # ---------------------------
     # TRANSFER SUGGESTION CARDS
     # ---------------------------
+    _render_blank_gw_alert(squad_df, blanking_team_ids, current_gw)
+
     suggestions = _build_transfer_suggestions(
-        squad_df, available, bank, top_n=3, depth_map=depth_map, free_transfers=free_transfers
+        squad_df, available, bank, top_n=3, depth_map=depth_map,
+        free_transfers=free_transfers, blanking_team_ids=blanking_team_ids,
     )
     _render_transfer_suggestions(suggestions, free_transfers=free_transfers)
 
