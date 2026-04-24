@@ -400,13 +400,18 @@ def _parse_chip_status(history: dict, current_gw: int) -> dict:
     }
 
 
-def _compute_free_transfers(history: dict, entry_history: dict, current_gw: int) -> int:
+def _compute_free_transfers(history: dict, entry_history: dict, current_gw: int,
+                             fh_gws: Optional[set] = None) -> int:
     """Compute free transfers available this gameweek.
 
     FPL rules: 1 FT per GW, bank 1 extra if 0 transfers last GW (max 2 banked).
+    Free Hit GWs are excluded — they don't consume or bank FTs.
     """
     if not history:
         return 1
+
+    if fh_gws is None:
+        fh_gws = set()
 
     gw_history = history.get("current", [])
 
@@ -415,14 +420,69 @@ def _compute_free_transfers(history: dict, entry_history: dict, current_gw: int)
     if transfer_cost and transfer_cost < 0:
         return 0
 
-    # history["current"] only contains completed GWs — [-1] is the last finished GW.
-    # If 0 transfers were made last GW, 1 FT was banked → 2 FTs available now.
-    if len(gw_history) >= 1:
-        last_gw = gw_history[-1]
-        if last_gw.get("event_transfers", 1) == 0:
-            return 2  # Banked from last GW
+    # Walk backwards through completed GWs, skipping Free Hit GWs.
+    # FH GWs are recorded with high event_transfers counts but those don't
+    # affect the normal FT bank — we need the last non-FH GW.
+    for gw_entry in reversed(gw_history):
+        if gw_entry.get("event") in fh_gws:
+            continue
+        if gw_entry.get("event_transfers", 1) == 0:
+            return 2  # Banked a FT last non-FH GW
+        break  # Made transfers last non-FH GW → 1 FT this GW
 
     return 1
+
+
+def _apply_pending_transfers(picks_data: dict, picks_source_gw: int,
+                              all_transfers: list, fh_gws: set,
+                              bootstrap: dict) -> tuple:
+    """Apply transfers registered after picks_source_gw (excluding FH GWs).
+
+    Returns (updated_picks_data, list_of_applied_descriptions).
+    This is needed because the FPL picks endpoint returns 404 for upcoming
+    GWs, so between GWs we load the last completed GW's picks and replay
+    any transfers on top to reconstruct the current registered squad.
+    """
+    import copy
+
+    pending = [
+        t for t in (all_transfers or [])
+        if t.get("event", 0) > picks_source_gw
+        and t.get("event", 0) not in fh_gws
+    ]
+    if not pending:
+        return picks_data, []
+
+    picks_data = copy.deepcopy(picks_data)
+    picks = picks_data.get("picks", [])
+    elements_lookup = {p["id"]: p for p in bootstrap.get("elements", [])}
+
+    applied = []
+    for transfer in sorted(pending, key=lambda t: (t.get("event", 0), t.get("time", ""))):
+        out_id = transfer["element_out"]
+        in_id = transfer["element_in"]
+        for pick in picks:
+            if pick["element"] == out_id:
+                pick["element"] = in_id
+                # selling_price = what was paid (can only sell for this or less if risen)
+                pick["selling_price"] = transfer.get(
+                    "element_in_cost",
+                    elements_lookup.get(in_id, {}).get("now_cost", 0)
+                )
+                out_name = elements_lookup.get(out_id, {}).get("web_name", str(out_id))
+                in_name = elements_lookup.get(in_id, {}).get("web_name", str(in_id))
+                applied.append(f"{out_name} → {in_name} (GW{transfer['event']})")
+                break
+
+        # Update bank: selling price received minus purchase price
+        out_cost = transfer.get("element_out_cost", 0)
+        in_cost = transfer.get("element_in_cost", 0)
+        if "entry_history" in picks_data and out_cost and in_cost:
+            picks_data["entry_history"]["bank"] = (
+                picks_data["entry_history"].get("bank", 0) + out_cost - in_cost
+            )
+
+    return picks_data, applied
 
 
 def _ownership_badge(pct: float) -> str:
@@ -1253,12 +1313,24 @@ def show_classic_transfers_page():
         show_api_error("loading your current squad")
         return
 
+    # Fetch all transfers — needed to reconstruct the squad when the picks
+    # endpoint returns 404 for upcoming GWs (FPL only serves completed GW picks).
+    all_transfers = get_classic_transfers(team_id) or []
+
+    # Apply any transfers made after the base GW (e.g. Bowen in for Ekitike
+    # registered for GW34 while base picks are from GW32).
+    picks_data, applied_transfers = _apply_pending_transfers(
+        picks_data, picks_source_gw, all_transfers, fh_gws, bootstrap
+    )
+
     if picks_source_gw and picks_source_gw < current_gw - 1:
         fh_gw = picks_source_gw + 1
-        st.info(
-            f"Squad loaded from GW{picks_source_gw} — GW{fh_gw} used a Free Hit "
-            f"(squad reverted after that GW)."
-        )
+        msg = f"Base squad loaded from GW{picks_source_gw} (GW{fh_gw} was a Free Hit)."
+        if applied_transfers:
+            msg += f" Applied pending transfer(s): {', '.join(applied_transfers)}."
+        st.info(msg)
+    elif applied_transfers:
+        st.info(f"Applied pending transfer(s): {', '.join(applied_transfers)}.")
 
     picks = picks_data.get("picks", [])
     active_chip = picks_data.get("active_chip")  # e.g., "wildcard", "freehit", "bboost", "3xc"
@@ -1269,9 +1341,10 @@ def show_classic_transfers_page():
     transfers_made = entry_history.get("event_transfers", 0)
     transfer_cost = entry_history.get("event_transfers_cost", 0)
 
-    # Compute chip status and free transfers
+    # Compute chip status and free transfers (pass fh_gws so FH GWs are
+    # excluded from the FT-banking calculation)
     chip_status = _parse_chip_status(history, current_gw)
-    free_transfers = _compute_free_transfers(history, entry_history, current_gw)
+    free_transfers = _compute_free_transfers(history, entry_history, current_gw, fh_gws=fh_gws)
 
     # Status panel — shown before filters so users see FT count immediately
     _render_transfer_status_panel(bank, squad_value, free_transfers, chip_status, active_chip)
