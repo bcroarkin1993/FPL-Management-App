@@ -1218,17 +1218,29 @@ def show_classic_transfers_page():
     # Team name (used in squad header below)
     team_name = entry.get("name", "Unknown Team")
 
-    # Get current squad — skipping any GW where Free Hit was active.
-    # After a Free Hit GW the squad REVERTS to the pre-FH squad, so loading
-    # picks from a Free Hit GW would show the wrong (temporary) 15 players.
+    # Determine the most relevant GW to load picks for.
+    # Use the Classic bootstrap events to find next/current GW — more accurate
+    # than the Draft API's get_current_gameweek() between GWs.
+    events = bootstrap.get("events", [])
+    next_gw_from_bootstrap = next((e["id"] for e in events if e.get("is_next")), None)
+    # Try the next GW first: between GWs, transfers are registered there even
+    # though get_current_gameweek() may still return the just-finished GW.
+    gws_to_try_base = sorted(
+        {current_gw + 1, next_gw_from_bootstrap, current_gw, current_gw - 1,
+         current_gw - 2, current_gw - 3} - {None},
+        reverse=True,  # highest GW first
+    )
+
+    # Skip any GW where Free Hit was active — squad reverts after FH so those
+    # picks represent a temporary squad, not the real registered 15.
     chips_list = history.get("chips", []) if history else []
     fh_gws = {c["event"] for c in chips_list if c.get("name") == "freehit"}
 
     picks_data = None
     picks_source_gw = None
-    for try_gw in [current_gw, current_gw - 1, current_gw - 2, current_gw - 3]:
+    for try_gw in gws_to_try_base:
         if try_gw < 1:
-            break
+            continue
         if try_gw in fh_gws:
             continue  # Free Hit GW — squad is temporary, skip it
         candidate = get_classic_team_picks(team_id, try_gw)
@@ -1242,8 +1254,9 @@ def show_classic_transfers_page():
         return
 
     if picks_source_gw and picks_source_gw < current_gw - 1:
+        fh_gw = picks_source_gw + 1
         st.info(
-            f"Squad loaded from GW{picks_source_gw} — GW{picks_source_gw + 1} used a Free Hit "
+            f"Squad loaded from GW{picks_source_gw} — GW{fh_gw} used a Free Hit "
             f"(squad reverted after that GW)."
         )
 
