@@ -223,8 +223,7 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
             <div class="pos-header" style="background: {pos_info['color']};">{pos_info['name']}</div>
         """
 
-        for player_name in pos_players.index:
-            row = pos_players.loc[player_name]
+        for player_name, row in pos_players.iterrows():
             team = row.get('Team', '')
             matchup = row.get('Matchup', '')
             proj_pts = row.get('Points', 0) or 0

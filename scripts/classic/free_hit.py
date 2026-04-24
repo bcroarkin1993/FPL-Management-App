@@ -14,6 +14,7 @@ from typing import Optional, Dict, List, Tuple
 import config
 
 from scripts.common.error_helpers import show_api_error
+from scripts.common.player_matching import canonical_normalize
 from scripts.common.utils import (
     get_rotowire_player_projections,
     get_classic_bootstrap_static,
@@ -112,33 +113,49 @@ def _get_fdr_color(fdr: int) -> str:
         return "#dc3545"
 
 
-def _lookup_projection(player_name: str, team: str, position: str, projections_df: pd.DataFrame) -> Optional[float]:
+def _lookup_projection(
+    web_name: str,
+    full_name: str,
+    team: str,
+    position: str,
+    projections_df: pd.DataFrame,
+) -> Optional[float]:
     """Look up projection for a player using fuzzy matching.
+
+    Tries both web_name (e.g. "Guehi") and full_name (e.g. "Marc Guehi") against
+    Rotowire using token_set_ratio so that "Guehi" vs "Marc Guehi" scores 100.
+    Uses canonical_normalize to strip accents for consistent comparison.
 
     Requires team to match to avoid false positives (e.g., matching 'Ortega' to wrong player).
     """
     if projections_df is None or projections_df.empty:
         return None
 
+    norm_web = canonical_normalize(web_name)
+    norm_full = canonical_normalize(full_name)
+
     best_match = None
     best_score = 0
 
     for _, row in projections_df.iterrows():
-        proj_name = str(row.get("Player", ""))
+        proj_name = canonical_normalize(str(row.get("Player", "")))
         proj_team = str(row.get("Team", ""))
         proj_pos = str(row.get("Position", ""))
 
-        # REQUIRE team to match - this prevents matching players to wrong team's projections
+        # Require team match to avoid cross-team false positives
         if proj_team != team:
             continue
 
-        score = fuzz.ratio(player_name.lower(), proj_name.lower())
+        # Score against both web_name and full_name; take the best
+        score = max(
+            fuzz.token_set_ratio(norm_web, proj_name),
+            fuzz.token_set_ratio(norm_full, proj_name),
+        )
 
         # Boost if position matches
         if proj_pos == position:
             score += 10
 
-        # Higher threshold since we're already requiring team match
         if score > best_score and score >= 65:
             best_score = score
             best_match = row
@@ -190,12 +207,14 @@ def _build_player_pool(
             if news and any(word in news.lower() for word in ['injured', 'illness', 'suspended', 'unavailable', 'out']):
                 continue
 
-        # Get projection
+        # Get projection — use both web_name ("Guehi") and full name ("Marc Guehi")
+        full_name = f"{p.get('first_name', '')} {p.get('second_name', '')}".strip()
         proj_points = _lookup_projection(
-            p.get("web_name", ""),
-            team_short,
-            position,
-            projections_df
+            web_name=p.get("web_name", ""),
+            full_name=full_name,
+            team=team_short,
+            position=position,
+            projections_df=projections_df,
         )
 
         # Skip players without projections (they likely won't play)
@@ -205,7 +224,7 @@ def _build_player_pool(
 
         rows.append({
             "Player_ID": p.get("id"),
-            "Player": p.get("web_name"),
+            "Player": full_name or p.get("web_name"),
             "Team": team_short,
             "Team_ID": team_id,
             "Position": position,
@@ -223,7 +242,7 @@ def _build_player_pool(
 def solve_optimal_squad(
     df: pd.DataFrame,
     budget: float,
-    formation: str = "auto"
+    formation: str = "auto",
 ) -> Tuple[Optional[pd.DataFrame], Optional[float]]:
     """
     Uses PuLP to solve the FPL Free Hit optimization problem.
@@ -236,7 +255,9 @@ def solve_optimal_squad(
 
     Objective:
     - Maximize total projected points of the STARTING XI
-    - Minimize bench cost (to leave room for better starters)
+
+    Bench: the budget ceiling naturally incentivises cheap fillers — spending less
+    on bench leaves more headroom for higher-value starters.
 
     Returns:
     - DataFrame with selected squad and Is_Starter flag
@@ -265,11 +286,7 @@ def solve_optimal_squad(
     prob = pulp.LpProblem("FPL_Free_Hit_Optimizer", pulp.LpMaximize)
 
     # Objective: Maximize starting XI points
-    # Add tiny negative weight to bench cost to prefer cheaper bench
-    prob += (
-        pulp.lpSum([start[i] * points[i] for i in ids]) -
-        0.001 * pulp.lpSum([(select[i] - start[i]) * prices[i] for i in ids])
-    )
+    prob += pulp.lpSum([start[i] * points[i] for i in ids])
 
     # Constraints
 

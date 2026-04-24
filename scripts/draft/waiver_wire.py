@@ -5,7 +5,7 @@ import requests
 import numpy as np
 import pandas as pd
 import streamlit as st
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 
 import config
@@ -974,14 +974,24 @@ def _compute_transfer_suggestions(
     roster_df: pd.DataFrame,
     top_n: int = 3,
     depth_map: Optional[Dict] = None,
-) -> List[Dict]:
+) -> Tuple[List[Dict], List[Dict]]:
     """Core suggestion logic: position-locked swaps using pre-computed Transfer/Keep Scores.
 
     Uses Transfer Score (available players) and Keep Score (roster players) from
     compute_player_scores() with dynamic alpha blending. Injury adjustments are
     applied on top of these pre-computed scores.
+
+    Returns:
+        (suggestions, debug_rows) — suggestions is the ranked list of transfers;
+        debug_rows is a per-position breakdown for the transparency expander.
     """
+    # How many roster/available candidates to evaluate per position before giving up.
+    # Prevents a single injured top-available from blocking the whole position.
+    AVAIL_CANDIDATES = 5
+    ROSTER_CANDIDATES = 2
+
     suggestions = []
+    debug_rows: List[Dict] = []
 
     # Season points for injury hold logic
     roster_season_pts = pd.to_numeric(
@@ -994,6 +1004,12 @@ def _compute_transfer_suggestions(
 
         # Skip if can't drop (<=1 at position) or nothing to add
         if len(roster_pos) <= 1 or len(avail_pos) == 0:
+            debug_rows.append({
+                'pos': pos,
+                'skipped': True,
+                'reason': 'Not enough roster players or no available players',
+                'pairs': [],
+            })
             continue
 
         # Apply injury adjustments to pre-computed scores
@@ -1022,61 +1038,86 @@ def _compute_transfer_suggestions(
             base_score = float(row.get('Keep Score', 0) or 0)
             roster_pos.loc[idx, '_adj_value'] = base_score * factor
 
-        # Find worst roster player and best available player
         roster_sorted = roster_pos.sort_values('_adj_value')
         avail_sorted = avail_pos.sort_values('_adj_value', ascending=False)
 
-        if roster_sorted.empty or avail_sorted.empty:
-            continue
+        pos_debug_pairs = []
+        pos_suggestion_found = False
 
-        worst_roster = roster_sorted.iloc[0]
-        best_avail = avail_sorted.iloc[0]
+        # Evaluate bottom-ROSTER_CANDIDATES roster players × top-AVAIL_CANDIDATES available players.
+        # This prevents a single injured/overrated player from blocking the whole position.
+        for _, worst_roster in roster_sorted.head(ROSTER_CANDIDATES).iterrows():
+            if pos_suggestion_found:
+                break
 
-        txn_score = best_avail['_adj_value'] - worst_roster['_adj_value']
+            keep_val = float(worst_roster.get('Keep Score', 0.5) or 0.5)
+            if keep_val > 0.7:
+                min_threshold = 0.10   # elite: 10%+ improvement required (was 15%)
+            elif keep_val > 0.5:
+                min_threshold = 0.06   # above-avg: 6%+ required (was 8%)
+            else:
+                min_threshold = 0.02   # weak: 2% is enough
 
-        # Minimum threshold scaled by drop player Keep Score — protect elite players
-        keep_val = float(worst_roster.get('Keep Score', 0.5) or 0.5)
-        if keep_val > 0.7:
-            min_threshold = 0.15  # elite: need 15%+ improvement
-        elif keep_val > 0.5:
-            min_threshold = 0.08  # above-avg: need 8%+ improvement
-        else:
-            min_threshold = 0.02  # weak players: 2% is enough
+            for _, best_avail in avail_sorted.head(AVAIL_CANDIDATES).iterrows():
+                txn_score = best_avail['_adj_value'] - worst_roster['_adj_value']
 
-        if txn_score > min_threshold:
-            rationale = _build_rationale(worst_roster, best_avail)
-            urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
-            suggestions.append({
-                'drop_player': _strip_accents(str(worst_roster.get('Player', ''))),
-                'drop_team': str(worst_roster.get('Team', '')),
-                'drop_position': pos,
-                'drop_value': round(float(worst_roster.get('Keep Score', 0)), 3),
-                'drop_form': round(float(worst_roster.get('Form', 0) or 0), 1),
-                'drop_season_pts': int(float(worst_roster.get('Season_Points', 0) or 0)),
-                'drop_injury': _format_availability(
-                    worst_roster.get('chance_of_playing_next_round'),
-                    worst_roster.get('status'),
-                    worst_roster.get('news')
-                ),
-                'add_player': _strip_accents(str(best_avail.get('Player', ''))),
-                'add_team': str(best_avail.get('Team', '')),
-                'add_position': pos,
-                'add_value': round(float(best_avail.get('Transfer Score', 0)), 3),
-                'add_proj_pts': round(float(best_avail.get('Points', 0) or 0), 1),
-                'add_form': round(float(best_avail.get('Form', 0) or 0), 1),
-                'add_injury': _format_availability(
-                    best_avail.get('chance_of_playing_next_round'),
-                    best_avail.get('status'),
-                    best_avail.get('news')
-                ),
-                'transaction_score': round(float(txn_score), 3),
-                'rationale': rationale,
-                'urgency': urgency,
-            })
+                pair_info = {
+                    'drop': _strip_accents(str(worst_roster.get('Player', ''))),
+                    'drop_keep': round(float(worst_roster.get('Keep Score', 0)), 3),
+                    'drop_adj': round(float(worst_roster.get('_adj_value', 0)), 3),
+                    'add': _strip_accents(str(best_avail.get('Player', ''))),
+                    'add_transfer': round(float(best_avail.get('Transfer Score', 0)), 3),
+                    'add_adj': round(float(best_avail.get('_adj_value', 0)), 3),
+                    'add_chance': best_avail.get('chance_of_playing_next_round'),
+                    'gap': round(float(txn_score), 3),
+                    'threshold': min_threshold,
+                    'passed': txn_score > min_threshold,
+                }
+                pos_debug_pairs.append(pair_info)
+
+                if txn_score > min_threshold:
+                    rationale = _build_rationale(worst_roster, best_avail)
+                    urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
+                    suggestions.append({
+                        'drop_player': _strip_accents(str(worst_roster.get('Player', ''))),
+                        'drop_team': str(worst_roster.get('Team', '')),
+                        'drop_position': pos,
+                        'drop_value': round(float(worst_roster.get('Keep Score', 0)), 3),
+                        'drop_form': round(float(worst_roster.get('Form', 0) or 0), 1),
+                        'drop_season_pts': int(float(worst_roster.get('Season_Points', 0) or 0)),
+                        'drop_injury': _format_availability(
+                            worst_roster.get('chance_of_playing_next_round'),
+                            worst_roster.get('status'),
+                            worst_roster.get('news')
+                        ),
+                        'add_player': _strip_accents(str(best_avail.get('Player', ''))),
+                        'add_team': str(best_avail.get('Team', '')),
+                        'add_position': pos,
+                        'add_value': round(float(best_avail.get('Transfer Score', 0)), 3),
+                        'add_proj_pts': round(float(best_avail.get('Points', 0) or 0), 1),
+                        'add_form': round(float(best_avail.get('Form', 0) or 0), 1),
+                        'add_injury': _format_availability(
+                            best_avail.get('chance_of_playing_next_round'),
+                            best_avail.get('status'),
+                            best_avail.get('news')
+                        ),
+                        'transaction_score': round(float(txn_score), 3),
+                        'rationale': rationale,
+                        'urgency': urgency,
+                    })
+                    pos_suggestion_found = True
+                    break  # found a suggestion for this roster candidate; move on
+
+        debug_rows.append({
+            'pos': pos,
+            'skipped': False,
+            'reason': '',
+            'pairs': pos_debug_pairs,
+        })
 
     # Sort by transaction score descending, return top N
     suggestions.sort(key=lambda x: x['transaction_score'], reverse=True)
-    return suggestions[:top_n]
+    return suggestions[:top_n], debug_rows
 
 
 def _render_depth_card(depth_map: Dict):
@@ -1217,6 +1258,44 @@ def _compute_keep_score(roster_df: pd.DataFrame,
     """
     return compute_player_scores(roster_df, all_players_df, current_gw,
                                  format_context="draft", depth_map=depth_map)
+
+def _render_transfer_debug(debug_rows: List[Dict]):
+    """Render a collapsed Transfer Analysis expander showing why each position did/didn't fire."""
+    if not debug_rows:
+        return
+
+    pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
+
+    with st.expander("Transfer Analysis", expanded=False):
+        st.caption(
+            "Shows how each position was evaluated. "
+            "Gap = best available adj. score − worst roster adj. score. "
+            "Adj. score = raw score × injury multiplier."
+        )
+        for row in debug_rows:
+            pos = row['pos']
+            label = pos_labels.get(pos, pos)
+            if row.get('skipped'):
+                st.markdown(f"**{label}** — skipped ({row.get('reason', '')})")
+                continue
+
+            pairs = row.get('pairs', [])
+            if not pairs:
+                st.markdown(f"**{label}** — no comparisons evaluated")
+                continue
+
+            lines = []
+            for p in pairs:
+                icon = "✅" if p['passed'] else "❌"
+                chance = p.get('add_chance')
+                chance_str = f" ({int(chance)}% chance)" if chance is not None and not pd.isna(chance) else ""
+                lines.append(
+                    f"{icon} **Drop** {p['drop']} (Keep {p['drop_keep']}, adj {p['drop_adj']}) → "
+                    f"**Add** {p['add']}{chance_str} (Transfer {p['add_transfer']}, adj {p['add_adj']}) "
+                    f"| Gap {p['gap']:+.3f} vs threshold {p['threshold']:.2f}"
+                )
+            st.markdown(f"**{label}**\n" + "\n\n".join(lines))
+
 
 # ---------------------------
 # AZURE OPENAI (OPTIONAL)
@@ -1714,11 +1793,12 @@ def show_waiver_wire_page():
     # --- Compute transfer suggestions (before rendering) ---
     # Pre-compute scores on both pools so _compute_transfer_suggestions can use them
     suggestions = []
+    debug_rows: List[Dict] = []
     if not my_roster.empty and not avail_all.empty:
         try:
             avail_all = _compute_waiver_score(avail_all, fpl_stats, current_gw=current_gw)
             my_roster = _compute_keep_score(my_roster, fpl_stats, current_gw=current_gw, depth_map=depth_map)
-            suggestions = _compute_transfer_suggestions(
+            suggestions, debug_rows = _compute_transfer_suggestions(
                 avail_all, my_roster,
                 top_n=3, depth_map=depth_map,
             )
@@ -1728,6 +1808,7 @@ def show_waiver_wire_page():
     # --- RENDER: Suggestion cards at top ---
     with suggestion_container:
         _render_transfer_suggestions(suggestions)
+        _render_transfer_debug(debug_rows)
 
     st.markdown("---")
 

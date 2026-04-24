@@ -6,9 +6,12 @@ Shows squad analysis with suggested transfers and upcoming fixtures.
 """
 
 import config
+import json
 import numpy as np
 import pandas as pd
 import streamlit as st
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fuzzywuzzy import fuzz
 
@@ -36,6 +39,106 @@ from scripts.common.analytics import (
     merge_ffp_single_gw_data,
 )
 from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
+
+
+# ---------------------------
+# LOCAL PENDING TRANSFERS
+# Dual-persisted: JSON file (survives hot-reloads and browser refreshes)
+# + st.session_state (fast within-session access).
+# The file is the source of truth; session_state is a cache.
+# ---------------------------
+
+_PENDING_KEY = "fpl_classic_pending_transfers"
+_PENDING_FILE = Path(".fpl_pending_transfers.json")
+
+
+def _load_pending_file() -> list:
+    """Read all pending transfers from the JSON file."""
+    try:
+        if _PENDING_FILE.exists():
+            return json.loads(_PENDING_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        pass
+    return []
+
+
+def _save_pending_file(transfers: list) -> None:
+    """Write all pending transfers to the JSON file."""
+    _PENDING_FILE.write_text(
+        json.dumps(transfers, indent=2), encoding="utf-8"
+    )
+
+
+def _init_pending_state(_state=None) -> None:
+    """Populate session_state from file on first page load (or after hot-reload)."""
+    state = st.session_state if _state is None else _state
+    if _PENDING_KEY not in state:
+        state[_PENDING_KEY] = _load_pending_file()
+
+
+def _get_pending_local(team_id, _state=None) -> list:
+    """Return locally-logged pending transfers for this team.
+    _state is injectable for testing; production uses st.session_state.
+    """
+    state = st.session_state if _state is None else _state
+    return [t for t in state.get(_PENDING_KEY, [])
+            if t.get("team_id") == team_id]
+
+
+def _add_pending_local(team_id, event: int, element_out: int, element_in: int,
+                        out_cost: int, in_cost: int, _state=None) -> None:
+    state = st.session_state if _state is None else _state
+    # _init_pending_state must be called before this so session_state has file contents.
+    existing = list(state.get(_PENDING_KEY, []))
+    # Replace any existing transfer with the same element_out for this team
+    existing = [t for t in existing
+                if not (t.get("team_id") == team_id and t.get("element_out") == element_out)]
+    existing.append({
+        "team_id": team_id,
+        "event": int(event),
+        "element_out": int(element_out),
+        "element_in": int(element_in),
+        "element_out_cost": int(out_cost),
+        "element_in_cost": int(in_cost),
+        "time": datetime.now(timezone.utc).isoformat(),
+        "local": True,
+    })
+    state[_PENDING_KEY] = existing
+    if _state is None:
+        _save_pending_file(existing)
+
+
+def _remove_pending_local(team_id, element_out: int, _state=None) -> None:
+    state = st.session_state if _state is None else _state
+    updated = [
+        t for t in state.get(_PENDING_KEY, [])
+        if not (t.get("team_id") == team_id and t.get("element_out") == element_out)
+    ]
+    state[_PENDING_KEY] = updated
+    if _state is None:
+        _save_pending_file(updated)
+
+
+def _sync_pending_local(team_id, api_transfers: list, _state=None) -> list:
+    """Drop confirmed transfers; return remaining. _state injectable for tests."""
+    state = st.session_state if _state is None else _state
+    # Merge file into session state (in case of hot-reload or refresh)
+    if _state is None and _PENDING_KEY not in state:
+        state[_PENDING_KEY] = _load_pending_file()
+    # Match on (element_out, element_in, event) triplet — NOT just the player pair.
+    # Using only (out, in) would incorrectly clear a new pending transfer if the
+    # same player pair was ever swapped in a previous GW (historical season transfers
+    # are all returned by the FPL API, not just the current GW).
+    confirmed = {(t["element_out"], t["element_in"], t.get("event", 0)) for t in api_transfers}
+    updated = [
+        t for t in state.get(_PENDING_KEY, [])
+        if not (t.get("team_id") == team_id
+                and (t.get("element_out"), t.get("element_in"), t.get("event", 0)) in confirmed)
+    ]
+    state[_PENDING_KEY] = updated
+    if _state is None:
+        _save_pending_file(updated)
+    return _get_pending_local(team_id, state)
 
 
 # ---------------------------
@@ -445,10 +548,27 @@ def _apply_pending_transfers(picks_data: dict, picks_source_gw: int,
     """
     import copy
 
+    # Apply permanent transfers registered after the base squad snapshot.
+    # Two categories:
+    #   - API transfers: exclude FH GW events (those are temporary FH squad
+    #     changes stored with the FH event number; replaying them rebuilds
+    #     the wrong squad).
+    #   - Local transfers (local=True): always apply — these are user-confirmed
+    #     permanent transfers. get_current_gameweek() may return the FH GW
+    #     number between gameweeks, causing local transfers to be saved with
+    #     event == fh_gw. We must NOT filter those out.
     pending = [
         t for t in (all_transfers or [])
-        if t.get("event", 0) > picks_source_gw
-        and t.get("event", 0) not in fh_gws
+        if (
+            # Local transfers: allow event == picks_source_gw since the base picks
+            # represent the squad *before* the user's intended transfer. Using strict >
+            # would drop the transfer when FPL returns current-GW picks as the base.
+            t.get("local") and t.get("event", 0) >= picks_source_gw
+        ) or (
+            not t.get("local")
+            and t.get("event", 0) > picks_source_gw
+            and t.get("event", 0) not in fh_gws
+        )
     ]
     if not pending:
         return picks_data, []
@@ -630,6 +750,122 @@ def _render_transfer_status_panel(bank: int, squad_value: int, free_transfers: i
         st.markdown(chips_card, unsafe_allow_html=True)
 
     st.markdown("")  # spacing
+
+
+def _render_log_transfer_ui(team_id: int, current_gw: int,
+                              picks: list, elements_by_id: dict,
+                              local_pending: list) -> None:
+    """Expander UI to log a pending transfer before FPL's API confirms it.
+
+    FPL's /api/entry/{id}/transfers/ only includes confirmed (post-deadline)
+    transfers. Transfers made before the deadline won't appear until the GW
+    kicks off. This UI lets the user manually log such transfers so the app
+    can immediately reflect the correct squad.
+    """
+    pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+
+    # Show active pending transfers above the expander with remove buttons
+    if local_pending:
+        for t in local_pending:
+            out_el   = elements_by_id.get(t["element_out"], {})
+            in_el    = elements_by_id.get(t["element_in"],  {})
+            out_name = out_el.get("web_name", str(t["element_out"]))
+            in_name  = in_el.get("web_name",  str(t["element_in"]))
+            col_msg, col_btn = st.columns([5, 1])
+            with col_msg:
+                st.info(
+                    f"⏳ Pending transfer applied: **{out_name} → {in_name}** (GW{t['event']})  "
+                    f"— auto-clears once FPL confirms it after the deadline.",
+                )
+            with col_btn:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("Remove", key=f"rm_pending_{t['element_out']}"):
+                    _remove_pending_local(team_id, t["element_out"])
+                    st.rerun()
+
+    with st.expander("Log a Pending Transfer", expanded=not local_pending):
+        st.caption(
+            "FPL only exposes confirmed transfers via its API (after the GW deadline). "
+            "Log a transfer you've already made so the squad and suggestions update immediately."
+        )
+
+        squad_ids = {p["element"] for p in picks}
+
+        # ── Player Out: sorted by ep_next ascending (worst expected points first) ──
+        squad_options = []
+        for pick in picks:
+            el      = elements_by_id.get(pick["element"], {})
+            ep_next = float(el.get("ep_next") or 0)
+            name    = el.get("web_name", str(pick["element"]))
+            pos     = pos_map.get(el.get("element_type"), "?")
+            cost    = el.get("now_cost", 0)
+            squad_options.append({
+                "label":        f"{name} ({pos}, £{cost/10:.1f}m, xPts: {ep_next:.1f})",
+                "id":           int(pick["element"]),
+                "element_type": el.get("element_type", 3),
+                "now_cost":     cost,
+                "ep_next":      ep_next,
+            })
+        # Worst expected points at top → most likely to want to transfer out
+        squad_options.sort(key=lambda o: o["ep_next"])
+
+        if not squad_options:
+            st.warning("Squad not loaded — reload the page.")
+            return
+
+        out_idx = st.selectbox(
+            "Player Out (sorted worst → best xPts)",
+            range(len(squad_options)),
+            format_func=lambda i: squad_options[i]["label"],
+            key="pending_out",
+        )
+        out_option = squad_options[out_idx]
+        out_pos_type = out_option["element_type"]
+
+        # ── Player In: same position, sorted by price desc ───────────────────
+        in_candidates = [
+            e for e in elements_by_id.values()
+            if e.get("element_type") == out_pos_type and int(e["id"]) not in squad_ids
+        ]
+        in_candidates.sort(key=lambda e: e.get("now_cost", 0), reverse=True)
+
+        in_labels = [
+            f"{e['web_name']} (£{e.get('now_cost',0)/10:.1f}m)"
+            for e in in_candidates
+        ]
+        if not in_labels:
+            st.warning("No candidates found for this position.")
+            return
+
+        in_idx = st.selectbox(
+            f"Player In ({pos_map.get(out_pos_type, '?')} — type to search)",
+            range(len(in_labels)),
+            format_func=lambda i: in_labels[i],
+            key="pending_in",
+        )
+        in_candidate = in_candidates[in_idx]
+
+        st.caption(
+            f"**Logged transfer:** {out_option['label'].split(',')[0].split('(')[0].strip()} "
+            f"→ {in_candidate.get('web_name', '?')} "
+            f"(£{in_candidate.get('now_cost',0)/10:.1f}m)"
+        )
+
+        if st.button("✅ Confirm & Apply Transfer", type="primary"):
+            out_name = out_option["label"].split("(")[0].strip()
+            in_name  = in_candidate.get("web_name", "?")
+            _add_pending_local(
+                team_id=team_id,
+                event=current_gw,
+                element_out=out_option["id"],
+                element_in=int(in_candidate["id"]),
+                out_cost=out_option["now_cost"],
+                in_cost=in_candidate.get("now_cost", 0),
+            )
+            st.session_state["_pending_transfer_success"] = (
+                f"Transfer logged: **{out_name} → {in_name}**. Squad updated below."
+            )
+            st.rerun()
 
 
 def _render_chip_advisor(chip_status: dict, squad_df: pd.DataFrame, current_gw: int):
@@ -883,10 +1119,35 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
     suggestions = []
     remaining_ft = free_transfers
 
-    # Pick at most one drop candidate per position — prevents e.g. two GK suggestions
-    # both recommending the same replacement (like Areola twice).
-    seen_positions: set = set()
-    drop_candidates = []
+    # Phase 1: Priority candidates — blank GW starters with no positional cover.
+    # These are selected first regardless of Keep Score, since they will score 0
+    # if played and there's no available sub to cover them.
+    priority_seen: set = set()
+    priority_candidates = []
+    if blanking_team_ids:
+        for _, row in squad_df.iterrows():
+            pos = row["Position"]
+            is_starter_p = int(row.get("squad_position", 12) or 12) <= 11
+            if not is_starter_p or row.get("Team_ID") not in blanking_team_ids:
+                continue
+            squad_same = squad_df[
+                (squad_df["Position"] == pos) & (squad_df["Player_ID"] != row["Player_ID"])
+            ]
+            has_cover = any(
+                r["Team_ID"] not in blanking_team_ids for _, r in squad_same.iterrows()
+            )
+            if has_cover:
+                continue  # position is covered by a non-blanking squadmate — not urgent
+            if pos not in priority_seen:
+                priority_seen.add(pos)
+                priority_candidates.append(row)
+            if len(priority_candidates) == top_n:
+                break
+
+    # Phase 2: Fill remaining slots from lowest Keep Score (one per position max).
+    # Prevents e.g. two GK suggestions both recommending the same replacement.
+    seen_positions: set = set(r["Position"] for r in priority_candidates)
+    drop_candidates = list(priority_candidates)
     for _, row in squad_df.nsmallest(top_n * 4, "Keep Score").iterrows():
         pos = row["Position"]
         if pos not in seen_positions:
@@ -1246,8 +1507,36 @@ def _render_transfer_suggestions(suggestions: List[Dict], free_transfers: int = 
 def show_classic_transfers_page():
     """Display the Classic FPL Transfers page."""
 
-    st.title("Transfer Suggestions")
-    st.caption("Find the best transfer targets based on projections, form, fixtures, and price.")
+    # Seed session_state from file on first load / after hot-reload.
+    # Must happen before any read of _PENDING_KEY.
+    _init_pending_state()
+
+    col_title, col_refresh = st.columns([5, 1])
+    with col_title:
+        st.title("Transfer Suggestions")
+        st.caption("Find the best transfer targets based on projections, form, fixtures, and price.")
+
+    # Show post-rerun success message (set before st.rerun() call in the form)
+    if "_pending_transfer_success" in st.session_state:
+        st.success(st.session_state.pop("_pending_transfer_success"))
+    with col_refresh:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Refresh Data", help="Clear cached data and reload from FPL API"):
+            # Clear Streamlit in-memory caches
+            get_classic_transfers.clear()
+            get_classic_team_picks.clear()
+            # Also clear SQLite picks cache — permanent cache can store stale/corrupt data
+            # (e.g. FH squad data stored under GW32 key during a FH period)
+            _team_id_for_clear = config.FPL_CLASSIC_TEAM_ID
+            if _team_id_for_clear:
+                from scripts.common.cache import get_cache_db
+                _db = get_cache_db()
+                _db.execute(
+                    "DELETE FROM cache WHERE key LIKE ?",
+                    (f"classic_picks:{_team_id_for_clear}:%",)
+                )
+                _db.commit()
+            st.rerun()
 
     # Check configuration
     team_id = config.FPL_CLASSIC_TEAM_ID
@@ -1313,24 +1602,49 @@ def show_classic_transfers_page():
         show_api_error("loading your current squad")
         return
 
-    # Fetch all transfers — needed to reconstruct the squad when the picks
-    # endpoint returns 404 for upcoming GWs (FPL only serves completed GW picks).
+    # Fetch confirmed transfers from FPL API.
+    # Note: FPL only returns confirmed (post-deadline) transfers here.
+    # Pre-deadline transfers won't appear until after the GW kicks off.
     all_transfers = get_classic_transfers(team_id) or []
 
-    # Apply any transfers made after the base GW (e.g. Bowen in for Ekitike
-    # registered for GW34 while base picks are from GW32).
+    # Build element lookup once — used by pending-transfer UI and squad reconstruction.
+    elements_by_id = {e["id"]: e for e in bootstrap.get("elements", [])}
+
+    # Sync session-state pending transfers: drop any that FPL has now confirmed.
+    local_pending = _sync_pending_local(team_id, all_transfers)
+
+    # Merge confirmed API transfers + still-pending local ones.
+    # Use (out, in, event) triplet so a historical transfer with the same players
+    # doesn't incorrectly mask a new pending local transfer.
+    confirmed_keys = {(t["element_out"], t["element_in"], t.get("event", 0)) for t in all_transfers}
+    extra_local = [t for t in local_pending
+                   if (t["element_out"], t["element_in"], t.get("event", 0)) not in confirmed_keys]
+    effective_transfers = all_transfers + extra_local
+
+    # Reconstruct the squad by replaying all post-base transfers.
     picks_data, applied_transfers = _apply_pending_transfers(
-        picks_data, picks_source_gw, all_transfers, fh_gws, bootstrap
+        picks_data, picks_source_gw, effective_transfers, fh_gws, bootstrap
     )
 
-    if picks_source_gw and picks_source_gw < current_gw - 1:
+    # Surface a notice when local pending transfers are in effect
+    if extra_local:
+        local_names = []
+        for t in extra_local:
+            out_name = elements_by_id.get(t["element_out"], {}).get("web_name", str(t["element_out"]))
+            in_name  = elements_by_id.get(t["element_in"],  {}).get("web_name", str(t["element_in"]))
+            local_names.append(f"{out_name} → {in_name}")
+        st.info(
+            f"⏳ Locally-logged transfer(s) applied: **{', '.join(local_names)}**  "
+            f"— these will auto-clear once FPL confirms them after the deadline."
+        )
+    elif picks_source_gw and picks_source_gw < current_gw - 1:
         fh_gw = picks_source_gw + 1
         msg = f"Base squad loaded from GW{picks_source_gw} (GW{fh_gw} was a Free Hit)."
         if applied_transfers:
             msg += f" Applied pending transfer(s): {', '.join(applied_transfers)}."
         st.info(msg)
     elif applied_transfers:
-        st.info(f"Applied pending transfer(s): {', '.join(applied_transfers)}.")
+        st.info(f"Applied confirmed transfer(s): {', '.join(applied_transfers)}.")
 
     picks = picks_data.get("picks", [])
     active_chip = picks_data.get("active_chip")  # e.g., "wildcard", "freehit", "bboost", "3xc"
@@ -1348,6 +1662,9 @@ def show_classic_transfers_page():
 
     # Status panel — shown before filters so users see FT count immediately
     _render_transfer_status_panel(bank, squad_value, free_transfers, chip_status, active_chip)
+
+    # Pending transfer logger — lets user manually log pre-deadline transfers
+    _render_log_transfer_ui(team_id, current_gw, picks, elements_by_id, extra_local)
 
     # Controls
     with st.expander("Filters", expanded=True):
@@ -1382,6 +1699,26 @@ def show_classic_transfers_page():
 
         # Build squad DataFrame
         squad_df = _build_squad_df(picks, bootstrap, entry_history)
+
+        # Warn loudly if a logged pending transfer hasn't taken effect
+        if extra_local:
+            current_ids = {p["element"] for p in picks}
+            for t in extra_local:
+                out_el  = elements_by_id.get(t["element_out"], {})
+                in_el   = elements_by_id.get(t["element_in"],  {})
+                out_name = out_el.get("web_name", str(t["element_out"]))
+                in_name  = in_el.get("web_name",  str(t["element_in"]))
+                if t["element_out"] in current_ids:
+                    st.error(
+                        f"⚠️ Transfer not applied: **{out_name}** is still in your squad "
+                        f"even though you logged **{out_name} → {in_name}**. "
+                        f"element_out={t['element_out']}, element_in={t['element_in']}, "
+                        f"event={t['event']}, picks_source_gw={picks_source_gw}, "
+                        f"fh_gws={fh_gws}. "
+                        f"Squad IDs: {sorted(current_ids)}"
+                    )
+                elif t["element_in"] in current_ids:
+                    st.success(f"✅ {out_name} → {in_name} applied successfully.")
         squad_df["AvgFDR"] = squad_df["Team_ID"].apply(
             lambda t: _avg_fdr_for_team(t, current_gw, fdr_weeks)
         )
@@ -1405,12 +1742,22 @@ def show_classic_transfers_page():
         all_players = _add_projections(all_players, projections_df)
         squad_df = _add_projections(squad_df, projections_df)
 
+        # Blank GW detection — needed here to prevent ep_next fallback from
+        # showing non-zero projections for teams with no fixture this GW.
+        blanking_team_ids = _get_blanking_team_ids(current_gw, bootstrap)
+
         # Fallback: when Rotowire hasn't published yet, use FPL's own ep_next so
         # players don't all land on the neutral 0.5 in the 1GW score.
+        # Skip blank GW teams — FPL's ep_next doesn't account for blank GWs.
         for _df in [all_players, squad_df]:
             if "ep_next" in _df.columns and "Projected_Points" in _df.columns:
-                mask = _df["Projected_Points"].isna() & (_df["ep_next"] > 0)
-                _df.loc[mask, "Projected_Points"] = _df.loc[mask, "ep_next"]
+                fallback_mask = _df["Projected_Points"].isna() & (_df["ep_next"] > 0)
+                if blanking_team_ids and "Team_ID" in _df.columns:
+                    fallback_mask = fallback_mask & (~_df["Team_ID"].isin(blanking_team_ids))
+                _df.loc[fallback_mask, "Projected_Points"] = _df.loc[fallback_mask, "ep_next"]
+                # Zero out any projections (Rotowire or ep_next) for blank GW teams
+                if blanking_team_ids and "Team_ID" in _df.columns:
+                    _df.loc[_df["Team_ID"].isin(blanking_team_ids), "Projected_Points"] = 0
 
         # Compute healthy form for squad players (15 players — fast)
         for idx, row in squad_df.iterrows():
@@ -1446,9 +1793,6 @@ def show_classic_transfers_page():
         # FFP Single-GW Data (Predicted, Start, LongStart)
         squad_df = merge_ffp_single_gw_data(squad_df, ffp_df)
         all_players = merge_ffp_single_gw_data(all_players, ffp_df)
-
-    # Blank GW detection — which teams have no fixture this GW
-    blanking_team_ids = _get_blanking_team_ids(current_gw, bootstrap)
 
     # Positional depth
     depth_map = {}

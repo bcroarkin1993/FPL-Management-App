@@ -34,6 +34,9 @@ Thumbs.db
 # SQLite cache
 *.db
 
+# Locally-logged pending FPL transfers (user-specific, pre-deadline)
+.fpl_pending_transfers.json
+
 # Scoring test script cache
 .scoring_test_cache/
 

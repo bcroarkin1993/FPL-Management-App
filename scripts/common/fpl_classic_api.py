@@ -72,8 +72,20 @@ def get_classic_league_standings(league_id: int, page: int = 1) -> Optional[Dict
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
         return resp.json()
-    except Exception:
-        _logger.warning("Failed to fetch classic league standings for league %s", league_id, exc_info=True)
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            _logger.warning(
+                "Classic league %s not found (404) — check FPL_CLASSIC_LEAGUE_IDS config. "
+                "This may be an H2H league (fallback will be tried) or an invalid ID.",
+                league_id,
+            )
+        else:
+            _logger.warning(
+                "Failed to fetch classic league standings for league %s: %s", league_id, e
+            )
+        return None
+    except Exception as e:
+        _logger.warning("Failed to fetch classic league standings for league %s: %s", league_id, e)
         return None
 
 
@@ -335,6 +347,13 @@ def get_classic_team_picks(team_id: int, gw: int) -> Optional[Dict[str, Any]]:
             resp = requests.get(url, timeout=30)
             resp.raise_for_status()
             return resp.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                # 404 is expected for future/unplayed GWs — log quietly
+                _logger.debug("No picks available for team %s GW %s (404 — GW not played yet)", team_id, gw)
+            else:
+                _logger.warning("Failed to fetch classic team picks for team %s GW %s", team_id, gw, exc_info=True)
+            return None
         except Exception:
             _logger.warning("Failed to fetch classic team picks for team %s GW %s", team_id, gw, exc_info=True)
             return None
@@ -342,7 +361,7 @@ def get_classic_team_picks(team_id: int, gw: int) -> Optional[Dict[str, Any]]:
     return cached_api_call(f"classic_picks:{team_id}:{gw}", _fetch, ttl=cache_ttl)
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=60)
 def get_classic_transfers(team_id: int) -> Optional[List[Dict[str, Any]]]:
     """
     Fetch all transfers made by a Classic FPL team.
