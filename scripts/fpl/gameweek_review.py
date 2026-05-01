@@ -21,6 +21,7 @@ from scripts.common.fpl_classic_api import (
     get_classic_team_history,
     get_classic_team_picks,
     _get_classic_gw_live_points,
+    _get_classic_gw_live_minutes,
 )
 from scripts.common.fpl_draft_api import (
     get_fpl_player_mapping,
@@ -142,6 +143,7 @@ def _render_gw_top_performers(gw, bootstrap):
         st.info("No live points data available for this gameweek.")
         return
 
+    live_minutes = _get_classic_gw_live_minutes(gw)
     elements = bootstrap.get("elements", [])
     teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
 
@@ -156,14 +158,15 @@ def _render_gw_top_performers(gw, bootstrap):
             "team": teams.get(el.get("team"), "?"),
             "pos": pos,
             "pts": pts,
+            "minutes": live_minutes.get(eid, 0),
             "selected_by": float(el.get("selected_by_percent", 0) or 0),
         })
 
     # Top 10 scorers
     top_scorers = sorted(players, key=lambda p: -p["pts"])[:10]
 
-    # Notable blankers: >= 10% ownership, scored 0-1
-    blankers = [p for p in players if p["selected_by"] >= 10.0 and p["pts"] <= 1]
+    # Notable blankers: >= 10% ownership, scored 0-1, but only players who actually played
+    blankers = [p for p in players if p["selected_by"] >= 10.0 and p["pts"] <= 1 and p["minutes"] > 0]
     blankers.sort(key=lambda p: (-p["selected_by"], p["pts"]))
     blankers = blankers[:10]
 

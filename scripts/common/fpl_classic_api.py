@@ -441,6 +441,30 @@ def _get_classic_gw_live_points(gw: int) -> dict:
     return {int(k): v for k, v in result.items()}
 
 
+def _get_classic_gw_live_minutes(gw: int) -> dict:
+    """Returns {element_id: minutes_played} from the Classic live endpoint for a single GW."""
+    is_finished = gw < config.CURRENT_GAMEWEEK
+    cache_ttl = None if is_finished else 300
+
+    def _fetch():
+        try:
+            url = f"https://fantasy.premierleague.com/api/event/{gw}/live/"
+            resp = requests.get(url, timeout=30)
+            data = resp.json()
+            return {
+                str(elem["id"]): elem.get("stats", {}).get("minutes", 0)
+                for elem in data.get("elements", [])
+            }
+        except Exception:
+            _logger.warning("Failed to fetch classic GW %s live minutes", gw, exc_info=True)
+            return None
+
+    result = cached_api_call(f"classic_live_minutes:{gw}", _fetch, ttl=cache_ttl)
+    if result is None:
+        return {}
+    return {int(k): v for k, v in result.items()}
+
+
 @st.cache_data(ttl=3600)
 def _get_classic_team_picks_for_gw(team_id: int, gw: int) -> list:
     """Returns list of element IDs for a Classic team's picks in a single GW."""
