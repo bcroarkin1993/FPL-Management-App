@@ -996,15 +996,29 @@ def _sanity_check_suggestion(drop_row: pd.Series, add_row: pd.Series) -> Tuple[b
 
     checks: List[Tuple[str, bool]] = []
 
-    # Check 1: GW effective projected points (blended projection × start likelihood)
-    drop_proj = _f(drop_row.get("_effective_proj", 0))
-    add_proj = _f(add_row.get("_effective_proj", 0))
-    if drop_proj > 0 and add_proj > 0:
-        checks.append(("proj_pts", add_proj >= drop_proj * 0.80))
-    elif drop_proj == 0 and add_proj > 0:
-        checks.append(("proj_pts", True))  # DROP has no projection → ADD wins by default
-    elif drop_proj > 0 and add_proj == 0:
-        checks.append(("proj_pts", False))  # ADD has no projection but DROP does
+    # Check 1: GW effective projected points (blended projection × start likelihood).
+    # Use None to distinguish NaN (blank GW / data gap — no information) from 0
+    # (rotation player not expected to start — meaningful signal).
+    # If either side is NaN, skip this check rather than treating NaN as "no projection."
+    def _proj_or_none(row) -> Optional[float]:
+        v = row.get("_effective_proj", 0)
+        try:
+            fv = float(v)
+            return None if np.isnan(fv) else fv
+        except (TypeError, ValueError):
+            return 0.0
+
+    drop_proj = _proj_or_none(drop_row)
+    add_proj = _proj_or_none(add_row)
+    if drop_proj is not None and add_proj is not None:
+        if drop_proj > 0 and add_proj > 0:
+            checks.append(("proj_pts", add_proj >= drop_proj * 0.80))
+        elif drop_proj == 0 and add_proj > 0:
+            checks.append(("proj_pts", True))   # DROP not projected to start → ADD wins
+        elif drop_proj > 0 and add_proj == 0:
+            checks.append(("proj_pts", False))  # ADD not projected to start → DROP wins
+        # both == 0: neither projected to start, skip — no useful signal
+    # if either is None (NaN = blank GW or data gap), skip proj check entirely
 
     # Check 2: Season points accumulated
     drop_season = _f(drop_row.get("Season_Points", 0))
@@ -1836,6 +1850,22 @@ def show_waiver_wire_page():
         my_roster = _align_roster_player_names_to_projections(my_roster, proj)
         my_roster["Team"] = my_roster["Team"].replace(TEAM_FULL_TO_SHORT)
 
+        # After name alignment the Player column now holds Rotowire canonical names.
+        # Recover Team from proj for any player whose Team is still NaN/missing —
+        # this happens when the FPL short web-name ("Eze") didn't match the full FPL
+        # stats name ("Eberechi Eze") on the earlier normalized-name merge, leaving
+        # Team blank even though the name was correctly aligned to Rotowire.
+        _nan_team = my_roster["Team"].isna() | my_roster["Team"].isin(["nan", "None", ""])
+        if _nan_team.any():
+            _proj_team_lookup = (
+                proj[["Player", "Team"]]
+                .drop_duplicates(subset=["Player"], keep="first")
+                .set_index("Player")["Team"]
+            )
+            my_roster.loc[_nan_team, "Team"] = (
+                my_roster.loc[_nan_team, "Player"].map(_proj_team_lookup)
+            )
+
         # Add next-GW projected points
         proj_points_df = proj[["Player", "Team", "Position", "Points"]].rename(
             columns={"Points": "Projected_Points"}
@@ -1843,11 +1873,25 @@ def show_waiver_wire_page():
         proj_points_df["__norm_name"] = proj_points_df["Player"].apply(canonical_normalize)
         my_roster["__norm_name"] = my_roster["Player"].apply(canonical_normalize)
 
+        # Primary merge: name + team + position (exact)
         my_roster = my_roster.merge(
             proj_points_df[["__norm_name", "Team", "Position", "Projected_Points"]],
             on=["__norm_name", "Team", "Position"],
             how="left"
         )
+        # Fallback: for any player still missing Projected_Points, try name + position only.
+        # Catches residual team-code mismatches after the team-recovery step above.
+        _still_missing = my_roster["Projected_Points"].isna()
+        if _still_missing.any():
+            _proj_name_pos = (
+                proj_points_df[["__norm_name", "Position", "Projected_Points"]]
+                .drop_duplicates(subset=["__norm_name", "Position"], keep="first")
+            )
+            _fallback = my_roster.loc[_still_missing, ["__norm_name", "Position"]].merge(
+                _proj_name_pos, on=["__norm_name", "Position"], how="left"
+            )
+            my_roster.loc[_still_missing, "Projected_Points"] = _fallback["Projected_Points"].values
+
         my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
 
         # Backfill Player_IDs and recompute form/FDR
