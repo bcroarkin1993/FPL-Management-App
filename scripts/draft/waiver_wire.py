@@ -1879,8 +1879,7 @@ def show_waiver_wire_page():
             on=["__norm_name", "Team", "Position"],
             how="left"
         )
-        # Fallback: for any player still missing Projected_Points, try name + position only.
-        # Catches residual team-code mismatches after the team-recovery step above.
+        # Fallback 1: name + position only (catches team-code mismatches).
         _still_missing = my_roster["Projected_Points"].isna()
         if _still_missing.any():
             _proj_name_pos = (
@@ -1891,6 +1890,19 @@ def show_waiver_wire_page():
                 _proj_name_pos, on=["__norm_name", "Position"], how="left"
             )
             my_roster.loc[_still_missing, "Projected_Points"] = _fallback["Projected_Points"].values
+
+        # Fallback 2: name only (catches FPL vs Rotowire position classification differences,
+        # e.g. FPL MID vs Rotowire FWD for attacking players like Eze).
+        _still_missing2 = my_roster["Projected_Points"].isna()
+        if _still_missing2.any():
+            _proj_name_only = (
+                proj_points_df[["__norm_name", "Projected_Points"]]
+                .drop_duplicates(subset=["__norm_name"], keep="first")
+            )
+            _fallback2 = my_roster.loc[_still_missing2, ["__norm_name"]].merge(
+                _proj_name_only, on="__norm_name", how="left"
+            )
+            my_roster.loc[_still_missing2, "Projected_Points"] = _fallback2["Projected_Points"].values
 
         my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
 
