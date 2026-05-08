@@ -969,6 +969,67 @@ def _build_rationale(drop: pd.Series, add: pd.Series) -> str:
     return "; ".join(parts) if parts else "higher overall value"
 
 
+def _sanity_check_suggestion(drop_row: pd.Series, add_row: pd.Series) -> Tuple[bool, str]:
+    """Veto suggestions where ADD is clearly worse than DROP on raw observable metrics.
+
+    Returns (passes, reason_string).
+
+    Injury override: if DROP is seriously injured (status i/s/u or chance < 50%),
+    allow any suggestion — replacing someone who can't play is always valid.
+    The 80% tolerance avoids over-vetoing marginal cases where composite score
+    signals (form, FDR, start consistency) legitimately favor the upgrade.
+    """
+    drop_status = str(drop_row.get("status", "") or "")
+    drop_chance = pd.to_numeric(drop_row.get("chance_of_playing_next_round"), errors="coerce")
+    seriously_injured = drop_status in ("i", "s", "u") or (
+        pd.notna(drop_chance) and float(drop_chance) < 50
+    )
+    if seriously_injured:
+        return True, "injury override"
+
+    def _f(val) -> float:
+        try:
+            v = float(val)
+            return 0.0 if np.isnan(v) else v
+        except (TypeError, ValueError):
+            return 0.0
+
+    checks: List[Tuple[str, bool]] = []
+
+    # Check 1: GW effective projected points (blended projection × start likelihood)
+    drop_proj = _f(drop_row.get("_effective_proj", 0))
+    add_proj = _f(add_row.get("_effective_proj", 0))
+    if drop_proj > 0 and add_proj > 0:
+        checks.append(("proj_pts", add_proj >= drop_proj * 0.80))
+    elif drop_proj == 0 and add_proj > 0:
+        checks.append(("proj_pts", True))  # DROP has no projection → ADD wins by default
+    elif drop_proj > 0 and add_proj == 0:
+        checks.append(("proj_pts", False))  # ADD has no projection but DROP does
+
+    # Check 2: Season points accumulated
+    drop_season = _f(drop_row.get("Season_Points", 0))
+    add_season = _f(add_row.get("Season_Points", 0))
+    if drop_season > 0 and add_season > 0:
+        checks.append(("season_pts", add_season >= drop_season * 0.80))
+
+    # Check 3: Multi-GW projection (FFP 3-week window)
+    drop_mgw = _f(drop_row.get("MultiGW_Proj", 0))
+    add_mgw = _f(add_row.get("MultiGW_Proj", 0))
+    if drop_mgw > 0 and add_mgw > 0:
+        checks.append(("3gw_proj", add_mgw >= drop_mgw * 0.80))
+
+    if not checks:
+        return True, "no data"  # Cannot veto without comparable data
+
+    n_pass = sum(1 for _, ok in checks if ok)
+    passes = n_pass >= (len(checks) + 1) // 2  # majority of available signals
+
+    if not passes:
+        failed = [name for name, ok in checks if not ok]
+        return False, f"ADD worse on: {', '.join(failed)}"
+    return True, "ok"
+
+
 def _compute_transfer_suggestions(
     avail_df: pd.DataFrame,
     roster_df: pd.DataFrame,
@@ -989,6 +1050,14 @@ def _compute_transfer_suggestions(
     # Prevents a single injured top-available from blocking the whole position.
     AVAIL_CANDIDATES = 5
     ROSTER_CANDIDATES = 2
+
+    def _ef(val) -> float:
+        """Float conversion that collapses NaN/None to 0."""
+        try:
+            v = float(val)
+            return 0.0 if np.isnan(v) else v
+        except (TypeError, ValueError):
+            return 0.0
 
     suggestions = []
     debug_rows: List[Dict] = []
@@ -1052,11 +1121,11 @@ def _compute_transfer_suggestions(
 
             keep_val = float(worst_roster.get('Keep Score', 0.5) or 0.5)
             if keep_val > 0.7:
-                min_threshold = 0.10   # elite: 10%+ improvement required (was 15%)
+                min_threshold = 0.12   # elite: 12%+ improvement required
             elif keep_val > 0.5:
-                min_threshold = 0.06   # above-avg: 6%+ required (was 8%)
+                min_threshold = 0.07   # above-avg: 7%+ required
             else:
-                min_threshold = 0.02   # weak: 2% is enough
+                min_threshold = 0.05   # weak: 5% — raised from 2% to cut noise
 
             for _, best_avail in avail_sorted.head(AVAIL_CANDIDATES).iterrows():
                 txn_score = best_avail['_adj_value'] - worst_roster['_adj_value']
@@ -1072,10 +1141,23 @@ def _compute_transfer_suggestions(
                     'gap': round(float(txn_score), 3),
                     'threshold': min_threshold,
                     'passed': txn_score > min_threshold,
+                    'sanity': 'n/a',
                 }
                 pos_debug_pairs.append(pair_info)
 
                 if txn_score > min_threshold:
+                    sanity_ok, sanity_reason = _sanity_check_suggestion(worst_roster, best_avail)
+                    pair_info['sanity'] = sanity_reason
+                    if not sanity_ok:
+                        pair_info['passed'] = False
+                        continue  # try next available candidate for this drop player
+
+                    _drop_proj = _ef(worst_roster.get('_effective_proj', 0))
+                    _add_proj = _ef(best_avail.get('_effective_proj', 0))
+                    # Fall back to raw Points column if effective_proj unavailable for ADD
+                    if _add_proj == 0:
+                        _add_proj = _ef(best_avail.get('Points', 0))
+
                     rationale = _build_rationale(worst_roster, best_avail)
                     urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
                     suggestions.append({
@@ -1085,6 +1167,9 @@ def _compute_transfer_suggestions(
                         'drop_value': round(float(worst_roster.get('Keep Score', 0)), 3),
                         'drop_form': round(float(worst_roster.get('Form', 0) or 0), 1),
                         'drop_season_pts': int(float(worst_roster.get('Season_Points', 0) or 0)),
+                        'drop_proj_pts': round(_drop_proj, 1),
+                        'drop_3gw_proj': round(_ef(worst_roster.get('MultiGW_Proj', 0)), 1),
+                        'drop_has_data': _drop_proj > 0,
                         'drop_injury': _format_availability(
                             worst_roster.get('chance_of_playing_next_round'),
                             worst_roster.get('status'),
@@ -1094,7 +1179,10 @@ def _compute_transfer_suggestions(
                         'add_team': str(best_avail.get('Team', '')),
                         'add_position': pos,
                         'add_value': round(float(best_avail.get('Transfer Score', 0)), 3),
-                        'add_proj_pts': round(float(best_avail.get('Points', 0) or 0), 1),
+                        'add_proj_pts': round(_add_proj, 1),
+                        'add_3gw_proj': round(_ef(best_avail.get('MultiGW_Proj', 0)), 1),
+                        'add_has_data': _add_proj > 0,
+                        'add_season_pts': int(float(best_avail.get('Season_Points', 0) or 0)),
                         'add_form': round(float(best_avail.get('Form', 0) or 0), 1),
                         'add_injury': _format_availability(
                             best_avail.get('chance_of_playing_next_round'),
@@ -1196,6 +1284,18 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
             urgency_html = ('<span style="background:#ff9800;color:#fff;padding:3px 10px;border-radius:12px;'
                             'font-size:0.8em;font-weight:bold;margin-left:8px;">LOW DEPTH</span>')
 
+        # Build GW projection display strings with data-quality indicator
+        drop_proj_str = (
+            f"{s['drop_proj_pts']:.1f} pts" if s.get('drop_has_data')
+            else '<span style="color:#e67e22;">No proj</span>'
+        )
+        add_proj_str = (
+            f"{s['add_proj_pts']:.1f} pts" if s.get('add_has_data')
+            else '<span style="color:#e67e22;">No proj</span>'
+        )
+        drop_mgw_str = f" &bull; 3GW: {s['drop_3gw_proj']:.1f}" if s.get('drop_3gw_proj', 0) > 0 else ""
+        add_mgw_str = f" &bull; 3GW: {s['add_3gw_proj']:.1f}" if s.get('add_3gw_proj', 0) > 0 else ""
+
         card_html = f"""
         <div style="border: 1px solid #444; border-radius: 10px; padding: 16px; margin-bottom: 12px;
                     background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);">
@@ -1212,8 +1312,8 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
                     <div style="color: #e74c3c; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">DROP</div>
                     <div style="color: #e0e0e0; font-weight: bold;">{s['drop_player']} ({s['drop_team']})</div>
                     <div style="color: #999; font-size: 0.85em;">
-                        Value: {s['drop_value']} &bull; Form: {s['drop_form']} (healthy) &bull;
-                        Season: {s['drop_season_pts']} &bull; {s['drop_injury']}
+                        Keep: {s['drop_value']} &bull; GW: {drop_proj_str}{drop_mgw_str} &bull;
+                        Season: {s['drop_season_pts']} pts &bull; {s['drop_injury']}
                     </div>
                 </div>
                 <div style="color: #888; font-size: 1.5em; padding: 0 16px;">&rarr;</div>
@@ -1221,8 +1321,8 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
                     <div style="color: #4ecca3; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">ADD</div>
                     <div style="color: #e0e0e0; font-weight: bold;">{s['add_player']} ({s['add_team']})</div>
                     <div style="color: #999; font-size: 0.85em;">
-                        Value: {s['add_value']} &bull; Proj: {s['add_proj_pts']} &bull;
-                        Form: {s['add_form']} (healthy) &bull; {s['add_injury']}
+                        Score: {s['add_value']} &bull; GW: {add_proj_str}{add_mgw_str} &bull;
+                        Season: {s.get('add_season_pts', 0)} pts &bull; Form: {s['add_form']} &bull; {s['add_injury']}
                     </div>
                 </div>
             </div>
@@ -1270,7 +1370,8 @@ def _render_transfer_debug(debug_rows: List[Dict]):
         st.caption(
             "Shows how each position was evaluated. "
             "Gap = best available adj. score − worst roster adj. score. "
-            "Adj. score = raw score × injury multiplier."
+            "Adj. score = raw score × injury multiplier. "
+            "🚫 = passed score threshold but vetoed by sanity check (ADD worse on raw metrics)."
         )
         for row in debug_rows:
             pos = row['pos']
@@ -1286,13 +1387,21 @@ def _render_transfer_debug(debug_rows: List[Dict]):
 
             lines = []
             for p in pairs:
-                icon = "✅" if p['passed'] else "❌"
+                sanity = p.get('sanity', 'n/a')
+                gap_passed = p['gap'] > p['threshold']
+                if p['passed']:
+                    icon = "✅"
+                elif gap_passed and sanity not in ('n/a', 'ok', 'no data', 'injury override'):
+                    icon = "🚫"  # threshold passed but sanity vetoed
+                else:
+                    icon = "❌"
                 chance = p.get('add_chance')
                 chance_str = f" ({int(chance)}% chance)" if chance is not None and not pd.isna(chance) else ""
+                sanity_str = f" | Vetoed: {sanity}" if icon == "🚫" else ""
                 lines.append(
                     f"{icon} **Drop** {p['drop']} (Keep {p['drop_keep']}, adj {p['drop_adj']}) → "
                     f"**Add** {p['add']}{chance_str} (Transfer {p['add_transfer']}, adj {p['add_adj']}) "
-                    f"| Gap {p['gap']:+.3f} vs threshold {p['threshold']:.2f}"
+                    f"| Gap {p['gap']:+.3f} vs threshold {p['threshold']:.2f}{sanity_str}"
                 )
             st.markdown(f"**{label}**\n" + "\n\n".join(lines))
 
