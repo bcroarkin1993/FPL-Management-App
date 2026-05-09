@@ -350,9 +350,18 @@ def show_club_fixtures_section():
             config.refresh_gameweek()
             st.rerun()
 
+    try:
+        current_gw = get_current_gameweek()
+    except Exception:
+        current_gw = None
+    current_gw = current_gw or 1
+
     # --- NEW: Fixture Difficulty Grid ---
     with st.expander("Fixture Difficulty Grid (overview)", expanded=True):
-        weeks = st.slider("Horizon (GWs)", 3, 12, 6, 1, key="fdr_horizon")
+        fdr_remaining = max(1, 38 - current_gw + 1)
+        fdr_max = min(12, fdr_remaining)
+        fdr_default = min(6, fdr_max)
+        weeks = st.slider("Horizon (GWs)", 1, fdr_max, fdr_default, 1, key="fdr_horizon")
         disp, diffs, avg = get_fixture_difficulty_grid(weeks=weeks)
         st.markdown(style_fixture_difficulty(disp, diffs), unsafe_allow_html=True)
         st.caption(
@@ -360,24 +369,21 @@ def show_club_fixtures_section():
     # ------------------------------------
 
     # ---- Filters (TOP) ----
-    try:
-        current_gw = get_current_gameweek()  # use your helper if available
-    except Exception:
-        current_gw = None
-    current_gw = current_gw or 1
-
     f1, f2, f3 = st.columns([1, 1, 1])
     with f1:
         start_gw = st.number_input("Start Gameweek", min_value=1, max_value=38, value=int(current_gw), step=1)
     with f2:
-        weeks = st.slider("How many weeks?", min_value=1, max_value=10, value=5, step=1)
+        max_weeks = min(10, max(1, 38 - int(start_gw) + 1))
+        default_weeks = min(5, max_weeks)
+        weeks = st.slider("How many weeks?", min_value=1, max_value=max_weeks, value=default_weeks, step=1)
     with f3:
         # global team filter (moved out of Average FDR)
         teams_df, id_to_team, _ = _get_teams_reference()
         all_clubs = sorted(teams_df["Team"].tolist())
         team_filter = st.multiselect("Filter clubs (optional)", options=all_clubs, default=[])
 
-    fixtures_raw = _fetch_fixtures_range(start_gw, start_gw + weeks - 1)
+    end_gw = min(start_gw + weeks - 1, 38)
+    fixtures_raw = _fetch_fixtures_range(start_gw, end_gw)
     club_long = _make_club_fixtures_long(fixtures_raw)
 
     # --- Discord Alerts panel ---

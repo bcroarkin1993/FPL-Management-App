@@ -65,6 +65,7 @@ def get_fixture_difficulty_grid(weeks: int = 6):
     from scripts.common.fpl_draft_api import get_current_gameweek
 
     current_gw = int(get_current_gameweek())
+    weeks = min(weeks, max(1, 38 - current_gw + 1))
 
     teams = _bootstrap_teams_df()  # id, short_name
     id2short = {int(r.id): str(r.short_name) for _, r in teams.iterrows()}
