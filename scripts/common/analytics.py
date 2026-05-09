@@ -530,7 +530,7 @@ def compute_player_scores(
     result["Keep Score"] = keep_score
 
     # Cleanup temp columns
-    result.drop(columns=["_FDREase", "_effective_proj", "_start_consistency"], inplace=True, errors="ignore")
+    result.drop(columns=["_FDREase", "_start_consistency"], inplace=True, errors="ignore")
 
     return result
 
@@ -820,8 +820,10 @@ def blend_multi_gw_projections(
     ffp["Next3GWs"] = pd.to_numeric(ffp["Next3GWs"], errors="coerce")
 
     # Build lookup dicts (individual zeros still skipped as defense-in-depth)
-    lookup = {}  # (norm_name, team_short) -> Next3GWs
-    lookup_short = {}  # (last_word_of_norm, team_short) fallback for short-name players
+    lookup = {}          # (norm_name, team_short) -> Next3GWs  [primary]
+    lookup_short = {}    # (last_word_of_norm, team_short)       [secondary]
+    lookup_name = {}     # norm_name only                        [tertiary — team-agnostic]
+    lookup_lastword = {} # last_word only                        [quaternary — last resort]
     for _, row in ffp.iterrows():
         key = (row["__norm"], str(row["__team_short"]))
         val = row["Next3GWs"]
@@ -832,6 +834,10 @@ def blend_multi_gw_projections(
                 short_key = (last_word, str(row["__team_short"]))
                 if short_key not in lookup_short:
                     lookup_short[short_key] = val
+            if row["__norm"] and row["__norm"] not in lookup_name:
+                lookup_name[row["__norm"]] = val
+            if last_word and last_word not in lookup_lastword:
+                lookup_lastword[last_word] = val
 
     if not lookup:
         return result
@@ -844,17 +850,17 @@ def blend_multi_gw_projections(
         norm_name = result.at[idx, "__norm"]
         team_short = str(result.at[idx, team_col]) if team_col else ""
         team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
+        last_word = norm_name.split()[-1] if norm_name else ""
 
         key = (norm_name, team_short)
         if key in lookup:
             result.at[idx, output_col] = lookup[key]
-        else:
-            # Fallback: last word of full name matches an FFP short-name entry (e.g. "Eze" → "Eberechi Eze")
-            last_word = norm_name.split()[-1] if norm_name else ""
-            if last_word:
-                short_val = lookup_short.get((last_word, team_short))
-                if short_val is not None:
-                    result.at[idx, output_col] = short_val
+        elif last_word and (last_word, team_short) in lookup_short:
+            result.at[idx, output_col] = lookup_short[(last_word, team_short)]
+        elif norm_name and norm_name in lookup_name:
+            result.at[idx, output_col] = lookup_name[norm_name]
+        elif last_word and last_word in lookup_lastword:
+            result.at[idx, output_col] = lookup_lastword[last_word]
 
     result.drop(columns=["__norm"], inplace=True, errors="ignore")
     return result
@@ -969,8 +975,10 @@ def merge_ffp_single_gw_data(
     for col in ffp_cols:
         ffp[col] = pd.to_numeric(ffp[col], errors="coerce")
 
-    lookup = {}  # (norm_name, team_short) -> data dict
-    lookup_short = {}  # (last_word_of_norm, team_short) fallback for short-name players
+    lookup = {}          # (norm_name, team_short) -> data dict  [primary]
+    lookup_short = {}    # (last_word_of_norm, team_short)        [secondary]
+    lookup_name = {}     # norm_name only                         [tertiary — team-agnostic]
+    lookup_lastword = {} # last_word only                         [quaternary — last resort]
     for _, row in ffp.iterrows():
         key = (row["__norm"], str(row["__team_short"]))
         data = {col: row[col] for col in ffp_cols if pd.notna(row[col])}
@@ -980,6 +988,10 @@ def merge_ffp_single_gw_data(
             short_key = (last_word, str(row["__team_short"]))
             if short_key not in lookup_short:
                 lookup_short[short_key] = data
+        if row["__norm"] and row["__norm"] not in lookup_name:
+            lookup_name[row["__norm"]] = data
+        if last_word and last_word not in lookup_lastword:
+            lookup_lastword[last_word] = data
 
     if not lookup:
         return result
@@ -994,14 +1006,16 @@ def merge_ffp_single_gw_data(
         norm_name = result.at[idx, "__norm"]
         team_short = str(result.at[idx, team_col]) if team_col else ""
         team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
+        last_word = norm_name.split()[-1] if norm_name else ""
 
         key = (norm_name, team_short)
         data = lookup.get(key)
-        if data is None:
-            # Fallback: last word of full name matches an FFP short-name entry (e.g. "Eze" → "Eberechi Eze")
-            last_word = norm_name.split()[-1] if norm_name else ""
-            if last_word:
-                data = lookup_short.get((last_word, team_short))
+        if data is None and last_word:
+            data = lookup_short.get((last_word, team_short))
+        if data is None and norm_name:
+            data = lookup_name.get(norm_name)
+        if data is None and last_word:
+            data = lookup_lastword.get(last_word)
         if data:
             for src_col, dst_col in col_map.items():
                 if src_col in data:
