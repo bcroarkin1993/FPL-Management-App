@@ -189,13 +189,18 @@ Score = α × 1GW + (1-α) × ROS
 
 | Function | File | Purpose |
 |----------|------|---------|
-| `compute_player_scores()` | `scripts/common/analytics.py` | Core scoring — computes all 4 columns |
+| `compute_player_scores()` | `scripts/common/analytics.py` | Core scoring — computes all 4 columns + `_effective_proj` |
 | `compute_dynamic_alpha()` | `scripts/common/analytics.py` | Per-player alpha based on context |
 | `merge_ffp_single_gw_data()` | `scripts/common/analytics.py` | Merges FFP Predicted/Start/LongStart onto player DataFrames |
+| `blend_multi_gw_projections()` | `scripts/common/analytics.py` | Merges FFP Next3GWs (falls back to PPG×3 if unpublished) |
 | `positional_percentile()` | `scripts/common/analytics.py` | Within-position percentile against full FPL pool |
 | `season_progress_weight()` | `scripts/common/analytics.py` | Concave GW→weight curve for season quality blend |
 
 All scores are **positional percentiles** (0-1) computed against the full FPL player pool (~700 players). A score of 0.85 means "top 15% at this position" — immediately interpretable regardless of position.
+
+**`_effective_proj` column**: `compute_player_scores()` retains `_effective_proj` (blended_proj × start_likelihood) in its output. Consumers (Waiver Wire suggestion engine, card rendering) rely on it for GW projection display and sanity checking. Do not drop it from the result.
+
+**FFP name matching — 4-level fallback**: Both `merge_ffp_single_gw_data()` and `blend_multi_gw_projections()` use a 4-step lookup to handle name mismatches between FFP short names ("Eze") and FPL full names ("Eberechi Eze"), as well as FFP team name variants: (1) exact `(norm_name, team_short)`, (2) `(last_word, team_short)`, (3) `norm_name` only, (4) `last_word` only.
 
 ## Environment Variables
 
@@ -294,7 +299,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Performance optimizations | Added `@st.cache_data` to 9 uncached API functions; startup preload with `@st.cache_resource`; refactored Draft home to eliminate 4 redundant `/league/details` calls; 50-60% faster page loads after initial startup |
 | Season Highlights for Team Analysis | Best XI (optimal formation from top scorers), Team MVP (with starts/goals/assists/captain stats), Best Clubs (top 3 contributing EPL clubs); shared `team_analysis_helpers.py` module for Draft and Classic |
 | Advanced Player Statistics Table | 40+ columns with 8 presets (Essential, Attacking, Defensive, Per 90, ICT Focus, Fixture Focus, GK Stats, Regression); green-white-red color gradients; regression metrics (G-xG, A-xA, GI-xGI) to identify over/under performers; switched to Classic FPL API for price/ownership data |
-| Waiver Wire Transfer Suggestions | Top-3 position-locked swap suggestions with unified Player Value scoring, injury-aware hold logic, asymmetric add/drop weights, and styled suggestion cards |
+| Waiver Wire Transfer Suggestions | Top-3 position-locked swap suggestions with unified Player Value scoring, injury-aware hold logic, raised score-gap thresholds (elite/above-avg/weak tiers), multi-signal sanity check (vetoes ADD clearly worse on proj/season/3GW), 4-level FFP name fallback, and inline GW+3GW+season stats on each suggestion card |
 | Error logging & better error messages | Added `error_helpers.py` module with structured logging and user-facing error display; added `timeout=30` to ~12 unprotected `requests.get()` calls; added `_logger.warning()` to ~15 silent `except` blocks; replaced ~13 generic error messages with actionable hints |
 | Luck-Adjusted Standings (All-Play Record) | Replaced simplistic average-based model with industry-standard All-Play Record (every team vs every other each GW); fixed 0-score filter bug; shared `luck_analysis.py` module for Draft and Classic H2H; color-styled standings tables with auto-sized height; added toggle to Classic H2H standings |
 | Data Source Update Alerts | Discord notifications when Rotowire/FFP publish new GW data; unified Alert Settings page in FPL App Home with configurable alert windows, test buttons, and live data source status checks; JSON config (`alert_settings.json`) with GitHub Actions commit-back for state persistence |
