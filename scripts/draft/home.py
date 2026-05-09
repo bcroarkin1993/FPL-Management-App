@@ -4,7 +4,14 @@ import plotly.express as px
 import requests
 import streamlit as st
 from scripts.common.error_helpers import get_logger, show_api_error
-from scripts.common.luck_analysis import extract_draft_gw_scores, calculate_all_play_standings, render_luck_adjusted_table, render_standings_table
+from scripts.common.luck_analysis import (
+    extract_draft_gw_scores,
+    calculate_all_play_standings,
+    calculate_h2h_streaks,
+    format_streak_html,
+    render_luck_adjusted_table,
+    render_standings_table,
+)
 from scripts.common.utils import get_current_gameweek, get_draft_league_details
 from scripts.common.styled_tables import render_styled_table
 
@@ -219,6 +226,33 @@ def get_fpl_draft_league_standings(draft_league_id, show_luck_adjusted_stats=Fal
     except Exception as e:
         show_api_error("fetching league standings", exception=e)
         return pd.DataFrame(columns=expected_columns).set_index('Rank')
+
+@st.cache_data(ttl=300)
+def _compute_draft_current_streaks(league_id) -> dict:
+    """Return {team_name: streak_str} for current H2H streaks (e.g. {'FC Rockets': '3W'})."""
+    league_data = get_draft_league_details(league_id)
+    if not league_data:
+        return {}
+    team_names = {e["id"]: e["entry_name"] for e in league_data.get("league_entries", [])}
+    rows = []
+    for m in league_data.get("matches", []):
+        t1 = m.get("league_entry_1")
+        t2 = m.get("league_entry_2")
+        p1 = m.get("league_entry_1_points", 0)
+        p2 = m.get("league_entry_2_points", 0)
+        if p1 == 0 and p2 == 0:
+            continue
+        gw = m.get("event")
+        rows.extend([
+            {"Team": team_names.get(t1, f"T{t1}"), "Gameweek": gw, "Points": p1, "Opp_Points": p2},
+            {"Team": team_names.get(t2, f"T{t2}"), "Gameweek": gw, "Points": p2, "Opp_Points": p1},
+        ])
+    if not rows:
+        return {}
+    weekly_scores = pd.DataFrame(rows)
+    streaks_df = calculate_h2h_streaks(weekly_scores)
+    return dict(zip(streaks_df["Team"], streaks_df["Current_Streak"]))
+
 
 def show_fixture_results(draft_league_id, gameweek):
     """
@@ -615,6 +649,12 @@ def show_home_page():
     if show_luck_adjusted_stats:
         render_luck_adjusted_table(standings_df)
     else:
+        current_streaks = _compute_draft_current_streaks(config.FPL_DRAFT_LEAGUE_ID)
+        if current_streaks and not standings_df.empty:
+            standings_df = standings_df.reset_index()
+            standings_df["Streak"] = standings_df["Team"].map(current_streaks).fillna("-")
+            standings_df["Streak"] = standings_df["Streak"].apply(format_streak_html)
+            standings_df = standings_df.set_index("Rank")
         render_standings_table(standings_df, is_h2h=True)
 
     st.divider()

@@ -12,7 +12,16 @@ import random
 import streamlit as st
 from typing import Optional, Dict, List
 
-from scripts.common.luck_analysis import extract_classic_h2h_gw_scores, calculate_all_play_standings, render_luck_adjusted_table, render_standings_table
+from scripts.common.luck_analysis import (
+    extract_classic_h2h_gw_scores,
+    calculate_all_play_standings,
+    calculate_h2h_streaks,
+    build_classic_h2h_weekly_scores,
+    format_streak_html,
+    render_luck_adjusted_table,
+    render_standings_table,
+)
+from scripts.common.styled_tables import render_styled_table
 from scripts.common.utils import (
     get_league_standings,
     get_classic_team_history,
@@ -449,6 +458,11 @@ def show_classic_home_page():
         st.subheader("League Standings")
         df = format_h2h_standings(standings)
 
+        # Compute streaks once for both the streak column and the Records section below
+        h2h_matches = get_all_h2h_league_matches(league_id)
+        h2h_weekly_scores = build_classic_h2h_weekly_scores(h2h_matches)
+        h2h_streaks_df = calculate_h2h_streaks(h2h_weekly_scores) if not h2h_weekly_scores.empty else None
+
         if df.empty:
             st.info("No standings data available yet.")
         else:
@@ -465,8 +479,13 @@ def show_classic_home_page():
 
                 render_luck_adjusted_table(luck_df)
             else:
-                # Don't show entry_id in display
                 display_df = df.drop(columns=["entry_id"], errors="ignore")
+                # Merge current streak column
+                if h2h_streaks_df is not None and not h2h_streaks_df.empty:
+                    streak_map = dict(zip(h2h_streaks_df["Team"], h2h_streaks_df["Current_Streak"]))
+                    display_df = display_df.copy()
+                    display_df["Streak"] = display_df["Team"].map(streak_map).fillna("-")
+                    display_df["Streak"] = display_df["Streak"].apply(format_streak_html)
                 render_standings_table(display_df, is_h2h=True)
     else:
         st.subheader("League Standings")
@@ -575,6 +594,94 @@ def show_classic_home_page():
             st.info("Not enough data to display chart.")
 
     st.divider()
+
+    # ---------------------------
+    # H2H RECORDS & STREAKS
+    # ---------------------------
+    if scoring_type == "H2H" and h2h_streaks_df is not None and not h2h_streaks_df.empty:
+        st.subheader("Records & Streaks")
+
+        def _record_card(title: str, value: str, subtitle: str, detail: str, accent: str = "#00ff87") -> str:
+            return (
+                f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
+                f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);">'
+                f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+                f'letter-spacing:0.5px;margin-bottom:4px;">{title}</div>'
+                f'<div style="color:{accent};font-size:24px;font-weight:800;margin-bottom:4px;">{value}</div>'
+                f'<div style="color:#e0e0e0;font-size:13px;font-weight:600;">{subtitle}</div>'
+                f'<div style="color:#9ca3af;font-size:12px;margin-top:2px;">{detail}</div>'
+                f'</div>'
+            )
+
+        # Records from weekly scores
+        if not h2h_weekly_scores.empty:
+            ws = h2h_weekly_scores.copy()
+            ws["Margin"] = ws["Points"] - ws["Opp_Points"]
+
+            # Highest score
+            max_idx = ws["Points"].idxmax()
+            max_row = ws.loc[max_idx]
+            # Lowest score
+            min_idx = ws["Points"].idxmin()
+            min_row = ws.loc[min_idx]
+            # Biggest win / closest match (winner perspective: Margin > 0)
+            wins = ws[ws["Margin"] > 0]
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(
+                    _record_card("Highest Single GW Score", f"{int(max_row['Points'])} pts",
+                                 f"{max_row['Team']} (GW{int(max_row['Gameweek'])})",
+                                 f"vs {max_row['Opp_Points']} pts"),
+                    unsafe_allow_html=True,
+                )
+                if not wins.empty:
+                    big_win_idx = wins["Margin"].idxmax()
+                    bw = wins.loc[big_win_idx]
+                    st.markdown(
+                        _record_card("Biggest Win", f"{int(bw['Points'])}-{int(bw['Opp_Points'])}",
+                                     f"{bw['Team']} (GW{int(bw['Gameweek'])})",
+                                     f"+{int(bw['Margin'])} margin"),
+                        unsafe_allow_html=True,
+                    )
+            with col2:
+                st.markdown(
+                    _record_card("Lowest Single GW Score", f"{int(min_row['Points'])} pts",
+                                 f"{min_row['Team']} (GW{int(min_row['Gameweek'])})",
+                                 f"vs {min_row['Opp_Points']} pts",
+                                 accent="#f87171"),
+                    unsafe_allow_html=True,
+                )
+                close_matches = ws[ws["Margin"] > 0].copy()
+                if not close_matches.empty:
+                    close_idx = close_matches["Margin"].idxmin()
+                    cm = close_matches.loc[close_idx]
+                    st.markdown(
+                        _record_card("Closest Match", f"{int(cm['Points'])}-{int(cm['Opp_Points'])}",
+                                     f"GW{int(cm['Gameweek'])}",
+                                     f"{cm['Team']} won by {int(cm['Margin'])} pt(s)",
+                                     accent="#facc15"),
+                        unsafe_allow_html=True,
+                    )
+
+        st.divider()
+
+        st.subheader("Streaks")
+        streaks_display = h2h_streaks_df.rename(columns={
+            "Current_Streak": "Current",
+            "Longest_Win_Streak": "Best Win Run",
+            "Longest_Unbeaten_Streak": "Best Unbeaten Run",
+            "Longest_Loss_Streak": "Worst Loss Run",
+        })
+        render_styled_table(
+            streaks_display,
+            text_align={"Current": "center", "Best Win Run": "center",
+                        "Best Unbeaten Run": "center", "Worst Loss Run": "center"},
+            positive_color_cols=["Best Win Run", "Best Unbeaten Run"],
+            negative_color_cols=["Worst Loss Run"],
+        )
+
+        st.divider()
 
     # ---------------------------
     # MY TEAM INFO
