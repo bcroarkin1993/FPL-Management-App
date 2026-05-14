@@ -324,11 +324,9 @@ def build_classic_h2h_weekly_scores(matches: list) -> pd.DataFrame:
     """
     rows = []
     for m in matches:
-        if not m.get("finished", False):
-            continue
         p1 = m.get("entry_1_points", 0)
         p2 = m.get("entry_2_points", 0)
-        if p1 == 0 and p2 == 0:
+        if not m.get("finished", False) and p1 == 0 and p2 == 0:
             continue
         gw = m.get("event", 0)
         t1 = m.get("entry_1_name", "Unknown")

@@ -654,7 +654,11 @@ def show_home_page():
             standings_df = standings_df.reset_index()
             standings_df["Streak"] = standings_df["Team"].map(current_streaks).fillna("-")
             standings_df["Streak"] = standings_df["Streak"].apply(format_streak_html)
-            standings_df = standings_df.set_index("Rank")
+            # Insert Streak between L and PF
+            cols = list(standings_df.columns)
+            l_idx = cols.index("L")
+            cols.insert(l_idx + 1, cols.pop(cols.index("Streak")))
+            standings_df = standings_df[cols].set_index("Rank")
         render_standings_table(standings_df, is_h2h=True)
 
     st.divider()

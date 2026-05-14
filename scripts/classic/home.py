@@ -486,6 +486,11 @@ def show_classic_home_page():
                     display_df = display_df.copy()
                     display_df["Streak"] = display_df["Team"].map(streak_map).fillna("-")
                     display_df["Streak"] = display_df["Streak"].apply(format_streak_html)
+                    # Insert Streak between L and PF
+                    cols = list(display_df.columns)
+                    l_idx = cols.index("L")
+                    cols.insert(l_idx + 1, cols.pop(cols.index("Streak")))
+                    display_df = display_df[cols]
                 render_standings_table(display_df, is_h2h=True)
     else:
         st.subheader("League Standings")
