@@ -954,9 +954,9 @@ def _build_rationale(drop: pd.Series, add: pd.Series) -> str:
     add_multi = float(add.get('MultiGW_Proj', 0) or 0)
     drop_multi = float(drop.get('MultiGW_Proj', 0) or 0)
     if add_multi > drop_multi and add_multi > 0 and drop_multi > 0:
-        parts.append(f"3GW outlook: {add_multi:.1f} vs {drop_multi:.1f} pts")
+        parts.append(f"multi-GW outlook: {add_multi:.1f} vs {drop_multi:.1f} pts")
     elif add_multi > 0 and drop_multi == 0:
-        parts.append(f"3GW outlook: {add_multi:.1f} pts")
+        parts.append(f"multi-GW outlook: {add_multi:.1f} pts")
 
     drop_avail = _format_availability(
         drop.get('chance_of_playing_next_round'),
@@ -1275,7 +1275,7 @@ def _render_depth_card(depth_map: Dict):
         st.markdown(card, unsafe_allow_html=True)
 
 
-def _render_transfer_suggestions(suggestions: List[Dict]):
+def _render_transfer_suggestions(suggestions: List[Dict], current_gw: int = 0):
     """Render suggestion cards using styled HTML."""
     if not suggestions:
         st.info("No beneficial transfers found. Your roster looks strong at all positions.")
@@ -1283,6 +1283,8 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
 
     st.subheader("Transfer Suggestions")
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
+    mgw_window = min(3, max(1, 38 - current_gw)) if current_gw > 0 else 3
+    mgw_label = "Next GW" if mgw_window == 1 else f"Next {mgw_window} GW"
 
     for s in suggestions:
         pos_label = pos_labels.get(s['drop_position'], s['drop_position'])
@@ -1307,8 +1309,8 @@ def _render_transfer_suggestions(suggestions: List[Dict]):
             f"{s['add_proj_pts']:.1f} pts" if s.get('add_has_data')
             else '<span style="color:#e67e22;">No proj</span>'
         )
-        drop_mgw_str = f" &bull; 3GW: {s['drop_3gw_proj']:.1f}" if s.get('drop_3gw_proj', 0) > 0 else ""
-        add_mgw_str = f" &bull; 3GW: {s['add_3gw_proj']:.1f}" if s.get('add_3gw_proj', 0) > 0 else ""
+        drop_mgw_str = f" &bull; {mgw_label}: {s['drop_3gw_proj']:.1f}" if s.get('drop_3gw_proj', 0) > 0 else ""
+        add_mgw_str = f" &bull; {mgw_label}: {s['add_3gw_proj']:.1f}" if s.get('add_3gw_proj', 0) > 0 else ""
 
         card_html = f"""
         <div style="border: 1px solid #444; border-radius: 10px; padding: 16px; margin-bottom: 12px;
@@ -1917,12 +1919,13 @@ def show_waiver_wire_page():
     except Exception:
         ffp_df = None
 
+    _remaining_gws = max(1, 38 - current_gw)
     if not avail_all.empty:
-        avail_all = blend_multi_gw_projections(avail_all, ffp_df, single_gw_col="Points")
+        avail_all = blend_multi_gw_projections(avail_all, ffp_df, single_gw_col="Points", remaining_gws=_remaining_gws)
     if not my_roster.empty:
         # Roster uses Projected_Points as single-GW col
         pts_col = "Projected_Points" if "Projected_Points" in my_roster.columns else "Points"
-        my_roster = blend_multi_gw_projections(my_roster, ffp_df, single_gw_col=pts_col)
+        my_roster = blend_multi_gw_projections(my_roster, ffp_df, single_gw_col=pts_col, remaining_gws=_remaining_gws)
 
     # --- Rotowire Season Projections ---
     try:
@@ -1945,7 +1948,7 @@ def show_waiver_wire_page():
     # fpl_stats is used as the reference pool for positional_percentile().
     # It must have the same enrichment columns (MultiGW_Proj, SeasonProjection, FFP_*)
     # as the scoring datasets for percentile comparisons to be meaningful.
-    fpl_stats = blend_multi_gw_projections(fpl_stats, ffp_df, single_gw_col="points_per_game")
+    fpl_stats = blend_multi_gw_projections(fpl_stats, ffp_df, single_gw_col="points_per_game", remaining_gws=_remaining_gws)
     fpl_stats = merge_season_projections(fpl_stats, season_rankings_df)
     fpl_stats = merge_ffp_single_gw_data(fpl_stats, ffp_df)
     fpl_stats = enrich_reference_with_projections(fpl_stats, proj)
@@ -1972,7 +1975,7 @@ def show_waiver_wire_page():
 
     # --- RENDER: Suggestion cards at top ---
     with suggestion_container:
-        _render_transfer_suggestions(suggestions)
+        _render_transfer_suggestions(suggestions, current_gw=current_gw)
         _render_transfer_debug(debug_rows)
 
     st.markdown("---")
