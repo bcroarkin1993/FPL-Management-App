@@ -1774,12 +1774,13 @@ def show_classic_transfers_page():
         except Exception:
             ffp_df = None
 
-        # Add multi-GW projections
+        # Add multi-GW projections (cap fallback multiplier to remaining GWs)
+        _remaining_gws = max(1, 38 - current_gw)
         squad_df = blend_multi_gw_projections(
-            squad_df, ffp_df, single_gw_col="Projected_Points"
+            squad_df, ffp_df, single_gw_col="Projected_Points", remaining_gws=_remaining_gws
         )
         all_players = blend_multi_gw_projections(
-            all_players, ffp_df, single_gw_col="Projected_Points"
+            all_players, ffp_df, single_gw_col="Projected_Points", remaining_gws=_remaining_gws
         )
 
         # Rotowire Season Projections

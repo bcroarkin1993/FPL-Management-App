@@ -226,6 +226,133 @@ def calculate_all_play_standings(
     return result_df
 
 
+def calculate_h2h_streaks(weekly_scores: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate W/D/L streaks for all teams from H2H match data.
+
+    Parameters:
+    - weekly_scores: DataFrame with columns Team, Gameweek, Points, Opp_Points
+
+    Returns:
+    - DataFrame with columns: Team, Current_Streak, Longest_Win_Streak,
+      Longest_Unbeaten_Streak, Longest_Loss_Streak. Sorted by Longest_Win_Streak desc.
+    """
+    if weekly_scores.empty:
+        return pd.DataFrame()
+
+    streak_data = []
+
+    for team in weekly_scores["Team"].unique():
+        team_df = weekly_scores[weekly_scores["Team"] == team].sort_values("Gameweek")
+
+        results = []
+        for _, row in team_df.iterrows():
+            if row["Points"] > row["Opp_Points"]:
+                results.append("W")
+            elif row["Points"] < row["Opp_Points"]:
+                results.append("L")
+            else:
+                results.append("D")
+
+        if not results:
+            streak_data.append({
+                "Team": team,
+                "Current_Streak": "-",
+                "Longest_Win_Streak": 0,
+                "Longest_Unbeaten_Streak": 0,
+                "Longest_Loss_Streak": 0,
+            })
+            continue
+
+        # Current streak: count matching tail results
+        current_type = results[-1]
+        current_streak = 1
+        for i in range(len(results) - 2, -1, -1):
+            if results[i] == current_type:
+                current_streak += 1
+            else:
+                break
+
+        # Longest win / loss streaks
+        longest_win = 0
+        longest_loss = 0
+        streak = 1
+        for i in range(1, len(results)):
+            if results[i] == results[i - 1]:
+                streak += 1
+            else:
+                if results[i - 1] == "W":
+                    longest_win = max(longest_win, streak)
+                elif results[i - 1] == "L":
+                    longest_loss = max(longest_loss, streak)
+                streak = 1
+        if results[-1] == "W":
+            longest_win = max(longest_win, streak)
+        elif results[-1] == "L":
+            longest_loss = max(longest_loss, streak)
+
+        # Longest unbeaten run (W or D)
+        cur_unbeaten = 0
+        longest_unbeaten = 0
+        for r in results:
+            if r in ("W", "D"):
+                cur_unbeaten += 1
+                longest_unbeaten = max(longest_unbeaten, cur_unbeaten)
+            else:
+                cur_unbeaten = 0
+
+        streak_data.append({
+            "Team": team,
+            "Current_Streak": f"{current_streak}{current_type}",
+            "Longest_Win_Streak": longest_win,
+            "Longest_Unbeaten_Streak": longest_unbeaten,
+            "Longest_Loss_Streak": longest_loss,
+        })
+
+    return pd.DataFrame(streak_data).sort_values("Longest_Win_Streak", ascending=False)
+
+
+def build_classic_h2h_weekly_scores(matches: list) -> pd.DataFrame:
+    """
+    Convert Classic H2H match list to weekly scores format.
+
+    Parameters:
+    - matches: List of match dicts from get_all_h2h_league_matches()
+
+    Returns:
+    - DataFrame with columns: Team, Gameweek, Points, Opp_Points
+    """
+    rows = []
+    for m in matches:
+        p1 = m.get("entry_1_points", 0)
+        p2 = m.get("entry_2_points", 0)
+        if not m.get("finished", False) and p1 == 0 and p2 == 0:
+            continue
+        gw = m.get("event", 0)
+        t1 = m.get("entry_1_name", "Unknown")
+        t2 = m.get("entry_2_name", "Unknown")
+        rows.append({"Team": t1, "Gameweek": gw, "Points": p1, "Opp_Points": p2})
+        rows.append({"Team": t2, "Gameweek": gw, "Points": p2, "Opp_Points": p1})
+
+    if not rows:
+        return pd.DataFrame(columns=["Team", "Gameweek", "Points", "Opp_Points"])
+    return pd.DataFrame(rows).sort_values(["Team", "Gameweek"])
+
+
+def format_streak_html(val: str) -> str:
+    """Wrap a streak string (e.g. '3W', '2L', '1D') in a colored HTML span."""
+    if not val or val == "-":
+        return val
+    last = val[-1]
+    if last == "W":
+        color = "#4CAF50"
+    elif last == "L":
+        color = "#f44336"
+    else:
+        color = "#9e9e9e"
+    return f'<span style="color:{color};font-weight:600">{val}</span>'
+
+
 def render_luck_adjusted_table(df: pd.DataFrame):
     """
     Render a luck-adjusted standings DataFrame with text color styling.

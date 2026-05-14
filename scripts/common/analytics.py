@@ -203,6 +203,7 @@ def compute_dynamic_alpha(
     ros_score: float,
     format_context: str = "draft",
     depth_map: Optional[Dict[str, "PositionalDepth"]] = None,
+    current_gw: int = 0,
 ) -> float:
     """Compute the dynamic 1GW/ROS blend weight (alpha) for Transfer/Keep Score.
 
@@ -213,13 +214,15 @@ def compute_dynamic_alpha(
     2. Position: GK -0.10, FWD -0.05 (more ROS-oriented)
     3. Rank tier (player's ROS): Elite(>0.80) -0.10, Above avg(>0.60) -0.05, Below(<0.40) +0.05
     4. Squad depth: Critical +0.15, Low +0.10 (urgency → favor 1GW)
-    5. Clamped to [0.15, 0.75]
+    5. Late season (GW35+): progressive +0.05/GW boost so 1GW dominates when ROS horizon shrinks
+    6. Clamped to [0.15, 0.75]
 
     Args:
         position: Position code (G/D/M/F).
         ros_score: Player's ROS score (0-1).
         format_context: "draft" or "classic".
         depth_map: Positional depth map from compute_positional_depth().
+        current_gw: Current gameweek (0 = unknown, no late-season adjustment).
 
     Returns:
         Alpha value in [0.15, 0.75].
@@ -250,7 +253,12 @@ def compute_dynamic_alpha(
             elif depth.depth_level == "Low":
                 alpha += 0.10
 
-    # 5. Clamp
+    # 5. Late-season boost: as GWs remaining shrink, ROS becomes less informative.
+    # At GW35: +0.10, GW36: +0.20, GW37: +0.30, GW38: +0.30 (capped).
+    if current_gw >= 35:
+        alpha += min(0.30, (current_gw - 34) * 0.10)
+
+    # 6. Clamp
     return max(0.15, min(0.75, alpha))
 
 
@@ -334,6 +342,18 @@ def compute_player_scores(
     fpl_mask = ~ffp_mask & fpl_chance.notna()
     start_likelihood[fpl_mask] = fpl_chance[fpl_mask] / 100.0
     start_likelihood = start_likelihood.clip(lower=0, upper=1)
+
+    # When Rotowire explicitly projects a player as a starter, apply a position-specific
+    # floor to start_likelihood. Rotowire only projects expected starters, so their
+    # presence is itself a confidence signal — prevents FFP uncertainty from fully
+    # overriding an expert lineup projection. DEF floor is highest: defenders who start
+    # play 90 mins; unlike FWD/MID there's no "subbed on late for 2 pts" scenario.
+    _ROTOWIRE_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.68, "F": 0.65}
+    _pos_col = result["Position"] if "Position" in result.columns else pd.Series("M", index=result.index)
+    _has_rotowire = rotowire_proj.gt(0)
+    for _pos_code, _floor_val in _ROTOWIRE_START_FLOORS.items():
+        _pos_mask = _has_rotowire & (_pos_col == _pos_code)
+        start_likelihood[_pos_mask] = start_likelihood[_pos_mask].clip(lower=_floor_val)
 
     # Effective projected points
     result["_effective_proj"] = blended_proj * start_likelihood
@@ -499,11 +519,14 @@ def compute_player_scores(
         fdr_ease_pctile = _min_max_norm_series(result["_FDREase"]).fillna(0.5)
 
     # Dynamic ROS weights (sum = 1.0 at all gameweeks)
-    w_mgw = 0.40 - 0.10 * p    # 40% → 30% (multi-GW projections dominant)
-    w_sq = 0.30 + 0.15 * p     # 30% → 45% (season quality grows)
-    w_form = 0.15 - 0.05 * p   # 15% → 10% (trajectory indicator)
-    w_start = 0.10             # 10% constant (start consistency)
-    w_fdr = 0.05               #  5% constant (supplementary fixture signal)
+    # FDR fades with season progress: overlaps with multi-GW (which already prices in fixtures),
+    # and at late season the FDR window covers phantom games that won't be played.
+    # Its freed weight shifts to season quality, which becomes the most reliable late-season signal.
+    w_mgw = 0.40 - 0.10 * p          # 40% → 30% (multi-GW projections dominant)
+    w_sq = 0.30 + 0.20 * p           # 30% → 49% (season quality grows; absorbs fading FDR)
+    w_form = 0.15 - 0.05 * p         # 15% → 10% (trajectory indicator)
+    w_start = 0.10                   # 10% constant (start consistency)
+    w_fdr = 0.05 * (1 - p)           #  5% → ~0% (fades as remaining fixtures shrink)
 
     result["ROS"] = (
         w_mgw * multigw_pctile +
@@ -521,7 +544,7 @@ def compute_player_scores(
     for idx in result.index:
         pos = str(result.at[idx, "Position"]) if "Position" in result.columns else "M"
         ros_val = float(result.at[idx, "ROS"])
-        alpha = compute_dynamic_alpha(pos, ros_val, format_context, depth_map)
+        alpha = compute_dynamic_alpha(pos, ros_val, format_context, depth_map, current_gw)
         blended = alpha * float(result.at[idx, "1GW"]) + (1 - alpha) * ros_val
         transfer_score.at[idx] = blended
         keep_score.at[idx] = blended
@@ -771,18 +794,21 @@ def blend_multi_gw_projections(
     ffp_df: Optional[pd.DataFrame],
     single_gw_col: str = "Points",
     output_col: str = "MultiGW_Proj",
+    remaining_gws: int = 3,
 ) -> pd.DataFrame:
     """
     Blend FFP multi-GW (Next3GWs) projections into a player DataFrame.
 
     Matches FFP players by normalized name + team short code.
-    Unmatched players or missing FFP data falls back to single_gw_col * 3.
+    Unmatched players or missing FFP data falls back to single_gw_col * min(3, remaining_gws).
 
     Args:
         player_df: DataFrame with player names and a single-GW projection column.
         ffp_df: FFP projections DataFrame with Name, Team, Next3GWs columns (or None).
         single_gw_col: Column name for single-GW projection.
         output_col: Column name for the blended multi-GW value.
+        remaining_gws: GWs left in season (caps fallback multiplier to avoid inflated projections
+            near season end).
 
     Returns:
         player_df with output_col added.
@@ -792,14 +818,16 @@ def blend_multi_gw_projections(
     # Determine the player name column
     name_col = "Player" if "Player" in result.columns else "Name" if "Name" in result.columns else None
 
-    # Fallback: single_gw * 3, then points_per_game * 3 if still 0
+    # Fallback: single_gw * min(3, remaining_gws).
+    # Cap at remaining_gws so we don't project 3× a single-GW value when only 1 GW is left.
+    fallback_mult = min(3, max(1, remaining_gws))
     single_vals = pd.to_numeric(result.get(single_gw_col, 0), errors="coerce").fillna(0)
-    result[output_col] = single_vals * 3
+    result[output_col] = single_vals * fallback_mult
     # Second fallback: players with 0 single-GW proj (e.g. name merge failed) but valid ppg
     if "points_per_game" in result.columns:
         ppg = pd.to_numeric(result["points_per_game"], errors="coerce").fillna(0)
         zero_mask = result[output_col].eq(0) & ppg.gt(0)
-        result.loc[zero_mask, output_col] = ppg[zero_mask] * 3
+        result.loc[zero_mask, output_col] = ppg[zero_mask] * fallback_mult
 
     if ffp_df is None or ffp_df.empty or name_col is None:
         return result
@@ -836,6 +864,13 @@ def blend_multi_gw_projections(
                     lookup_short[short_key] = val
             if row["__norm"] and row["__norm"] not in lookup_name:
                 lookup_name[row["__norm"]] = val
+            # Also store reversed token order to catch "family given" → "given family" variants
+            # (e.g. FFP "Tanaka Ao" ↔ FPL "Ao Tanaka" for Japanese players).
+            norm_tokens = row["__norm"].split()
+            if len(norm_tokens) > 1:
+                norm_reversed = " ".join(reversed(norm_tokens))
+                if norm_reversed not in lookup_name:
+                    lookup_name[norm_reversed] = val
             if last_word and last_word not in lookup_lastword:
                 lookup_lastword[last_word] = val
 

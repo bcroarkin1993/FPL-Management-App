@@ -19,6 +19,7 @@ import config
 from scripts.common.bench_analysis import compute_draft_league_bench_data, render_league_bench_analysis
 from scripts.common.error_helpers import get_logger, show_api_error
 from scripts.common.utils import get_current_gameweek, get_draft_points_by_position
+from scripts.common.luck_analysis import calculate_h2h_streaks
 from scripts.common.styled_tables import render_styled_table
 
 _logger = get_logger("fpl_app.draft.league_analysis")
@@ -507,66 +508,6 @@ def calculate_records(matches_df: pd.DataFrame, weekly_scores: pd.DataFrame) -> 
     return records
 
 
-def calculate_streaks(weekly_scores: pd.DataFrame) -> pd.DataFrame:
-    """Calculate current and longest win/loss streaks."""
-    if weekly_scores.empty:
-        return pd.DataFrame()
-
-    streak_data = []
-
-    for team in weekly_scores["Team"].unique():
-        team_df = weekly_scores[weekly_scores["Team"] == team].sort_values("Gameweek")
-
-        # Determine W/L/D for each game
-        results = []
-        for _, row in team_df.iterrows():
-            if row["Points"] > row["Opp_Points"]:
-                results.append("W")
-            elif row["Points"] < row["Opp_Points"]:
-                results.append("L")
-            else:
-                results.append("D")
-
-        # Calculate streaks
-        current_streak = 1
-        current_type = results[-1] if results else None
-        longest_win = 0
-        longest_loss = 0
-
-        # Current streak
-        for i in range(len(results) - 2, -1, -1):
-            if results[i] == current_type:
-                current_streak += 1
-            else:
-                break
-
-        # Longest streaks
-        streak = 1
-        for i in range(1, len(results)):
-            if results[i] == results[i-1]:
-                streak += 1
-            else:
-                if results[i-1] == "W":
-                    longest_win = max(longest_win, streak)
-                elif results[i-1] == "L":
-                    longest_loss = max(longest_loss, streak)
-                streak = 1
-
-        # Check final streak
-        if results:
-            if results[-1] == "W":
-                longest_win = max(longest_win, streak)
-            elif results[-1] == "L":
-                longest_loss = max(longest_loss, streak)
-
-        streak_data.append({
-            "Team": team,
-            "Current_Streak": f"{current_streak}{current_type}" if current_type else "-",
-            "Longest_Win_Streak": longest_win,
-            "Longest_Loss_Streak": longest_loss,
-        })
-
-    return pd.DataFrame(streak_data).sort_values("Longest_Win_Streak", ascending=False)
 
 
 # ---------------------------
@@ -792,19 +733,21 @@ def show_draft_league_analysis_page():
         st.divider()
 
         st.subheader("Streaks")
-        streaks_df = calculate_streaks(weekly_scores)
+        streaks_df = calculate_h2h_streaks(weekly_scores)
 
         if not streaks_df.empty:
             streaks_display = streaks_df.rename(columns={
                 "Current_Streak": "Current",
-                "Longest_Win_Streak": "Best Win Streak",
-                "Longest_Loss_Streak": "Worst Loss Streak",
+                "Longest_Win_Streak": "Best Win Run",
+                "Longest_Unbeaten_Streak": "Best Unbeaten Run",
+                "Longest_Loss_Streak": "Worst Loss Run",
             })
             render_styled_table(
                 streaks_display,
-                text_align={"Current": "center", "Best Win Streak": "center", "Worst Loss Streak": "center"},
-                positive_color_cols=["Best Win Streak"],
-                negative_color_cols=["Worst Loss Streak"],
+                text_align={"Current": "center", "Best Win Run": "center",
+                            "Best Unbeaten Run": "center", "Worst Loss Run": "center"},
+                positive_color_cols=["Best Win Run", "Best Unbeaten Run"],
+                negative_color_cols=["Worst Loss Run"],
             )
         else:
             st.info("Not enough data for streak analysis.")
