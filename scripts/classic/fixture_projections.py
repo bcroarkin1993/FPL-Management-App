@@ -444,6 +444,90 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
     components.html(html, height=height, scrolling=False)
 
 
+def _render_classic_bench_section(bench_df: pd.DataFrame, is_live: bool = False, active_chip: str = None):
+    """
+    Render bench slots below the starting XI. GK is shown first (fixed sub), then the
+    3 outfield players sorted by projected points descending (optimal auto-sub order).
+    Skip when Bench Boost is active (all 15 players already shown in lineup).
+    """
+    if bench_df.empty or active_chip == "bboost":
+        return
+
+    bench_df = bench_df.copy()
+    bench_df['Points'] = pd.to_numeric(bench_df.get('Points', 0), errors='coerce').fillna(0.0)
+
+    # GK first (fixed), then outfield sorted by proj pts desc
+    gk_rows = bench_df[bench_df['Position'] == 'G'] if 'Position' in bench_df.columns else pd.DataFrame()
+    out_rows = bench_df[bench_df['Position'] != 'G'].sort_values('Points', ascending=False) if 'Position' in bench_df.columns else bench_df.sort_values('Points', ascending=False)
+    ordered = pd.concat([gk_rows, out_rows])
+    labels = ['GK Sub'] + [f'{i+1}{"st" if i==0 else "nd" if i==1 else "rd"} Sub' for i in range(len(out_rows))]
+
+    html = """
+    <style>
+        .bench-section { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin-top: 8px; }
+        .bench-header {
+            font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+            padding: 6px 10px; border-radius: 4px; margin-bottom: 6px; color: #555;
+            background: #e8e8e8;
+        }
+        .bench-card {
+            display: flex; align-items: center; justify-content: space-between;
+            background: #f4f4f4; border-radius: 6px; padding: 7px 12px;
+            margin-bottom: 4px; border-left: 3px dashed #bbb;
+        }
+        .bench-card.played { border-left-color: #28a745; background: #f0fff4; }
+        .sub-label { font-size: 9px; font-weight: 700; color: #888; text-transform: uppercase;
+                     min-width: 48px; }
+        .bench-player-info { flex: 1; min-width: 0; }
+        .bench-player-name { font-weight: 500; font-size: 12px; color: #333;
+                             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .bench-player-meta { font-size: 10px; color: #999; text-transform: uppercase; }
+        .bench-pts { text-align: right; min-width: 55px; }
+        .bench-live-pts { font-size: 15px; font-weight: 700; color: #28a745; }
+        .bench-proj-pts { font-size: 13px; font-weight: 500; color: #777; }
+        .bench-proj-label { font-size: 10px; color: #aaa; }
+    </style>
+    <div class="bench-section">
+        <div class="bench-header">Bench</div>
+    """
+
+    for i, (_, row) in enumerate(ordered.iterrows()):
+        label = labels[i] if i < len(labels) else f'{i}th Sub'
+        player_name = row.get('Player', 'Unknown')
+        team = row.get('Team', '')
+        position = row.get('Position', '')
+        proj_pts = row.get('Points', 0) or 0
+        meta = f"{team} · {position}" if team and position else team or position
+
+        if is_live and 'Has_Played' in row.index:
+            live_pts = row.get('Live_Points', 0) or 0
+            has_played = row.get('Has_Played', False)
+            if has_played:
+                points_html = f'<div class="bench-live-pts">{live_pts:.0f}</div><div class="bench-proj-label">proj: {proj_pts:.1f}</div>'
+                card_class = "bench-card played"
+            else:
+                points_html = f'<div class="bench-proj-pts">{proj_pts:.1f}</div><div class="bench-proj-label">projected</div>'
+                card_class = "bench-card"
+        else:
+            points_html = f'<div class="bench-proj-pts">{proj_pts:.1f}</div>'
+            card_class = "bench-card"
+
+        html += f"""
+        <div class="{card_class}">
+            <div class="sub-label">{label}</div>
+            <div class="bench-player-info">
+                <div class="bench-player-name">{player_name}</div>
+                <div class="bench-player-meta">{meta}</div>
+            </div>
+            <div class="bench-pts">{points_html}</div>
+        </div>
+        """
+
+    html += "</div>"
+    height = 32 + (len(ordered) * 46) + 10
+    components.html(html, height=height, scrolling=False)
+
+
 def _lookup_projection(player_name: str, team: str, position: str, projections_df: pd.DataFrame,
                        web_name: str = None) -> dict:
     """Look up projection for a player using fuzzy matching.
@@ -1200,10 +1284,14 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
             squad_1, subs_1 = _apply_auto_subs(squad_1, live_stats, bootstrap, gw=current_gw)
             squad_2, subs_2 = _apply_auto_subs(squad_2, live_stats, bootstrap, gw=current_gw)
 
-        # Blend live data if available
+        # Blend live data if available (runs on full 15-player squad, so bench gets live data too)
         if gw_is_live and live_stats:
             squad_1 = _blend_live_with_squad(squad_1, live_stats)
             squad_2 = _blend_live_with_squad(squad_2, live_stats)
+
+        # Extract bench (positions 12-15) — already has live blending applied above
+        bench_1 = squad_1[squad_1['squad_position'] > 11].sort_values('squad_position').copy()
+        bench_2 = squad_2[squad_2['squad_position'] > 11].sort_values('squad_position').copy()
 
         # Calculate scores (use blended if live)
         orig_score_1 = _calculate_projected_score(squad_1, chip_1)
@@ -1270,6 +1358,7 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
             """, unsafe_allow_html=True)
 
         _render_classic_team_lineup(squad_1, selected['team1_name'], is_live=gw_is_live, active_chip=chip_1)
+        _render_classic_bench_section(bench_1, is_live=gw_is_live, active_chip=chip_1)
 
     with col2:
         chip_text = f" ({chip_2.upper()})" if chip_2 else ""
@@ -1300,6 +1389,7 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
             """, unsafe_allow_html=True)
 
         _render_classic_team_lineup(squad_2, selected['team2_name'], is_live=gw_is_live, active_chip=chip_2)
+        _render_classic_bench_section(bench_2, is_live=gw_is_live, active_chip=chip_2)
 
     # Show prediction disclaimer if applicable
     if predicted_1 or predicted_2:
