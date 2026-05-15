@@ -108,7 +108,7 @@ The scoring model answers two questions: **"Who should I pick up?"** (Transfer S
 **Principle**: 1GW should reflect *expected points this gameweek* and nothing else. Form, season points, and FDR are intentionally excluded because Rotowire and FFP projections already incorporate those signals — adding them again would double-count.
 
 ```
-blended_projection = avg(Rotowire, FFP Predicted)  — use whichever is available
+blended_projection = 0.6 × Rotowire + 0.4 × FFP Predicted  — use whichever is available
 start_likelihood   = FFP Start% (primary) | FPL chance_of_playing (fallback) | 100%
 effective_proj     = blended_projection × start_likelihood
 
@@ -193,6 +193,7 @@ Score = α × 1GW + (1-α) × ROS
 | `compute_dynamic_alpha()` | `scripts/common/analytics.py` | Per-player alpha based on context |
 | `merge_ffp_single_gw_data()` | `scripts/common/analytics.py` | Merges FFP Predicted/Start/LongStart onto player DataFrames |
 | `blend_multi_gw_projections()` | `scripts/common/analytics.py` | Merges FFP Next3GWs (falls back to PPG×3 if unpublished) |
+| `blend_fixture_projections()` | `scripts/common/analytics.py` | Lightweight fixture display blend: Rotowire 60% + FFP 40% × start likelihood → `Proj_Blended` column. No percentile computation. Uses `Proj_Blended` (not `Blended_Points`) to avoid collision with the live-blending column. |
 | `positional_percentile()` | `scripts/common/analytics.py` | Within-position percentile against full FPL pool |
 | `season_progress_weight()` | `scripts/common/analytics.py` | Concave GW→weight curve for season quality blend |
 
@@ -268,7 +269,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Multi-GW Transfer Planner | Not Started | Blend FFP multi-GW projections (GW2–GW6, Next2–6GWs) with Rotowire/other sources for multi-week transfer analysis. Upgrade transfer suggestions for both Draft and Classic to factor in future GWs. Requires projection blending strategy. |
+| Multi-GW Transfer Planner | Completed (polish available) | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. Gaps: only Next3GWs used (Next2/4–6 fetched but ignored); Classic Transfers lacks sanity-check gate that Draft has. |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
 | Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |
 
@@ -276,7 +277,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Fixture Projections Enhancements | Completed | Key differentials section, captain comparison (Classic), H2H layout fix (Classic now matches Draft order). |
+| Fixture Projections Enhancements | Completed | Key differentials section, captain comparison (Classic), H2H layout fix (Classic now matches Draft order). Blended projections (Rotowire 60% + FFP 40% × start likelihood) added to Draft and Classic fixture pages; blend weight unified app-wide at 60/40. |
 
 ### Low Priority
 
