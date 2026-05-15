@@ -39,6 +39,7 @@ from scripts.common.analytics import (
     merge_ffp_single_gw_data,
 )
 from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
+from scripts.common.player_matching import canonical_normalize
 
 
 # ---------------------------
@@ -238,23 +239,29 @@ def _get_fdr_color(fdr: float) -> str:
         return "#dc3545"  # Red - hard
 
 
+# Rotowire uses verbose position labels; FPL uses single chars. Normalize before comparing.
+_RW_POS_TO_FPL = {"GK": "G", "GKP": "G", "DEF": "D", "MID": "M", "FWD": "F",
+                   "F": "F", "D": "D", "M": "M", "G": "G"}
+
+
 def _lookup_projection(player_name: str, team: str, position: str, projections_df: pd.DataFrame) -> dict:
-    """Look up projection for a player using fuzzy matching."""
+    """Look up projection for a player using fuzzy matching with canonical normalization."""
     if projections_df is None or projections_df.empty:
         return {"Points": None, "Pos Rank": None}
 
+    norm_target = canonical_normalize(player_name)
     best_match = None
     best_score = 0
 
     for _, row in projections_df.iterrows():
-        proj_name = str(row.get("Player", ""))
+        proj_name_raw = str(row.get("Player", ""))
         proj_team = str(row.get("Team", ""))
-        proj_pos = str(row.get("Position", ""))
+        proj_pos = _RW_POS_TO_FPL.get(str(row.get("Position", "")).upper(), str(row.get("Position", "")))
 
-        # Calculate name similarity
-        score = fuzz.ratio(player_name.lower(), proj_name.lower())
+        norm_proj = canonical_normalize(proj_name_raw)
+        score = fuzz.ratio(norm_target, norm_proj)
 
-        # Boost score if team and position match
+        # Boost if team and position both match (now using normalized position)
         if proj_team == team and proj_pos == position:
             score += 15
 
@@ -302,6 +309,7 @@ def _build_all_players_df(bootstrap: dict, current_gw: int, n_weeks: int) -> pd.
             "minutes": p.get("minutes", 0),
             "starts": p.get("starts", 0),
             "news": p.get("news", ""),
+            "status": p.get("status", "a"),
             "chance_of_playing_next_round": p.get("chance_of_playing_next_round"),
         })
 
@@ -985,6 +993,7 @@ def _build_multi_transfer_plan(squad_df: pd.DataFrame, available_df: pd.DataFram
                     "position": pos_labels.get(pos, pos),
                     "score_diff": float(found.get("Transfer Score", 0)) - float(drop_row.get("Keep Score", 0)),
                     "drop_player": drop_row["Player"],
+                    "drop_full_name": drop_row.get("Full Name") or drop_row["Player"],
                     "drop_team": drop_row["Team"],
                     "drop_price": f"£{drop_row['now_cost']/10:.1f}m",
                     "drop_form": f"{float(drop_row.get('HealthyForm' if 'HealthyForm' in drop_row.index else 'form', 0) or 0):.1f}",
@@ -992,6 +1001,7 @@ def _build_multi_transfer_plan(squad_df: pd.DataFrame, available_df: pd.DataFram
                     "drop_injury": _get_availability_indicator(
                         drop_row.get("chance_of_playing_next_round"), drop_row.get("news", "")),
                     "add_player": found["Player"],
+                    "add_full_name": found.get("Full Name") or found["Player"],
                     "add_team": found["Team"],
                     "add_price": f"£{found['now_cost']/10:.1f}m",
                     "add_form": f"{float(found.get(add_form_col, 0) or 0):.1f}",
@@ -1037,12 +1047,12 @@ def _render_multi_transfer_plan(plan: List[Dict]):
                                  font-size: 0.85em; font-weight: bold;">+{s['score_diff']:.3f}</span>
                 </div>
                 <div style="color: #e74c3c; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">DROP</div>
-                <div style="color: #e0e0e0; font-weight: bold;">{s['drop_player']} ({s['drop_team']})</div>
+                <div style="color: #e0e0e0; font-weight: bold;">{s['drop_full_name']} ({s['drop_team']})</div>
                 <div style="color: #999; font-size: 0.82em; margin-bottom: 8px;">
                     {s['drop_price']} &bull; Form: {s['drop_form']} &bull; {s['drop_injury']}
                 </div>
                 <div style="color: #4ecca3; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">ADD</div>
-                <div style="color: #e0e0e0; font-weight: bold;">{s['add_player']} ({s['add_team']})</div>
+                <div style="color: #e0e0e0; font-weight: bold;">{s['add_full_name']} ({s['add_team']})</div>
                 <div style="color: #999; font-size: 0.82em;">
                     {s['add_price']} &bull; Proj: {s['add_proj_pts']} &bull; {s['add_injury']}
                     {s.get('add_ownership_badge', '')}
@@ -1224,6 +1234,11 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         else:
             min_threshold = 0.02
 
+        # GKs are near-guaranteed starters; a backup can cover one bad GW.
+        # Classic transfers are precious — require a massive improvement for GK swaps.
+        if pos == "G" and not is_unavailable:
+            min_threshold = max(min_threshold, 0.25)
+
         if score_diff < min_threshold:
             continue
 
@@ -1274,6 +1289,8 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
             urgency = "BLANK GW"
         elif has_blank and has_non_blanking_backup:
             urgency = "LOW PRIORITY"
+        elif pos == "G":
+            urgency = "GK CAUTION"
         else:
             urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
 
@@ -1306,12 +1323,14 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
             "position": pos_labels.get(pos, pos),
             "score_diff": score_diff,
             "drop_player": drop_row["Player"],
+            "drop_full_name": drop_row.get("Full Name") or drop_row["Player"],
             "drop_team": drop_row["Team"],
             "drop_price": f"£{drop_row['now_cost']/10:.1f}m",
             "drop_form": f"{drop_form_val:.1f}",
             "drop_season_pts": drop_row.get("total_points", 0),
             "drop_injury": drop_injury,
             "add_player": add_row["Player"],
+            "add_full_name": add_row.get("Full Name") or add_row["Player"],
             "add_team": add_row["Team"],
             "add_price": f"£{add_row['now_cost']/10:.1f}m",
             "add_form": f"{add_form_val:.1f}",
@@ -1457,6 +1476,9 @@ def _render_transfer_suggestions(suggestions: List[Dict], free_transfers: int = 
         elif urgency == "LOW PRIORITY":
             urgency_html = ('<span style="background:#374151;color:#9ca3af;padding:3px 10px;border-radius:12px;'
                             'font-size:0.8em;font-weight:bold;margin-left:8px;">LOW PRIORITY</span>')
+        elif urgency == "GK CAUTION":
+            urgency_html = ('<span style="background:#b45309;color:#fff;padding:3px 10px;border-radius:12px;'
+                            'font-size:0.8em;font-weight:bold;margin-left:8px;">GK CAUTION</span>')
         elif urgency == "LOW DEPTH":
             urgency_html = ('<span style="background:#ff9800;color:#fff;padding:3px 10px;border-radius:12px;'
                             'font-size:0.8em;font-weight:bold;margin-left:8px;">LOW DEPTH</span>')
@@ -1475,7 +1497,7 @@ def _render_transfer_suggestions(suggestions: List[Dict], free_transfers: int = 
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                 <div style="flex: 1;">
                     <div style="color: #e74c3c; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">DROP</div>
-                    <div style="color: #e0e0e0; font-weight: bold;">{s['drop_player']} ({s['drop_team']})</div>
+                    <div style="color: #e0e0e0; font-weight: bold;">{s['drop_full_name']} ({s['drop_team']})</div>
                     <div style="color: #999; font-size: 0.85em;">
                         Price: {s['drop_price']} &bull; Form: {s['drop_form']} (healthy) &bull;
                         Season: {s['drop_season_pts']} &bull; {s['drop_injury']}
@@ -1484,7 +1506,7 @@ def _render_transfer_suggestions(suggestions: List[Dict], free_transfers: int = 
                 <div style="color: #888; font-size: 1.5em; padding: 0 16px;">&rarr;</div>
                 <div style="flex: 1; text-align: right;">
                     <div style="color: #4ecca3; font-weight: bold; font-size: 0.8em; margin-bottom: 2px;">ADD</div>
-                    <div style="color: #e0e0e0; font-weight: bold;">{s['add_player']} ({s['add_team']})</div>
+                    <div style="color: #e0e0e0; font-weight: bold;">{s['add_full_name']} ({s['add_team']})</div>
                     <div style="color: #999; font-size: 0.85em;">
                         Price: {s['add_price']} &bull; Proj: {s['add_proj_pts']} &bull;
                         Form: {s['add_form']} (healthy) &bull; {s['add_injury']}
@@ -1824,12 +1846,15 @@ def show_classic_transfers_page():
     pos_map = {"GK": "G", "DEF": "D", "MID": "M", "FWD": "F"}
     filter_positions = [pos_map.get(p, p) for p in pos_filter]
 
-    # Filter available players
+    # Filter available players — must be active in FPL (status a=available, d=doubtful)
+    # and have played at some point this season. This excludes players who are
+    # injured, suspended, unavailable, or not in squad (status i/s/u/n).
     available = all_players[
         (~all_players["Player_ID"].isin(squad_ids)) &
         (all_players["Position"].isin(filter_positions)) &
         (all_players["now_cost"] <= max_price * 10) &
-        (all_players["minutes"] > 0)  # Must have played this season
+        (all_players["minutes"] > 0) &
+        (all_players["status"].isin(["a", "d"]))
     ].copy()
 
     # Compute healthy form for top transfer candidates (selective — not all 600+ players)
