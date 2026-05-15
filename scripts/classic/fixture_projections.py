@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 from fuzzywuzzy import fuzz
 from scripts.common.error_helpers import show_api_error
 from scripts.common.player_matching import canonical_normalize
-from scripts.common.analytics import simulate_auto_subs
+from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections
+from scripts.common.scraping import get_ffp_projections_data
 from scripts.common.fixture_helpers import compute_key_differentials, render_key_differentials
 from scripts.common.utils import (
     find_optimal_lineup,
@@ -381,6 +382,7 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
             team = row.get("Team", "")
             matchup = row.get("Matchup", "")
             proj_pts = pd.to_numeric(row.get("Points", 0), errors="coerce") or 0
+            display_pts = pd.to_numeric(row.get("Proj_Blended"), errors="coerce") or proj_pts
             is_captain = row.get("is_captain", False)
 
             captain_html = '<span class="status-badge captain-badge">C</span>' if is_captain else ""
@@ -416,7 +418,7 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
                     card_class = "player-card upcoming"
                     status_html = '<span class="status-badge status-upcoming">Upcoming</span>'
             else:
-                proj_display = proj_pts * (3 if active_chip == "3xc" else 2) if is_captain else proj_pts
+                proj_display = display_pts * (3 if active_chip == "3xc" else 2) if is_captain else display_pts
                 points_html = f'<div class="proj-only">{proj_display:.1f}</div>'
                 card_class = "player-card"
                 status_html = ""
@@ -455,10 +457,13 @@ def _render_classic_bench_section(bench_df: pd.DataFrame, is_live: bool = False,
 
     bench_df = bench_df.copy()
     bench_df['Points'] = pd.to_numeric(bench_df.get('Points', 0), errors='coerce').fillna(0.0)
+    bench_df['Proj_Blended'] = pd.to_numeric(bench_df.get('Proj_Blended'), errors='coerce').fillna(bench_df['Points'])
 
-    # GK first (fixed), then outfield sorted by proj pts desc
+    sort_col = 'Proj_Blended' if bench_df['Proj_Blended'].gt(0).any() else 'Points'
+
+    # GK first (fixed), then outfield sorted by blended proj pts desc (optimal auto-sub order)
     gk_rows = bench_df[bench_df['Position'] == 'G'] if 'Position' in bench_df.columns else pd.DataFrame()
-    out_rows = bench_df[bench_df['Position'] != 'G'].sort_values('Points', ascending=False) if 'Position' in bench_df.columns else bench_df.sort_values('Points', ascending=False)
+    out_rows = bench_df[bench_df['Position'] != 'G'].sort_values(sort_col, ascending=False) if 'Position' in bench_df.columns else bench_df.sort_values(sort_col, ascending=False)
     ordered = pd.concat([gk_rows, out_rows])
     labels = ['GK Sub'] + [f'{i+1}{"st" if i==0 else "nd" if i==1 else "rd"} Sub' for i in range(len(out_rows))]
 
@@ -497,6 +502,7 @@ def _render_classic_bench_section(bench_df: pd.DataFrame, is_live: bool = False,
         team = row.get('Team', '')
         position = row.get('Position', '')
         proj_pts = row.get('Points', 0) or 0
+        display_pts = row.get('Proj_Blended') or proj_pts
         meta = f"{team} · {position}" if team and position else team or position
 
         if is_live and 'Has_Played' in row.index:
@@ -509,7 +515,7 @@ def _render_classic_bench_section(bench_df: pd.DataFrame, is_live: bool = False,
                 points_html = f'<div class="bench-proj-pts">{proj_pts:.1f}</div><div class="bench-proj-label">projected</div>'
                 card_class = "bench-card"
         else:
-            points_html = f'<div class="bench-proj-pts">{proj_pts:.1f}</div>'
+            points_html = f'<div class="bench-proj-pts">{display_pts:.1f}</div>'
             card_class = "bench-card"
 
         html += f"""
@@ -692,8 +698,13 @@ def _calculate_projected_score(squad_df: pd.DataFrame, active_chip: str = None, 
         # Normal: only starting XI (positions 1-11)
         active_players = squad_df[squad_df["squad_position"] <= 11].copy()
 
-    # Choose points column
-    pts_col = "Blended_Points" if use_blended and "Blended_Points" in active_players.columns else "Points"
+    # Choose points column: live mode → Blended_Points; pre-match → Proj_Blended (FFP blend) if available
+    if use_blended and "Blended_Points" in active_players.columns:
+        pts_col = "Blended_Points"
+    elif not use_blended and "Proj_Blended" in active_players.columns:
+        pts_col = "Proj_Blended"
+    else:
+        pts_col = "Points"
 
     # Calculate base points
     active_players[pts_col] = pd.to_numeric(active_players[pts_col], errors="coerce").fillna(0.0)
@@ -795,7 +806,8 @@ def _get_team_squad_and_lineup(
     current_gw: int,
     bootstrap: dict,
     projections_df: pd.DataFrame,
-    gw_started: bool
+    gw_started: bool,
+    ffp_df=None,
 ) -> tuple:
     """
     Get a team's squad and calculate projections.
@@ -829,12 +841,14 @@ def _get_team_squad_and_lineup(
         # Build squad from elements
         squad_df = _build_squad_from_elements(squad_elements, bootstrap)
 
-    # Add projections
+    # Add Rotowire projections then blend with FFP
     if projections_df is not None and not projections_df.empty:
         squad_df = _add_projections_to_squad(squad_df, projections_df)
     else:
         squad_df["Points"] = 0.0
         squad_df["Pos Rank"] = "N/A"
+
+    squad_df = blend_fixture_projections(squad_df, ffp_df)
 
     # If predicted lineup, calculate optimal and assign captain
     if is_predicted and not squad_df.empty:
@@ -909,6 +923,7 @@ def _render_h2h_fixtures_overview(
     sigma: float = 15.0,
     live_stats: dict = None,
     gw_is_live: bool = False,
+    ffp_df=None,
 ):
     """
     Render an overview table showing all H2H fixtures with projected scores and win probabilities.
@@ -928,10 +943,10 @@ def _render_h2h_fixtures_overview(
         try:
             # Get squad and lineup for both teams
             squad_1, chip_1, _ = _get_team_squad_and_lineup(
-                fixture["team1_id"], current_gw, bootstrap, projections_df, gw_started
+                fixture["team1_id"], current_gw, bootstrap, projections_df, gw_started, ffp_df=ffp_df
             )
             squad_2, chip_2, _ = _get_team_squad_and_lineup(
-                fixture["team2_id"], current_gw, bootstrap, projections_df, gw_started
+                fixture["team2_id"], current_gw, bootstrap, projections_df, gw_started, ffp_df=ffp_df
             )
 
             if squad_1.empty or squad_2.empty:
@@ -1222,11 +1237,13 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
     if projections_df is None or projections_df.empty:
         st.warning("Rotowire projections unavailable. Scores will show 0.")
 
+    ffp_df_h2h = get_ffp_projections_data()
+
     # Render fixtures overview table
     sigma = 15.0
     _render_h2h_fixtures_overview(
         fixture_options, current_gw, bootstrap, projections_df, gw_started, sigma,
-        live_stats=live_stats, gw_is_live=gw_is_live,
+        live_stats=live_stats, gw_is_live=gw_is_live, ffp_df=ffp_df_h2h,
     )
 
     if gw_is_live:
@@ -1268,10 +1285,10 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
     with st.spinner(spinner_msg):
         # Get squad and lineup for both teams
         squad_1, chip_1, predicted_1 = _get_team_squad_and_lineup(
-            selected["team1_id"], current_gw, bootstrap, projections_df, gw_started
+            selected["team1_id"], current_gw, bootstrap, projections_df, gw_started, ffp_df=ffp_df_h2h
         )
         squad_2, chip_2, predicted_2 = _get_team_squad_and_lineup(
-            selected["team2_id"], current_gw, bootstrap, projections_df, gw_started
+            selected["team2_id"], current_gw, bootstrap, projections_df, gw_started, ffp_df=ffp_df_h2h
         )
 
         if squad_1.empty or squad_2.empty:
@@ -1563,6 +1580,8 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
         except Exception:
             pass
 
+        ffp_df = get_ffp_projections_data()
+
         if not projections_available:
             st.warning("Rotowire projections unavailable. Projected GW points will show 0.")
 
@@ -1585,7 +1604,7 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
 
         # Get squad and lineup using unified function
         squad_df, active_chip, is_predicted = _get_team_squad_and_lineup(
-            team_id, current_gw, bootstrap, projections_df, gw_started
+            team_id, current_gw, bootstrap, projections_df, gw_started, ffp_df=ffp_df
         )
 
         if is_predicted:

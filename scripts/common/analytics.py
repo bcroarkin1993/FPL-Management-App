@@ -327,7 +327,7 @@ def compute_player_scores(
     # Treat FFP_Predicted <= 0 as missing (FFP publishes 0 when predictions aren't available)
     both_mask = rotowire_proj.gt(0) & ffp_pred.gt(0)
     ffp_only_mask = rotowire_proj.eq(0) & ffp_pred.gt(0)
-    blended_proj[both_mask] = (rotowire_proj[both_mask] + ffp_pred[both_mask]) / 2
+    blended_proj[both_mask] = 0.6 * rotowire_proj[both_mask] + 0.4 * ffp_pred[both_mask]
     blended_proj[ffp_only_mask] = ffp_pred[ffp_only_mask]
 
     # Start likelihood: FFP_Start (primary), FPL chance_of_playing (fallback), default 100%
@@ -1057,6 +1057,78 @@ def merge_ffp_single_gw_data(
                     result.at[idx, dst_col] = data[src_col]
 
     result.drop(columns=["__norm"], inplace=True, errors="ignore")
+    return result
+
+
+def blend_fixture_projections(
+    players_df: pd.DataFrame,
+    ffp_df: Optional[pd.DataFrame],
+    rotowire_col: str = "Points",
+) -> pd.DataFrame:
+    """Blend Rotowire and FFP projections for fixture display (no percentile computation).
+
+    Produces a ``Proj_Blended`` column (60% Rotowire + 40% FFP, scaled by start
+    likelihood) and a ``_proj_source`` column indicating which sources were used.
+    Uses ``Proj_Blended`` (not ``Blended_Points``) to avoid collision with the live
+    blending column that ``_blend_live_with_squad`` writes during live gameweeks.
+
+    Args:
+        players_df: DataFrame with player projections. Must have a ``Position``
+            column and the column named by ``rotowire_col`` (Rotowire projection).
+        ffp_df: FFP projections DataFrame (from ``get_ffp_projections_data()``).
+            Pass None to fall back to Rotowire-only.
+        rotowire_col: Column name holding Rotowire single-GW projected points.
+
+    Returns:
+        players_df with ``Proj_Blended`` and ``_proj_source`` columns added.
+    """
+    result = players_df.copy()
+
+    rw = pd.to_numeric(result.get(rotowire_col), errors="coerce").fillna(0)
+
+    if ffp_df is None or ffp_df.empty:
+        result["Proj_Blended"] = rw
+        result["_proj_source"] = rw.map(lambda v: "Rotowire" if v > 0 else "None")
+        return result
+
+    # Merge FFP_Predicted and FFP_Start onto this DataFrame
+    result = merge_ffp_single_gw_data(result, ffp_df)
+
+    ffp_pred = pd.to_numeric(result.get("FFP_Predicted"), errors="coerce").fillna(0)
+    ffp_start = pd.to_numeric(result.get("FFP_Start"), errors="coerce")
+
+    # Blend (60/40) — fall back to whichever source is available
+    both_mask = rw.gt(0) & ffp_pred.gt(0)
+    ffp_only_mask = rw.eq(0) & ffp_pred.gt(0)
+    rw_only_mask = rw.gt(0) & ffp_pred.eq(0)
+
+    blended = pd.Series(0.0, index=result.index)
+    blended[both_mask] = 0.6 * rw[both_mask] + 0.4 * ffp_pred[both_mask]
+    blended[ffp_only_mask] = ffp_pred[ffp_only_mask]
+    blended[rw_only_mask] = rw[rw_only_mask]
+
+    # Source label per player
+    src = pd.Series("None", index=result.index)
+    src[both_mask] = "Rotowire + FFP"
+    src[ffp_only_mask] = "FFP"
+    src[rw_only_mask] = "Rotowire"
+    result["_proj_source"] = src
+
+    # Start likelihood: FFP_Start% (primary) → 1.0 default
+    start_likelihood = pd.Series(1.0, index=result.index)
+    ffp_mask = ffp_start.notna()
+    start_likelihood[ffp_mask] = (ffp_start[ffp_mask] / 100.0).clip(0, 1)
+
+    # When Rotowire projected the player, apply position-specific floor — Rotowire
+    # only covers expected starters, so presence is a confidence signal.
+    _FLOORS = {"G": 0.80, "D": 0.75, "M": 0.68, "F": 0.65}
+    pos_col = result["Position"] if "Position" in result.columns else pd.Series("M", index=result.index)
+    has_rw = rw.gt(0)
+    for pos_code, floor_val in _FLOORS.items():
+        mask = has_rw & (pos_col == pos_code)
+        start_likelihood[mask] = start_likelihood[mask].clip(lower=floor_val)
+
+    result["Proj_Blended"] = (blended * start_likelihood).round(2)
     return result
 
 

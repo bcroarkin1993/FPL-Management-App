@@ -3,7 +3,8 @@ import math
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from scripts.common.analytics import simulate_auto_subs
+from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections
+from scripts.common.scraping import get_ffp_projections_data
 from scripts.common.utils import (
     find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures,
     get_team_id_by_name, get_rotowire_player_projections, get_team_composition_for_gameweek,
@@ -227,6 +228,7 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
             team = row.get('Team', '')
             matchup = row.get('Matchup', '')
             proj_pts = row.get('Points', 0) or 0
+            display_pts = row.get('Proj_Blended') or proj_pts
 
             if is_live:
                 live_pts = row.get('Live_Points', 0) or 0
@@ -254,8 +256,8 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
                     card_class = "player-card upcoming"
                     status_html = '<span class="status-badge status-upcoming">Upcoming</span>'
             else:
-                # Pre-match: just show projections
-                points_html = f'<div class="proj-only">{proj_pts:.1f}</div>'
+                # Pre-match: show blended projection (Rotowire + FFP) when available
+                points_html = f'<div class="proj-only">{display_pts:.1f}</div>'
                 card_class = "player-card"
                 status_html = ""
 
@@ -292,12 +294,15 @@ def _render_draft_bench_section(bench_df: pd.DataFrame, is_live: bool = False):
 
     bench_df = bench_df.copy()
     bench_df['Points'] = pd.to_numeric(bench_df.get('Points', 0), errors='coerce').fillna(0.0)
+    bench_df['Proj_Blended'] = pd.to_numeric(bench_df.get('Proj_Blended'), errors='coerce').fillna(bench_df['Points'])
+
+    sort_col = 'Proj_Blended' if bench_df['Proj_Blended'].gt(0).any() else 'Points'
 
     # Split GK and outfield
     pos_col = 'Position' if 'Position' in bench_df.columns else None
     if pos_col:
         gk_rows = bench_df[bench_df[pos_col] == 'G']
-        out_rows = bench_df[bench_df[pos_col] != 'G'].sort_values('Points', ascending=False)
+        out_rows = bench_df[bench_df[pos_col] != 'G'].sort_values(sort_col, ascending=False)
         ordered = pd.concat([gk_rows, out_rows])
         labels = ['GK Sub'] + [f'{i+1}{"st" if i==0 else "nd" if i==1 else "rd"} Sub' for i in range(len(out_rows))]
     else:
@@ -338,6 +343,7 @@ def _render_draft_bench_section(bench_df: pd.DataFrame, is_live: bool = False):
         team = row.get('Team', '')
         position = row.get('Position', '')
         proj_pts = row.get('Points', 0) or 0
+        display_pts = row.get('Proj_Blended') or proj_pts
         meta = f"{team} · {position}" if team and position else team or position
 
         if is_live and 'Has_Played' in row.index:
@@ -350,7 +356,7 @@ def _render_draft_bench_section(bench_df: pd.DataFrame, is_live: bool = False):
                 points_html = f'<div class="bench-proj-pts">{proj_pts:.1f}</div><div class="bench-proj-label">projected</div>'
                 card_class = "bench-card"
         else:
-            points_html = f'<div class="bench-proj-pts">{proj_pts:.1f}</div>'
+            points_html = f'<div class="bench-proj-pts">{display_pts:.1f}</div>'
             card_class = "bench-card"
 
         html += f"""
@@ -416,7 +422,7 @@ def _render_winprob_bar(team1_name: str, team2_name: str, p_team1: float):
     st.markdown(html, unsafe_allow_html=True)
 
 def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_lineup: bool = False,
-                                live_stats: dict = None):
+                                live_stats: dict = None, ffp_df=None):
     """
     Returns two DataFrames representing lineups and points for each team in a fixture,
     sorted by position (GK, DEF, MID, FWD) and then by descending projected points within each position.
@@ -499,18 +505,24 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
             projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
         )
 
+        # Blend starters with FFP
+        team1_df = blend_fixture_projections(team1_df, ffp_df)
+        team2_df = blend_fixture_projections(team2_df, ffp_df)
+
         # Merge bench players with projections
         if not team1_bench_raw.empty:
             bench1_merged = merge_fpl_players_and_projections(
                 team1_bench_raw[['Player', 'Team', 'Position'] + (['squad_position'] if 'squad_position' in team1_bench_raw.columns else [])],
                 projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
             )
+            bench1_merged = blend_fixture_projections(bench1_merged, ffp_df)
             bench1_df = bench1_merged.set_index('Player') if 'Player' in bench1_merged.columns else bench1_merged
         if not team2_bench_raw.empty:
             bench2_merged = merge_fpl_players_and_projections(
                 team2_bench_raw[['Player', 'Team', 'Position'] + (['squad_position'] if 'squad_position' in team2_bench_raw.columns else [])],
                 projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
             )
+            bench2_merged = blend_fixture_projections(bench2_merged, ffp_df)
             bench2_df = bench2_merged.set_index('Player') if 'Player' in bench2_merged.columns else bench2_merged
     else:
         # Use optimal lineup calculation (original behavior)
@@ -524,6 +536,8 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
         team2_full = merge_fpl_players_and_projections(
             team2_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
         )
+        team1_full = blend_fixture_projections(team1_full, ffp_df)
+        team2_full = blend_fixture_projections(team2_full, ffp_df)
         team1_df = team1_full.copy()
         team2_df = team2_full.copy()
 
@@ -541,25 +555,28 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
         team1_df = find_optimal_lineup(team1_df)
         team2_df = find_optimal_lineup(team2_df)
 
-        # Bench = players not in the optimal XI, sorted by proj pts desc (optimal auto-sub order)
+        # Bench = players not in the optimal XI, sorted by blended proj pts desc (optimal auto-sub order)
+        _bench_sort = 'Proj_Blended' if 'Proj_Blended' in team1_full.columns else 'Points'
         if 'Player' in team1_df.columns and 'Player' in team1_full.columns:
             selected1 = set(team1_df['Player'].tolist())
-            bench1_raw = team1_full[~team1_full['Player'].isin(selected1)].sort_values('Points', ascending=False)
+            bench1_raw = team1_full[~team1_full['Player'].isin(selected1)].sort_values(_bench_sort, ascending=False)
             bench1_df = bench1_raw.set_index('Player')
         if 'Player' in team2_df.columns and 'Player' in team2_full.columns:
             selected2 = set(team2_df['Player'].tolist())
-            bench2_raw = team2_full[~team2_full['Player'].isin(selected2)].sort_values('Points', ascending=False)
+            bench2_raw = team2_full[~team2_full['Player'].isin(selected2)].sort_values(_bench_sort, ascending=False)
             bench2_df = bench2_raw.set_index('Player')
 
-    # Define the position order for sorting
+    # Define the position order for sorting; prefer Blended_Points within each position
     position_order = ['G', 'D', 'M', 'F']
+    _sort_col = 'Proj_Blended' if 'Proj_Blended' in team1_df.columns else 'Points'
     for df in [team1_df, team2_df]:
         df['Position'] = pd.Categorical(df['Position'], categories=position_order, ordered=True)
-        df.sort_values(by=['Position', 'Points'], ascending=[True, False], inplace=True)
+        df.sort_values(by=['Position', _sort_col], ascending=[True, False], inplace=True)
 
-    # Select the final columns to use
-    team1_df = team1_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
-    team2_df = team2_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+    # Select the final columns to use (include blend columns when present)
+    _extra = [c for c in ('Proj_Blended', '_proj_source') if c in team1_df.columns]
+    team1_df = team1_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank'] + _extra]
+    team2_df = team2_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank'] + _extra]
 
     # Format team DataFrames to use player names as the index
     team1_df.set_index('Player', inplace=True)
@@ -888,8 +905,9 @@ def show_fixtures_page():
         st.warning("No fixtures found for the current gameweek.")
         return
 
-    # Pull FPL player projections from Rotowire
+    # Pull FPL player projections from Rotowire and FFP (cached, zero extra cost)
     fpl_player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL)
+    ffp_df = get_ffp_projections_data()
 
     if fpl_player_projections is None or fpl_player_projections.empty:
         st.warning("Rotowire projections unavailable.")
@@ -927,6 +945,7 @@ def show_fixtures_page():
             fixture_selection, config.FPL_DRAFT_LEAGUE_ID, fpl_player_projections,
             use_actual_lineup=gw_is_live,
             live_stats=live_stats if gw_is_live else None,
+            ffp_df=ffp_df,
         )
 
         if result is None:
@@ -952,8 +971,9 @@ def show_fixtures_page():
             team1_live = team1_df['Live_Points'].sum()
             team2_live = team2_df['Live_Points'].sum()
         else:
-            team1_score = team1_df['Points'].sum()
-            team2_score = team2_df['Points'].sum()
+            _use_blended = 'Proj_Blended' in team1_df.columns
+            team1_score = team1_df['Proj_Blended'].sum() if _use_blended else team1_df['Points'].sum()
+            team2_score = team2_df['Proj_Blended'].sum() if _use_blended else team2_df['Points'].sum()
             team1_live = None
             team2_live = None
 
@@ -1000,11 +1020,12 @@ def show_fixtures_page():
                 </div>
                 """, unsafe_allow_html=True)
             else:
+                _proj_label1 = "Projected Points (Rotowire + FFP)" if _use_blended else "Projected Points (Rotowire)"
                 st.markdown(f"""
                 <div style="background: linear-gradient(135deg, #37003c 0%, #5a0050 100%); padding: 16px; border-radius: 10px; margin-bottom: 12px;">
                     <div style="color: white; font-size: 14px; font-weight: 500; margin-bottom: 4px;">{format_team_name(team1_name)}</div>
                     <div style="color: #00ff87; font-size: 32px; font-weight: 700;">{team1_score:.1f}</div>
-                    <div style="color: rgba(255,255,255,0.6); font-size: 12px;">Projected Points</div>
+                    <div style="color: rgba(255,255,255,0.6); font-size: 12px;">{_proj_label1}</div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -1034,11 +1055,12 @@ def show_fixtures_page():
                 </div>
                 """, unsafe_allow_html=True)
             else:
+                _proj_label2 = "Projected Points (Rotowire + FFP)" if _use_blended else "Projected Points (Rotowire)"
                 st.markdown(f"""
                 <div style="background: linear-gradient(135deg, #37003c 0%, #5a0050 100%); padding: 16px; border-radius: 10px; margin-bottom: 12px;">
                     <div style="color: white; font-size: 14px; font-weight: 500; margin-bottom: 4px;">{format_team_name(team2_name)}</div>
                     <div style="color: #00ff87; font-size: 32px; font-weight: 700;">{team2_score:.1f}</div>
-                    <div style="color: rgba(255,255,255,0.6); font-size: 12px;">Projected Points</div>
+                    <div style="color: rgba(255,255,255,0.6); font-size: 12px;">{_proj_label2}</div>
                 </div>
                 """, unsafe_allow_html=True)
 
