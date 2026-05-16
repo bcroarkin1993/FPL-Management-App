@@ -394,10 +394,10 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
                 if is_captain:
                     captain_mult = 3 if active_chip == "3xc" else 2
                     live_display = live_pts * captain_mult if has_played else live_pts
-                    proj_display = proj_pts * captain_mult
+                    proj_display = display_pts * captain_mult
                 else:
                     live_display = live_pts
-                    proj_display = proj_pts
+                    proj_display = display_pts
 
                 if has_played:
                     diff = live_display - proj_display
@@ -509,10 +509,10 @@ def _render_classic_bench_section(bench_df: pd.DataFrame, is_live: bool = False,
             live_pts = row.get('Live_Points', 0) or 0
             has_played = row.get('Has_Played', False)
             if has_played:
-                points_html = f'<div class="bench-live-pts">{live_pts:.0f}</div><div class="bench-proj-label">proj: {proj_pts:.1f}</div>'
+                points_html = f'<div class="bench-live-pts">{live_pts:.0f}</div><div class="bench-proj-label">proj: {display_pts:.1f}</div>'
                 card_class = "bench-card played"
             else:
-                points_html = f'<div class="bench-proj-pts">{proj_pts:.1f}</div><div class="bench-proj-label">projected</div>'
+                points_html = f'<div class="bench-proj-pts">{display_pts:.1f}</div><div class="bench-proj-label">projected</div>'
                 card_class = "bench-card"
         else:
             points_html = f'<div class="bench-proj-pts">{display_pts:.1f}</div>'

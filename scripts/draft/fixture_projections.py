@@ -237,20 +237,20 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
 
                 if has_played:
                     # Player has finished - show actual vs projected
-                    diff = live_pts - proj_pts
+                    diff = live_pts - display_pts
                     diff_sign = "+" if diff > 0 else ""
                     diff_class = "perf-up" if diff > 0 else "perf-down" if diff < 0 else ""
 
                     points_html = f"""
                         <div class="live-pts">{live_pts:.0f}</div>
-                        <div class="perf-indicator {diff_class}">proj: {proj_pts:.1f} ({diff_sign}{diff:.1f})</div>
+                        <div class="perf-indicator {diff_class}">proj: {display_pts:.1f} ({diff_sign}{diff:.1f})</div>
                     """
                     card_class = "player-card played"
                     status_html = '<span class="status-badge status-played">Played</span>'
                 else:
-                    # Player yet to play - show projected
+                    # Player yet to play - show blended projection (Rotowire + FFP) when available
                     points_html = f"""
-                        <div class="proj-only">{proj_pts:.1f}</div>
+                        <div class="proj-only">{display_pts:.1f}</div>
                         <div class="proj-pts">projected</div>
                     """
                     card_class = "player-card upcoming"
@@ -350,10 +350,10 @@ def _render_draft_bench_section(bench_df: pd.DataFrame, is_live: bool = False):
             live_pts = row.get('Live_Points', 0) or 0
             has_played = row.get('Has_Played', False)
             if has_played:
-                points_html = f'<div class="bench-live-pts">{live_pts:.0f}</div><div class="bench-proj-label">proj: {proj_pts:.1f}</div>'
+                points_html = f'<div class="bench-live-pts">{live_pts:.0f}</div><div class="bench-proj-label">proj: {display_pts:.1f}</div>'
                 card_class = "bench-card played"
             else:
-                points_html = f'<div class="bench-proj-pts">{proj_pts:.1f}</div><div class="bench-proj-label">projected</div>'
+                points_html = f'<div class="bench-proj-pts">{display_pts:.1f}</div><div class="bench-proj-label">projected</div>'
                 card_class = "bench-card"
         else:
             points_html = f'<div class="bench-proj-pts">{display_pts:.1f}</div>'
