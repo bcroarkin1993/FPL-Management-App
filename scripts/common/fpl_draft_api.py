@@ -30,29 +30,46 @@ def get_current_gameweek():
     Fetches the current gameweek based on the game status from the FPL Draft API.
 
     Returns:
-    - current_gameweek: An integer representing the current gameweek.
+    - current_gameweek: An integer representing the current gameweek (max 38).
     """
     game_url = "https://draft.premierleague.com/api/game"
     try:
         response = requests.get(game_url, timeout=20)
         game_data = response.json()
 
-        # Check if the current event is finished
         if game_data.get('current_event_finished'):
             next_ev = game_data.get('next_event')
             if next_ev is None:
                 # Season complete — next_event is null after GW38 finishes.
-                # Return current_event + 1 so build_draft_history_df includes GW38.
-                current_gameweek = (game_data.get('current_event') or 38) + 1
+                # Return the last played GW (current_event), not current_event+1,
+                # so display contexts never show GW39.
+                current_gameweek = int(game_data.get('current_event') or 38)
             else:
                 current_gameweek = next_ev
         else:
             current_gameweek = game_data.get('current_event', 1)
 
-        return current_gameweek
+        return int(current_gameweek)
     except Exception as e:
         _logger.warning("Failed to fetch current gameweek: %s", e)
         return config.CURRENT_GAMEWEEK
+
+
+def is_season_complete() -> bool:
+    """
+    Returns True when the season has concluded (GW38 finished and no next event).
+    Safe to call at any point in the season — returns False during normal play.
+    """
+    game_url = "https://draft.premierleague.com/api/game"
+    try:
+        response = requests.get(game_url, timeout=20)
+        game_data = response.json()
+        return bool(
+            game_data.get('current_event_finished')
+            and game_data.get('next_event') is None
+        )
+    except Exception:
+        return False
 
 
 def get_draft_picks(league_id):

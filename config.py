@@ -194,7 +194,8 @@ def _resolve_current_gameweek():
             next_ev = j.get("next_event")
             if next_ev is None:
                 # Season complete — next_event is null after GW38 finishes.
-                gw = (j.get("current_event") or 38) + 1
+                # Return the last played GW (not +1) so display contexts never show GW39.
+                gw = int(j.get("current_event") or 38)
             else:
                 gw = next_ev
         else:

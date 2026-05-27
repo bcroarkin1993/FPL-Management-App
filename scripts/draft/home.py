@@ -12,7 +12,7 @@ from scripts.common.luck_analysis import (
     render_luck_adjusted_table,
     render_standings_table,
 )
-from scripts.common.utils import get_current_gameweek, get_draft_league_details
+from scripts.common.utils import get_current_gameweek, get_draft_league_details, is_season_complete
 from scripts.common.styled_tables import render_styled_table
 
 _logger = get_logger("fpl_app.draft.home")
@@ -386,10 +386,6 @@ def build_draft_history_df(draft_league_id):
     Returns DataFrame with columns:
         Team, Gameweek, GW_Points, Total_Points, League_Pts, League_Position
     """
-    current_gameweek = get_current_gameweek()
-    if current_gameweek is None:
-        return pd.DataFrame()
-
     league_response = get_draft_league_details(draft_league_id)
     if not league_response:
         return pd.DataFrame()
@@ -411,13 +407,14 @@ def build_draft_history_df(draft_league_id):
 
     for match in sorted(matches, key=lambda m: m['event']):
         gw = match['event']
-        if gw >= current_gameweek:
+        p1 = match.get('league_entry_1_points', 0) or 0
+        p2 = match.get('league_entry_2_points', 0) or 0
+        # Skip matches that haven't been played yet (both scores are 0)
+        if p1 == 0 and p2 == 0:
             continue
 
         t1 = match['league_entry_1']
         t2 = match['league_entry_2']
-        p1 = match['league_entry_1_points']
-        p2 = match['league_entry_2_points']
 
         # GW fantasy points
         gw_rows.setdefault((t1, gw), {'gw_pts': 0})['gw_pts'] += p1
@@ -637,9 +634,7 @@ def show_home_page():
     st.title("My Fantasy Draft Team & League Standings")
 
     # Season-concluded banner
-    current_gw = get_current_gameweek()
-    season_complete = (current_gw is None or current_gw > 38)
-    if season_complete:
+    if is_season_complete():
         st.info(
             "🏁 **The 2025/26 FPL Draft season has concluded!** "
             "Final standings are shown below. Head to **Season Wrapped** for your full season review.",
