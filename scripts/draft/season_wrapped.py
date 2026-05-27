@@ -539,7 +539,8 @@ def show_season_wrapped_page():
     entry_id = get_team_id_by_name(config.FPL_DRAFT_LEAGUE_ID, selected_team)
     num_teams = len(team_dict)
 
-    max_gw = min(get_current_gameweek(), 38)
+    _raw_gw = get_current_gameweek()
+    max_gw = min(int(_raw_gw), 38) if _raw_gw is not None else 38
     if max_gw < 1:
         st.info("No gameweek data available yet.")
         return

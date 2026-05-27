@@ -636,6 +636,16 @@ def plot_league_position_over_time(history_df):
 def show_home_page():
     st.title("My Fantasy Draft Team & League Standings")
 
+    # Season-concluded banner
+    current_gw = get_current_gameweek()
+    season_complete = (current_gw is None or current_gw > 38)
+    if season_complete:
+        st.info(
+            "🏁 **The 2025/26 FPL Draft season has concluded!** "
+            "Final standings are shown below. Head to **Season Wrapped** for your full season review.",
+            icon=None,
+        )
+
     st.subheader("FPL Draft League Table")
     # Toggle to show luck adjusted standing
     show_luck_adjusted_stats = st.checkbox("Show Luck Adjusted Standings")
@@ -668,8 +678,12 @@ def show_home_page():
     # ---------------------------
     st.subheader("Gameweek Results")
 
-    current_gw = get_current_gameweek()
-    default_gw_index = max(current_gw - 2, 0) if current_gw and current_gw >= 1 else 0
+    results_gw = get_current_gameweek()
+    if results_gw is None or results_gw > 38:
+        # Season complete — default to final gameweek
+        default_gw_index = 37  # GW38 is index 37 in range(1, 39)
+    else:
+        default_gw_index = max(results_gw - 2, 0)
 
     gameweek = st.selectbox(
         "Select Gameweek",

@@ -191,7 +191,12 @@ def _resolve_current_gameweek():
         r = requests.get("https://draft.premierleague.com/api/game", timeout=15)
         j = r.json()
         if j.get("current_event_finished"):
-            gw = j.get("next_event", 1)
+            next_ev = j.get("next_event")
+            if next_ev is None:
+                # Season complete — next_event is null after GW38 finishes.
+                gw = (j.get("current_event") or 38) + 1
+            else:
+                gw = next_ev
         else:
             gw = j.get("current_event", 1)
         return int(gw or 1)

@@ -38,10 +38,16 @@ def get_current_gameweek():
         game_data = response.json()
 
         # Check if the current event is finished
-        if game_data['current_event_finished']:
-            current_gameweek = game_data['next_event']
+        if game_data.get('current_event_finished'):
+            next_ev = game_data.get('next_event')
+            if next_ev is None:
+                # Season complete — next_event is null after GW38 finishes.
+                # Return current_event + 1 so build_draft_history_df includes GW38.
+                current_gameweek = (game_data.get('current_event') or 38) + 1
+            else:
+                current_gameweek = next_ev
         else:
-            current_gameweek = game_data['current_event']
+            current_gameweek = game_data.get('current_event', 1)
 
         return current_gameweek
     except Exception as e:
