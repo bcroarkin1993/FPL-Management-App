@@ -18,6 +18,34 @@ FPL_DRAFT_LEAGUE_ID   = int(os.getenv("FPL_DRAFT_LEAGUE_ID", "0"))
 FPL_DRAFT_TEAM_ID     = int(os.getenv("FPL_DRAFT_TEAM_ID", "0"))
 FPL_CLASSIC_TEAM_ID   = int(os.getenv("FPL_CLASSIC_TEAM_ID", "0"))
 
+def _parse_draft_league_history(env_value: str) -> list:
+    """
+    Parse FPL_DRAFT_LEAGUE_HISTORY env var.
+
+    Format: "YYYY/YY:league_id,YYYY/YY:league_id"
+    Example: "2023/24:123456,2024/25:789012"
+
+    Returns list of (season_label, league_id) tuples, sorted by season_label.
+    """
+    if not env_value or not env_value.strip():
+        return []
+
+    seasons = []
+    for entry in env_value.split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        parts = entry.split(":", 1)
+        try:
+            label = parts[0].strip()
+            league_id = int(parts[1].strip())
+            seasons.append((label, league_id))
+        except (ValueError, IndexError):
+            continue
+
+    return sorted(seasons, key=lambda x: x[0])
+
+
 def _parse_classic_leagues(env_value: str) -> list:
     """
     Parse FPL_CLASSIC_LEAGUE_IDS env var.
@@ -59,6 +87,10 @@ def _parse_classic_leagues(env_value: str) -> list:
 # Classic FPL leagues - supports multiple leagues
 # Format: "id:name,id:name,..." or "id,id,..."
 FPL_CLASSIC_LEAGUE_IDS = _parse_classic_leagues(os.getenv("FPL_CLASSIC_LEAGUE_IDS", ""))
+
+# Past Draft league IDs for cross-season history (Season Wrapped)
+# Format: "YYYY/YY:league_id,YYYY/YY:league_id"
+FPL_DRAFT_LEAGUE_HISTORY = _parse_draft_league_history(os.getenv("FPL_DRAFT_LEAGUE_HISTORY", ""))
 
 # Resolved lazily below:
 # CURRENT_GAMEWEEK
