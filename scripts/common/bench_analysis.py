@@ -511,6 +511,8 @@ def _summarize_bench_data(team_name, bench_data, max_gw):
 
     return {
         "Team": team_name,
+        "Pts Scored": total_actual,
+        "Pts Possible": total_optimal,
         "Total Bench Pts": total_bench,
         "Avg Bench/GW": round(total_bench / num_gws, 1) if num_gws > 0 else 0,
         "Total Pts Lost": total_lost,

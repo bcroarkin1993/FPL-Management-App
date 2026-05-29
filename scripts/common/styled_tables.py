@@ -63,6 +63,9 @@ def render_styled_table(
     positive_color_cols: List[str] = None,
     negative_color_cols: List[str] = None,
     max_height: int = None,
+    font_size: int = 14,
+    title_font_size: int = None,
+    cell_padding: str = None,
 ):
     """
     Render a DataFrame as a dark-themed HTML table via st.markdown.
@@ -72,13 +75,15 @@ def render_styled_table(
     df : DataFrame to display.
     title : Optional header rendered above the table inside the wrapper.
     col_formats : {col: format_spec} for value formatting.
-        Examples: {"Points": "{:,.0f}", "Price": "£{:.1f}m"}
     text_align : {col: "left"|"center"|"right"}.
-        Defaults: "left" for object/string cols, "right" for numeric cols.
     highlight_row : fn(row) -> bool. Matching rows get an accent left-border.
     positive_color_cols : Columns where higher values are greener.
     negative_color_cols : Columns where higher values are redder.
     max_height : Optional max-height in px (enables vertical scroll).
+    font_size : Data and column-header font size in px (default 14).
+    title_font_size : Title bar font size in px; defaults to slightly above font_size.
+    cell_padding : Explicit CSS padding for data cells e.g. "14px 16px".
+                   Overrides the formula-based default.
     """
     if df is None or df.empty:
         st.info("No data to display.")
@@ -115,15 +120,25 @@ def render_styled_table(
 
     # Title
     if title:
-        parts.append(f'<div style="{_TITLE_STYLE}">{title}</div>')
+        t_size = f"font-size:{title_font_size}px;" if title_font_size else ""
+        title_style = _TITLE_STYLE.replace("font-size:1.05rem;", f"font-size:1.05rem;{t_size}")
+        parts.append(f'<div style="{title_style}">{title}</div>')
 
-    parts.append(f'<table style="{_TABLE_STYLE}">')
+    th_size = f"font-size:{font_size + 1}px;" if font_size != 14 else ""
+    if cell_padding:
+        td_pad = f"padding:{cell_padding};"
+    elif font_size != 14:
+        td_pad = f"padding:{max(6, font_size - 5)}px {max(10, font_size - 2)}px;"
+    else:
+        td_pad = ""
+    table_style = _TABLE_STYLE.replace("font-size:14px;", f"font-size:{font_size}px;")
+    parts.append(f'<table style="{table_style}">')
 
     # Header
     parts.append("<thead><tr>")
     for col in df.columns:
         align = _align(col)
-        parts.append(f'<th style="{_TH_STYLE}text-align:{align};">{col}</th>')
+        parts.append(f'<th style="{_TH_STYLE}{th_size}text-align:{align};">{col}</th>')
     parts.append("</tr></thead>")
 
     # Body
@@ -163,7 +178,7 @@ def render_styled_table(
                 extra_style = _color_scale(float(val), cmin, cmax, "negative")
 
             parts.append(
-                f'<td style="{_TD_STYLE}text-align:{align};{extra_style}">{display_val}</td>'
+                f'<td style="{_TD_STYLE}{td_pad}text-align:{align};{extra_style}">{display_val}</td>'
             )
 
         parts.append("</tr>")
