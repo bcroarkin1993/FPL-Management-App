@@ -12,8 +12,8 @@ while read local_ref local_sha remote_ref remote_sha; do
         # Use venv's Python directly, clearing conda env vars to avoid conflicts
         REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
         if [ -f "$REPO_DIR/venv/bin/python" ]; then
-            unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL PYTHONPATH
-            "$REPO_DIR/venv/bin/python" -m pytest --tb=short -q
+            env -i HOME="$HOME" PATH="$REPO_DIR/venv/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin" \
+                "$REPO_DIR/venv/bin/python" -m pytest --tb=short -q
         else
             pytest --tb=short -q
         fi
