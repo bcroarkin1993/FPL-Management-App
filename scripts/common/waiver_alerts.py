@@ -21,12 +21,13 @@ DRAFT_OFFSET_HOURS = 25.5
 CLASSIC_OFFSET_HOURS = 1.5
 
 
-def _get_current_gameweek() -> int:
-    """Fetch current/next GW from the official Draft endpoint."""
+def _get_current_gameweek():
+    """Fetch current/next GW from the official Draft endpoint. Returns None if season has ended."""
     r = requests.get("https://draft.premierleague.com/api/game", timeout=20)
     r.raise_for_status()
     data = r.json()
-    return int(data["next_event"] if data.get("current_event_finished") else data["current_event"])
+    gw = data["next_event"] if data.get("current_event_finished") else data["current_event"]
+    return int(gw) if gw is not None else None
 
 
 def _fixtures_for_event(gw: int):
@@ -225,7 +226,13 @@ def main():
 
     # Gameweek override
     gw_env = os.getenv("FPL_CURRENT_GAMEWEEK")
-    gw = int(gw_env) if gw_env and gw_env.isdigit() else _get_current_gameweek()
+    if gw_env and gw_env.isdigit():
+        gw = int(gw_env)
+    else:
+        gw = _get_current_gameweek()
+        if gw is None:
+            print("[waiver_alerts] Season has ended (no active gameweek) — skipping all alerts")
+            return
 
     kickoff_et = _earliest_kickoff_et(gw)
     now_et = datetime.now(TZ)
