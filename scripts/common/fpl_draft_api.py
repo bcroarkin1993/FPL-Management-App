@@ -526,12 +526,15 @@ def _fetch_draft_position_data(league_id: int) -> dict:
 
                 if eid not in player_accum[team_name]:
                     player_accum[team_name][eid] = {
+                        "element_id": eid,
                         "player": elem.get("web_name", "Unknown"),
                         "position": pos_display,
                         "total_points": 0,
+                        "gw_count": 0,
                         "team": teams_map.get(elem.get("team"), "???"),
                     }
                 player_accum[team_name][eid]["total_points"] += gw_pts
+                player_accum[team_name][eid]["gw_count"] += 1
 
     # Convert player accumulators to list format
     player_data = {
@@ -1018,7 +1021,7 @@ def pull_fpl_player_stats():
     player_df = pd.merge(player_df, position_df, left_on='element_type', right_on='position_id')
 
     # Organize columns
-    cols = ['id', 'player', 'position_abbrv', 'team_name', 'team_name_abbrv', 'clean_sheets', 'goals_scored',
+    cols = ['id', 'web_name', 'player', 'position_abbrv', 'team_name', 'team_name_abbrv', 'clean_sheets', 'goals_scored',
             'assists', 'minutes', 'own_goals', 'penalties_missed', 'penalties_saved', 'red_cards', 'yellow_cards',
             'starts', 'expected_goals', 'expected_assists', 'expected_goal_involvements', 'expected_goals_conceded',
             'creativity', 'influence', 'threat', 'ict_index', 'bonus', 'bps', 'form', 'points_per_game', 'total_points',

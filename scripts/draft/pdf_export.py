@@ -50,6 +50,8 @@ h2 {
     padding-bottom: 8px;
     margin: 0 0 6px 0;
     font-size: 1.3em;
+    page-break-after: avoid;
+    break-after: avoid;
 }
 h2 .subtitle {
     display: block;
@@ -63,26 +65,28 @@ h2 .subtitle {
 .section     { margin-bottom: 12px; }
 .two-col     { display: flex; gap: 12px; }
 .two-col > * { flex: 1; }
+.grid-5      { display: grid; grid-template-columns: repeat(5,1fr); gap: 8px; }
 .grid-4      { display: grid; grid-template-columns: repeat(4,1fr); gap: 8px; }
 .grid-2      { display: grid; grid-template-columns: repeat(2,1fr); gap: 8px; }
 
-/* ── Light card ── */
+/* ── Dark card ── */
 .card {
     border-radius: 10px;
     padding: 14px 16px;
-    background: #f8f9fa;
-    border: 1px solid #e2e8f0;
+    background: #1a1a2e;
+    border: 1px solid #2a2a3e;
+    color: #e0e0e0;
 }
-.card-gold  { border-color: """ + _GOLD  + """; background: linear-gradient(135deg,#fffbeb,#fef3c7); }
-.card-red   { border-color: """ + _RED   + """; background: linear-gradient(135deg,#fff5f5,#fee2e2); }
-.card-green { border-color: """ + _GREEN + """; }
-.card-purple{ border-color: """ + _PURPLE + """; }
+.card-gold  { border-color: """ + _GOLD   + """; background: linear-gradient(135deg,#1f1800,#2a2100); }
+.card-red   { border-color: """ + _RED    + """; background: linear-gradient(135deg,#1f0808,#280d0d); }
+.card-green { border-color: """ + _GREEN  + """; background: #0a1f14; }
+.card-purple{ border-color: """ + _PURPLE + """; background: #120828; }
 
-/* ── Light table ── */
-table { width: 100%; border-collapse: collapse; background: #ffffff; border-radius: 8px; overflow: hidden; }
+/* ── Dark table ── */
+table { width: 100%; border-collapse: collapse; background: #16213e; border-radius: 8px; overflow: hidden; }
 thead tr th {
-    background: linear-gradient(135deg, #f3e8ff, #ede9fe);
-    color: """ + _PURPLE + """;
+    background: linear-gradient(135deg, #2d1b69, #1a0d3e);
+    color: #e0e0e0;
     font-weight: 600;
     font-size: 13px;
     padding: 8px 10px;
@@ -91,34 +95,34 @@ thead tr th {
 }
 th.center, td.center { text-align: center; }
 th.right,  td.right  { text-align: right;  }
-tbody tr td { padding: 7px 10px; color: #1a1a2e; border-bottom: 1px solid #e5e7eb; font-size: 13px; }
-tbody tr:nth-child(even) td { background: #f9fafb; }
+tbody tr td { padding: 7px 10px; color: #e0e0e0; border-bottom: 1px solid #2a2a3e; font-size: 13px; }
+tbody tr:nth-child(even) td { background: #1a1a2e; }
 tbody tr.champion td {
-    background: rgba(0, 204, 102, 0.12) !important;
-    border-top: 1px solid rgba(0, 204, 102, 0.40);
-    border-bottom: 1px solid rgba(0, 204, 102, 0.40);
+    background: rgba(0, 204, 102, 0.22) !important;
+    border-top: 1px solid rgba(0, 204, 102, 0.50);
+    border-bottom: 1px solid rgba(0, 204, 102, 0.50);
 }
 tbody tr.champion td:first-child { border-left: 4px solid """ + _GREEN + """; }
 tbody tr.runner-up td {
-    background: rgba(157, 78, 221, 0.10) !important;
-    border-top: 1px solid rgba(157, 78, 221, 0.35);
-    border-bottom: 1px solid rgba(157, 78, 221, 0.35);
+    background: rgba(157, 78, 221, 0.22) !important;
+    border-top: 1px solid rgba(157, 78, 221, 0.45);
+    border-bottom: 1px solid rgba(157, 78, 221, 0.45);
 }
 tbody tr.runner-up td:first-child { border-left: 4px solid #9d4edd; }
 tbody tr.third-place td {
-    background: rgba(245, 158, 11, 0.10) !important;
-    border-top: 1px solid rgba(245, 158, 11, 0.35);
-    border-bottom: 1px solid rgba(245, 158, 11, 0.35);
+    background: rgba(245, 158, 11, 0.22) !important;
+    border-top: 1px solid rgba(245, 158, 11, 0.45);
+    border-bottom: 1px solid rgba(245, 158, 11, 0.45);
 }
 tbody tr.third-place td:first-child { border-left: 4px solid #f59e0b; }
 tbody tr.relegated td {
-    background: rgba(255, 75, 75, 0.10) !important;
-    border-top: 1px solid rgba(255, 75, 75, 0.35);
-    border-bottom: 1px solid rgba(255, 75, 75, 0.35);
+    background: rgba(255, 75, 75, 0.22) !important;
+    border-top: 1px solid rgba(255, 75, 75, 0.45);
+    border-bottom: 1px solid rgba(255, 75, 75, 0.45);
 }
 tbody tr.relegated td:first-child { border-left: 4px solid """ + _RED + """; }
-.pos-col { color: #059669; font-weight: 600; }
-.neg-col { color: """ + _RED + """; font-weight: 600; }
+.pos-col { color: """ + _GREEN + """; font-weight: 600; }
+.neg-col { color: """ + _RED   + """; font-weight: 600; }
 
 /* ── Pick cards (draft) ── */
 .pick-card {
@@ -127,13 +131,14 @@ tbody tr.relegated td:first-child { border-left: 4px solid """ + _RED + """; }
     align-items: center;
     border-radius: 8px;
     padding: 10px 12px;
-    background: #f8f9fa;
+    background: #16213e;
     margin-bottom: 8px;
+    color: #e0e0e0;
 }
-.pick-card .name { font-weight: 700; font-size: 14px; }
-.pick-card .meta { color: #6b7280; font-size: 11px; }
+.pick-card .name  { font-weight: 700; font-size: 14px; color: #e0e0e0; }
+.pick-card .meta  { color: #9ca3af; font-size: 11px; }
 .pick-card .grade { font-size: 16px; font-weight: 700; text-align: right; }
-.pick-card .pts   { color: #6b7280; font-size: 11px; text-align: right; }
+.pick-card .pts   { color: #9ca3af; font-size: 11px; text-align: right; }
 """
 
 # ---------------------------------------------------------------------------
@@ -153,8 +158,9 @@ def _section(icon: str, title: str, subtitle: str = "", page_break: bool = False
 
 
 def _chart(fig: go.Figure, include_js: bool = False, height: int = 360,
-           bottom_margin: int = 50, left_margin: int = 70, right_margin: int = 20) -> str:
-    fig.update_layout(height=height, width=680,
+           bottom_margin: int = 50, left_margin: int = 70, right_margin: int = 30,
+           width: int = 630) -> str:
+    fig.update_layout(height=height, width=width,
                       margin=dict(t=50, b=bottom_margin, l=left_margin, r=right_margin))
     return pio.to_html(
         fig,
@@ -186,12 +192,24 @@ def _color_scale_value(val: float, col_vals: List[float],
         if direction == "negative":
             ratio = 1 - ratio
     ratio = max(0.0, min(1.0, ratio))
-    if ratio <= 0.5:
-        t = ratio / 0.5
-        r, g, b = int(220 - 60 * t), int(60 + 140 * t), 60
+    if direction == "diverging":
+        if ratio <= 0.5:
+            t = ratio / 0.5
+            r = int(200 - 50 * t)   # 200 → 150
+            g = int(60  + 90 * t)   # 60  → 150
+            b = int(60  + 90 * t)   # 60  → 150
+        else:
+            t = (ratio - 0.5) / 0.5
+            r = int(150 - 110 * t)  # 150 → 40
+            g = int(150 +  70 * t)  # 150 → 220
+            b = int(150 -  50 * t)  # 150 → 100
     else:
-        t = (ratio - 0.5) / 0.5
-        r, g, b = int(160 - 120 * t), int(200 + 20 * t), int(60 + 40 * t)
+        if ratio <= 0.5:
+            t = ratio / 0.5
+            r, g, b = int(220 - 60 * t), int(60 + 140 * t), 60
+        else:
+            t = (ratio - 0.5) / 0.5
+            r, g, b = int(160 - 120 * t), int(200 + 20 * t), int(60 + 40 * t)
     return f"color:rgb({r},{g},{b});font-weight:600;"
 
 
@@ -255,7 +273,7 @@ def _award_card(icon: str, title: str, team: str, detail: str, color: str) -> st
         f'<div style="color:#9ca3af;font-size:9px;text-transform:uppercase;'
         f'letter-spacing:1px;margin-bottom:3px;">{_esc(title)}</div>'
         f'<div style="color:{color};font-size:13px;font-weight:700;margin-bottom:2px;">{_esc(team)}</div>'
-        f'<div style="color:#888;font-size:10px;">{_esc(detail)}</div>'
+        f'<div style="color:#9ca3af;font-size:10px;">{_esc(detail)}</div>'
         f'</div>'
     )
 
@@ -266,7 +284,7 @@ def _mini_card(label: str, value: str, detail: str, color: str) -> str:
         f'<div style="color:#9ca3af;font-size:10px;text-transform:uppercase;'
         f'letter-spacing:1px;margin-bottom:4px;">{_esc(label)}</div>'
         f'<div style="color:{color};font-size:17px;font-weight:800;margin-bottom:3px;">{_esc(value)}</div>'
-        f'<div style="color:#888;font-size:11px;">{_esc(detail)}</div>'
+        f'<div style="color:#9ca3af;font-size:11px;">{_esc(detail)}</div>'
         f'</div>'
     )
 
@@ -365,12 +383,12 @@ def _build_champion(league_data: dict) -> str:
             th_lp = th_w * 3 + th_d
             third_html = f"""
 <div class="card no-break" style="flex:1;border-color:#f59e0b;text-align:center;padding:12px 10px;
-    background:linear-gradient(135deg,#fffbeb,#fef3c7);">
+    background:linear-gradient(135deg,#1f1500,#2a1c00);">
   <div style="font-size:1.5em;margin-bottom:4px;">🥉</div>
-  <div style="color:#92400e;font-size:11px;text-transform:uppercase;
+  <div style="color:#9ca3af;font-size:11px;text-transform:uppercase;
               letter-spacing:1px;margin-bottom:4px;">3rd Place</div>
-  <div style="color:#b45309;font-size:15px;font-weight:700;margin-bottom:3px;">{_esc(th_name)}</div>
-  <div style="color:#78350f;font-size:11px;">{th_w}W–{th_d}D–{th_l}L &nbsp;·&nbsp; {th_lp} pts</div>
+  <div style="color:#f59e0b;font-size:15px;font-weight:700;margin-bottom:3px;">{_esc(th_name)}</div>
+  <div style="color:#9ca3af;font-size:11px;">{th_w}W–{th_d}D–{th_l}L &nbsp;·&nbsp; {th_lp} pts</div>
 </div>"""
 
         rel_html = ""
@@ -441,7 +459,7 @@ def _build_champion(league_data: dict) -> str:
         inline_styles=inline_styles,
     )
     parts.append(f"""
-<div class="no-break" style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;margin-top:2px;">
+<div class="no-break" style="border:1px solid #2a2a3e;border-radius:10px;overflow:hidden;margin-top:2px;">
   <div style="background:linear-gradient(135deg,#37003c,#5a0060);color:{_GREEN};
               font-weight:700;font-size:1em;padding:8px 14px;">Final League Standings</div>
   {table_html}
@@ -469,9 +487,9 @@ def _build_season_journey(history_df: pd.DataFrame) -> str:
         color_map[champion] = _GOLD
 
     layout_base = dict(
-        paper_bgcolor="#ffffff", plot_bgcolor="#f9fafb",
-        font=dict(color="#1a1a2e", size=12),
-        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#1a1a2e", size=11)),
+        paper_bgcolor="#1a1a2e", plot_bgcolor="#16213e",
+        font=dict(color="#e0e0e0", size=12),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#e0e0e0", size=11)),
     )
 
     # Cumulative points
@@ -485,11 +503,11 @@ def _build_season_journey(history_df: pd.DataFrame) -> str:
         ))
     fig1.update_layout(
         **layout_base,
-        title=dict(text="📈 Cumulative Points Race", font=dict(size=16, color="#1a1a2e"),
+        title=dict(text="📈 Cumulative Points Race", font=dict(size=16, color="#e0e0e0"),
                    x=0.5, xanchor="center"),
     )
-    fig1.update_xaxes(title="Gameweek", dtick=2, gridcolor="#e5e7eb")
-    fig1.update_yaxes(title="Total FPL Points", gridcolor="#e5e7eb")
+    fig1.update_xaxes(title="Gameweek", dtick=2, gridcolor="#2a2a3e", color="#9ca3af")
+    fig1.update_yaxes(title="Total FPL Points", gridcolor="#2a2a3e", color="#9ca3af")
 
     # League position
     fig2 = go.Figure()
@@ -503,13 +521,13 @@ def _build_season_journey(history_df: pd.DataFrame) -> str:
         ))
     fig2.update_layout(
         **layout_base,
-        title=dict(text="🏅 League Position Timeline", font=dict(size=16, color="#1a1a2e"),
+        title=dict(text="🏅 League Position Timeline", font=dict(size=16, color="#e0e0e0"),
                    x=0.5, xanchor="center"),
     )
-    fig2.update_xaxes(title="Gameweek", dtick=2, gridcolor="#e5e7eb")
+    fig2.update_xaxes(title="Gameweek", dtick=2, gridcolor="#2a2a3e", color="#9ca3af")
     fig2.update_yaxes(
         title="League Position", autorange="reversed",
-        dtick=1, range=[n + 0.5, 0.5], gridcolor="#e5e7eb",
+        dtick=1, range=[n + 0.5, 0.5], gridcolor="#2a2a3e", color="#9ca3af",
     )
 
     return (
@@ -523,7 +541,112 @@ def _build_season_journey(history_df: pd.DataFrame) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Section 3 — League Awards
+# Section 3 — Season's Top Players
+# ---------------------------------------------------------------------------
+
+def _build_top_players(top_players: Dict) -> str:
+    if not top_players:
+        return ""
+
+    awards = top_players.get("awards", {})
+    by_position = top_players.get("by_position", {})
+
+    AWARD_CONFIG = [
+        ("points_leader", "🏅", "Points Champion", _GOLD),
+        ("golden_boot",   "⚽", "Golden Boot",     _GREEN),
+        ("assist_king",   "🅰️", "Assist King",     "#00b4d8"),
+        ("golden_glove",  "🧤", "Golden Glove",    _PURPLE),
+        ("bonus_king",    "⭐", "Bonus King",      "#f8961e"),
+    ]
+
+    award_cards = []
+    for key, icon, title, accent in AWARD_CONFIG:
+        award = awards.get(key)
+        if not award:
+            continue
+        owned_by = award.get("owned_by")
+        owner_line = (
+            f'<div style="color:{_GREEN};font-size:9px;margin-top:3px;">✓ {_esc(owned_by)}</div>'
+            if owned_by else
+            '<div style="color:#aaa;font-size:9px;margin-top:3px;">Unclaimed</div>'
+        )
+        award_cards.append(
+            f'<div class="card no-break" style="border-color:{accent};text-align:center;padding:8px 5px;">'
+            f'<div style="font-size:1.3em;margin-bottom:3px;">{icon}</div>'
+            f'<div style="color:#9ca3af;font-size:9px;text-transform:uppercase;'
+            f'letter-spacing:1px;margin-bottom:3px;">{_esc(title)}</div>'
+            f'<div style="color:{accent};font-size:12px;font-weight:700;margin-bottom:2px;">{_esc(award["name"])}</div>'
+            f'<div style="color:#888;font-size:10px;">{_esc(award["stat_value"])} {_esc(award["stat_label"])}'
+            f' · {_esc(award["club"])}</div>'
+            f'{owner_line}'
+            f'</div>'
+        )
+
+    RANK_COLORS = ["#FFD700", "#C0C0C0", "#CD7F32", "#9ca3af", "#9ca3af"]
+    RANK_LABELS = ["1st", "2nd", "3rd", "4th", "5th"]
+    POS_ICONS   = {"GK": "🧤", "DEF": "🛡️", "MID": "⚡", "FWD": "⚽"}
+
+    def _stats_line(p: Dict, pos: str) -> str:
+        g  = p.get("goals", 0)
+        a  = p.get("assists", 0)
+        cs = p.get("clean_sheets", 0)
+        if pos == "GK":
+            return f'{cs} CS · {g}G · {a}A'
+        return f'{g}G · {a}A · {cs} CS'
+
+    pos_cols = []
+    for pos in ["GK", "DEF", "MID", "FWD"]:
+        players = by_position.get(pos, [])
+        col = (
+            f'<div>'
+            f'<div style="text-align:center;color:#9ca3af;font-weight:700;font-size:11px;'
+            f'text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">'
+            f'{POS_ICONS.get(pos, "")} {pos}</div>'
+        )
+        for i, p in enumerate(players[:5]):
+            rc = RANK_COLORS[i]
+            rl = RANK_LABELS[i]
+            owned = p.get("owned_by")
+            owner_html = (
+                f'<div style="color:{_GREEN};font-size:9px;margin-top:2px;">✓ {_esc(owned)}</div>'
+                if owned else
+                '<div style="color:#4a5568;font-size:9px;margin-top:2px;">Unclaimed</div>'
+            )
+            col += (
+                f'<div style="border:1px solid #2a2a3e;border-radius:7px;padding:7px 9px;'
+                f'background:#1a1a2e;margin-bottom:6px;">'
+                f'<div style="display:flex;align-items:flex-start;gap:6px;">'
+                f'<span style="color:{rc};font-weight:700;font-size:11px;min-width:24px;">{rl}</span>'
+                f'<div style="flex:1;">'
+                f'<div style="font-size:12px;font-weight:600;color:#e0e0e0;">{_esc(p["name"])}</div>'
+                f'<div style="color:#9ca3af;font-size:10px;">{_esc(p.get("club", ""))}'
+                f' · <span style="color:{rc};font-weight:700;">{p["total_points"]} pts</span></div>'
+                f'<div style="color:#6b7280;font-size:9px;margin-top:1px;">{_stats_line(p, pos)}</div>'
+                f'{owner_html}'
+                f'</div></div></div>'
+            )
+        col += '</div>'
+        pos_cols.append(col)
+
+    awards_grid = f'<div class="grid-5 no-break">{"".join(award_cards)}</div>'
+    pos_grid    = f'<div class="grid-4">{"".join(pos_cols)}</div>'
+
+    return (
+        _section("🌟", "Season's Top Players",
+                 "The FPL stars who defined the 2025/26 season — and who in your league owned them",
+                 page_break=True)
+        + '<p style="color:#6b7280;font-size:12px;margin:6px 0 10px;">'
+        + 'Global FPL award winners — with a note on who in your league held them.</p>'
+        + awards_grid
+        + '<p style="color:#6b7280;font-size:12px;margin:10px 0 8px;">'
+        + 'Top 5 players at each position by total season points.</p>'
+        + pos_grid
+        + "</div>"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section 4 — League Awards
 # ---------------------------------------------------------------------------
 
 def _build_awards(superlatives: Dict, history_df: pd.DataFrame) -> str:
@@ -569,7 +692,7 @@ def _build_awards(superlatives: Dict, history_df: pd.DataFrame) -> str:
     return (
         _section("🎖️", "League Awards",
                  "Eight superlatives celebrating the best (and worst) of the season",
-                 page_break=True)
+                 extra_style="margin-top:20px;")
         + f'<div class="grid-4">{cards_html}</div>'
         + "</div>"
     )
@@ -616,8 +739,8 @@ def _build_highlights(highlights: Dict) -> str:
 
     return (
         _section("⚡", "Gameweek Highlights", "The most memorable moments of the season",
-                 extra_style="margin-top:20px;")
-        + f'<div class="grid-2">{"".join(cards)}</div>'
+                 extra_style="margin-top:20px;page-break-inside:avoid;break-inside:avoid;")
+        + f'<div class="grid-2 no-break">{"".join(cards)}</div>'
         + "</div>"
     )
 
@@ -656,16 +779,16 @@ def _build_h2h(league_data: dict) -> str:
 
     def _cell_style(cell):
         if cell == "-":
-            return "background:#f3f4f6;color:#9ca3af;"
+            return "background:#1a1a2e;color:#4a5568;"
         w, d, l = _parse(cell)
         if w > l:
-            return "background:rgba(0,168,85,0.15);color:#059669;font-weight:700;"
+            return f"background:rgba(0,168,85,0.28);color:{_GREEN};font-weight:700;"
         if w < l:
-            return f"background:rgba(255,75,75,0.12);color:{_RED};font-weight:600;"
-        return "background:rgba(255,215,0,0.15);color:#b45309;"
+            return f"background:rgba(255,75,75,0.22);color:{_RED};font-weight:600;"
+        return "background:rgba(255,215,0,0.22);color:#f59e0b;"
 
     _TH_BASE = ("background:linear-gradient(135deg,#37003c,#5a0060);color:#00ff87;"
-                "font-weight:600;font-size:10px;padding:6px 4px;"
+                "font-weight:600;font-size:10px;padding:10px 4px;"
                 "border-bottom:2px solid #5a0060;text-align:center;"
                 "overflow:hidden;white-space:nowrap;text-overflow:ellipsis;")
 
@@ -680,20 +803,59 @@ def _build_h2h(league_data: dict) -> str:
         for opp in teams:
             val   = str(h2h.loc[team, opp]) if (team in h2h.index and opp in h2h.columns) else "-"
             style = _cell_style(val)
-            cells += (f'<td style="padding:4px 3px;font-size:10px;text-align:center;'
-                      f'border:1px solid #f0f0f0;{style}">{_esc(val)}</td>')
+            cells += (f'<td style="padding:8px 3px;font-size:10px;text-align:center;'
+                      f'border:1px solid #2a2a3e;{style}">{_esc(val)}</td>')
         rows_html += (
-            f'<tr><td style="padding:4px 8px;font-size:10px;font-weight:600;'
-            f'color:#1a1a2e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
-            f'width:{NAME_COL_W}px;max-width:{NAME_COL_W}px;background:#f8f9fa;">'
+            f'<tr><td style="padding:8px 8px;font-size:10px;font-weight:600;'
+            f'color:#e0e0e0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+            f'width:{NAME_COL_W}px;max-width:{NAME_COL_W}px;background:#16213e;">'
             f'{_esc(team)}</td>{cells}</tr>'
         )
 
     matrix_html = (
-        f'<div style="border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">'
-        f'<table style="width:100%;table-layout:fixed;border-collapse:collapse;background:#ffffff;">'
+        f'<div style="border:1px solid #2a2a3e;border-radius:8px;overflow:hidden;">'
+        f'<table style="width:100%;table-layout:fixed;border-collapse:collapse;background:#16213e;">'
         f'<thead><tr>{header_row}</tr></thead>'
         f'<tbody>{rows_html}</tbody></table></div>'
+    )
+
+    # Notable rivalries
+    seen: set = set()
+    lopsided = {"margin": -1, "team1": "", "team2": "", "record": ""}
+    even     = {"margin": float("inf"), "team1": "", "team2": "", "record": ""}
+    for i, t1 in enumerate(teams):
+        for t2 in teams[i + 1:]:
+            key = tuple(sorted([t1, t2]))
+            if key in seen:
+                continue
+            seen.add(key)
+            w, d, l = _parse(str(h2h.loc[t1, t2]) if (t1 in h2h.index and t2 in h2h.columns) else "-")
+            total = w + d + l
+            if total == 0:
+                continue
+            m = abs(w - l)
+            if m > lopsided["margin"]:
+                lopsided = {"margin": m,
+                            "team1": t1 if w >= l else t2,
+                            "team2": t2 if w >= l else t1,
+                            "record": f"{max(w,l)}-{d}-{min(w,l)}"}
+            if m < even["margin"]:
+                even = {"margin": m, "team1": t1, "team2": t2, "record": f"{w}-{d}-{l}"}
+
+    rivalry_cards = []
+    if lopsided["team1"]:
+        rivalry_cards.append(_award_card(
+            "⚔️", "Most One-Sided Rivalry",
+            f'{lopsided["team1"]} vs {lopsided["team2"]}',
+            lopsided["record"], _RED))
+    if even["team1"]:
+        rivalry_cards.append(_award_card(
+            "🤝", "Most Evenly Matched",
+            f'{even["team1"]} vs {even["team2"]}',
+            even["record"], "#00b4d8"))
+    rivalries_html = (
+        f'<div class="grid-2 no-break" style="margin-top:12px;">{"".join(rivalry_cards)}</div>'
+        if rivalry_cards else ""
     )
 
     return (
@@ -701,6 +863,7 @@ def _build_h2h(league_data: dict) -> str:
                  "Full W-D-L matrix across all league matchups",
                  extra_style="margin-top:28px;")
         + matrix_html
+        + rivalries_html
         + "</div>"
     )
 
@@ -778,18 +941,29 @@ def _build_transfer_window(transfer_data: Dict) -> str:
     # Activity bar chart
     if per_team:
         sorted_teams = sorted(per_team.items(), key=lambda x: x[1], reverse=True)
+        counts = [c for _, c in sorted_teams]
+        min_c, max_c = min(counts), max(counts)
+        def _bar_color(c):
+            t = (c - min_c) / (max_c - min_c) if max_c > min_c else 1.0
+            return f'rgb({int(123 + 132*t)},{int(47 + 168*t)},{int(190*(1-t))})'
+        bar_colors = [_bar_color(c) for c in counts]
+
         fig = go.Figure(go.Bar(
             x=[t for t, _ in sorted_teams],
-            y=[c for _, c in sorted_teams],
-            marker_color=_PURPLE,
+            y=counts,
+            marker_color=bar_colors,
+            text=counts,
+            textposition="outside",
+            textfont=dict(color="#e0e0e0", size=10),
         ))
         fig.update_layout(
-            paper_bgcolor="#ffffff", plot_bgcolor="#f9fafb",
-            font=dict(color="#1a1a2e", size=12),
-            title=dict(text="Transfer Activity by Team", font=dict(size=15, color="#1a1a2e"),
+            paper_bgcolor="#1a1a2e", plot_bgcolor="#16213e",
+            font=dict(color="#e0e0e0", size=12),
+            title=dict(text="Transfer Activity by Team", font=dict(size=15, color="#e0e0e0"),
                        x=0.5, xanchor="center"),
-            yaxis=dict(gridcolor="#e5e7eb", range=[0, max(c for _, c in sorted_teams) * 1.2]),
-            xaxis=dict(tickangle=45, gridcolor="#e5e7eb"),
+            yaxis=dict(gridcolor="#2a2a3e", color="#9ca3af",
+                       range=[0, max(counts) * 1.25]),
+            xaxis=dict(tickangle=45, gridcolor="#2a2a3e", color="#9ca3af"),
         )
         # left_margin=40: no y-axis title, so 70 wastes space and shifts bars right
         # right_margin=55: angled last label extends right of the final bar
@@ -907,7 +1081,7 @@ def _build_lineup_management(bench_data_list: List[Dict]) -> str:
 def _build_html(league_data: dict, history_df: pd.DataFrame,
                 bench_data_list: List[Dict], superlatives: Dict,
                 highlights: Dict, draft_data: Dict,
-                transfer_data: Dict) -> str:
+                transfer_data: Dict, top_players: Dict = None) -> str:
 
     league_name = league_data.get("league", {}).get("name", "FPL Draft League")
 
@@ -915,6 +1089,7 @@ def _build_html(league_data: dict, history_df: pd.DataFrame,
         _build_cover(league_name),
         _build_champion(league_data),
         _build_season_journey(history_df),
+        _build_top_players(top_players or {}),
         _build_awards(superlatives, history_df),
         _build_highlights(highlights),
         _build_h2h(league_data),
@@ -972,10 +1147,12 @@ def generate_league_wrapped_pdf(
     highlights:      Dict,
     draft_data:      Dict,
     transfer_data:   Dict,
+    top_players:     Dict = None,
 ) -> bytes:
     """Build and return a League Wrapped PDF as bytes."""
     html = _build_html(
         league_data, history_df, bench_data_list,
         superlatives, highlights, draft_data, transfer_data,
+        top_players or {},
     )
     return _render_with_playwright(html)

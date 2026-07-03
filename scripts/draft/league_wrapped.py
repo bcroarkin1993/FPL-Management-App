@@ -1,15 +1,16 @@
 """
 FPL Draft League Wrapped — league-wide end-of-season summary page.
 
-8-part narrative:
+9-part narrative:
   1. League Champion     (hero banner + final standings)
   2. Season Journey      (cumulative points race + league position timeline)
-  3. League Awards       (8 superlatives)
-  4. Gameweek Highlights (highest/lowest GW, closest H2H, biggest rank swing)
-  5. Head-to-Head Records (full W-D-L matrix + notable rivalries)
-  6. Draft Board         (league-wide steals & busts)
-  7. Transfer Window     (activity leaderboard + best/worst moves)
-  8. Lineup Management   (bench points missed leaderboard)
+  3. Season's Top Players (FPL award winners + position leaderboards + league ownership)
+  4. League Awards       (8 superlatives)
+  5. Gameweek Highlights (highest/lowest GW, closest H2H, biggest rank swing)
+  6. Head-to-Head Records (full W-D-L matrix + notable rivalries)
+  7. Draft Board         (league-wide steals & busts)
+  8. Transfer Window     (activity leaderboard + best/worst moves)
+  9. Lineup Management   (bench points missed leaderboard)
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -27,6 +28,7 @@ from scripts.common.fpl_draft_api import (
     _get_draft_gw_live_points,
     get_current_gameweek,
     get_draft_league_details,
+    get_draft_team_players_with_points,
     get_fpl_player_mapping,
     get_waiver_transactions_up_to_gameweek,
     pull_fpl_player_stats,
@@ -63,6 +65,22 @@ _TEAM_COLORS = [
     "#f8961e", "#90be6d", "#f94144", "#9d4edd", "#3a86ff",
     "#06d6a0", "#ef476f",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _fpl_display_name(info: dict) -> str:
+    """Return the best short display name from a player_map entry.
+
+    FPL web_name is often a single surname ("Semenyo"). When that happens,
+    fall back to Player (first_name + second_name = "Antoine Semenyo").
+    Only use web_name when it contains multiple words, e.g. "Bruno Fernandes".
+    """
+    web = info.get("Web_Name") or ""
+    full = info.get("Player") or ""
+    return web if len(web.split()) > 1 else full
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +212,210 @@ def _compute_gw_highlights(league_id: int, max_gw: int) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Data: Season's top players
+# ---------------------------------------------------------------------------
+
+def _build_player_ownership(league_id: int) -> Dict[str, str]:
+    """Returns {normalized_web_name: team_name} crediting ownership to the team that held
+    the player the most gameweeks (total_points as tiebreaker).
+
+    Keyed by normalized web_name (not element_id) because Classic and Draft FPL APIs assign
+    different element IDs to the same player — web_name is consistent across both APIs.
+    """
+    team_players = get_draft_team_players_with_points(league_id)
+    # norm_name → (gw_count, total_points, team_name)
+    best: Dict[str, tuple] = {}
+    for team_name, players in team_players.items():
+        for p in players:
+            web_name = p.get("player", "")  # stored as web_name from Draft bootstrap-static
+            if not web_name:
+                continue
+            norm = canonical_normalize(web_name)
+            gw = p.get("gw_count", 0)
+            pts = p.get("total_points", 0)
+            prev = best.get(norm)
+            if prev is None or (gw, pts) > (prev[0], prev[1]):
+                best[norm] = (gw, pts, team_name)
+    return {norm: v[2] for norm, v in best.items()}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _compute_top_players(league_id: int, max_gw: int) -> Dict:
+    """Global FPL award winners and position leaderboards with league ownership context."""
+    try:
+        fpl_stats = pull_fpl_player_stats()
+    except Exception:
+        _logger.warning("Failed to fetch player stats for top players section", exc_info=True)
+        return {}
+
+    if fpl_stats.empty:
+        return {}
+
+    try:
+        ownership = _build_player_ownership(league_id)  # {normalized_web_name: team_name}
+    except Exception:
+        _logger.warning("Failed to build ownership map", exc_info=True)
+        ownership = {}
+
+    def _get_owner(web_name: str) -> Optional[str]:
+        if not web_name:
+            return None
+        norm = canonical_normalize(web_name)
+        owner = ownership.get(norm)
+        if owner:
+            return owner
+        # Fallback: match on surname only (handles single-word web_name variants)
+        last = norm.split()[-1] if norm else ""
+        if last:
+            for key, val in ownership.items():
+                if key.split()[-1] == last:
+                    return val
+        return None
+
+    def _pinfo(row) -> Dict:
+        eid = int(row["id"])
+        web = str(row.get("web_name", "")).strip()
+        full = str(row.get("player", "")).strip()
+        display_name = web if len(web.split()) > 1 else full
+        return {
+            "id": eid,
+            "name": display_name,
+            "club": str(row.get("team_name_abbrv", row.get("team_name", "?"))),
+            "owned_by": _get_owner(web or full),
+        }
+
+    awards: Dict[str, Dict] = {}
+
+    row = fpl_stats.loc[fpl_stats["total_points"].idxmax()]
+    awards["points_leader"] = {**_pinfo(row), "stat_value": int(row["total_points"]), "stat_label": "pts"}
+
+    row = fpl_stats.loc[fpl_stats["goals_scored"].idxmax()]
+    awards["golden_boot"] = {**_pinfo(row), "stat_value": int(row["goals_scored"]), "stat_label": "goals"}
+
+    gks = fpl_stats[fpl_stats["position_abbrv"] == "GKP"]
+    if not gks.empty:
+        row = gks.loc[gks["clean_sheets"].idxmax()]
+        awards["golden_glove"] = {**_pinfo(row), "stat_value": int(row["clean_sheets"]), "stat_label": "clean sheets"}
+
+    row = fpl_stats.loc[fpl_stats["assists"].idxmax()]
+    awards["assist_king"] = {**_pinfo(row), "stat_value": int(row["assists"]), "stat_label": "assists"}
+
+    row = fpl_stats.loc[fpl_stats["bonus"].idxmax()]
+    awards["bonus_king"] = {**_pinfo(row), "stat_value": int(row["bonus"]), "stat_label": "bonus pts"}
+
+    # Top 5 per position by total_points
+    pos_abbrvs = [("GKP", "GK"), ("DEF", "DEF"), ("MID", "MID"), ("FWD", "FWD")]
+    by_position: Dict[str, List[Dict]] = {}
+    for abbrv, label in pos_abbrvs:
+        subset = fpl_stats[fpl_stats["position_abbrv"] == abbrv].nlargest(5, "total_points")
+        entries = []
+        for _, r in subset.iterrows():
+            entries.append({
+                **_pinfo(r),
+                "total_points": int(r["total_points"]),
+                "goals": int(r["goals_scored"]),
+                "assists": int(r["assists"]),
+                "clean_sheets": int(r["clean_sheets"]),
+            })
+        by_position[label] = entries
+
+    return {"awards": awards, "by_position": by_position}
+
+
+# ---------------------------------------------------------------------------
+# Render: Season's top players
+# ---------------------------------------------------------------------------
+
+def _render_top_players(data: Dict) -> None:
+    if not data:
+        st.info("No player data available.")
+        return
+
+    awards = data.get("awards", {})
+    by_position = data.get("by_position", {})
+
+    # FPL season awards row
+    st.markdown(
+        '<p style="color:#9ca3af;font-size:13px;margin-bottom:14px;">'
+        'Global FPL award winners this season, with a note on who in your league held them.</p>',
+        unsafe_allow_html=True,
+    )
+
+    AWARD_CONFIG = [
+        ("points_leader", "🏅", "Points Champion", _GOLD),
+        ("golden_boot", "⚽", "Golden Boot", _GREEN),
+        ("assist_king", "🅰️", "Assist King", "#00b4d8"),
+        ("golden_glove", "🧤", "Golden Glove", _PURPLE),
+        ("bonus_king", "⭐", "Bonus King", "#f8961e"),
+    ]
+
+    cols = st.columns(5)
+    for col, (key, icon, title, accent) in zip(cols, AWARD_CONFIG):
+        award = awards.get(key)
+        if not award:
+            continue
+        owned_by = award.get("owned_by")
+        if owned_by:
+            owner_html = f'<span style="color:{_GREEN};font-weight:600;">✓ {owned_by}</span>'
+        else:
+            owner_html = '<span style="color:#555;">Unclaimed</span>'
+        detail = (
+            f'{award["stat_value"]} {award["stat_label"]} · {award["club"]}'
+            f'<br>{owner_html}'
+        )
+        with col:
+            st.markdown(_award_card(icon, title, award["name"], detail, accent), unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Position leaderboards
+    st.markdown(
+        '<p style="color:#9ca3af;font-size:13px;margin-bottom:10px;">'
+        'Top 3 FPL players at each position by total season points.</p>',
+        unsafe_allow_html=True,
+    )
+
+    RANK_COLORS = ["#FFD700", "#C0C0C0", "#CD7F32", "#9ca3af", "#9ca3af"]
+    RANK_LABELS = ["1st", "2nd", "3rd", "4th", "5th"]
+    POS_ICONS = {"GK": "🧤", "DEF": "🛡️", "MID": "⚡", "FWD": "⚽"}
+
+    pos_cols = st.columns(4)
+    for col, pos in zip(pos_cols, ["GK", "DEF", "MID", "FWD"]):
+        players = by_position.get(pos, [])
+        with col:
+            st.markdown(
+                f'<div style="text-align:center;color:#9ca3af;font-weight:700;font-size:13px;'
+                f'text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;">'
+                f'{POS_ICONS.get(pos, "")} {pos}</div>',
+                unsafe_allow_html=True,
+            )
+            for i, p in enumerate(players):
+                rank_color = RANK_COLORS[i] if i < 3 else "#888"
+                rank_label = RANK_LABELS[i] if i < 3 else f"{i + 1}th"
+                owned_by = p.get("owned_by")
+                owner_html = (
+                    f'<div style="color:{_GREEN};font-size:10px;margin-top:2px;">✓ {owned_by}</div>'
+                    if owned_by
+                    else '<div style="color:#444;font-size:10px;margin-top:2px;">Unclaimed</div>'
+                )
+                card_html = (
+                    f'<div style="border:1px solid #2a2a3e;border-radius:8px;padding:10px 12px;'
+                    f'background:#16213e;margin-bottom:8px;color:#e0e0e0;">'
+                    f'<div style="display:flex;align-items:flex-start;gap:8px;">'
+                    f'<span style="color:{rank_color};font-weight:700;font-size:12px;'
+                    f'min-width:26px;padding-top:1px;">{rank_label}</span>'
+                    f'<div style="flex:1;min-width:0;">'
+                    f'<div style="color:#e0e0e0;font-size:13px;font-weight:600;'
+                    f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{p["name"]}</div>'
+                    f'<div style="color:#888;font-size:11px;">{p["club"]} · '
+                    f'<span style="color:{rank_color};font-weight:700;">{p["total_points"]} pts</span></div>'
+                    f'{owner_html}'
+                    f'</div></div></div>'
+                )
+                st.markdown(card_html, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
 # Data: League draft board (all teams)
 # ---------------------------------------------------------------------------
 
@@ -296,7 +518,7 @@ def _compute_league_draft_board(league_id: int) -> Dict:
             "team": c["entry_name"],
             "round": c["round"],
             "pick": c["pick"],
-            "player": info.get("Player", f"ID {c['player_id']}"),
+            "player": _fpl_display_name(info) or f"ID {c['player_id']}",
             "position": info.get("Position", ""),
             "pts": pts,
             "avg": round(avg, 1),
@@ -347,7 +569,7 @@ def _compute_league_transfer_stats(league_id: int, max_gw: int) -> Dict:
 
     def _player_name(el_id: int) -> str:
         info = player_map.get(el_id, {})
-        return info.get("Player") or info.get("Web_Name") or f"Player {el_id}"
+        return _fpl_display_name(info) or f"Player {el_id}"
 
     per_team: Dict[str, int] = {}
     most_in: Dict[str, int] = {}
@@ -933,12 +1155,18 @@ def _render_transfer_window(transfer_data: Dict) -> None:
 
     # Activity leaderboard
     if per_team:
-        df = pd.DataFrame([{"Team": t, "Approved Moves": c} for t, c in per_team.items()])
+        sorted_teams = sorted(per_team.items(), key=lambda x: x[1], reverse=True)
+        counts = [c for _, c in sorted_teams]
+        min_c, max_c = min(counts), max(counts)
+        def _bar_color(c):
+            t = (c - min_c) / (max_c - min_c) if max_c > min_c else 1.0
+            return f'rgb({int(123 + 132*t)},{int(47 + 168*t)},{int(190*(1-t))})'
+        bar_colors = [_bar_color(c) for c in counts]
         fig = go.Figure(go.Bar(
-            x=df["Team"],
-            y=df["Approved Moves"],
-            marker_color=[_GOLD if i == 0 else _PURPLE for i in range(len(df))],
-            text=df["Approved Moves"],
+            x=[t for t, _ in sorted_teams],
+            y=counts,
+            marker_color=bar_colors,
+            text=counts,
             textposition="outside",
             textfont=dict(color="#e0e0e0", size=13),
         ))
@@ -951,7 +1179,7 @@ def _render_transfer_window(transfer_data: Dict) -> None:
             margin=dict(t=55, l=65, r=20, b=90),
         )
         fig.update_xaxes(tickangle=-35, gridcolor="#2a2a3e")
-        fig.update_yaxes(gridcolor="#2a2a3e", range=[0, df["Approved Moves"].max() * 1.2])
+        fig.update_yaxes(gridcolor="#2a2a3e", range=[0, max(counts) * 1.25])
         st.plotly_chart(fig, use_container_width=True)
 
     # Best and worst transfer cards
@@ -1136,6 +1364,12 @@ def show_league_wrapped_page():
             _logger.warning("Failed to compute transfer stats", exc_info=True)
             transfer_data = {}
 
+        try:
+            top_players_data = _compute_top_players(league_id, max_gw)
+        except Exception:
+            _logger.warning("Failed to compute top players", exc_info=True)
+            top_players_data = {}
+
     # ---------------------------------------------------------------------------
     # Render sections
     # ---------------------------------------------------------------------------
@@ -1158,7 +1392,16 @@ def show_league_wrapped_page():
         st.warning(f"Could not render season journey: {exc}")
     st.markdown("---")
 
-    # Part 3: League Awards
+    # Part 3: Season's Top Players
+    _section_header("🌟", "Season's Top Players", "The FPL stars who defined the 2025/26 season — and who in your league owned them")
+    try:
+        _render_top_players(top_players_data)
+    except Exception as exc:
+        _logger.warning("top players failed", exc_info=True)
+        st.warning(f"Could not render top players: {exc}")
+    st.markdown("---")
+
+    # Part 4: League Awards
     _section_header("🎖️", "League Awards", "Eight superlatives celebrating the best (and worst) of the season")
     try:
         _render_league_awards(superlatives, history_df)
@@ -1167,7 +1410,7 @@ def show_league_wrapped_page():
         st.warning(f"Could not render league awards: {exc}")
     st.markdown("---")
 
-    # Part 4: Gameweek Highlights
+    # Part 5: Gameweek Highlights
     _section_header("⚡", "Gameweek Highlights", "The most memorable moments of the season")
     try:
         _render_gw_highlights(highlights)
@@ -1176,7 +1419,7 @@ def show_league_wrapped_page():
         st.warning(f"Could not render GW highlights: {exc}")
     st.markdown("---")
 
-    # Part 5: Head-to-Head Records
+    # Part 6: Head-to-Head Records
     _section_header("⚔️", "Head-to-Head Records", "Full W-D-L matrix across all league matchups")
     try:
         _render_h2h_records(league_data)
@@ -1185,7 +1428,7 @@ def show_league_wrapped_page():
         st.warning(f"Could not render H2H records: {exc}")
     st.markdown("---")
 
-    # Part 6: Draft Board Retrospective
+    # Part 7: Draft Board Retrospective
     _section_header("🃏", "Draft Board Retrospective", "League-wide draft steals and busts")
     try:
         _render_draft_board(draft_data)
@@ -1194,7 +1437,7 @@ def show_league_wrapped_page():
         st.warning(f"Could not render draft board: {exc}")
     st.markdown("---")
 
-    # Part 7: Transfer Window
+    # Part 8: Transfer Window
     _section_header("🔀", "Transfer Window", "Who was most active and who won (or lost) the transfer game")
     try:
         _render_transfer_window(transfer_data)
@@ -1203,7 +1446,7 @@ def show_league_wrapped_page():
         st.warning(f"Could not render transfer window: {exc}")
     st.markdown("---")
 
-    # Part 8: Lineup Management
+    # Part 9: Lineup Management
     _section_header("🧩", "Lineup Management", "Bench points missed — who managed their squad best?")
     try:
         _render_lineup_management(bench_data_list)
@@ -1224,6 +1467,7 @@ def show_league_wrapped_page():
                     highlights=highlights,
                     draft_data=draft_data,
                     transfer_data=transfer_data,
+                    top_players=top_players_data,
                 )
                 st.download_button(
                     label="⬇️ Download League Wrapped PDF",
