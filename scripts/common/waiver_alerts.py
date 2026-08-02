@@ -22,19 +22,28 @@ CLASSIC_OFFSET_HOURS = 1.5
 
 
 def _get_current_gameweek():
-    """Fetch current/next GW from the official Draft endpoint. Returns None if season has ended."""
-    r = requests.get("https://draft.premierleague.com/api/game", timeout=20)
-    r.raise_for_status()
-    data = r.json()
+    """Fetch current/next GW from the official Draft endpoint. Returns None if season has ended
+    or the endpoint is unavailable/unparseable (e.g. during off-season maintenance windows)."""
+    try:
+        r = requests.get("https://draft.premierleague.com/api/game", timeout=20)
+        r.raise_for_status()
+        data = r.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"[waiver_alerts] Could not fetch/parse current gameweek ({e}) — treating as off-season, skipping")
+        return None
     gw = data["next_event"] if data.get("current_event_finished") else data["current_event"]
     return int(gw) if gw is not None else None
 
 
 def _fixtures_for_event(gw: int):
     """Canonical fixtures endpoint; query by GW via params to avoid caching issues."""
-    r = requests.get("https://fantasy.premierleague.com/api/fixtures/", params={"event": int(gw)}, timeout=20)
-    r.raise_for_status()
-    js = r.json()
+    try:
+        r = requests.get("https://fantasy.premierleague.com/api/fixtures/", params={"event": int(gw)}, timeout=20)
+        r.raise_for_status()
+        js = r.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"[waiver_alerts] Could not fetch/parse fixtures for GW {gw} ({e})")
+        return []
     return js if isinstance(js, list) else []
 
 
@@ -234,7 +243,11 @@ def main():
             print("[waiver_alerts] Season has ended (no active gameweek) — skipping all alerts")
             return
 
-    kickoff_et = _earliest_kickoff_et(gw)
+    try:
+        kickoff_et = _earliest_kickoff_et(gw)
+    except RuntimeError as e:
+        print(f"[waiver_alerts] {e} — no fixtures scheduled yet, skipping all alerts")
+        return
     now_et = datetime.now(TZ)
 
     print(f"[waiver_alerts] GW={gw}")
