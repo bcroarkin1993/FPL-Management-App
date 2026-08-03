@@ -34,6 +34,12 @@ def get_logger(name: str = "fpl_app") -> logging.Logger:
 _HINTS = {
     "api_down":  "The FPL API may be temporarily unavailable. Try refreshing in a few minutes.",
     "league_id": "Please verify your league ID in `.env` (`FPL_DRAFT_LEAGUE_ID` or `FPL_CLASSIC_LEAGUE_IDS`).",
+    "draft_league_stale": (
+        "FPL Draft leagues don't carry over between seasons — this is likely still last "
+        "season's league ID. Create your new league at "
+        "[draft.premierleague.com](https://draft.premierleague.com), then update "
+        "`FPL_DRAFT_LEAGUE_ID` in your `.env` file."
+    ),
     "team_id":   "Please verify your team ID in `.env` (`FPL_DRAFT_TEAM_ID` or `FPL_CLASSIC_TEAM_ID`).",
     "rotowire":  "Rotowire may have changed their page layout, or projections aren't published yet for this gameweek.",
     "preseason": "This data becomes available once the season starts and games are played.",

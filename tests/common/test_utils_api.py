@@ -14,10 +14,12 @@ from scripts.common.utils import (
     get_current_gameweek,
     get_classic_bootstrap_static,
     get_league_entries,
+    get_league_player_ownership,
     get_draft_league_details,
     get_classic_league_standings,
     get_classic_team_history,
     get_rotowire_player_projections,
+    is_draft_league_reachable,
 )
 
 
@@ -108,6 +110,44 @@ class TestGetLeagueEntries:
     def test_handles_error(self, mock_get):
         mock_get.side_effect = Exception("Network error")
         result = get_league_entries(12345)
+        assert result == {}
+
+
+class TestIsDraftLeagueReachable:
+    def test_unset_league_id_is_unreachable(self):
+        assert is_draft_league_reachable(0) is False
+        assert is_draft_league_reachable(None) is False
+
+    @patch("scripts.common.utils.requests.get")
+    def test_valid_league_is_reachable(self, mock_get, mock_league_response):
+        mock_get.return_value = _mock_response(mock_league_response)
+        assert is_draft_league_reachable(12345) is True
+
+    @patch("scripts.common.utils.requests.get")
+    def test_stale_or_invalid_league_is_unreachable(self, mock_get):
+        """A prior season's league ID (before the new season's league exists)
+        typically fails to resolve -- this must surface as False, not raise."""
+        mock_get.side_effect = Exception("Network error")
+        assert is_draft_league_reachable(12345) is False
+
+
+class TestGetLeaguePlayerOwnership:
+    @patch("scripts.common.utils.requests.get")
+    def test_handles_error(self, mock_get):
+        """Regression test: a failed/non-JSON API response (e.g. an empty body from a
+        stale or off-season league ID) must degrade to {} instead of raising."""
+        mock_get.side_effect = Exception("Network error")
+        result = get_league_player_ownership(12345)
+        assert result == {}
+
+    @patch("scripts.common.utils.requests.get")
+    def test_handles_bad_json(self, mock_get):
+        """Same regression, but for a response that returns 200 with an unparseable body
+        (the actual failure mode reported: JSONDecodeError on an empty response)."""
+        bad_resp = MagicMock()
+        bad_resp.json.side_effect = json.JSONDecodeError("Expecting value", "", 0)
+        mock_get.return_value = bad_resp
+        result = get_league_player_ownership(12345)
         assert result == {}
 
 

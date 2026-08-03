@@ -19,11 +19,18 @@ _logger = get_logger("fpl_app.fixture_helpers")
 
 
 def _bootstrap_teams_df() -> pd.DataFrame:
-    """Return FPL bootstrap teams as a 2-col DF: id, short_name."""
+    """Return FPL bootstrap teams as a 2-col DF: id, short_name.
+
+    Uses the Classic FPL bootstrap-static endpoint rather than the Draft one --
+    team id/short_name are identical across both games, but the Draft API's
+    bootstrap-static goes offline (serves an HTML "Game Updating" page instead
+    of JSON) between seasons, while Classic's is already live once fixtures
+    are published.
+    """
+    from scripts.common.fpl_classic_api import get_classic_bootstrap_static
     try:
-        resp = requests.get("https://draft.premierleague.com/api/bootstrap-static", timeout=20)
-        resp.raise_for_status()
-        teams = resp.json().get("teams", [])
+        bootstrap = get_classic_bootstrap_static()
+        teams = (bootstrap or {}).get("teams", [])
         return pd.DataFrame(teams)[["id", "short_name"]]
     except Exception:
         _logger.warning("Failed to fetch bootstrap teams data", exc_info=True)
@@ -100,6 +107,11 @@ def get_fixture_difficulty_grid(weeks: int = 6):
             if h is None or a is None:
                 continue
             hs, as_ = id2short.get(int(h), str(h)), id2short.get(int(a), str(a))
+            if hs not in disp_core.index or as_ not in disp_core.index:
+                # Team id didn't resolve to a known short name (e.g. bootstrap
+                # data was unavailable/incomplete) -- skip rather than crash.
+                _logger.warning("Skipping fixture with unresolved team id(s): %s vs %s", h, a)
+                continue
 
             # Home team cell
             prev_h = disp_core.at[hs, col]

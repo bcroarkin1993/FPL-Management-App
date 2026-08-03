@@ -72,6 +72,21 @@ def is_season_complete() -> bool:
         return False
 
 
+def is_draft_league_reachable(league_id) -> bool:
+    """
+    Returns True if the given Draft league ID currently resolves to real
+    league data via the FPL Draft API.
+
+    Returns False for an unset league ID, or one that no longer resolves —
+    most commonly because it's a prior season's league ID and this season's
+    league hasn't been created yet (FPL Draft leagues don't carry over
+    automatically; a new league must be created each season).
+    """
+    if not league_id:
+        return False
+    return bool(get_league_entries(league_id))
+
+
 def get_draft_picks(league_id):
     """
     Fetches the draft picks for each team in the league and returns a dictionary with team_id as the key,
@@ -283,8 +298,12 @@ def get_league_player_ownership(league_id):
     league_details_url = f"https://draft.premierleague.com/api/league/{league_id}/details"
 
     # --- Fetch data
-    element_status = requests.get(element_status_url, timeout=30).json().get("element_status", [])
-    league_details = requests.get(league_details_url, timeout=30).json()
+    try:
+        element_status = requests.get(element_status_url, timeout=30).json().get("element_status", [])
+        league_details = requests.get(league_details_url, timeout=30).json()
+    except Exception as e:
+        _logger.warning("Failed to fetch league ownership data for league %s: %s", league_id, e)
+        return {}
 
     # --- Build owner (entry) map robustly
     # Try the helper first (preferred)

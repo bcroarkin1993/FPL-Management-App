@@ -1,8 +1,14 @@
 """Unit tests for compute_key_differentials()."""
 
+from unittest.mock import patch, MagicMock
+
 import pandas as pd
 import pytest
-from scripts.common.fixture_helpers import compute_key_differentials
+from scripts.common.fixture_helpers import (
+    compute_key_differentials,
+    _bootstrap_teams_df,
+    get_fixture_difficulty_grid,
+)
 
 
 def _make_classic_df(players: list[dict]) -> pd.DataFrame:
@@ -128,3 +134,50 @@ class TestComputeKeyDifferentials:
         d1, d2 = compute_key_differentials(team1, team2, "A", "B", points_col="Blended_Points")
         assert d1[0]["points"] == 8.0
         assert d2[0]["points"] == 7.0
+
+
+class TestBootstrapTeamsDf:
+    @patch("scripts.common.fpl_classic_api.get_classic_bootstrap_static")
+    def test_returns_id_and_short_name(self, mock_bootstrap):
+        mock_bootstrap.return_value = {
+            "teams": [
+                {"id": 1, "short_name": "ARS", "name": "Arsenal"},
+                {"id": 2, "short_name": "AVL", "name": "Aston Villa"},
+            ]
+        }
+        df = _bootstrap_teams_df()
+        assert list(df["short_name"]) == ["ARS", "AVL"]
+
+    @patch("scripts.common.fpl_classic_api.get_classic_bootstrap_static")
+    def test_handles_unavailable_bootstrap(self, mock_bootstrap):
+        """Regression: the Draft API's bootstrap-static goes offline (serves an
+        HTML 'Game Updating' page) between seasons. If the Classic source we
+        now use also fails, this must degrade to an empty DF, not raise."""
+        mock_bootstrap.return_value = None
+        df = _bootstrap_teams_df()
+        assert df.empty
+        assert list(df.columns) == ["id", "short_name"]
+
+
+class TestGetFixtureDifficultyGrid:
+    @patch("scripts.common.fixture_helpers._bootstrap_teams_df")
+    @patch("scripts.common.fpl_draft_api.get_current_gameweek")
+    @patch("scripts.common.fixture_helpers.requests.get")
+    def test_unresolved_team_id_is_skipped_not_crashed(self, mock_get, mock_gw, mock_teams):
+        """Regression for KeyError crash on the Gameweek Fixtures page: a fixture
+        referencing a team id missing from the bootstrap map (e.g. incomplete/
+        stale bootstrap data) must be skipped, not crash the whole grid."""
+        mock_gw.return_value = 1
+        mock_teams.return_value = pd.DataFrame({"id": [1, 2], "short_name": ["ARS", "AVL"]})
+
+        fixture_resp = MagicMock()
+        fixture_resp.raise_for_status.return_value = None
+        # team_h=1 (known) vs team_a=99 (unknown -- not in the bootstrap map)
+        fixture_resp.json.return_value = [
+            {"team_h": 1, "team_a": 99, "team_h_difficulty": 2, "team_a_difficulty": 3}
+        ]
+        mock_get.return_value = fixture_resp
+
+        disp, diffs, avg = get_fixture_difficulty_grid(weeks=1)
+        assert "ARS" in disp.index
+        assert "99" not in disp.index

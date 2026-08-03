@@ -327,6 +327,7 @@ def mock_all_utils(mock_streamlit):
         "get_league_entries": {},
         "get_league_player_ownership": {},
         "get_draft_league_details": {"matches": [], "league_entries": [], "standings": []},
+        "is_draft_league_reachable": True,
         "get_draft_picks": {},
         "get_gameweek_fixtures": [],
         "get_historical_team_scores": pd.DataFrame(),

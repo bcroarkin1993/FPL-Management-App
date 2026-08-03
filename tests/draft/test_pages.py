@@ -13,6 +13,7 @@ class TestDraftHomePage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.draft.home.get_current_gameweek", return_value=25), \
              patch("scripts.draft.home.get_draft_league_details", return_value={"matches": [], "league_entries": [], "standings": []}), \
+             patch("scripts.draft.home.is_draft_league_reachable", return_value=True), \
              patch("scripts.draft.home.extract_draft_gw_scores", return_value=pd.DataFrame()), \
              patch("scripts.draft.home.calculate_all_play_standings", return_value=pd.DataFrame()), \
              patch("scripts.draft.home.render_luck_adjusted_table"), \
@@ -20,6 +21,15 @@ class TestDraftHomePage:
              patch("scripts.draft.home.build_draft_history_df", return_value=pd.DataFrame()):
             from scripts.draft.home import show_home_page
             show_home_page()
+
+    def test_stale_league_shows_error_and_stops(self, mock_all_utils, mock_streamlit):
+        """When FPL_DRAFT_LEAGUE_ID doesn't resolve (e.g. a prior season's league,
+        before this season's has been created), the page must show an actionable
+        error and stop rather than rendering broken/empty data."""
+        with patch("scripts.draft.home.is_draft_league_reachable", return_value=False):
+            from scripts.draft.home import show_home_page
+            with pytest.raises(mock_streamlit["_StopException"]):
+                show_home_page()
 
 
 class TestDraftFixtureProjectionsPage:

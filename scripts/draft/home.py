@@ -12,7 +12,12 @@ from scripts.common.luck_analysis import (
     render_luck_adjusted_table,
     render_standings_table,
 )
-from scripts.common.utils import get_current_gameweek, get_draft_league_details, is_season_complete
+from scripts.common.utils import (
+    get_current_gameweek,
+    get_draft_league_details,
+    is_season_complete,
+    is_draft_league_reachable,
+)
 from scripts.common.styled_tables import render_styled_table
 
 _logger = get_logger("fpl_app.draft.home")
@@ -632,6 +637,15 @@ def plot_league_position_over_time(history_df):
 
 def show_home_page():
     st.title("My Fantasy Draft Team & League Standings")
+
+    # Stale/unreachable league ID (most common cause: a new season's Draft league
+    # hasn't been created yet, and FPL_DRAFT_LEAGUE_ID still points at last season's)
+    if not is_draft_league_reachable(config.FPL_DRAFT_LEAGUE_ID):
+        show_api_error(
+            "loading your Draft League",
+            hint_key="draft_league_stale",
+            stop=True,
+        )
 
     # Season-concluded banner
     if is_season_complete():
