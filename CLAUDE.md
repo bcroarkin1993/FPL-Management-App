@@ -205,7 +205,9 @@ All scores are **positional percentiles** (0-1) computed against the full FPL pl
 
 ## Environment Variables
 
-Required in `.env`:
+Required in `.env` (or set/locked via the in-app **🆔 League Setup** page under FPL App Home,
+which validates IDs against the live FPL APIs and takes priority over these env vars —
+see `scripts/common/league_config.py` and `scripts/fpl/league_setup.py`):
 - `FPL_DRAFT_LEAGUE_ID` - Your draft league ID (from URL)
 - `FPL_DRAFT_TEAM_ID` - Your team ID (from URL)
 
@@ -292,6 +294,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Notes |
 |------|-------|
+| League Setup Admin Page | In-app "🆔 League Setup" page (FPL App Home) to set/validate/lock Draft and Classic league & team IDs instead of hand-editing `.env`. Draft: enter league ID, look it up, pick your team from a resolved dropdown (no need to know your entry ID). Classic: add/remove multiple leagues, resolve team via entry ID lookup. Locked read-only view with two-step "Unlock to Edit" confirmation. Persisted to gitignored `league_settings.json` (repo is public — not committed, unlike `alert_settings.json`). `config.py`'s 4 ID attributes (`FPL_DRAFT_LEAGUE_ID`, `FPL_DRAFT_TEAM_ID`, `FPL_CLASSIC_TEAM_ID`, `FPL_CLASSIC_LEAGUE_IDS`) converted from eager to lazy PEP 562 resolution (same pattern as `CURRENT_GAMEWEEK`), prioritizing locked JSON settings over `.env`, so saved changes take effect immediately without an app restart. |
 | Gameweek Fixtures GW38 Cap | Auto-constrain FDR Horizon and "How many weeks?" sliders to never exceed GW38; defensive cap added inside `get_fixture_difficulty_grid()`; fetch range hard-capped at `end_gw = min(start_gw + weeks - 1, 38)` |
 | Team Difficulty Visualizations | FDR heatmap, defensive stats, attack vs defense ratings (inspired by fpl.page/team-dds) |
 | Projections Hub | Unified projections page with 5 data source tabs: Rotowire expert rankings, FFP Points Predictor (start %, multi-GW forecasts), Goal/Assist Odds, Clean Sheet Odds, Match Odds (The Odds API). Each tab has data source attribution, filters, and usage tips. |

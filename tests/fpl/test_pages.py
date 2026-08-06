@@ -97,6 +97,40 @@ class TestGameweekReviewPage:
             show_gw_review_page()
 
 
+class TestLeagueSetupPage:
+    def test_smoke_unlocked_defaults(self, mock_all_utils):
+        """Default (unset) settings should render the edit forms without error.
+
+        All st.button() calls are truthy under mock_all_utils, but the default
+        empty text_input("") values cause lookup/save branches to short-circuit
+        via st.error() rather than making real API calls.
+        """
+        with patch("scripts.fpl.league_setup.load_settings", return_value={
+                "version": 1,
+                "draft": {"league_id": None, "team_id": None, "team_name": None, "locked": False},
+                "classic": {"leagues": [], "team_id": None, "team_name": None, "locked": False},
+            }), \
+             patch("scripts.fpl.league_setup.save_settings", return_value=True), \
+             patch("scripts.fpl.league_setup.config.refresh_league_settings"):
+            from scripts.fpl.league_setup import show_league_setup_page
+            show_league_setup_page()
+
+    def test_smoke_locked_view(self, mock_all_utils):
+        """Locked settings should render the read-only summary + unlock button."""
+        with patch("scripts.fpl.league_setup.load_settings", return_value={
+                "version": 1,
+                "draft": {"league_id": 4544, "team_id": 17077, "team_name": "My Team", "locked": True},
+                "classic": {
+                    "leagues": [{"id": 1555691, "name": "FAFO FPL"}],
+                    "team_id": 6720205, "team_name": "My Classic Team", "locked": True,
+                },
+            }), \
+             patch("scripts.fpl.league_setup.save_settings", return_value=True), \
+             patch("scripts.fpl.league_setup.config.refresh_league_settings"):
+            from scripts.fpl.league_setup import show_league_setup_page
+            show_league_setup_page()
+
+
 class TestSettingsPage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.fpl.settings.load_settings", return_value={

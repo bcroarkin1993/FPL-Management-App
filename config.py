@@ -1,6 +1,8 @@
 # config.py — Python 3.9 safe
 # Loads env (if python-dotenv is installed), defines app constants,
-# and lazily resolves CURRENT_GAMEWEEK and ROTOWIRE_URL on first access (cached with TTL).
+# and lazily resolves CURRENT_GAMEWEEK, ROTOWIRE_URL, and the Draft/Classic
+# league & team IDs on first access (cached; league/team IDs additionally
+# resolve from league_settings.json, set via the in-app League Setup page).
 
 import logging
 import os
@@ -13,10 +15,11 @@ try:
 except Exception:
     pass
 
-# ----- Core league/app settings (IDs only; no network here) -----
-FPL_DRAFT_LEAGUE_ID   = int(os.getenv("FPL_DRAFT_LEAGUE_ID", "0"))
-FPL_DRAFT_TEAM_ID     = int(os.getenv("FPL_DRAFT_TEAM_ID", "0"))
-FPL_CLASSIC_TEAM_ID   = int(os.getenv("FPL_CLASSIC_TEAM_ID", "0"))
+# ----- Core league/app settings -----
+# FPL_DRAFT_LEAGUE_ID, FPL_DRAFT_TEAM_ID, FPL_CLASSIC_TEAM_ID, and
+# FPL_CLASSIC_LEAGUE_IDS are resolved lazily below (see __getattr__), so that
+# values saved via the League Setup admin page take effect immediately
+# without restarting the app.
 
 def _parse_draft_league_history(env_value: str) -> list:
     """
@@ -86,7 +89,7 @@ def _parse_classic_leagues(env_value: str) -> list:
 
 # Classic FPL leagues - supports multiple leagues
 # Format: "id:name,id:name,..." or "id,id,..."
-FPL_CLASSIC_LEAGUE_IDS = _parse_classic_leagues(os.getenv("FPL_CLASSIC_LEAGUE_IDS", ""))
+# Resolved lazily below (see __getattr__): FPL_CLASSIC_LEAGUE_IDS
 
 # Past Draft league IDs for cross-season history (Season Wrapped)
 # Format: "YYYY/YY:league_id,YYYY/YY:league_id"
@@ -94,6 +97,7 @@ FPL_DRAFT_LEAGUE_HISTORY = _parse_draft_league_history(os.getenv("FPL_DRAFT_LEAG
 
 # Resolved lazily below:
 # CURRENT_GAMEWEEK
+# FPL_DRAFT_LEAGUE_ID, FPL_DRAFT_TEAM_ID, FPL_CLASSIC_TEAM_ID, FPL_CLASSIC_LEAGUE_IDS
 # ROTOWIRE_URL
 
 FORM_LOOKBACK_WEEKS   = int(os.getenv("FORM_LOOKBACK_WEEKS", "4"))
@@ -169,6 +173,9 @@ TEAM_COLORS = {
 # Lazy attributes for:
 #   - CURRENT_GAMEWEEK (FPL game endpoint; env override supported)
 #   - ROTOWIRE_URL     (env override or discovered from ARTICLES_INDEX using CURRENT_GAMEWEEK)
+#   - FPL_DRAFT_LEAGUE_ID, FPL_DRAFT_TEAM_ID, FPL_CLASSIC_TEAM_ID,
+#     FPL_CLASSIC_LEAGUE_ID (league_settings.json via the League Setup admin
+#     page, when locked; falls back to the .env-based behavior otherwise)
 # =============================================================================
 
 # Cache TTL in seconds (5 minutes for gameweek, allows refresh during gameweek transitions)
@@ -177,6 +184,57 @@ _GW_CACHE_TTL = 300
 # Cache storage: (value, timestamp) tuples for TTL-based expiration
 _GW_CACHE = None        # type: ignore  # (gameweek: int, cached_at: float)
 _RW_URL_CACHE = None    # type: ignore  # (url: str, for_gw: int)
+
+# League/team ID settings loaded once per process; cleared by refresh_league_settings()
+_LEAGUE_SETTINGS_CACHE = None  # type: ignore  # dict from league_config.load_settings()
+
+
+def _get_league_settings():
+    """Load (and cache) the local league_settings.json admin settings, if any."""
+    global _LEAGUE_SETTINGS_CACHE
+    if _LEAGUE_SETTINGS_CACHE is None:
+        from scripts.common.league_config import load_settings
+        _LEAGUE_SETTINGS_CACHE = load_settings()
+    return _LEAGUE_SETTINGS_CACHE
+
+
+def refresh_league_settings():
+    """Clear the cached league/team ID settings so the next access re-reads
+    league_settings.json. Call this after saving via the League Setup page."""
+    global _LEAGUE_SETTINGS_CACHE
+    _LEAGUE_SETTINGS_CACHE = None
+
+
+def _resolve_draft_league_id():
+    settings = _get_league_settings()
+    draft = settings.get("draft", {})
+    if draft.get("locked") and draft.get("league_id"):
+        return int(draft["league_id"])
+    return int(os.getenv("FPL_DRAFT_LEAGUE_ID", "0"))
+
+
+def _resolve_draft_team_id():
+    settings = _get_league_settings()
+    draft = settings.get("draft", {})
+    if draft.get("locked") and draft.get("team_id"):
+        return int(draft["team_id"])
+    return int(os.getenv("FPL_DRAFT_TEAM_ID", "0"))
+
+
+def _resolve_classic_team_id():
+    settings = _get_league_settings()
+    classic = settings.get("classic", {})
+    if classic.get("locked") and classic.get("team_id"):
+        return int(classic["team_id"])
+    return int(os.getenv("FPL_CLASSIC_TEAM_ID", "0"))
+
+
+def _resolve_classic_league_ids():
+    settings = _get_league_settings()
+    classic = settings.get("classic", {})
+    if classic.get("locked") and classic.get("leagues"):
+        return [{"id": int(l["id"]), "name": l.get("name")} for l in classic["leagues"]]
+    return _parse_classic_leagues(os.getenv("FPL_CLASSIC_LEAGUE_IDS", ""))
 
 def _resolve_current_gameweek():
     """Resolve the current gameweek with env override, else FPL Draft API, else fallback to 1."""
@@ -329,5 +387,17 @@ def __getattr__(name):  # PEP 562: module-level getattr
             url = _discover_rotowire_article(current_gw)
             _RW_URL_CACHE = (url, current_gw)
         return _RW_URL_CACHE[0]
+
+    if name == "FPL_DRAFT_LEAGUE_ID":
+        return _resolve_draft_league_id()
+
+    if name == "FPL_DRAFT_TEAM_ID":
+        return _resolve_draft_team_id()
+
+    if name == "FPL_CLASSIC_TEAM_ID":
+        return _resolve_classic_team_id()
+
+    if name == "FPL_CLASSIC_LEAGUE_IDS":
+        return _resolve_classic_league_ids()
 
     raise AttributeError(name)

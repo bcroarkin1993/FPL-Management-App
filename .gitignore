@@ -37,6 +37,9 @@ Thumbs.db
 # Locally-logged pending FPL transfers (user-specific, pre-deadline)
 .fpl_pending_transfers.json
 
+# Locally-set Draft/Classic league & team IDs (user-specific; repo is public)
+league_settings.json
+
 # Scoring test script cache
 .scoring_test_cache/
 

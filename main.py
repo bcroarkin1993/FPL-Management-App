@@ -41,6 +41,7 @@ from scripts.fpl.injuries import show_injuries_page
 from scripts.fpl.price_changes import show_price_changes_page
 from scripts.fpl.gameweek_review import show_gw_review_page
 from scripts.fpl.settings import show_settings_page
+from scripts.fpl.league_setup import show_league_setup_page
 
 # --- Classic pages ---
 from scripts.classic.home import show_classic_home_page
@@ -661,6 +662,7 @@ FPL_PAGES = {
     "💰  Price Changes": show_price_changes_page,
     "🏥  Player Injuries": show_injuries_page,
     "⚙️  Alert Settings": show_settings_page,
+    "🆔  League Setup": show_league_setup_page,
 }
 
 DRAFT_PAGES = {
