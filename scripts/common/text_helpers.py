@@ -36,7 +36,7 @@ TEAM_FULL_TO_SHORT = {
     "Coventry": "COV", "Coventry City": "COV",
     "Crystal Palace": "CRY", "Everton": "EVE", "Fulham": "FUL",
     "Hull": "HUL", "Hull City": "HUL",
-    "Ipswich": "IPS", "Leicester": "LEI", "Liverpool": "LIV",
+    "Ipswich": "IPS", "Ipswich Town": "IPS", "Leicester": "LEI", "Liverpool": "LIV",
     "Man City": "MCI", "Man Utd": "MUN", "Newcastle": "NEW",
     "Nott'm Forest": "NFO", "Southampton": "SOU", "Spurs": "TOT",
     "Sunderland": "SUN",
