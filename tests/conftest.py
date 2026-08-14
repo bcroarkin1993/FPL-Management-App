@@ -345,6 +345,7 @@ def mock_all_utils(mock_streamlit):
         # Classic API
         "get_classic_bootstrap_static": {"elements": [], "teams": [], "events": []},
         "get_classic_league_standings": None,
+        "get_classic_or_h2h_league_standings": None,
         "get_classic_team_history": None,
         "get_classic_team_picks": None,
         "get_classic_transfers": [],

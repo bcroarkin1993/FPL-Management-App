@@ -18,6 +18,19 @@ class TestLoadSettings:
         assert settings["version"] == DEFAULT_SETTINGS["version"]
         assert "draft" in settings
         assert "classic" in settings
+        assert settings["draft"]["commish_seasons"] == {}
+
+    def test_legacy_file_without_commish_seasons_key_gets_default(self, tmp_path):
+        """A settings file saved before Commish Mode existed should still
+        deep-merge in an empty commish_seasons dict, not KeyError."""
+        config_path = tmp_path / "league_settings.json"
+        config_path.write_text(json.dumps({
+            "version": 1,
+            "draft": {"league_id": 4544, "team_id": 17077, "team_name": "My Team", "locked": True},
+        }))
+        with patch("scripts.common.league_config._find_config_path", return_value=config_path):
+            settings = load_settings()
+        assert settings["draft"]["commish_seasons"] == {}
 
     def test_valid_file(self, tmp_path):
         """When config file exists with partial data, merge with defaults."""
@@ -75,3 +88,31 @@ class TestSaveSettings:
             assert len(loaded["classic"]["leagues"]) == 2
             assert loaded["classic"]["leagues"][0]["name"] == "FAFO FPL"
             assert loaded["classic"]["locked"] is True
+
+    def test_commish_seasons_round_trip(self, tmp_path):
+        """Commish Mode dues/payout data should persist unchanged through save/load."""
+        config_path = tmp_path / "league_settings.json"
+        with patch("scripts.common.league_config._find_config_path", return_value=config_path):
+            settings = dict(DEFAULT_SETTINGS)
+            settings["draft"] = {
+                "league_id": 11347, "team_id": 56086, "team_name": "Stoned Squirrels", "locked": True,
+                "commish_seasons": {
+                    "2026/27": {
+                        "buy_in": 75,
+                        "payout_pct": {"1": 60, "2": 30, "3": 10},
+                        "locked": True,
+                        "dues": {
+                            "Stoned Squirrels": {"amount_paid": 75, "notes": ""},
+                            "Top Drawer Balls": {"amount_paid": 0, "notes": "will pay at draft"},
+                        },
+                    },
+                },
+            }
+            save_settings(settings)
+
+            loaded = load_settings()
+            season = loaded["draft"]["commish_seasons"]["2026/27"]
+            assert season["buy_in"] == 75
+            assert season["payout_pct"] == {"1": 60, "2": 30, "3": 10}
+            assert season["dues"]["Stoned Squirrels"]["amount_paid"] == 75
+            assert season["dues"]["Top Drawer Balls"]["notes"] == "will pay at draft"

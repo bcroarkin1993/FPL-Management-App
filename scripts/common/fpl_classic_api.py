@@ -74,11 +74,12 @@ def get_classic_league_standings(league_id: int, page: int = 1) -> Optional[Dict
         return resp.json()
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
-            _logger.warning(
-                "Classic league %s not found (404) — check FPL_CLASSIC_LEAGUE_IDS config. "
-                "This may be an H2H league (fallback will be tried) or an invalid ID.",
-                league_id,
-            )
+            # Expected/common outcome — this may just be an H2H-scored league
+            # (get_classic_or_h2h_league_standings tries that next) or a
+            # league ID that's stale (e.g. left over from a previous season,
+            # since neither Draft nor Classic league IDs are guaranteed to
+            # resolve indefinitely). Not warning-worthy on its own.
+            _logger.debug("Classic league %s not found (404)", league_id)
         else:
             _logger.warning(
                 "Failed to fetch classic league standings for league %s: %s", league_id, e
@@ -114,9 +115,46 @@ def get_h2h_league_standings(league_id: int, page: int = 1) -> Optional[Dict[str
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
         return resp.json()
-    except Exception:
-        _logger.warning("Failed to fetch H2H league standings for league %s", league_id, exc_info=True)
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            # Expected/common outcome when this is a fallback attempt after
+            # Classic already 404'd — see get_classic_or_h2h_league_standings.
+            _logger.debug("H2H league %s not found (404)", league_id)
+        else:
+            _logger.warning("Failed to fetch H2H league standings for league %s: %s", league_id, e)
         return None
+    except Exception as e:
+        _logger.warning("Failed to fetch H2H league standings for league %s: %s", league_id, e)
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def get_classic_or_h2h_league_standings(league_id: int, page: int = 1) -> Optional[Dict[str, Any]]:
+    """
+    Fetch league standings, trying Classic scoring first then H2H — FPL uses
+    two different league types/endpoints, and a valid league ID 404s on
+    whichever one doesn't match its actual type.
+
+    Centralizes the fallback (used by the Home page league snapshots and
+    League Setup's Classic lookup) so a fully-unreachable ID produces one
+    clean log line here instead of the per-endpoint debug noise from each
+    attempt underneath.
+    """
+    if not league_id:
+        return None
+    data = get_classic_league_standings(league_id, page=page)
+    if data:
+        return data
+    data = get_h2h_league_standings(league_id, page=page)
+    if data:
+        return data
+    _logger.info(
+        "League %s not found on Classic or H2H endpoints — likely a stale ID "
+        "(e.g. left over from a previous season) or a typo. Check/update it "
+        "on the League Setup page.",
+        league_id,
+    )
+    return None
 
 
 # =============================================================================

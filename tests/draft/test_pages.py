@@ -134,3 +134,53 @@ class TestDraftHelperPage:
         with patch("scripts.draft.draft_helper.get_rotowire_season_rankings", return_value=pd.DataFrame()):
             from scripts.draft.draft_helper import show_draft_helper_page
             show_draft_helper_page()
+
+
+class TestCommishModePage:
+    def test_smoke_no_season_configured(self, mock_all_utils):
+        """First visit, no commish_seasons saved yet — should render the setup form."""
+        settings = {
+            "draft": {"league_id": 11347, "team_id": 56086, "team_name": "Stoned Squirrels",
+                      "locked": True, "commish_seasons": {}},
+        }
+        with patch("scripts.draft.commish_mode.load_settings", return_value=settings), \
+             patch("scripts.draft.commish_mode.save_settings") as mock_save, \
+             patch("scripts.draft.commish_mode.get_league_entries", return_value={1: "Stoned Squirrels", 2: "Top Drawer Balls"}):
+            from scripts.draft.commish_mode import show_commish_mode_page
+            show_commish_mode_page()
+            # mock_streamlit's st.button is an unconditionally-truthy MagicMock, so the
+            # "Save & Lock" branch does fire during this smoke test — assert it hit the
+            # mock, not the real league_settings.json (save_settings must always be
+            # patched in this page's tests, never left real).
+            assert mock_save.called
+
+    def test_smoke_season_locked(self, mock_all_utils):
+        """A locked season already exists — should render the dues/payout dashboard."""
+        settings = {
+            "draft": {
+                "league_id": 11347, "team_id": 56086, "team_name": "Stoned Squirrels", "locked": True,
+                "commish_seasons": {
+                    "2026/27": {
+                        "buy_in": 75, "payout_pct": {"1": 60, "2": 30, "3": 10}, "locked": True,
+                        "dues": {
+                            "Stoned Squirrels": {"amount_paid": 75, "notes": ""},
+                            "Top Drawer Balls": {"amount_paid": 0, "notes": ""},
+                        },
+                    },
+                },
+            },
+        }
+        with patch("scripts.draft.commish_mode.load_settings", return_value=settings), \
+             patch("scripts.draft.commish_mode.save_settings") as mock_save, \
+             patch("scripts.draft.commish_mode.get_league_entries", return_value={1: "Stoned Squirrels", 2: "Top Drawer Balls"}):
+            from scripts.draft.commish_mode import show_commish_mode_page
+            show_commish_mode_page()
+            # Same reasoning as above — the dues st.form_submit_button mock is also
+            # unconditionally truthy, so "Save Dues" fires too; must hit the mock only.
+            assert mock_save.called
+
+    def test_smoke_no_draft_league_configured(self, mock_all_utils):
+        """No Draft league set up at all — should show a warning and return, not crash."""
+        with patch("config.FPL_DRAFT_LEAGUE_ID", 0):
+            from scripts.draft.commish_mode import show_commish_mode_page
+            show_commish_mode_page()

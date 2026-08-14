@@ -10,7 +10,7 @@ import streamlit as st
 import config
 from scripts.common.league_config import load_settings, save_settings, DEFAULT_SETTINGS
 from scripts.common.fpl_draft_api import is_draft_league_reachable, get_league_entries
-from scripts.common.fpl_classic_api import get_classic_league_standings, get_entry_details
+from scripts.common.fpl_classic_api import get_classic_or_h2h_league_standings, get_entry_details
 
 
 def show_league_setup_page():
@@ -218,9 +218,13 @@ def _show_classic_edit_form(classic: dict):
         else:
             league_id = int(new_league_id_input)
             with st.spinner("Looking up league..."):
-                result = get_classic_league_standings(league_id)
+                result = get_classic_or_h2h_league_standings(league_id)
             if not result or not result.get("league"):
-                st.error("Could not resolve that Classic league ID. Please double-check it.")
+                st.error(
+                    "Could not resolve that Classic league ID on either the Classic or H2H "
+                    "endpoint. Double-check it, or note that league IDs aren't guaranteed to "
+                    "carry over between seasons."
+                )
             else:
                 name = result["league"].get("name", "Unnamed")
                 st.session_state["classic_lookup_result"] = {"id": league_id, "name": name}

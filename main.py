@@ -10,10 +10,9 @@ import config
 from scripts.common.text_helpers import TZ_ET
 from scripts.common.utils import (
     get_classic_bootstrap_static,
-    get_classic_league_standings,
+    get_classic_or_h2h_league_standings,
     get_draft_league_details,
     get_fpl_player_mapping,
-    get_h2h_league_standings,
     get_league_entries,
     get_league_player_ownership,
     get_rotowire_player_projections,
@@ -31,6 +30,7 @@ from scripts.draft.draft_helper import show_draft_helper_page
 from scripts.draft.league_analysis import show_draft_league_analysis_page
 from scripts.draft.trade_analyzer import show_trade_analyzer_page
 from scripts.draft.league_wrapped import show_wrapped_page
+from scripts.draft.commish_mode import show_commish_mode_page
 
 # --- FPL cross-format pages ---
 from scripts.fpl.fixtures import show_club_fixtures_section
@@ -188,6 +188,11 @@ def _dashboard_css():
     .standings-name { flex: 1; font-weight: 600; color: #e0e0e0; font-size: 0.85rem; }
     .standings-record { color: #9ca3af; font-size: 0.75rem; margin-right: 8px; }
     .standings-pts { font-weight: 800; color: #00ff87; font-size: 0.88rem; background: rgba(0,255,135,0.15); padding: 2px 8px; border-radius: 10px; }
+    .league-category-header { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #9ca3af; margin: 12px 0 6px; }
+    .league-category-header:first-child { margin-top: 0; }
+    .league-card-info { display: flex; justify-content: space-between; align-items: center; }
+    .league-card-members { color: #e0e0e0; font-size: 0.85rem; font-weight: 600; }
+    .league-card-subtitle { color: #9ca3af; font-size: 0.78rem; font-style: italic; }
     /* In-form players */
     .performer-row { display: flex; align-items: center; padding: 5px 10px; border-radius: 8px; margin-bottom: 4px; background: #16213e; border: 1px solid #333; }
     .performer-rank { font-weight: 800; color: #00ff87; min-width: 24px; font-size: 0.9rem; }
@@ -382,45 +387,68 @@ def _render_fixtures(gw):
 
 
 def _render_league_snapshots():
-    """Show abbreviated standings for all configured leagues."""
+    """Show a directory of all configured leagues, grouped by type (Draft,
+    Classic, Head-to-Head). Each league shows full standings when available,
+    or a basic name + member-count card before the season has standings to show.
+    """
     st.markdown(
         '<div class="section-header"><span class="section-icon">🏆</span> My Leagues</div>',
         unsafe_allow_html=True,
     )
 
-    has_leagues = False
-    leagues_html = ""
+    any_configured = False
+    draft_html = None
+    classic_cards = []  # [(scoring_type, html), ...]
 
     # Draft league
     draft_league_id = getattr(config, "FPL_DRAFT_LEAGUE_ID", None)
     if draft_league_id:
+        any_configured = True
         try:
-            html = _build_draft_snapshot(draft_league_id)
-            if html:
-                has_leagues = True
-                leagues_html += html
+            draft_html = _build_draft_snapshot(draft_league_id)
         except Exception:
             _logger.warning("Could not load draft league snapshot", exc_info=True)
 
     # Classic / H2H leagues
     classic_leagues = getattr(config, "FPL_CLASSIC_LEAGUE_IDS", [])
-    if isinstance(classic_leagues, list):
+    if isinstance(classic_leagues, list) and classic_leagues:
+        any_configured = True
         for league_info in classic_leagues:
             try:
                 league_id = league_info.get("id") if isinstance(league_info, dict) else int(league_info)
                 league_name = league_info.get("name") if isinstance(league_info, dict) else None
                 if league_id:
-                    html = _build_classic_snapshot(league_id, league_name)
-                    if html:
-                        has_leagues = True
-                        leagues_html += html
+                    result = _build_classic_snapshot(league_id, league_name)
+                    if result:
+                        classic_cards.append(result)
             except Exception:
                 _logger.warning("Could not load classic league snapshot", exc_info=True)
 
-    if has_leagues:
-        st.markdown(leagues_html, unsafe_allow_html=True)
-    else:
-        st.caption("No leagues configured. Set league IDs in .env")
+    classic_only_html = "".join(html for scoring, html in classic_cards if scoring != "h")
+    h2h_only_html = "".join(html for scoring, html in classic_cards if scoring == "h")
+
+    if not draft_html and not classic_only_html and not h2h_only_html:
+        if any_configured:
+            # A league IS configured — it just couldn't be resolved at all right
+            # now (e.g. a transient API issue), not that setup is missing.
+            st.caption("Your league(s) are configured, but couldn't be loaded right now. Try refreshing.")
+        else:
+            st.caption("No leagues configured yet.")
+            if st.button("🆔 Go to League Setup", key="home_league_setup_link"):
+                st.session_state["_pending_nav_section"] = "⚽  FPL App Home"
+                st.session_state["_pending_nav_page"] = "🆔  League Setup"
+                st.rerun()
+        return
+
+    if draft_html:
+        st.markdown('<div class="league-category-header">📋 Draft</div>', unsafe_allow_html=True)
+        st.markdown(draft_html, unsafe_allow_html=True)
+    if classic_only_html:
+        st.markdown('<div class="league-category-header">🏆 Classic</div>', unsafe_allow_html=True)
+        st.markdown(classic_only_html, unsafe_allow_html=True)
+    if h2h_only_html:
+        st.markdown('<div class="league-category-header">⚔️ Head-to-Head</div>', unsafe_allow_html=True)
+        st.markdown(h2h_only_html, unsafe_allow_html=True)
 
 
 def _build_league_card_html(league_name, all_rows, icon):
@@ -478,17 +506,91 @@ def _build_league_card_html(league_name, all_rows, icon):
     )
 
 
+def _format_draft_countdown(draft_dt_str, tz_name):
+    """Format a Draft league's draft_dt (ISO UTC string, from the live Draft
+    API — set by whoever is commissioner on draft.premierleague.com, visible
+    to every league member regardless of role) as a local date/time plus a
+    countdown, e.g. 'Tue Aug 18, 7:30 PM EDT — in 4d 3h'. Returns None if
+    draft_dt_str can't be parsed."""
+    from datetime import datetime, timezone
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        ZoneInfo = None
+
+    if not draft_dt_str:
+        return None
+    try:
+        draft_dt_utc = datetime.fromisoformat(draft_dt_str.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+    tz = None
+    if ZoneInfo is not None:
+        try:
+            tz = ZoneInfo(tz_name or "America/New_York")
+        except Exception:
+            tz = None
+    local_dt = draft_dt_utc.astimezone(tz) if tz else draft_dt_utc
+
+    # %-d/%-I (no leading zero) aren't portable to Windows' strftime, so format
+    # normally and strip a leading zero from the day/hour by hand instead.
+    date_str = local_dt.strftime("%a %b %d, %I:%M %p %Z")
+    date_str = date_str.replace(" 0", " ")
+
+    delta = draft_dt_utc - datetime.now(timezone.utc)
+    seconds = delta.total_seconds()
+    if seconds <= 0:
+        return f"Draft: {date_str}"
+
+    days = int(seconds // 86400)
+    hours = int((seconds % 86400) // 3600)
+    minutes = int((seconds % 3600) // 60)
+    if days > 0:
+        countdown = f"in {days}d {hours}h"
+    elif hours > 0:
+        countdown = f"in {hours}h {minutes}m"
+    else:
+        countdown = f"in {minutes}m"
+    return f"Draft: {date_str} — {countdown}"
+
+
+def _build_league_info_card(icon, league_name, member_count, subtitle):
+    """Fallback card for a league with no standings/results yet (e.g.
+    preseason, before any gameweek has been played) — shows the league
+    name and member count instead of a ranked table."""
+    return (
+        f'<div class="league-card">'
+        f'<div class="league-card-header">{icon} {league_name}</div>'
+        f'<div class="league-card-info">'
+        f'<span class="league-card-members">👥 {member_count} teams</span>'
+        f'<span class="league-card-subtitle">{subtitle}</span>'
+        f'</div>'
+        f'</div>'
+    )
+
+
 def _build_draft_snapshot(league_id):
-    """Build HTML for a draft league snapshot card."""
+    """Build HTML for a draft league snapshot card. Falls back to a basic
+    info card (name + member count) when standings aren't populated yet."""
     details = get_draft_league_details(league_id)
     if not details:
         return None
 
-    league_name = details.get("league", {}).get("name", "Draft League")
-    entries_map = {e["id"]: e for e in details.get("league_entries", [])}
+    league = details.get("league", {})
+    league_name = league.get("name", "Draft League")
+    entries_list = details.get("league_entries", [])
+    entries_map = {e["id"]: e for e in entries_list}
     standings = details.get("standings", [])
     if not standings:
-        return None
+        if not entries_list:
+            return None
+        subtitle = "Season not started yet"
+        if league.get("draft_status") == "pre":
+            countdown = _format_draft_countdown(league.get("draft_dt"), league.get("draft_tz_show"))
+            if countdown:
+                subtitle = countdown
+        return _build_league_info_card("📋", league_name, len(entries_list), subtitle)
 
     my_team_id = getattr(config, "FPL_DRAFT_TEAM_ID", None)
     my_league_entry_id = None
@@ -513,20 +615,27 @@ def _build_draft_snapshot(league_id):
 
 
 def _build_classic_snapshot(league_id, league_name_override=None):
-    """Build HTML for a classic or H2H league snapshot card.
-
-    Tries classic standings first, falls back to H2H standings.
+    """Build (scoring_type, html) for a classic or H2H league snapshot card,
+    where scoring_type is 'c' (Classic) or 'h' (H2H) — used to group cards by
+    category in _render_league_snapshots(). Tries classic standings first,
+    falls back to H2H standings. Falls back to a basic info card (name +
+    member count, from new_entries — populated before standings.results is)
+    when standings aren't computed yet (e.g. preseason).
     """
-    data = get_classic_league_standings(league_id)
-    if not data:
-        data = get_h2h_league_standings(league_id)
+    data = get_classic_or_h2h_league_standings(league_id)
     if not data:
         return None
 
     league_name = league_name_override or data.get("league", {}).get("name", "League")
+    league_scoring = data.get("league", {}).get("scoring", "c")
+    icon = "⚔️" if league_scoring == "h" else "🏆"
+
     results = data.get("standings", {}).get("results", [])
     if not results:
-        return None
+        member_count = len(data.get("new_entries", {}).get("results", []))
+        if not member_count:
+            return None
+        return league_scoring, _build_league_info_card(icon, league_name, member_count, "Season not started yet")
 
     my_team_id = getattr(config, "FPL_CLASSIC_TEAM_ID", None)
     all_rows = []
@@ -537,9 +646,7 @@ def _build_classic_snapshot(league_id, league_name_override=None):
         is_me = (r.get("entry") == my_team_id)
         all_rows.append((rank, team_name, f"{pts:,}", None, is_me))
 
-    league_scoring = data.get("league", {}).get("scoring", "c")
-    icon = "⚔️" if league_scoring == "h" else "🏆"
-    return _build_league_card_html(league_name, all_rows, icon)
+    return league_scoring, _build_league_card_html(league_name, all_rows, icon)
 
 
 def _render_top_performers():
@@ -674,6 +781,7 @@ DRAFT_PAGES = {
     "🏆  League Analysis": show_draft_league_analysis_page,
     "📝  Draft Helper": show_draft_helper_page,
     "🎬  Season Wrapped": show_wrapped_page,
+    "💰  Commish Mode": show_commish_mode_page,
 }
 
 CLASSIC_PAGES = {
@@ -742,11 +850,26 @@ def main():
 
     st.sidebar.divider()
 
+    # A pending nav request (e.g. a "Go to League Setup" quick-link button
+    # elsewhere) is applied here, before the radios are instantiated. This
+    # must pre-seed the widgets' own session_state keys (legal before
+    # creation) rather than trying to override them afterward — Streamlit
+    # forbids mutating a widget's session_state once it's been instantiated
+    # in the same run, and passing index= alone wouldn't override a key's
+    # already-persisted value from a prior run anyway.
+    pending_section = st.session_state.pop("_pending_nav_section", None)
+    pending_page = st.session_state.pop("_pending_nav_page", None)
+    if pending_section and pending_section in SECTIONS:
+        st.session_state["nav_section"] = pending_section
+    if pending_page:
+        st.session_state["nav_page"] = pending_page
+
     # Section selector
     section = st.sidebar.radio(
         "Section",
         list(SECTIONS.keys()),
         label_visibility="collapsed",
+        key="nav_section",
     )
 
     st.sidebar.divider()
@@ -757,6 +880,7 @@ def main():
         "Page",
         list(pages.keys()),
         label_visibility="collapsed",
+        key="nav_page",
     )
 
     # Route to the selected page

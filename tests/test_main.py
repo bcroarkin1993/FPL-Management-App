@@ -39,7 +39,7 @@ def _home_page_patches():
                  "matches_drawn": 2, "matches_lost": 1, "total": 60},
             ],
         }),
-        patch("main.get_classic_league_standings", return_value={
+        patch("main.get_classic_or_h2h_league_standings", return_value={
             "league": {"name": "Test Classic League"},
             "standings": {
                 "results": [
@@ -113,8 +113,7 @@ class TestMain:
         patches = [
             patch("main.requests.get", side_effect=Exception("Network error")),
             patch("main.get_draft_league_details", return_value=None),
-            patch("main.get_classic_league_standings", return_value=None),
-            patch("main.get_h2h_league_standings", return_value=None),
+            patch("main.get_classic_or_h2h_league_standings", return_value=None),
         ]
         for p in patches:
             p.start()

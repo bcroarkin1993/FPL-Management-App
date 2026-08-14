@@ -20,6 +20,12 @@ DEFAULT_SETTINGS = {
         "team_id": None,
         "team_name": None,
         "locked": False,
+        # Commissioner dues/payout tracking, keyed by season label ("YYYY/YY")
+        # so it survives Draft league rollover (league IDs get reissued each
+        # season — see Commish Mode / League Setup):
+        # {"2026/27": {"buy_in": 75, "payout_pct": {"1": 60, "2": 30, "3": 10},
+        #              "locked": True, "dues": {"Team Name": {"amount_paid": 75, "notes": ""}}}}
+        "commish_seasons": {},
     },
     "classic": {
         "leagues": [],  # [{"id": int, "name": str}, ...]
