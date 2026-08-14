@@ -3,6 +3,7 @@
 import json
 from unittest.mock import patch
 
+import config
 from scripts.common.league_config import (
     load_settings,
     save_settings,
@@ -18,6 +19,19 @@ class TestLoadSettings:
         assert settings["version"] == DEFAULT_SETTINGS["version"]
         assert "draft" in settings
         assert "classic" in settings
+        assert settings["draft"]["history"] == []
+
+    def test_legacy_file_without_history_key_gets_default(self, tmp_path):
+        """A settings file saved before the history feature existed should
+        still deep-merge in an empty history list, not KeyError."""
+        config_path = tmp_path / "league_settings.json"
+        config_path.write_text(json.dumps({
+            "version": 1,
+            "draft": {"league_id": 4544, "team_id": 17077, "team_name": "My Team", "locked": True},
+        }))
+        with patch("scripts.common.league_config._find_config_path", return_value=config_path):
+            settings = load_settings()
+        assert settings["draft"]["history"] == []
 
     def test_valid_file(self, tmp_path):
         """When config file exists with partial data, merge with defaults."""
@@ -75,3 +89,123 @@ class TestSaveSettings:
             assert len(loaded["classic"]["leagues"]) == 2
             assert loaded["classic"]["leagues"][0]["name"] == "FAFO FPL"
             assert loaded["classic"]["locked"] is True
+
+    def test_draft_history_round_trip(self, tmp_path):
+        """Draft history list should persist unchanged through save/load."""
+        config_path = tmp_path / "league_settings.json"
+        with patch("scripts.common.league_config._find_config_path", return_value=config_path):
+            settings = dict(DEFAULT_SETTINGS)
+            settings["draft"] = {
+                "league_id": 4544, "team_id": 17077, "team_name": "Current Team", "locked": True,
+                "history": [
+                    {"season": "2024/25", "league_id": 111, "team_id": 1, "team_name": "Old Team"},
+                    {"season": "2023/24", "league_id": 222, "team_id": 2, "team_name": "Older Team"},
+                ],
+            }
+            save_settings(settings)
+
+            loaded = load_settings()
+            assert len(loaded["draft"]["history"]) == 2
+            assert loaded["draft"]["history"][0]["season"] == "2024/25"
+
+
+class TestResolveDraftLeagueHistory:
+    """config._resolve_draft_league_history() merge logic (config.py, not league_config.py)."""
+
+    def setup_method(self):
+        config.refresh_league_settings()
+
+    def teardown_method(self):
+        config.refresh_league_settings()
+
+    def test_env_only(self, monkeypatch):
+        monkeypatch.setenv("FPL_DRAFT_LEAGUE_HISTORY", "2023/24:111,2024/25:222")
+        with patch("config._get_league_settings", return_value={"draft": {"history": []}}):
+            assert config.FPL_DRAFT_LEAGUE_HISTORY == [("2023/24", 111), ("2024/25", 222)]
+
+    def test_json_only(self, monkeypatch):
+        monkeypatch.delenv("FPL_DRAFT_LEAGUE_HISTORY", raising=False)
+        settings = {"draft": {"history": [{"season": "2025/26", "league_id": 11347}]}}
+        with patch("config._get_league_settings", return_value=settings):
+            assert config.FPL_DRAFT_LEAGUE_HISTORY == [("2025/26", 11347)]
+
+    def test_json_wins_on_season_collision(self, monkeypatch):
+        monkeypatch.setenv("FPL_DRAFT_LEAGUE_HISTORY", "2024/25:999")
+        settings = {"draft": {"history": [{"season": "2024/25", "league_id": 222}]}}
+        with patch("config._get_league_settings", return_value=settings):
+            assert config.FPL_DRAFT_LEAGUE_HISTORY == [("2024/25", 222)]
+
+    def test_env_fills_seasons_missing_from_json(self, monkeypatch):
+        monkeypatch.setenv("FPL_DRAFT_LEAGUE_HISTORY", "2023/24:111")
+        settings = {"draft": {"history": [{"season": "2024/25", "league_id": 222}]}}
+        with patch("config._get_league_settings", return_value=settings):
+            assert config.FPL_DRAFT_LEAGUE_HISTORY == [("2023/24", 111), ("2024/25", 222)]
+
+    def test_nothing_configured(self, monkeypatch):
+        monkeypatch.delenv("FPL_DRAFT_LEAGUE_HISTORY", raising=False)
+        with patch("config._get_league_settings", return_value={"draft": {"history": []}}):
+            assert config.FPL_DRAFT_LEAGUE_HISTORY == []
+
+    def test_manual_only_entry_excluded_from_tuple_form(self, monkeypatch):
+        """A manual-stats entry with no league_id shouldn't appear in the
+        lightweight tuple view (it has no league_id to expose)."""
+        monkeypatch.delenv("FPL_DRAFT_LEAGUE_HISTORY", raising=False)
+        settings = {"draft": {"history": [
+            {"season": "2025/26", "league_id": None, "team_name": "Stoned Squirrels",
+             "manual_stats": {"rank": 3, "total_points": 1500, "wins": 10, "draws": 2, "losses": 6}},
+        ]}}
+        with patch("config._get_league_settings", return_value=settings):
+            assert config.FPL_DRAFT_LEAGUE_HISTORY == []
+
+
+class TestGetDraftLeagueHistoryRecords:
+    """config.get_draft_league_history_records() — full records, preserves manual_stats."""
+
+    def setup_method(self):
+        config.refresh_league_settings()
+
+    def teardown_method(self):
+        config.refresh_league_settings()
+
+    def test_manual_stats_preserved(self, monkeypatch):
+        monkeypatch.delenv("FPL_DRAFT_LEAGUE_HISTORY", raising=False)
+        manual_stats = {"rank": 3, "total_points": 1500, "wins": 10, "draws": 2, "losses": 6}
+        settings = {"draft": {"history": [
+            {"season": "2025/26", "league_id": None, "team_id": None,
+             "team_name": "Stoned Squirrels", "manual_stats": manual_stats},
+        ]}}
+        with patch("config._get_league_settings", return_value=settings):
+            records = config.get_draft_league_history_records()
+        assert len(records) == 1
+        assert records[0]["manual_stats"] == manual_stats
+        assert records[0]["league_id"] is None
+
+    def test_env_derived_record_has_no_manual_stats(self, monkeypatch):
+        monkeypatch.setenv("FPL_DRAFT_LEAGUE_HISTORY", "2023/24:111")
+        with patch("config._get_league_settings", return_value={"draft": {"history": []}}):
+            records = config.get_draft_league_history_records()
+        assert records == [{
+            "season": "2023/24", "league_id": 111, "team_id": None,
+            "team_name": None, "manual_stats": None,
+        }]
+
+    def test_json_wins_on_season_collision(self, monkeypatch):
+        monkeypatch.setenv("FPL_DRAFT_LEAGUE_HISTORY", "2024/25:999")
+        settings = {"draft": {"history": [
+            {"season": "2024/25", "league_id": None, "team_name": "My Team",
+             "manual_stats": {"rank": 1, "total_points": 2000, "wins": 15, "draws": 0, "losses": 3}},
+        ]}}
+        with patch("config._get_league_settings", return_value=settings):
+            records = config.get_draft_league_history_records()
+        assert len(records) == 1
+        assert records[0]["manual_stats"]["rank"] == 1
+
+    def test_sorted_by_season(self, monkeypatch):
+        monkeypatch.delenv("FPL_DRAFT_LEAGUE_HISTORY", raising=False)
+        settings = {"draft": {"history": [
+            {"season": "2024/25", "league_id": 222, "manual_stats": None},
+            {"season": "2022/23", "league_id": 111, "manual_stats": None},
+        ]}}
+        with patch("config._get_league_settings", return_value=settings):
+            records = config.get_draft_league_history_records()
+        assert [r["season"] for r in records] == ["2022/23", "2024/25"]

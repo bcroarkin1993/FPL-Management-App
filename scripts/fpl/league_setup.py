@@ -5,12 +5,17 @@
 # the live FPL APIs (resolving league/team names) before being saved to
 # league_settings.json (gitignored, local-only — see scripts/common/league_config.py).
 
+import os
+import re
+
 import streamlit as st
 
 import config
 from scripts.common.league_config import load_settings, save_settings, DEFAULT_SETTINGS
 from scripts.common.fpl_draft_api import is_draft_league_reachable, get_league_entries
 from scripts.common.fpl_classic_api import get_classic_league_standings, get_entry_details
+
+_SEASON_RE = re.compile(r"^\d{4}/\d{2}$")
 
 
 def show_league_setup_page():
@@ -25,6 +30,8 @@ def show_league_setup_page():
 
     st.divider()
     _show_draft_section(settings)
+    st.divider()
+    _show_draft_history_section(settings)
     st.divider()
     _show_classic_section(settings)
 
@@ -139,6 +146,224 @@ def _show_draft_edit_form(draft: dict):
                 st.rerun()
             else:
                 st.error("Failed to save settings.")
+
+
+# =================================================================
+# Draft — cross-season history
+# =================================================================
+
+def _lookup_draft_team_name(league_id: int, preferred_name: str = None):
+    """Best-effort team resolution for a historical league ID.
+
+    Returns (team_id, team_name, entries_dict). entries_dict is {} if the
+    league couldn't be reached live (old leagues can eventually stop
+    resolving via the Draft API) — callers should degrade to manual entry.
+    """
+    try:
+        if not is_draft_league_reachable(league_id):
+            return None, None, {}
+        entries = get_league_entries(league_id) or {}
+    except Exception:
+        return None, None, {}
+    if preferred_name:
+        for eid, name in entries.items():
+            if name.strip().lower() == preferred_name.strip().lower():
+                return int(eid), name, entries
+    return None, None, entries
+
+
+def _upsert_history_entry(season: str, league_id, team_id, team_name: str, manual_stats: dict = None):
+    full_settings = load_settings()
+    history = full_settings["draft"].setdefault("history", [])
+    idx = next((i for i, h in enumerate(history) if h.get("season") == season), None)
+    entry = {
+        "season": season, "league_id": league_id, "team_id": team_id, "team_name": team_name,
+        "manual_stats": manual_stats,
+    }
+    if idx is not None:
+        history[idx] = entry
+    else:
+        history.append(entry)
+    full_settings["draft"]["history"] = sorted(history, key=lambda h: h["season"])
+    save_settings(full_settings)
+    config.refresh_league_settings()
+
+
+def _remove_history_entry(season: str):
+    full_settings = load_settings()
+    history = full_settings["draft"].setdefault("history", [])
+    full_settings["draft"]["history"] = [h for h in history if h.get("season") != season]
+    save_settings(full_settings)
+    config.refresh_league_settings()
+
+
+def _clear_history_lookup_state():
+    for key in (
+        "history_lookup_season", "history_lookup_league_id", "history_lookup_entries",
+        "history_manual_mode", "history_new_season", "history_new_league_id",
+        "history_overwrite_pending",
+        "history_manual_stats_team", "history_manual_stats_rank", "history_manual_stats_points",
+        "history_manual_stats_wins", "history_manual_stats_draws", "history_manual_stats_losses",
+        "history_manual_overwrite_pending",
+    ):
+        st.session_state.pop(key, None)
+
+
+def _show_draft_history_section(settings: dict):
+    st.subheader("📜 Draft League History")
+    st.caption(
+        "Draft leagues are recreated every season, so old league IDs are easy to lose once "
+        "you roll over to a new one. Save past seasons here so Season Wrapped's cross-season "
+        "history (\"Looking Back\") and your career-arc chart keep working."
+    )
+
+    draft = settings.get("draft", DEFAULT_SETTINGS["draft"])
+    json_history = list(draft.get("history", []))
+    json_seasons = {h["season"] for h in json_history}
+
+    env_history = config._parse_draft_league_history(os.getenv("FPL_DRAFT_LEAGUE_HISTORY", ""))
+    env_only = [
+        {"season": s, "league_id": lid, "team_id": None, "team_name": None, "_env_only": True}
+        for s, lid in env_history if s not in json_seasons
+    ]
+    merged = sorted(json_history + env_only, key=lambda h: h["season"])
+
+    if not merged:
+        st.caption("No past seasons saved yet.")
+    else:
+        for entry in merged:
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                team_label = entry.get("team_name") or "Unresolved team"
+                manual_stats = entry.get("manual_stats")
+                if manual_stats:
+                    line = (
+                        f"**{entry['season']}** — {team_label} — "
+                        f"Rank #{manual_stats.get('rank', '?')}, {manual_stats.get('total_points', 0)} pts "
+                        f"({manual_stats.get('wins', 0)}-{manual_stats.get('draws', 0)}-{manual_stats.get('losses', 0)}) "
+                        f"— *manually entered*"
+                    )
+                else:
+                    line = f"**{entry['season']}** — {team_label} (League ID {entry['league_id']})"
+                    if entry.get("_env_only"):
+                        line += "  \n*From `.env` — not yet saved here*"
+                st.markdown(line)
+            with col2:
+                if entry.get("_env_only"):
+                    if st.button("Save here", key=f"history_save_{entry['season']}"):
+                        with st.spinner("Resolving team..."):
+                            team_id, team_name, _ = _lookup_draft_team_name(
+                                entry["league_id"], draft.get("team_name")
+                            )
+                        _upsert_history_entry(entry["season"], entry["league_id"], team_id, team_name)
+                        st.rerun()
+                else:
+                    if st.button("Remove", key=f"history_remove_{entry['season']}"):
+                        _remove_history_entry(entry["season"])
+                        st.rerun()
+
+    st.markdown("**Add a past season**")
+    entry_mode = st.radio(
+        "How do you want to add this season?",
+        ["Look up live league", "Enter final stats manually"],
+        key="history_entry_mode", horizontal=True,
+    )
+    season_input = st.text_input("Season (e.g. 2024/25)", key="history_new_season")
+    season_clean = season_input.strip()
+    season_valid = bool(_SEASON_RE.match(season_clean)) if season_clean else False
+    if season_clean and not season_valid:
+        st.error("Season must look like `2024/25`.")
+
+    if entry_mode == "Look up live league":
+        league_id_input = st.text_input("League ID", key="history_new_league_id")
+
+        if st.button("Look Up League", key="history_lookup_btn"):
+            league_id_clean = league_id_input.strip()
+            if not season_valid:
+                st.error("Enter a valid season first.")
+            elif not league_id_clean.isdigit():
+                st.error("Please enter a numeric league ID.")
+            else:
+                league_id = int(league_id_clean)
+                with st.spinner("Looking up league..."):
+                    _, _, entries = _lookup_draft_team_name(league_id)
+                if entries:
+                    st.session_state["history_lookup_season"] = season_clean
+                    st.session_state["history_lookup_league_id"] = league_id
+                    st.session_state["history_lookup_entries"] = entries
+                    st.success(f"Found {len(entries)} teams in this league.")
+                else:
+                    st.session_state.pop("history_lookup_season", None)
+                    st.session_state.pop("history_lookup_league_id", None)
+                    st.session_state.pop("history_lookup_entries", None)
+                    st.warning(
+                        "Could not resolve that league live — Draft league IDs get reissued to a "
+                        "new league each season, so this is expected for anything but the current "
+                        "or very recently ended season. Use \"Enter final stats manually\" above instead."
+                    )
+
+        pending_season = st.session_state.get("history_lookup_season")
+        pending_league_id = st.session_state.get("history_lookup_league_id")
+        entries = st.session_state.get("history_lookup_entries")
+
+        if pending_season and pending_league_id and entries:
+            is_duplicate = pending_season in json_seasons
+            team_names = list(entries.values())
+            chosen_name = st.selectbox("Which team is yours?", options=team_names, key="history_team_select")
+            chosen_id = int(next(eid for eid, name in entries.items() if name == chosen_name))
+
+            if is_duplicate and not st.session_state.get("history_overwrite_pending"):
+                st.warning(f"`{pending_season}` is already saved — adding again will overwrite it.")
+                if st.button("Overwrite existing entry", key="history_overwrite_btn"):
+                    st.session_state["history_overwrite_pending"] = True
+                    st.rerun()
+            else:
+                if st.button("Add to History", key="history_add_btn", type="primary"):
+                    _upsert_history_entry(pending_season, pending_league_id, chosen_id, chosen_name)
+                    _clear_history_lookup_state()
+                    st.success(f"Saved {pending_season}.")
+                    st.rerun()
+
+    else:  # Enter final stats manually
+        st.caption(
+            "For a season whose league ID no longer resolves (Draft IDs get reissued to a new "
+            "league each season) — enter the final standings directly, e.g. from a saved Season "
+            "Wrapped PDF export."
+        )
+        manual_team_name = st.text_input("Team name", key="history_manual_stats_team")
+        col_r, col_p = st.columns(2)
+        with col_r:
+            manual_rank = st.number_input("Final Rank", min_value=1, step=1, key="history_manual_stats_rank")
+        with col_p:
+            manual_points = st.number_input("Total Points", min_value=0, step=1, key="history_manual_stats_points")
+        col_w, col_d, col_l = st.columns(3)
+        with col_w:
+            manual_wins = st.number_input("Wins", min_value=0, step=1, key="history_manual_stats_wins")
+        with col_d:
+            manual_draws = st.number_input("Draws", min_value=0, step=1, key="history_manual_stats_draws")
+        with col_l:
+            manual_losses = st.number_input("Losses", min_value=0, step=1, key="history_manual_stats_losses")
+
+        is_duplicate = season_valid and season_clean in json_seasons
+        add_disabled = not season_valid or not manual_team_name.strip()
+
+        if is_duplicate and not st.session_state.get("history_manual_overwrite_pending"):
+            st.warning(f"`{season_clean}` is already saved — adding again will overwrite it.")
+            if st.button("Overwrite existing entry", key="history_manual_overwrite_btn", disabled=add_disabled):
+                st.session_state["history_manual_overwrite_pending"] = True
+                st.rerun()
+        else:
+            if st.button("Add to History", key="history_add_manual_btn", type="primary", disabled=add_disabled):
+                _upsert_history_entry(
+                    season_clean, None, None, manual_team_name.strip(),
+                    manual_stats={
+                        "rank": int(manual_rank), "total_points": int(manual_points),
+                        "wins": int(manual_wins), "draws": int(manual_draws), "losses": int(manual_losses),
+                    },
+                )
+                _clear_history_lookup_state()
+                st.success(f"Saved {season_clean}.")
+                st.rerun()
 
 
 # =================================================================
