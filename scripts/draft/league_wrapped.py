@@ -661,7 +661,7 @@ def _render_champion_banner(league_data: dict) -> None:
         f'border:2px solid {_GOLD};border-radius:16px;padding:32px;text-align:center;margin-bottom:20px;">'
         f'<div style="font-size:3em;margin-bottom:8px;">🏆</div>'
         f'<div style="color:{_GOLD};font-size:2.2em;font-weight:800;margin-bottom:4px;">{winner_name}</div>'
-        f'<div style="color:#e0e0e0;font-size:1.1em;margin-bottom:12px;">2025/26 League Champion</div>'
+        f'<div style="color:#e0e0e0;font-size:1.1em;margin-bottom:12px;">{config.display_pl_season_label()} League Champion</div>'
         f'<div style="color:#9ca3af;font-size:1em;">'
         f'{w}W – {d}D – {l}L &nbsp;|&nbsp; {league_pts} league pts &nbsp;|&nbsp; {pts_for:,} FPL pts'
         f'</div></div>',
@@ -1305,7 +1305,7 @@ def _render_lineup_management(bench_data_list: List[Dict]) -> None:
 
 def show_league_wrapped_page():
     st.title("League Wrapped 🏆")
-    st.write("The complete 2025/26 FPL Draft season — league-wide story.")
+    st.write(f"The complete {config.display_pl_season_label()} FPL Draft season — league-wide story.")
 
     league_id = config.FPL_DRAFT_LEAGUE_ID
     if not league_id:
@@ -1375,7 +1375,7 @@ def show_league_wrapped_page():
     # ---------------------------------------------------------------------------
 
     # Part 1: League Champion
-    _section_header("🏆", "League Champion", "The 2025/26 Draft League final standings")
+    _section_header("🏆", "League Champion", f"The {config.display_pl_season_label()} Draft League final standings")
     try:
         _render_champion_banner(league_data)
     except Exception as exc:
@@ -1393,7 +1393,7 @@ def show_league_wrapped_page():
     st.markdown("---")
 
     # Part 3: Season's Top Players
-    _section_header("🌟", "Season's Top Players", "The FPL stars who defined the 2025/26 season — and who in your league owned them")
+    _section_header("🌟", "Season's Top Players", f"The FPL stars who defined the {config.display_pl_season_label()} season — and who in your league owned them")
     try:
         _render_top_players(top_players_data)
     except Exception as exc:

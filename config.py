@@ -119,7 +119,7 @@ ROTOWIRE_LINEUPS_URL = os.getenv(
 )
 ROTOWIRE_SEASON_RANKINGS_URL = os.getenv(
     "ROTOWIRE_SEASON_RANKINGS_URL",
-    "https://www.rotowire.com/soccer/article/fantasy-premier-league-rankings-top-400-for-2025-26-season-fpl-94580",
+    "https://www.rotowire.com/soccer/article/fantasy-premier-league-fpl-rankings-top-400-for-2026-27-season-124261",
 )
 
 # ----- Notifications / Discord -----
@@ -140,7 +140,11 @@ TZ_NAME = os.getenv("TZ_NAME", "America/New_York")
 LEAGUE_DATA = None  # Cached league entries, populated by get_league_teams()
 TRANSACTION_DATA = None  # Cached transaction data, populated by get_transaction_data()
 
-# ----- Team colors (fallbacks included) -----
+# ----- Team colors -----
+# Intentionally append-only across seasons: teams no longer in the Premier
+# League stay listed (rather than being deleted) in case they're promoted
+# back in a future season — costs nothing, they just won't appear in the
+# current season's fixtures/rosters. Newly promoted teams get added here too.
 TEAM_COLORS = {
     "Arsenal":          {"primary": "#EF0107", "secondary": "#FFFFFF"},
     "Aston Villa":      {"primary": "#95BFE5", "secondary": "#670E36"},
@@ -162,11 +166,14 @@ TEAM_COLORS = {
     "Spurs":            {"primary": "#FFFFFF", "secondary": "#132257"},
     "West Ham":         {"primary": "#7A263A", "secondary": "#1BB1E7"},
     "Wolves":           {"primary": "#FDB913", "secondary": "#231F20"},
-    # Fallbacks
+    # Promoted/relegated in past or upcoming seasons — kept for whenever they're back
     "Burnley":          {"primary": "#6C1D45", "secondary": "#99D6EA"},
     "Luton":            {"primary": "#F78F1E", "secondary": "#002D62"},
     "Sheffield Utd":    {"primary": "#EE2737", "secondary": "#000000"},
     "Leeds":            {"primary": "#FFCD00", "secondary": "#1D428A"},
+    "Coventry City":    {"primary": "#78D0F2", "secondary": "#000000"},
+    "Hull City":        {"primary": "#F18A01", "secondary": "#000000"},
+    "Sunderland":       {"primary": "#EB172F", "secondary": "#FFFFFF"},
 }
 
 # =============================================================================
@@ -266,6 +273,47 @@ def _resolve_current_gameweek():
         )
         return 1
 
+def current_pl_season_str():
+    """Best-effort current Premier League season as 'YYYY-YY' (e.g. '2026-27'),
+    derived from today's date. The PL season runs Aug-May; treat Jul 1 as the
+    rollover point so pre-season browsing already reflects the upcoming season."""
+    from datetime import date
+    today = date.today()
+    start_year = today.year if today.month >= 7 else today.year - 1
+    return f"{start_year}-{str(start_year + 1)[-2:]}"
+
+
+def current_pl_season_label():
+    """Current Premier League season as 'YYYY/YY' for display (e.g. '2026/27')."""
+    return current_pl_season_str().replace("-", "/")
+
+
+def display_pl_season_label():
+    """The Premier League season currently in progress, or (during the
+    off-season gap) the one that most recently concluded, as 'YYYY/YY'.
+
+    Unlike current_pl_season_str() — used for pre-season Rotowire content
+    discovery, which deliberately rolls over on July 1st, ahead of the real
+    season boundary — this uses the actual Aug-May season window, so
+    mid-season and post-season UI (Season Wrapped, League Wrapped, PDF
+    exports, the "season concluded" banner) shows the correct year without
+    being pulled forward before the new season has actually started.
+    """
+    from datetime import date
+    today = date.today()
+    end_year = today.year if today.month <= 8 else today.year + 1
+    return f"{end_year - 1}/{str(end_year)[-2:]}"
+
+
+def _extract_season_from_href(href: str):
+    """Pull a 'YYYY-YY' season token out of a Rotowire URL slug, if present.
+    Most gameweek-specific articles omit the season; preseason/season-long
+    articles (e.g. '...-2026-27-season...') include it."""
+    import re
+    m = re.search(r"(?<!\d)(20\d{2})-(\d{2})(?!\d)", href)
+    return f"{m.group(1)}-{m.group(2)}" if m else None
+
+
 def _discover_rotowire_article(gw: int):
     """Find the best Rotowire rankings article for the given GW from ARTICLES_INDEX."""
     _logger = logging.getLogger("fpl_app.config")
@@ -286,13 +334,15 @@ def _discover_rotowire_article(gw: int):
         return ""
 
     index_url = ARTICLES_INDEX or "https://www.rotowire.com/soccer/column/fantasy-premier-league-rankings-188"
+    current_season = current_pl_season_str()
     try:
         resp = requests.get(index_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "html.parser")
         anchors = soup.select(
             'a[href*="fantasy-premier-league-player-rankings-gameweek-"], '
-            'a[href*="/soccer/article/fpl-gw"]'
+            'a[href*="/soccer/article/fpl-gw"], '
+            'a[href*="best-fpl-picks-for-gameweeks-"]'
         )
 
         # Multiple regex patterns for robustness (most specific to least)
@@ -306,17 +356,40 @@ def _discover_rotowire_article(gw: int):
             # New format without article ID (fallback)
             re.compile(r"/soccer/article/fpl-gw(\d+)-[a-z0-9-]+$"),
         ]
+        # Pre-season "best picks for gameweeks X-Y" range articles carry an explicit
+        # season token, e.g. best-fpl-picks-for-gameweeks-1-5-fantasy-premier-league-2026-27-126238
+        range_pattern = re.compile(
+            r"/soccer/article/best-fpl-picks-for-gameweeks-(\d+)-(\d+)-fantasy-premier-league-(\d{4}-\d{2})(?:-[a-z0-9-]+)?-(\d+)$"
+        )
 
+        # candidates: (gw_found, art_id, url, season_or_None) — selectable for this GW
+        # all_article_ids: every season-tagged article id seen on the page, regardless
+        # of whether it's selectable for this GW, so the season floor (below) reflects
+        # the whole page rather than only articles that happen to cover this GW.
         candidates = []
+        current_season_ids = []
         for a in anchors:
             href = (a.get("href") or "").strip()
+
+            rm = range_pattern.search(href)
+            if rm:
+                gw_start, gw_end, season, art_id = int(rm.group(1)), int(rm.group(2)), rm.group(3), int(rm.group(4))
+                if season == current_season:
+                    current_season_ids.append(art_id)
+                if gw_start <= int(gw) <= gw_end:
+                    candidates.append((int(gw), art_id, urljoin(index_url, href), season))
+                continue
+
             for pat in patterns:
                 m = pat.search(href)
                 if m:
                     gw_found = int(m.group(1))
                     # Article ID may not exist in alternate pattern
                     art_id = int(m.group(2)) if len(m.groups()) > 1 and m.group(2) else 0
-                    candidates.append((gw_found, art_id, urljoin(index_url, href)))
+                    season = _extract_season_from_href(href)
+                    if season == current_season and art_id:
+                        current_season_ids.append(art_id)
+                    candidates.append((gw_found, art_id, urljoin(index_url, href), season))
                     break
 
         if not candidates:
@@ -329,9 +402,39 @@ def _discover_rotowire_article(gw: int):
 
         _logger.debug("Rotowire: Found %d candidate articles for GW %s", len(candidates), gw)
 
+        # Season-tagged candidates from a prior season are never eligible — an old
+        # article being the "closest GW" match is a false positive, not a fallback.
+        # Most per-GW articles don't tag their season in the URL at all, so also use
+        # article ID as a proxy: Rotowire IDs increase monotonically over time, so
+        # once we know the lowest ID published for the current season anywhere on the
+        # page, any untagged candidate below that floor predates the season rollover
+        # and is stale too.
+        season_floor_id = min(current_season_ids) if current_season_ids else None
+
+        def _is_stale(c):
+            _gw, art_id, _url, season = c
+            if season == current_season:
+                return False
+            if season is not None:
+                return True  # explicitly tagged as a different season
+            if season_floor_id is not None and art_id and art_id < season_floor_id:
+                return True  # untagged, but older than the earliest known current-season article
+            return False
+
+        fresh_candidates = [c for c in candidates if not _is_stale(c)]
+        if not fresh_candidates:
+            _logger.warning(
+                "Rotowire URL discovery: all %d candidates predate the current season "
+                "(expected %s); returning empty URL instead of stale data.",
+                len(candidates), current_season,
+            )
+            return ""
+        candidates = fresh_candidates
+
         exact = [c for c in candidates if c[0] == int(gw)]
         if exact:
-            result = max(exact, key=lambda x: x[1])[2]
+            # Prefer a current-season-tagged exact match over an untagged one, then newest article id.
+            result = max(exact, key=lambda x: (x[3] == current_season, x[1]))[2]
             _logger.debug("Rotowire: Exact GW match found: %s", result)
             return result
 

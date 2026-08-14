@@ -145,6 +145,30 @@ def rotowire_url_selector():
         return manual_url.strip() or auto_url
 
 
+def is_rotowire_url_stale(url: str, current_gw: int) -> bool:
+    """Check whether a Rotowire rankings article URL covers the current
+    gameweek, so the app doesn't display a previous gameweek's projections
+    as if they were current.
+
+    Handles both a single-GW article ("...-gameweek-26-...") and a
+    preseason range-preview article ("...-gameweeks-1-5-..."), where the
+    article is fresh for any GW within its range. Returns False (not stale)
+    if the URL doesn't match either pattern, since there's nothing to
+    compare against — that's a different failure mode than "unknown but
+    fine," but it's already handled separately by "no URL at all."
+    """
+    import re
+    url_lower = url.lower()
+    range_match = re.search(r'gameweeks-(\d+)-(\d+)', url_lower)
+    if range_match:
+        gw_start, gw_end = int(range_match.group(1)), int(range_match.group(2))
+        return not (gw_start <= current_gw <= gw_end)
+    single_match = re.search(r'gameweek-(\d+)', url_lower)
+    if single_match:
+        return int(single_match.group(1)) != current_gw
+    return False
+
+
 def render_rotowire_projections():
     """Render the Rotowire player projections tab."""
     _render_source_banner(
@@ -164,14 +188,10 @@ def render_rotowire_projections():
         st.info("No Rotowire URL available. Please configure one above.")
         return
 
-    # Extract GW from URL to detect stale data
-    import re
-    url_gw_match = re.search(r'gameweek-(\d+)', url.lower())
-    data_gw = int(url_gw_match.group(1)) if url_gw_match else None
     current_gw = config.CURRENT_GAMEWEEK
 
     # Block stale data - don't show previous GW projections
-    if data_gw and data_gw != current_gw:
+    if is_rotowire_url_stale(url, current_gw):
         st.info(f"GW{current_gw} projections are not yet available from Rotowire. Check back closer to the gameweek deadline.")
         return
 

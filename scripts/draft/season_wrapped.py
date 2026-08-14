@@ -531,7 +531,7 @@ def _load_draft_season_history(team_name: str, current_league_id: int) -> List[D
         if current_data:
             standing = _extract_team_standing(current_data, team_name)
             if standing:
-                standing["season"] = "2025/26"
+                standing["season"] = config.display_pl_season_label()
                 history.append(standing)
     except Exception:
         pass
@@ -671,7 +671,7 @@ def _compute_league_superlatives(league_id: int, max_gw: int) -> Dict:
 
 def show_season_wrapped_page():
     st.title("Season Wrapped 🎬")
-    st.write("Your complete 2025/26 FPL Draft season in review.")
+    st.write(f"Your complete {config.display_pl_season_label()} FPL Draft season in review.")
     _inject_print_styles()
     _render_export_button()
 
@@ -754,7 +754,7 @@ def show_season_wrapped_page():
         f'border:2px solid {_PURPLE};border-radius:14px;padding:30px;text-align:center;color:#e0e0e0;margin-bottom:20px;">'
         f'<div style="font-size:2.5em;font-weight:800;color:#ffffff;margin-bottom:6px;">{selected_team}</div>'
         f'<div style="color:#9ca3af;font-size:14px;letter-spacing:1px;text-transform:uppercase;margin-bottom:20px;">'
-        f'2025/26 FPL Draft Season</div>'
+        f'{config.display_pl_season_label()} FPL Draft Season</div>'
         f'<div style="display:flex;justify-content:center;gap:40px;flex-wrap:wrap;">'
         f'<div><div style="color:{_GOLD};font-size:2em;font-weight:700;">{final_rank}<span style="color:#888;font-size:0.6em;">/{num_teams}</span></div>'
         f'<div style="color:#9ca3af;font-size:12px;text-transform:uppercase;">Final Rank</div></div>'
