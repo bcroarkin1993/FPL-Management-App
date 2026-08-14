@@ -328,12 +328,15 @@ class PlayerRegistry:
         return len(self._by_id)
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(ttl=3600, show_spinner=False)
 def get_player_registry() -> PlayerRegistry:
     """
     Get the cached PlayerRegistry singleton.
 
-    Uses Streamlit's cache_resource for session-level caching.
+    Uses Streamlit's cache_resource for session-level caching, with a 1-hour
+    TTL (matching get_fpl_player_mapping's convention) so roster changes —
+    transfers, newly promoted teams' players appearing, etc. — aren't stuck
+    for the lifetime of the process.
     The registry is built from FPL bootstrap-static data on first access.
 
     Returns:

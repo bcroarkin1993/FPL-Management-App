@@ -5,6 +5,7 @@ Shared text-processing utilities, team name mappings, and position converters
 used across the FPL Management App.
 """
 
+import logging
 import re
 import unicodedata
 from typing import Any
@@ -19,17 +20,26 @@ import pandas as pd
 
 from zoneinfo import ZoneInfo
 
+_logger = logging.getLogger("fpl_app.text_helpers")
+
 # Timezone
 TZ_ET = ZoneInfo("America/New_York")
 
-# Team name mappings (RotoWire full names -> FPL short codes)
+# Team name mappings (RotoWire full names -> FPL short codes).
+# Intentionally append-only across seasons: teams relegated out of the Premier
+# League stay listed (rather than being deleted) since they may be promoted
+# back in a future season, and keeping them costs nothing — they simply won't
+# appear in current-season fixtures/rosters.
 TEAM_FULL_TO_SHORT = {
     "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
     "Brentford": "BRE", "Brighton": "BHA", "Chelsea": "CHE",
+    "Coventry": "COV", "Coventry City": "COV",
     "Crystal Palace": "CRY", "Everton": "EVE", "Fulham": "FUL",
+    "Hull": "HUL", "Hull City": "HUL",
     "Ipswich": "IPS", "Leicester": "LEI", "Liverpool": "LIV",
     "Man City": "MCI", "Man Utd": "MUN", "Newcastle": "NEW",
     "Nott'm Forest": "NFO", "Southampton": "SOU", "Spurs": "TOT",
+    "Sunderland": "SUN",
     "West Ham": "WHU", "Wolves": "WOL",
     # Common variations
     "Manchester City": "MCI", "Manchester United": "MUN",
@@ -177,8 +187,16 @@ def _to_short_team_code(team_val, teams_df=None):
         except Exception:
             pass
 
-    # Best effort: return uppercase 3-letter heuristic
+    # Best effort: return uppercase 3-letter heuristic. This is a naive guess
+    # (e.g. "Sheffield Utd" -> "SHE", not the real "SHU") — log it so a newly
+    # promoted/renamed team that's missing from TEAM_FULL_TO_SHORT is visible
+    # in logs rather than silently producing a wrong team code downstream.
     guess = re.sub(r"[^A-Za-z]", "", s).upper()[:3]
+    _logger.warning(
+        "_to_short_team_code: %r not found in TEAM_FULL_TO_SHORT, guessing %r — "
+        "add this team to TEAM_FULL_TO_SHORT if the guess is wrong.",
+        s, guess,
+    )
     return guess if len(guess) == 3 else s
 
 

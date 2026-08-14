@@ -650,7 +650,7 @@ def show_home_page():
     # Season-concluded banner
     if is_season_complete():
         st.info(
-            "🏁 **The 2025/26 FPL Draft season has concluded!** "
+            f"🏁 **The {config.display_pl_season_label()} FPL Draft season has concluded!** "
             "Final standings are shown below. Head to **Season Wrapped** for your full season review.",
             icon=None,
         )

@@ -13,6 +13,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
 
+import config
 from scripts.draft.league_analysis import build_h2h_matrix, get_matches_df, get_team_names
 
 # ---------------------------------------------------------------------------
@@ -302,7 +303,7 @@ def _build_cover(league_name: str) -> str:
     padding:40px 30px 36px;margin-bottom:28px;">
   <div style="font-size:1em;color:#9ca3af;letter-spacing:4px;
               text-transform:uppercase;margin-bottom:14px;">
-    Fantasy Premier League - Draft &nbsp;·&nbsp; 2025/26
+    Fantasy Premier League - Draft &nbsp;·&nbsp; {config.display_pl_season_label()}
   </div>
   <div style="font-size:3em;font-weight:900;color:{_GOLD};
               letter-spacing:1px;line-height:1.1;margin-bottom:12px;">
@@ -351,7 +352,7 @@ def _build_champion(league_data: dict) -> str:
     text-align:center;margin-bottom:10px;">
   <div style="font-size:2.2em;margin-bottom:4px;">🏆</div>
   <div style="color:{_GOLD};font-size:2em;font-weight:800;margin-bottom:3px;">{_esc(wname)}</div>
-  <div style="color:#e0e0e0;font-size:1em;margin-bottom:8px;">2025/26 League Champion</div>
+  <div style="color:#e0e0e0;font-size:1em;margin-bottom:8px;">{config.display_pl_season_label()} League Champion</div>
   <div style="color:#9ca3af;font-size:0.9em;">
     {ww}W – {wd}D – {wl}L &nbsp;|&nbsp; {wlp} league pts &nbsp;|&nbsp; {wpts:,} FPL pts
   </div>
@@ -633,7 +634,7 @@ def _build_top_players(top_players: Dict) -> str:
 
     return (
         _section("🌟", "Season's Top Players",
-                 "The FPL stars who defined the 2025/26 season — and who in your league owned them",
+                 f"The FPL stars who defined the {config.display_pl_season_label()} season — and who in your league owned them",
                  page_break=True)
         + '<p style="color:#6b7280;font-size:12px;margin:6px 0 10px;">'
         + 'Global FPL award winners — with a note on who in your league held them.</p>'
@@ -1105,7 +1106,7 @@ def _build_html(league_data: dict, history_df: pd.DataFrame,
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>{_esc(league_name)} — Season Wrapped 2025/26</title>
+  <title>{_esc(league_name)} — Season Wrapped {config.display_pl_season_label()}</title>
   <style>{_CSS}</style>
 </head>
 <body>{body}</body>
