@@ -412,7 +412,18 @@ def _available_from_projections(
     If ownership is empty/unavailable (preseason, API issues), return normalized projections unchanged.
     """
     if projections_df is None or projections_df.empty:
-        raise ValueError("projections_df is empty or None.")
+        # Genuinely nothing to rank players by (Rotowire hasn't published a usable
+        # rankings table yet — common early preseason). Distinct from the
+        # ownership-empty case below: there, we can still show *something*
+        # (everyone available); here there's no projection data to show at all,
+        # so stop cleanly with an honest message instead of crashing downstream.
+        st.info(
+            "📊 Player projections aren't available yet — Rotowire hasn't published a "
+            "usable rankings table for this gameweek (common in the preseason). Waiver "
+            "suggestions need projected points to rank players; check back closer to "
+            "the gameweek deadline."
+        )
+        st.stop()
 
     # Normalize projections to the exact schema the fuzzy merge expects
     proj_for_merge = _prepare_proj_for_merge(projections_df)

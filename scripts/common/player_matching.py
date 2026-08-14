@@ -502,6 +502,13 @@ def clean_fpl_player_names(fpl_players_df, projections_df, fuzzy_threshold=80, l
     Returns:
     - fpl_players_df: Updated FPL DataFrame with cleaned player names.
     """
+    # No projections to match against (e.g. Rotowire hasn't published a usable
+    # rankings table yet — common preseason) — nothing to clean against, so
+    # return the FPL names unchanged rather than KeyError on a missing 'Player'
+    # column.
+    if projections_df is None or projections_df.empty or "Player" not in projections_df.columns:
+        return fpl_players_df
+
     # Extract candidate names from projections
     projection_names = projections_df['Player'].tolist()
 

@@ -25,6 +25,71 @@ _logger = get_logger("fpl_app.scraping")
 # ROTOWIRE SCRAPING
 # =============================================================================
 
+# Rotowire publishes at least two distinct table shapes under the same CSS
+# classes: the standard weekly rankings table (12 columns, includes
+# per-position rank breakdown and a Matchup/TSB% column) and a preseason
+# "best picks" preview table (6 columns: Rank, Player, Team, Pos, Price,
+# Adj Total -- no per-position ranks, no matchup). A fixed column-count/order
+# assumption silently drops every row of whichever shape it wasn't written
+# for. Since both shapes include a real <thead> with clear column names,
+# map by header text instead -- resilient to Rotowire adding, removing, or
+# reordering columns, not just these two known shapes.
+_ROTOWIRE_HEADER_ALIASES = {
+    'Overall Rank': ('overall rank', 'rank'),
+    'FW Rank': ('fw rank',),
+    'MID Rank': ('mid rank',),
+    'DEF Rank': ('def rank',),
+    'GK Rank': ('gk rank',),
+    'Player': ('player',),
+    'Team': ('team',),
+    'Matchup': ('matchup',),
+    'Position': ('pos', 'position'),
+    'Price': ('price',),
+    'TSB %': ('tsb%', 'tsb %'),
+    'Points': ('pts', 'points', 'adj total'),
+}
+
+
+def _map_rotowire_header_row(header_cells):
+    """Map a <thead> row's header text to canonical field -> column index."""
+    lower_headers = [h.strip().lower() for h in header_cells]
+    mapping = {}
+    for canonical, aliases in _ROTOWIRE_HEADER_ALIASES.items():
+        for alias in aliases:
+            if alias in lower_headers:
+                mapping[canonical] = lower_headers.index(alias)
+                break
+    return mapping
+
+
+def _rotowire_row_from_header_map(cells, header_map, safe_numeric):
+    """Build a canonical row dict from a <td> row using a header->index map.
+    Returns None if the row can't be resolved to at least Player + Team
+    (e.g. a stray header/subtitle row inside <tbody>)."""
+    def get(field, default=""):
+        idx = header_map.get(field)
+        return cells[idx] if idx is not None and idx < len(cells) else default
+
+    player, team = get('Player'), get('Team')
+    if not player or not team:
+        return None
+
+    return {
+        'Overall Rank': get('Overall Rank'),
+        'FW Rank': safe_numeric(get('FW Rank')),
+        'MID Rank': safe_numeric(get('MID Rank')),
+        'DEF Rank': safe_numeric(get('DEF Rank')),
+        'GK Rank': safe_numeric(get('GK Rank')),
+        'Player': player,
+        'Team': team,
+        'Matchup': get('Matchup'),
+        'Position': get('Position'),
+        'Price': safe_numeric(get('Price')),
+        'TSB %': get('TSB %'),
+        'Points': safe_numeric(get('Points')),
+    }
+
+
 @st.cache_data(ttl=3600)
 def get_rotowire_player_projections(url, limit=None):
     """
@@ -38,7 +103,7 @@ def get_rotowire_player_projections(url, limit=None):
     - DataFrame: A DataFrame containing player rankings, projected points, and calculated value.
                  Returns empty DataFrame on error.
     """
-    EXPECTED_COLUMNS = 12  # Number of columns expected per row
+    LEGACY_EXPECTED_COLUMNS = 12  # Fallback positional layout, used only if no <thead> is found
 
     # Helper to safely convert to numeric
     def _safe_numeric(val, default=0):
@@ -90,20 +155,42 @@ def get_rotowire_player_projections(url, limit=None):
         _logger.warning("Rotowire: Error extracting table rows: %s", e)
         return pd.DataFrame()
 
+    thead = table.find("thead")
+    header_map = {}
+    if thead:
+        header_cells = [th.get_text(strip=True) for th in thead.find_all("th")]
+        header_map = _map_rotowire_header_row(header_cells)
+        if 'Player' not in header_map or 'Team' not in header_map:
+            _logger.warning(
+                "Rotowire: <thead> found but couldn't resolve Player/Team columns from %s -- "
+                "falling back to legacy positional parsing.",
+                header_cells,
+            )
+            header_map = {}
+
     # Parse each row
     data = []
     skipped_rows = 0
     for tr in rows:
         tds = tr.find_all("td")
-
-        # Skip rows that don't have expected column count (likely headers or malformed)
-        if len(tds) < EXPECTED_COLUMNS:
+        if not tds:
             skipped_rows += 1
             continue
+        cells = [td.get_text(strip=True) for td in tds]
 
-        # Extract cell text (handle extra columns gracefully by only taking first 12)
-        cells = [td.get_text(strip=True) for td in tds[:EXPECTED_COLUMNS]]
+        if header_map:
+            row_data = _rotowire_row_from_header_map(cells, header_map, _safe_numeric)
+            if row_data is None:
+                skipped_rows += 1
+                continue
+            data.append(row_data)
+            continue
 
+        # Legacy fallback: fixed 12-column positional layout (no <thead> on the page)
+        if len(cells) < LEGACY_EXPECTED_COLUMNS:
+            skipped_rows += 1
+            continue
+        cells = cells[:LEGACY_EXPECTED_COLUMNS]
         try:
             row_data = {
                 'Overall Rank': cells[0],

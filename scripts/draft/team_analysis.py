@@ -140,16 +140,27 @@ def show_team_stats_page():
     # ---------------------------
     st.header(f"Gameweek {config.CURRENT_GAMEWEEK} Projections")
 
-    proj_df = show_team_projections(team_id, player_projections, config.CURRENT_GAMEWEEK)
-    if not proj_df.empty:
-        _pos_sort = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
-        proj_df["_pos_order"] = proj_df["Position"].map(_pos_sort)
-        proj_df["_pts"] = pd.to_numeric(proj_df["Points"], errors="coerce").fillna(0)
-        proj_df = proj_df.sort_values(["_pos_order", "_pts"], ascending=[True, False]).drop(columns=["_pos_order", "_pts"])
-    render_styled_table(
-        proj_df,
-        col_formats={"Points": "{:.1f}"},
-    )
+    if player_projections is None or player_projections.empty:
+        # Without source projections, show_team_projections() would still return
+        # real roster rows (merge_fpl_players_and_projections degrades gracefully),
+        # just with every Points value blank/NaN — confusing to show as a table
+        # with no explanation, so say why instead.
+        st.info(
+            "📊 Player projections aren't available yet — Rotowire hasn't published a "
+            "usable rankings table for this gameweek (common in the preseason). "
+            "Check back closer to the gameweek deadline."
+        )
+    else:
+        proj_df = show_team_projections(team_id, player_projections, config.CURRENT_GAMEWEEK)
+        if not proj_df.empty:
+            _pos_sort = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
+            proj_df["_pos_order"] = proj_df["Position"].map(_pos_sort)
+            proj_df["_pts"] = pd.to_numeric(proj_df["Points"], errors="coerce").fillna(0)
+            proj_df = proj_df.sort_values(["_pos_order", "_pts"], ascending=[True, False]).drop(columns=["_pos_order", "_pts"])
+        render_styled_table(
+            proj_df,
+            col_formats={"Points": "{:.1f}"},
+        )
 
     st.divider()
 
