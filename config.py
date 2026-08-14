@@ -91,13 +91,16 @@ def _parse_classic_leagues(env_value: str) -> list:
 # Format: "id:name,id:name,..." or "id,id,..."
 # Resolved lazily below (see __getattr__): FPL_CLASSIC_LEAGUE_IDS
 
-# Past Draft league IDs for cross-season history (Season Wrapped)
+# Past Draft league IDs for cross-season history (Season Wrapped).
 # Format: "YYYY/YY:league_id,YYYY/YY:league_id"
-FPL_DRAFT_LEAGUE_HISTORY = _parse_draft_league_history(os.getenv("FPL_DRAFT_LEAGUE_HISTORY", ""))
+# Resolved lazily below (see __getattr__): FPL_DRAFT_LEAGUE_HISTORY — merges this
+# env var with league_settings.json's draft.history (set via League Setup),
+# which takes priority per season label.
 
 # Resolved lazily below:
 # CURRENT_GAMEWEEK
 # FPL_DRAFT_LEAGUE_ID, FPL_DRAFT_TEAM_ID, FPL_CLASSIC_TEAM_ID, FPL_CLASSIC_LEAGUE_IDS
+# FPL_DRAFT_LEAGUE_HISTORY
 # ROTOWIRE_URL
 
 FORM_LOOKBACK_WEEKS   = int(os.getenv("FORM_LOOKBACK_WEEKS", "4"))
@@ -242,6 +245,49 @@ def _resolve_classic_league_ids():
     if classic.get("locked") and classic.get("leagues"):
         return [{"id": int(l["id"]), "name": l.get("name")} for l in classic["leagues"]]
     return _parse_classic_leagues(os.getenv("FPL_CLASSIC_LEAGUE_IDS", ""))
+
+
+def _resolve_draft_league_history():
+    """List of (season_label, league_id) tuples, sorted by season.
+
+    Merges league_settings.json's draft.history (set via the League Setup
+    page's history section) with the legacy FPL_DRAFT_LEAGUE_HISTORY env var,
+    so nothing already configured in .env is lost. JSON wins on a season-label
+    collision; the env var only fills in seasons not already saved in JSON.
+    """
+    settings = _get_league_settings()
+    history = settings.get("draft", {}).get("history", [])
+    merged = {
+        h["season"]: int(h["league_id"])
+        for h in history if h.get("season") and h.get("league_id")
+    }
+    for season_label, league_id in _parse_draft_league_history(os.getenv("FPL_DRAFT_LEAGUE_HISTORY", "")):
+        merged.setdefault(season_label, league_id)
+    return sorted(merged.items(), key=lambda x: x[0])
+
+
+def get_draft_league_history_records():
+    """Full merged draft league history records (not collapsed to tuples).
+
+    Unlike FPL_DRAFT_LEAGUE_HISTORY (season, league_id pairs only), this
+    preserves each record's manual_stats — final rank/points/W-D-L saved
+    directly for a season whose league ID is no longer usable for a live
+    lookup (Draft league IDs get reissued to unrelated leagues once a
+    season rolls over, so old IDs can't be re-queried after the fact).
+    JSON wins on a season-label collision; the env var only fills in
+    seasons not already saved in JSON (env-derived records always have
+    manual_stats=None, since the env var only ever stores a league_id).
+    """
+    settings = _get_league_settings()
+    history = settings.get("draft", {}).get("history", [])
+    by_season = {h["season"]: dict(h) for h in history if h.get("season")}
+    for season_label, league_id in _parse_draft_league_history(os.getenv("FPL_DRAFT_LEAGUE_HISTORY", "")):
+        by_season.setdefault(season_label, {
+            "season": season_label, "league_id": league_id,
+            "team_id": None, "team_name": None, "manual_stats": None,
+        })
+    return sorted(by_season.values(), key=lambda h: h["season"])
+
 
 def _resolve_current_gameweek():
     """Resolve the current gameweek with env override, else FPL Draft API, else fallback to 1."""
@@ -502,5 +548,8 @@ def __getattr__(name):  # PEP 562: module-level getattr
 
     if name == "FPL_CLASSIC_LEAGUE_IDS":
         return _resolve_classic_league_ids()
+
+    if name == "FPL_DRAFT_LEAGUE_HISTORY":
+        return _resolve_draft_league_history()
 
     raise AttributeError(name)

@@ -20,6 +20,9 @@ DEFAULT_SETTINGS = {
         "team_id": None,
         "team_name": None,
         "locked": False,
+        # Past-season Draft league IDs, captured before they're overwritten by
+        # the next season's League Setup — Draft leagues don't carry over.
+        "history": [],  # [{"season": "2024/25", "league_id": int, "team_id": int, "team_name": str}, ...]
         # Commissioner dues/payout tracking, keyed by season label ("YYYY/YY")
         # so it survives Draft league rollover (league IDs get reissued each
         # season — see Commish Mode / League Setup):

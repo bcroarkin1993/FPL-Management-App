@@ -484,8 +484,13 @@ def _load_draft_season_history(team_name: str, current_league_id: int) -> List[D
     """
     Load cross-season Draft history for a team.
 
-    Uses FPL_DRAFT_LEAGUE_HISTORY config for past seasons + current league for current season.
-    Matches team by name (since entry_id may differ year to year).
+    Uses config.get_draft_league_history_records() for past seasons + current
+    league for current season. Past seasons prefer manually-saved final stats
+    (rank/points/W-D-L) when present — Draft league IDs get reissued to
+    unrelated leagues once a season rolls over, so a season saved without a
+    live-reachable ID can only be reconstructed from manually-entered data.
+    Falls back to a live lookup when a record has a league_id and no manual
+    stats. Matches team by name (since entry_id may differ year to year).
     """
     history = []
 
@@ -513,14 +518,28 @@ def _load_draft_season_history(team_name: str, current_league_id: int) -> List[D
         return None
 
     # Past configured seasons
-    for season_label, hist_league_id in config.FPL_DRAFT_LEAGUE_HISTORY:
+    for record in config.get_draft_league_history_records():
+        manual_stats = record.get("manual_stats")
+        if manual_stats:
+            history.append({
+                "season": record["season"],
+                "total_points": manual_stats.get("total_points", 0),
+                "rank": manual_stats.get("rank", "?"),
+                "wins": manual_stats.get("wins", 0),
+                "draws": manual_stats.get("draws", 0),
+                "losses": manual_stats.get("losses", 0),
+            })
+            continue
+        hist_league_id = record.get("league_id")
+        if not hist_league_id:
+            continue
         try:
             league_data = get_draft_league_details(hist_league_id)
             if not league_data:
                 continue
             standing = _extract_team_standing(league_data, team_name)
             if standing:
-                standing["season"] = season_label
+                standing["season"] = record["season"]
                 history.append(standing)
         except Exception:
             continue
@@ -1206,10 +1225,11 @@ def show_season_wrapped_page():
     # =========================================================================
     _section_header("📅", "Looking Back", "How does this season compare to previous years?")
 
-    if not config.FPL_DRAFT_LEAGUE_HISTORY:
+    if not config.get_draft_league_history_records():
         st.info(
-            "Configure `FPL_DRAFT_LEAGUE_HISTORY` in your `.env` to see cross-season Draft history. "
-            "Format: `2023/24:league_id,2024/25:league_id` — add each past season's league ID."
+            "Add your past seasons on the **🆔 League Setup** page "
+            "(FPL App Home → League Setup → Draft League History) to see cross-season history here — "
+            "look up a still-live league, or enter final stats manually for a season that's already rolled over."
         )
     else:
         try:
@@ -1331,7 +1351,7 @@ def show_season_wrapped_page():
 
 **Retention Rate** — How many of your original 15 draft picks are still on your roster at the end of the season.
 
-**Cross-Season Draft History** — Pulls final standings from each season's league configured in `FPL_DRAFT_LEAGUE_HISTORY`. Ranks and points are the final end-of-season values.
+**Cross-Season Draft History** — Pulls final standings from each past season saved on the League Setup page's Draft League History section: either looked up live from that season's league (while its ID is still reachable) or entered manually (for a season whose league ID has already been reissued). Ranks and points are the final end-of-season values.
 
 **Most Active Manager** — Total approved waiver transactions made during the season.
 

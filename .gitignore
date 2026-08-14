@@ -31,8 +31,12 @@ Thumbs.db
 *.swo
 *.pid
 
-# SQLite cache
+# SQLite cache (including WAL/SHM companion files — *.db alone doesn't
+# match these, which let them get tracked and drift out of sync with the
+# actual .fpl_cache.db across branch switches, corrupting the cache DB)
 *.db
+*.db-shm
+*.db-wal
 
 # Locally-logged pending FPL transfers (user-specific, pre-deadline)
 .fpl_pending_transfers.json
