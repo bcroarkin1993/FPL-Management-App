@@ -1303,9 +1303,41 @@ def _render_lineup_management(bench_data_list: List[Dict]) -> None:
 # Main page
 # ---------------------------------------------------------------------------
 
+def _any_gameweek_played(history_df) -> bool:
+    """Whether this league's history has any real gameweek score yet —
+    used to gate League Wrapped, which needs actual results (champion,
+    awards, draft steals/busts, etc. are all computed from them) to be
+    meaningful, rather than rendering a page of empty sections."""
+    return bool(
+        history_df is not None and not history_df.empty
+        and "GW_Points" in history_df.columns
+        and (history_df["GW_Points"] > 0).any()
+    )
+
+
+def _season_label_from_league_data(league_data: dict) -> str:
+    """Season label ('YYYY/YY') derived from this league's own draft date
+    when available, rather than just today's date — more accurate right
+    around the Aug/Sep season-rollover boundary than a pure calendar guess
+    (e.g. a league drafted Aug 9 is unambiguously the season starting that
+    August, even if display_pl_season_label()'s generic cutoff hasn't
+    flipped yet). Falls back to display_pl_season_label() if no draft date
+    is available on this league."""
+    try:
+        drafts = league_data.get("league", {}).get("drafts") or []
+        draft_dt_str = drafts[0].get("draft_dt") if drafts else None
+        if draft_dt_str:
+            from datetime import datetime
+            dt = datetime.fromisoformat(draft_dt_str.replace("Z", "+00:00"))
+            start_year = dt.year if dt.month >= 7 else dt.year - 1
+            return f"{start_year}/{str(start_year + 1)[-2:]}"
+    except Exception:
+        pass
+    return config.display_pl_season_label()
+
+
 def show_league_wrapped_page():
     st.title("League Wrapped 🏆")
-    st.write(f"The complete {config.display_pl_season_label()} FPL Draft season — league-wide story.")
 
     league_id = config.FPL_DRAFT_LEAGUE_ID
     if not league_id:
@@ -1326,6 +1358,9 @@ def show_league_wrapped_page():
             st.error("No league data returned. Check your FPL_DRAFT_LEAGUE_ID setting.")
             return
 
+        season_label = _season_label_from_league_data(league_data)
+        st.write(f"The complete {season_label} FPL Draft season — league-wide story.")
+
         max_gw = min(get_current_gameweek(), 38)
 
         try:
@@ -1333,6 +1368,16 @@ def show_league_wrapped_page():
         except Exception:
             _logger.warning("Failed to build history_df", exc_info=True)
             history_df = pd.DataFrame()
+
+        if not _any_gameweek_played(history_df):
+            st.info(
+                f"🏆 **League Wrapped isn't available yet.** No gameweeks have been played "
+                f"in the {season_label} season — champion, awards, draft "
+                f"retrospective, and everything else here is computed from real gameweek "
+                f"results. Check back once the season is underway (this page is most "
+                f"rewarding once the season wraps up)."
+            )
+            return
 
         try:
             bench_data_list = compute_draft_league_bench_data(league_id, max_gw)
