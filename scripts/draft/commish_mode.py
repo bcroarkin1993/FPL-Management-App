@@ -36,6 +36,16 @@ def _current_pl_season_guess() -> str:
     return f"{start_year}/{str(start_year + 1)[-2:]}"
 
 
+def _is_paid(due: dict, buy_in: float) -> bool:
+    """Whether a member's dues are marked paid. Reads the "paid" checkbox flag;
+    falls back to the legacy amount_paid >= buy_in comparison for dues records
+    saved before the switch to a binary paid/unpaid checkbox (nobody actually
+    paid in partial installments, so this is a safe one-way migration)."""
+    if "paid" in due:
+        return bool(due["paid"])
+    return due.get("amount_paid", 0) >= buy_in
+
+
 def show_commish_mode_page():
     st.title("Commish Mode 💰")
     st.caption(
@@ -133,7 +143,7 @@ def _show_season_setup_form(season_label, existing):
                     entries = get_league_entries(config.FPL_DRAFT_LEAGUE_ID) or {}
                 except Exception:
                     entries = {}
-            dues = {name: {"amount_paid": 0, "notes": ""} for name in entries.values()}
+            dues = {name: {"paid": False, "notes": ""} for name in entries.values()}
         seasons[season_clean] = {
             "buy_in": buy_in,
             "payout_pct": {"1": pct1, "2": pct2, "3": pct3},
@@ -153,8 +163,9 @@ def _show_season_dashboard(season_label: str, season_data: dict):
     dues = season_data.get("dues", {})
     n_members = len(dues)
     pool = buy_in * n_members
-    collected = sum(d.get("amount_paid", 0) for d in dues.values())
-    outstanding = [name for name, d in dues.items() if d.get("amount_paid", 0) < buy_in]
+    paid_count = sum(1 for d in dues.values() if _is_paid(d, buy_in))
+    collected = buy_in * paid_count
+    outstanding = [name for name, d in dues.items() if not _is_paid(d, buy_in)]
 
     st.subheader(f"{season_label} — {_money_md(buy_in)} buy-in, {n_members} members")
 
@@ -190,16 +201,16 @@ def _show_season_dashboard(season_label: str, season_data: dict):
             d = dues[name]
             c1, c2, c3 = st.columns([2, 1, 2])
             c1.write(name)
-            amt = c2.number_input(
-                "Paid ($)", min_value=0.0, step=5.0, value=float(d.get("amount_paid", 0)),
-                key=f"commish_due_amt_{season_label}_{name}", label_visibility="collapsed",
+            paid = c2.checkbox(
+                "Paid", value=_is_paid(d, buy_in),
+                key=f"commish_due_paid_{season_label}_{name}", label_visibility="collapsed",
             )
             notes = c3.text_input(
                 "Notes", value=d.get("notes", ""),
                 key=f"commish_due_notes_{season_label}_{name}", label_visibility="collapsed",
                 placeholder="Notes (optional)",
             )
-            updated[name] = {"amount_paid": amt, "notes": notes}
+            updated[name] = {"paid": paid, "notes": notes}
 
         if st.form_submit_button("Save Dues", type="primary"):
             full_settings = load_settings()

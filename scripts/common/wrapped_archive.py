@@ -6,6 +6,14 @@
 # (that file is for lightweight settings/IDs; this is rich historical
 # content, a different kind of data with its own storage).
 #
+# Two ways a season's file gets here: (1) one-time manual transcription from
+# a saved PDF, for seasons that predate this feature (e.g. 2025/26); (2)
+# automatically, overwritten on every visit to the live League Wrapped page
+# for the current season — so by the time next season's Draft league ID
+# rollover makes the old league unreachable, the last live snapshot is
+# already safely archived. See save_archived_season() call in
+# scripts/draft/league_wrapped.py's show_league_wrapped_page().
+#
 # Persisted under archive/league_wrapped/ at the repo root, which is
 # gitignored: this repo is public, and this data includes personal league
 # info (team/manager names). Files placed here are never auto-deleted by

@@ -105,8 +105,8 @@ class TestSaveSettings:
                         "payout_pct": {"1": 60, "2": 30, "3": 10},
                         "locked": True,
                         "dues": {
-                            "Stoned Squirrels": {"amount_paid": 75, "notes": ""},
-                            "Top Drawer Balls": {"amount_paid": 0, "notes": "will pay at draft"},
+                            "Stoned Squirrels": {"paid": True, "notes": ""},
+                            "Top Drawer Balls": {"paid": False, "notes": "will pay at draft"},
                         },
                     },
                 },
@@ -117,7 +117,7 @@ class TestSaveSettings:
             season = loaded["draft"]["commish_seasons"]["2026/27"]
             assert season["buy_in"] == 75
             assert season["payout_pct"] == {"1": 60, "2": 30, "3": 10}
-            assert season["dues"]["Stoned Squirrels"]["amount_paid"] == 75
+            assert season["dues"]["Stoned Squirrels"]["paid"] is True
             assert season["dues"]["Top Drawer Balls"]["notes"] == "will pay at draft"
 
     def test_draft_history_round_trip(self, tmp_path):

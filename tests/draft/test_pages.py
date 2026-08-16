@@ -163,8 +163,8 @@ class TestCommishModePage:
                     "2026/27": {
                         "buy_in": 75, "payout_pct": {"1": 60, "2": 30, "3": 10}, "locked": True,
                         "dues": {
-                            "Stoned Squirrels": {"amount_paid": 75, "notes": ""},
-                            "Top Drawer Balls": {"amount_paid": 0, "notes": ""},
+                            "Stoned Squirrels": {"paid": True, "notes": ""},
+                            "Top Drawer Balls": {"paid": False, "notes": ""},
                         },
                     },
                 },

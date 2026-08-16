@@ -27,7 +27,7 @@ DEFAULT_SETTINGS = {
         # so it survives Draft league rollover (league IDs get reissued each
         # season — see Commish Mode / League Setup):
         # {"2026/27": {"buy_in": 75, "payout_pct": {"1": 60, "2": 30, "3": 10},
-        #              "locked": True, "dues": {"Team Name": {"amount_paid": 75, "notes": ""}}}}
+        #              "locked": True, "dues": {"Team Name": {"paid": False, "notes": ""}}}}
         "commish_seasons": {},
     },
     "classic": {

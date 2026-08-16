@@ -45,6 +45,7 @@ from scripts.draft.season_wrapped import (
 from scripts.common.wrapped_archive import (
     list_archived_seasons,
     load_archived_season,
+    save_archived_season,
 )
 
 _logger = get_logger("fpl_app.draft.league_wrapped")
@@ -642,6 +643,33 @@ def _compute_league_transfer_stats(league_id: int, max_gw: int) -> Dict:
 # Part 1: League Champion
 # ---------------------------------------------------------------------------
 
+def _standings_list_from_league_data(league_data: dict) -> List[Dict]:
+    """Final standings as a flat list of {rank,team,w,d,l,league_pts,pts_for,
+    pts_against,pts_diff} dicts — the same shape the archive stores, and what
+    _render_archived_champion_banner() reads back. Used to snapshot the live
+    season into the archive."""
+    standings = league_data.get("standings", [])
+    entries = league_data.get("league_entries", [])
+    if not standings or not entries:
+        return []
+    entry_names = {e["id"]: e["entry_name"] for e in entries}
+    rows = []
+    for row in sorted(standings, key=lambda s: s.get("rank", 999)):
+        w = row.get("matches_won", 0)
+        d = row.get("matches_drawn", 0)
+        l = row.get("matches_lost", 0)
+        pf = row.get("points_for", 0)
+        pa = row.get("points_against", 0)
+        rows.append({
+            "rank": row.get("rank", "?"),
+            "team": entry_names.get(row.get("league_entry"), "?"),
+            "w": w, "d": d, "l": l,
+            "league_pts": w * 3 + d,
+            "pts_for": pf, "pts_against": pa, "pts_diff": pf - pa,
+        })
+    return rows
+
+
 def _render_champion_banner(league_data: dict) -> None:
     standings = league_data.get("standings", [])
     entries = league_data.get("league_entries", [])
@@ -826,7 +854,11 @@ def _render_season_journey(history_df: pd.DataFrame) -> None:
 # Part 3: League Awards
 # ---------------------------------------------------------------------------
 
-def _render_league_awards(superlatives: Dict, history_df: pd.DataFrame) -> None:
+def _compute_league_awards_list(superlatives: Dict, history_df: pd.DataFrame) -> List[Dict]:
+    """The 8 league-award cards as a flat list of {icon,title,team,detail,accent}
+    dicts — this exact shape is both what _render_archived_league_awards()
+    renders and what gets written into the season archive, so live and
+    archived awards always share one code path."""
     # 5 existing superlatives
     most_active = superlatives.get("most_active", {})
     best_mgr = superlatives.get("best_mgr", {})
@@ -863,28 +895,29 @@ def _render_league_awards(superlatives: Dict, history_df: pd.DataFrame) -> None:
             c_val = round(std_df.loc[c_team, "std"], 1)
             consistent = {"team": c_team, "value": f"σ = {c_val} pts/GW (lowest variance)"}
 
-    awards = [
-        ("🏆", "Points Champion", pts_champ.get("team", "?"), pts_champ.get("value", ""), _GOLD),
-        ("📊", "Highest Single GW", high_gw.get("team", "?"), high_gw.get("value", ""), "#00b4d8"),
-        ("🎯", "Most Consistent", consistent.get("team", "?"), consistent.get("value", ""), _GREEN),
-        ("🔀", "Most Active Manager", most_active.get("team", "?"),
-         f'{most_active.get("value", 0)} approved transactions', "#f8961e"),
-        ("🧠", "Best Lineup Manager", best_mgr.get("team", "?"),
-         best_mgr.get("value", ""), _PURPLE),
-        ("✏️", "Best Drafter", best_drafter.get("team", "?"),
-         best_drafter.get("value", ""), "#9d4edd"),
-        ("🍀", "Luckiest Manager", luckiest.get("team", "?"),
-         luckiest.get("value", ""), "#43aa8b"),
-        ("😤", "Most Unlucky", unluckiest.get("team", "?"),
-         unluckiest.get("value", ""), _RED),
+    return [
+        {"icon": "🏆", "title": "Points Champion", "team": pts_champ.get("team", "?"),
+         "detail": pts_champ.get("value", ""), "accent": _GOLD},
+        {"icon": "📊", "title": "Highest Single GW", "team": high_gw.get("team", "?"),
+         "detail": high_gw.get("value", ""), "accent": "#00b4d8"},
+        {"icon": "🎯", "title": "Most Consistent", "team": consistent.get("team", "?"),
+         "detail": consistent.get("value", ""), "accent": _GREEN},
+        {"icon": "🔀", "title": "Most Active Manager", "team": most_active.get("team", "?"),
+         "detail": f'{most_active.get("value", 0)} approved transactions', "accent": "#f8961e"},
+        {"icon": "🧠", "title": "Best Lineup Manager", "team": best_mgr.get("team", "?"),
+         "detail": best_mgr.get("value", ""), "accent": _PURPLE},
+        {"icon": "✏️", "title": "Best Drafter", "team": best_drafter.get("team", "?"),
+         "detail": best_drafter.get("value", ""), "accent": "#9d4edd"},
+        {"icon": "🍀", "title": "Luckiest Manager", "team": luckiest.get("team", "?"),
+         "detail": luckiest.get("value", ""), "accent": "#43aa8b"},
+        {"icon": "😤", "title": "Most Unlucky", "team": unluckiest.get("team", "?"),
+         "detail": unluckiest.get("value", ""), "accent": _RED},
     ]
 
-    # 4 cols × 2 rows
-    for row_start in range(0, len(awards), 4):
-        cols = st.columns(4)
-        for col, (icon, title, team, detail, accent) in zip(cols, awards[row_start:row_start + 4]):
-            col.markdown(_award_card(icon, title, team, detail, accent), unsafe_allow_html=True)
-        st.markdown("<br>", unsafe_allow_html=True)
+
+def _render_league_awards(superlatives: Dict, history_df: pd.DataFrame) -> None:
+    awards = _compute_league_awards_list(superlatives, history_df)
+    _render_archived_league_awards(awards)
 
 
 # ---------------------------------------------------------------------------
@@ -941,14 +974,33 @@ def _render_gw_highlights(highlights: Dict) -> None:
 # Part 5: Head-to-Head Records
 # ---------------------------------------------------------------------------
 
-def _render_h2h_records(league_data: dict) -> None:
+def _compute_h2h_matrix_df(league_data: dict) -> pd.DataFrame:
+    """The live H2H matrix as a DataFrame, computed from already-fetched
+    league_data (no extra API calls) — shared by the live render path and
+    the auto-archive snapshot below, so both always agree."""
     team_names = get_team_names(league_data)
     matches_df = get_matches_df(league_data, team_names)
     if matches_df.empty:
+        return pd.DataFrame()
+    return build_h2h_matrix(matches_df, team_names)
+
+
+def _h2h_df_to_dict(h2h_df: pd.DataFrame) -> Dict:
+    """Convert an H2H matrix DataFrame to the {"teams": [...], "cells": {...}}
+    shape used by the archive — the same shape _render_archived_league_wrapped
+    reconstructs a DataFrame from via pd.DataFrame(cells).T."""
+    if h2h_df is None or h2h_df.empty:
+        return {"teams": [], "cells": {}}
+    teams = h2h_df.index.tolist()
+    cells = {t: {opp: h2h_df.loc[t, opp] for opp in teams} for t in teams}
+    return {"teams": teams, "cells": cells}
+
+
+def _render_h2h_records(league_data: dict) -> None:
+    h2h_matrix = _compute_h2h_matrix_df(league_data)
+    if h2h_matrix.empty:
         st.info("No match data available.")
         return
-
-    h2h_matrix = build_h2h_matrix(matches_df, team_names)
     _render_h2h_matrix_table(h2h_matrix)
 
 
@@ -1507,7 +1559,11 @@ def _render_archived_league_wrapped(season: str, data: dict) -> None:
 def show_league_wrapped_page():
     st.title("League Wrapped 🏆")
 
-    archived_seasons = list_archived_seasons()
+    # The live season now auto-archives itself on every visit (see the
+    # auto-archive block below), so exclude it here — otherwise it would
+    # show up twice: once as "Current Season" (live) and once as its own
+    # season label (the frozen snapshot), which is redundant and confusing.
+    archived_seasons = [s for s in list_archived_seasons() if s != config.display_pl_season_label()]
     season_choice = "Current Season"
     if archived_seasons:
         options = archived_seasons + ["Current Season"]
@@ -1599,6 +1655,29 @@ def show_league_wrapped_page():
         except Exception:
             _logger.warning("Failed to compute top players", exc_info=True)
             top_players_data = {}
+
+    # ---------------------------------------------------------------------------
+    # Auto-archive: snapshot this season's League Wrapped data every time this
+    # page is viewed, overwriting the previous snapshot. This is what makes
+    # the data survive next season's Draft league-ID rollover (the whole
+    # reason 2025/26's data had to be manually rebuilt from a saved PDF) —
+    # by the time the league ID goes stale, whatever the last visit here
+    # captured is already sitting safely in the archive. Best-effort; must
+    # never break the live page.
+    # ---------------------------------------------------------------------------
+    try:
+        save_archived_season(season_label, {
+            "standings": _standings_list_from_league_data(league_data),
+            "top_players": top_players_data,
+            "league_awards": _compute_league_awards_list(superlatives, history_df),
+            "gw_highlights": highlights,
+            "h2h_matrix": _h2h_df_to_dict(_compute_h2h_matrix_df(league_data)),
+            "draft_board": draft_data,
+            "transfer_window": transfer_data,
+            "lineup_management": bench_data_list,
+        })
+    except Exception:
+        _logger.warning("Failed to auto-archive current season snapshot", exc_info=True)
 
     # ---------------------------------------------------------------------------
     # Render sections
