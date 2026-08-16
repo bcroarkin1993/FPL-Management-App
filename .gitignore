@@ -44,6 +44,11 @@ Thumbs.db
 # Locally-set Draft/Classic league & team IDs (user-specific; repo is public)
 league_settings.json
 
+# Local, permanent archive of personal league data (past season League
+# Wrapped exports and their extracted data — team/manager names, repo is
+# public) — never committed, never auto-deleted.
+archive/
+
 # Scoring test script cache
 .scoring_test_cache/
 

@@ -42,6 +42,10 @@ from scripts.draft.season_wrapped import (
     _compute_league_superlatives,
     show_season_wrapped_page,
 )
+from scripts.common.wrapped_archive import (
+    list_archived_seasons,
+    load_archived_season,
+)
 
 _logger = get_logger("fpl_app.draft.league_wrapped")
 
@@ -945,6 +949,14 @@ def _render_h2h_records(league_data: dict) -> None:
         return
 
     h2h_matrix = build_h2h_matrix(matches_df, team_names)
+    _render_h2h_matrix_table(h2h_matrix)
+
+
+def _render_h2h_matrix_table(h2h_matrix: pd.DataFrame) -> None:
+    """Render an H2H W-D-L matrix + notable rivalries. Pure function of the
+    matrix itself — shared by the live path above (which computes the
+    matrix from match records) and the archived-season path (which
+    reconstructs the same matrix shape from stored data instead)."""
     if h2h_matrix.empty:
         st.info("No H2H data available.")
         return
@@ -1336,8 +1348,181 @@ def _season_label_from_league_data(league_data: dict) -> str:
     return config.display_pl_season_label()
 
 
+# ---------------------------------------------------------------------------
+# Archived-season rendering (no live API calls — reads from wrapped_archive)
+# ---------------------------------------------------------------------------
+
+def _render_archived_champion_banner(standings: list) -> None:
+    """Champion/runner-up/last-place banner + final standings, from archived
+    (already name-resolved) standings — the raw-API entry_id -> name lookup
+    _render_champion_banner() needs isn't relevant here, everything is
+    already flat."""
+    if not standings:
+        st.info("No standings data available.")
+        return
+
+    def _league_pts(row):
+        return row.get("league_pts", row.get("w", 0) * 3 + row.get("d", 0))
+
+    sorted_standings = sorted(standings, key=lambda s: s.get("rank", 999))
+    winner = sorted_standings[0]
+
+    st.markdown(
+        f'<div style="background:linear-gradient(135deg,#1a1a2e 0%,#2d1b69 50%,#1a1a2e 100%);'
+        f'border:2px solid {_GOLD};border-radius:16px;padding:32px;text-align:center;margin-bottom:20px;">'
+        f'<div style="font-size:3em;margin-bottom:8px;">🏆</div>'
+        f'<div style="color:{_GOLD};font-size:2.2em;font-weight:800;margin-bottom:4px;">{winner.get("team", "?")}</div>'
+        f'<div style="color:#e0e0e0;font-size:1.1em;margin-bottom:12px;">League Champion</div>'
+        f'<div style="color:#9ca3af;font-size:1em;">'
+        f'{winner.get("w", 0)}W – {winner.get("d", 0)}D – {winner.get("l", 0)}L &nbsp;|&nbsp; '
+        f'{_league_pts(winner)} league pts &nbsp;|&nbsp; {winner.get("pts_for", 0):,} FPL pts'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if len(sorted_standings) >= 2:
+        ru = sorted_standings[1]
+        ru_html = (
+            f'<div style="flex:1;border:1px solid #9d4edd;border-radius:10px;padding:16px 14px;'
+            f'background:#16213e;text-align:center;color:#e0e0e0;">'
+            f'<div style="font-size:1.8em;margin-bottom:6px;">🥈</div>'
+            f'<div style="color:#9ca3af;font-size:12px;text-transform:uppercase;'
+            f'letter-spacing:2px;margin-bottom:6px;">Runner-Up</div>'
+            f'<div style="color:#9d4edd;font-size:17px;font-weight:700;margin-bottom:5px;">{ru.get("team", "?")}</div>'
+            f'<div style="color:#888;font-size:12px;">'
+            f'{ru.get("w", 0)}W – {ru.get("d", 0)}D – {ru.get("l", 0)}L &nbsp;·&nbsp; {_league_pts(ru)} league pts</div>'
+            f'</div>'
+        )
+        rel_html = ""
+        if len(sorted_standings) >= 3:
+            rel = sorted_standings[-1]
+            rel_html = (
+                f'<div style="flex:1;background:linear-gradient(135deg,#2d0000 0%,#1a0000 100%);'
+                f'border:2px solid {_RED};border-radius:10px;padding:16px 14px;text-align:center;">'
+                f'<div style="font-size:1.8em;margin-bottom:6px;">📍</div>'
+                f'<div style="color:{_RED};font-size:12px;font-weight:900;'
+                f'text-transform:uppercase;letter-spacing:3px;margin-bottom:6px;">Last Place</div>'
+                f'<div style="color:#ff8080;font-size:17px;font-weight:700;margin-bottom:5px;">{rel.get("team", "?")}</div>'
+                f'<div style="color:#cc4444;font-size:12px;">'
+                f'{rel.get("w", 0)}W – {rel.get("d", 0)}D – {rel.get("l", 0)}L &nbsp;·&nbsp; {_league_pts(rel)} league pts</div>'
+                f'</div>'
+            )
+        st.markdown(
+            f'<div style="display:flex;gap:12px;margin-bottom:14px;">{ru_html}{rel_html}</div>',
+            unsafe_allow_html=True,
+        )
+
+    rows = [
+        {
+            "Rank": row.get("rank", "?"), "Team": row.get("team", "?"),
+            "W": row.get("w", 0), "D": row.get("d", 0), "L": row.get("l", 0),
+            "League Pts": _league_pts(row),
+            "Pts For": row.get("pts_for", 0), "Pts Against": row.get("pts_against", 0),
+            "Pts Diff": row.get("pts_diff", row.get("pts_for", 0) - row.get("pts_against", 0)),
+        }
+        for row in sorted_standings
+    ]
+    render_styled_table(
+        pd.DataFrame(rows),
+        title="Final League Standings",
+        col_formats={"Pts For": "{:,}", "Pts Against": "{:,}", "Pts Diff": "{:+,}"},
+        text_align={"Rank": "center", "Team": "left", "W": "center", "D": "center", "L": "center"},
+        positive_color_cols=["League Pts", "Pts For", "Pts Diff"],
+        negative_color_cols=["Pts Against"],
+        highlight_row=lambda row: row.get("Rank") == 1,
+    )
+
+
+def _render_archived_league_awards(awards: list) -> None:
+    """8 league-award cards from an archived flat award list — reuses
+    _award_card(), the same card-drawing helper the live section uses."""
+    if not awards:
+        st.info("No league awards data available.")
+        return
+    for row_start in range(0, len(awards), 4):
+        cols = st.columns(4)
+        for col, award in zip(cols, awards[row_start:row_start + 4]):
+            col.markdown(
+                _award_card(
+                    award.get("icon", "🏆"), award.get("title", "?"),
+                    award.get("team", "?"), award.get("detail", ""),
+                    award.get("accent", _PURPLE),
+                ),
+                unsafe_allow_html=True,
+            )
+        st.markdown("<br>", unsafe_allow_html=True)
+
+
+def _render_archived_league_wrapped(season: str, data: dict) -> None:
+    """Render a fully-archived past season's League Wrapped — no live API
+    calls, everything reads from the stored archive."""
+    st.write(f"The complete {season} FPL Draft season — league-wide story. *(archived)*")
+
+    _section_header("🏆", "League Champion", f"The {season} Draft League final standings")
+    _render_archived_champion_banner(data.get("standings", []))
+    st.markdown("---")
+
+    _section_header("📈", "Season Journey", "Cumulative points race and league position over the season")
+    st.info(
+        "📈 Chart data isn't available for archived seasons — only the final PDF "
+        "export was preserved, not the underlying per-gameweek data it was built from."
+    )
+    st.markdown("---")
+
+    _section_header("🌟", "Season's Top Players",
+                     f"The FPL stars who defined the {season} season — and who in your league owned them")
+    _render_top_players(data.get("top_players", {}))
+    st.markdown("---")
+
+    _section_header("🎖️", "League Awards", "Eight superlatives celebrating the best (and worst) of the season")
+    _render_archived_league_awards(data.get("league_awards", []))
+    st.markdown("---")
+
+    _section_header("⚡", "Gameweek Highlights", "The most memorable moments of the season")
+    _render_gw_highlights(data.get("gw_highlights", {}))
+    st.markdown("---")
+
+    _section_header("⚔️", "Head-to-Head Records", "Full W-D-L matrix across all league matchups")
+    h2h = data.get("h2h_matrix", {})
+    teams, cells = h2h.get("teams", []), h2h.get("cells", {})
+    if teams and cells:
+        h2h_df = pd.DataFrame(cells).T.reindex(index=teams, columns=teams).fillna("-")
+        _render_h2h_matrix_table(h2h_df)
+    else:
+        st.info("No H2H data available.")
+    st.markdown("---")
+
+    _section_header("🃏", "Draft Board Retrospective", "League-wide draft steals and busts")
+    _render_draft_board(data.get("draft_board", {}))
+    st.markdown("---")
+
+    _section_header("🔀", "Transfer Window", "Who was most active and who won (or lost) the transfer game")
+    _render_transfer_window(data.get("transfer_window", {}))
+    st.markdown("---")
+
+    _section_header("🧩", "Lineup Management", "Bench points missed — who managed their squad best?")
+    _render_lineup_management(data.get("lineup_management", []))
+
+
 def show_league_wrapped_page():
     st.title("League Wrapped 🏆")
+
+    archived_seasons = list_archived_seasons()
+    season_choice = "Current Season"
+    if archived_seasons:
+        options = archived_seasons + ["Current Season"]
+        season_choice = st.selectbox(
+            "Season", options=options, index=len(options) - 1,
+            key="league_wrapped_season_select",
+        )
+
+    if season_choice != "Current Season":
+        archived_data = load_archived_season(season_choice)
+        if not archived_data:
+            st.error(f"Could not load archived data for {season_choice}.")
+            return
+        _render_archived_league_wrapped(season_choice, archived_data)
+        return
 
     league_id = config.FPL_DRAFT_LEAGUE_ID
     if not league_id:
