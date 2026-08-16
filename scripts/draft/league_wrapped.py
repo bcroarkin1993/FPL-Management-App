@@ -35,7 +35,7 @@ from scripts.common.fpl_draft_api import (
 )
 from scripts.common.luck_analysis import calculate_all_play_standings, extract_draft_gw_scores
 from scripts.common.player_matching import canonical_normalize
-from scripts.draft.home import build_draft_history_df
+from scripts.draft.home import build_draft_history_df, season_label_from_league_data as _season_label_from_league_data
 from scripts.draft.league_analysis import build_h2h_matrix, get_matches_df, get_team_names
 from scripts.draft.pdf_export import generate_league_wrapped_pdf
 from scripts.draft.season_wrapped import (
@@ -1379,27 +1379,6 @@ def _any_gameweek_played(history_df) -> bool:
     )
 
 
-def _season_label_from_league_data(league_data: dict) -> str:
-    """Season label ('YYYY/YY') derived from this league's own draft date
-    when available, rather than just today's date — more accurate right
-    around the Aug/Sep season-rollover boundary than a pure calendar guess
-    (e.g. a league drafted Aug 9 is unambiguously the season starting that
-    August, even if display_pl_season_label()'s generic cutoff hasn't
-    flipped yet). Falls back to display_pl_season_label() if no draft date
-    is available on this league."""
-    try:
-        drafts = league_data.get("league", {}).get("drafts") or []
-        draft_dt_str = drafts[0].get("draft_dt") if drafts else None
-        if draft_dt_str:
-            from datetime import datetime
-            dt = datetime.fromisoformat(draft_dt_str.replace("Z", "+00:00"))
-            start_year = dt.year if dt.month >= 7 else dt.year - 1
-            return f"{start_year}/{str(start_year + 1)[-2:]}"
-    except Exception:
-        pass
-    return config.display_pl_season_label()
-
-
 # ---------------------------------------------------------------------------
 # Archived-season rendering (no live API calls — reads from wrapped_archive)
 # ---------------------------------------------------------------------------
@@ -1559,11 +1538,28 @@ def _render_archived_league_wrapped(season: str, data: dict) -> None:
 def show_league_wrapped_page():
     st.title("League Wrapped 🏆")
 
-    # The live season now auto-archives itself on every visit (see the
-    # auto-archive block below), so exclude it here — otherwise it would
-    # show up twice: once as "Current Season" (live) and once as its own
-    # season label (the frozen snapshot), which is redundant and confusing.
-    archived_seasons = [s for s in list_archived_seasons() if s != config.display_pl_season_label()]
+    # Determine the live season from this league's own draft date (not a
+    # generic calendar guess — display_pl_season_label() doesn't roll over
+    # until September and previously caused a real archived season to be
+    # hidden from the selector because it wrongly matched an in-progress
+    # one). Fetched early and reused below; get_draft_league_details() is
+    # cached, so this doesn't cost a second live request.
+    league_id = config.FPL_DRAFT_LEAGUE_ID
+    league_data = None
+    current_season_label = None
+    if league_id:
+        try:
+            league_data = get_draft_league_details(league_id)
+        except Exception:
+            league_data = None
+        if league_data:
+            current_season_label = _season_label_from_league_data(league_data)
+
+    # The live season auto-archives itself on every visit (see the
+    # auto-archive block below), so exclude it from the picker once that's
+    # happened — otherwise it would show up twice: once as "Current Season"
+    # (live) and once as its own season label (the frozen snapshot).
+    archived_seasons = [s for s in list_archived_seasons() if s != current_season_label]
     season_choice = "Current Season"
     if archived_seasons:
         options = archived_seasons + ["Current Season"]
@@ -1580,7 +1576,6 @@ def show_league_wrapped_page():
         _render_archived_league_wrapped(season_choice, archived_data)
         return
 
-    league_id = config.FPL_DRAFT_LEAGUE_ID
     if not league_id:
         st.error("FPL_DRAFT_LEAGUE_ID is not configured. Check your .env file.")
         return
@@ -1589,17 +1584,18 @@ def show_league_wrapped_page():
     # Load all data under a single spinner
     # ---------------------------------------------------------------------------
     with st.spinner("Building League Wrapped..."):
-        try:
-            league_data = get_draft_league_details(league_id)
-        except Exception as exc:
-            st.error(f"Could not fetch league data: {exc}")
-            return
+        if league_data is None:
+            try:
+                league_data = get_draft_league_details(league_id)
+            except Exception as exc:
+                st.error(f"Could not fetch league data: {exc}")
+                return
 
         if not league_data:
             st.error("No league data returned. Check your FPL_DRAFT_LEAGUE_ID setting.")
             return
 
-        season_label = _season_label_from_league_data(league_data)
+        season_label = current_season_label or _season_label_from_league_data(league_data)
         st.write(f"The complete {season_label} FPL Draft season — league-wide story.")
 
         max_gw = min(get_current_gameweek(), 38)

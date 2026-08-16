@@ -49,7 +49,12 @@ from scripts.common.team_analysis_helpers import (
     render_season_best_11,
     render_team_mvp,
 )
-from scripts.draft.home import build_draft_history_df
+from scripts.draft.home import build_draft_history_df, season_label_from_league_data
+from scripts.common.wrapped_archive import (
+    list_archived_team_seasons,
+    load_archived_team_season,
+    save_archived_team_season,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -102,12 +107,15 @@ def _award_card(icon: str, title: str, team: str, detail: str, accent: str = _PU
     )
 
 
-def _render_wrapped_mvp(team_players: list, bootstrap_data: Optional[dict]) -> None:
-    """Render Captain's Armband MVP card with bonus, clean sheets, and saves stats."""
+def _compute_mvp_summary(team_players: list, bootstrap_data: Optional[dict]) -> Optional[Dict]:
+    """The MVP card's data as one flat, fully-resolved dict (player/team/
+    position/total_points/goals/assists/starts/clean_sheets/bonus/saves).
+    Cheap to archive, unlike the full FPL bootstrap (thousands of players)
+    it's derived from — the archived path reads this same shape back
+    without needing bootstrap_data at all."""
     mvp = get_team_mvp(team_players, bootstrap_data)
     if not mvp:
-        st.info("No MVP data available.")
-        return
+        return None
 
     bonus = clean_sheets = saves = 0
     if bootstrap_data:
@@ -117,6 +125,17 @@ def _render_wrapped_mvp(team_players: list, bootstrap_data: Optional[dict]) -> N
                 clean_sheets = elem.get("clean_sheets", 0) or 0
                 saves = elem.get("saves", 0) or 0
                 break
+
+    return {**mvp, "bonus": bonus, "clean_sheets": clean_sheets, "saves": saves}
+
+
+def _render_mvp_summary(mvp: Optional[Dict]) -> None:
+    """Render Captain's Armband MVP card from a resolved summary dict —
+    shared by the live path (via _compute_mvp_summary) and the archived
+    path (reading the same shape straight from storage)."""
+    if not mvp:
+        st.info("No MVP data available.")
+        return
 
     pos = mvp.get("position", "")
 
@@ -128,14 +147,14 @@ def _render_wrapped_mvp(team_players: list, bootstrap_data: Optional[dict]) -> N
         )
 
     stats = (
-        _stat(mvp["starts"], "Starts*", "#9b59b6")
-        + _stat(mvp["goals"], "Goals", "#e74c3c")
-        + _stat(mvp["assists"], "Assists", "#3498db")
-        + _stat(clean_sheets, "Clean Sheets", "#2ecc71")
-        + _stat(bonus, "Bonus Pts", "#f39c12")
+        _stat(mvp.get("starts", 0), "Starts*", "#9b59b6")
+        + _stat(mvp.get("goals", 0), "Goals", "#e74c3c")
+        + _stat(mvp.get("assists", 0), "Assists", "#3498db")
+        + _stat(mvp.get("clean_sheets", 0), "Clean Sheets", "#2ecc71")
+        + _stat(mvp.get("bonus", 0), "Bonus Pts", "#f39c12")
     )
     if pos == "G":
-        stats += _stat(saves, "Saves", "#1abc9c")
+        stats += _stat(mvp.get("saves", 0), "Saves", "#1abc9c")
 
     html = (
         f'<div style="border:2px solid #ffd700;border-radius:12px;padding:20px;'
@@ -685,95 +704,314 @@ def _compute_league_superlatives(league_id: int, max_gw: int) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# Main page
+# Render: sections shared between the live and archived-season paths
+#
+# Each takes only already-computed data (no API calls) so the exact same
+# function renders both the live view and an archived snapshot loaded from
+# scripts/common/wrapped_archive.py — see show_season_wrapped_page().
 # ---------------------------------------------------------------------------
 
-def show_season_wrapped_page():
-    st.title("Season Wrapped 🎬")
-    st.write(f"Your complete {config.display_pl_season_label()} FPL Draft season in review.")
-    _inject_print_styles()
-    _render_export_button()
-
-    # Team selector
-    try:
-        team_dict = get_league_teams(config.FPL_DRAFT_LEAGUE_ID)  # {entry_id: team_name}
-    except Exception:
-        st.error("Could not load league teams. Check your FPL_DRAFT_LEAGUE_ID config.")
+def _render_formation_stats(formation_counts: Dict[str, int], max_gw: int) -> None:
+    if not formation_counts:
+        st.info("Formation data not available.")
         return
 
-    if not team_dict:
-        st.warning("No teams found in your Draft league.")
+    top_formation = next(iter(formation_counts))
+    top_count = formation_counts[top_formation]
+
+    num_rows = len(formation_counts)
+    row_h = 44  # approx px per data row
+    card_h = max(180, num_rows * row_h + 56)  # header row + padding
+    col_feat, col_tbl = st.columns([2, 3])
+    with col_feat:
+        top_html = (
+            f'<div style="border:2px solid {_PURPLE};border-radius:12px;padding:32px 24px;'
+            f'background:linear-gradient(135deg,#1a1a2e 0%,#2d1b69 100%);text-align:center;'
+            f'min-height:{card_h}px;display:flex;flex-direction:column;justify-content:center;">'
+            f'<div style="color:#e0e0e0;font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Most Used Formation</div>'
+            f'<div style="color:#c87bff;font-size:3.2em;font-weight:800;margin:12px 0;letter-spacing:4px;">{top_formation}</div>'
+            f'<div style="color:#ffffff;font-size:15px;font-weight:600;">{top_count} GWs</div>'
+            f'<div style="color:#e0e0e0;font-size:12px;margin-top:4px;">out of {max_gw} played</div>'
+            f'</div>'
+        )
+        st.markdown(top_html, unsafe_allow_html=True)
+    with col_tbl:
+        rows_html = ""
+        for k, v in formation_counts.items():
+            pct = v / max_gw * 100
+            bar_w = int(pct)
+            is_top = k == top_formation
+            row_bg = "rgba(123,47,190,0.25)" if is_top else "#1e1e35"
+            badge_color = _PURPLE if is_top else "#4a4a6a"
+            rows_html += (
+                f'<tr style="border-bottom:1px solid #2a2a4a;background:{row_bg};">'
+                f'<td style="padding:11px 14px;color:#ffffff;'
+                f'font-weight:{"700" if is_top else "500"};font-size:17px;">{k}</td>'
+                f'<td style="padding:11px 14px;color:#ffffff;text-align:center;font-size:14px;">{v}</td>'
+                f'<td style="padding:11px 14px;">'
+                f'<div style="display:flex;align-items:center;gap:8px;">'
+                f'<div style="background:{badge_color};border-radius:4px;height:8px;width:{bar_w}%;min-width:4px;"></div>'
+                f'<span style="color:#e0e0e0;font-size:13px;white-space:nowrap;">{pct:.0f}%</span>'
+                f'</div></td></tr>'
+            )
+        tbl_html = (
+            f'<div style="border:1px solid #2a2a4a;border-radius:10px;overflow:hidden;background:#1a1a2e;">'
+            f'<table style="width:100%;border-collapse:collapse;background:#1a1a2e;">'
+            f'<thead><tr style="background:rgba(123,47,190,0.4);">'
+            f'<th style="padding:12px 14px;color:#ffffff;text-align:left;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;">Formation</th>'
+            f'<th style="padding:12px 14px;color:#ffffff;text-align:center;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;">GWs</th>'
+            f'<th style="padding:12px 14px;color:#ffffff;text-align:left;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;">Share</th>'
+            f'</tr></thead><tbody>{rows_html}</tbody></table></div>'
+        )
+        st.markdown(tbl_html, unsafe_allow_html=True)
+
+
+def _render_transfer_window_section(
+    transfers: List[Dict], most_in: Dict[str, int], most_out: Dict[str, int]
+) -> None:
+    if transfers:
+        best_tx = max(transfers, key=lambda x: x["net"])
+        worst_out_5gw = max(transfers, key=lambda x: x["pts_out_5gw"])
+
+        col_b, col_w = st.columns(2)
+        with col_b:
+            st.markdown(
+                _stat_card(
+                    "Best Transfer In",
+                    best_tx["player_in"],
+                    _GREEN,
+                    f"+{best_tx['pts_in']} pts rest of season (net {best_tx['net']:+d})",
+                ),
+                unsafe_allow_html=True,
+            )
+        with col_w:
+            st.markdown(
+                _stat_card(
+                    "Worst Transfer Out (5-GW)",
+                    worst_out_5gw["player_out"],
+                    _RED,
+                    f"{worst_out_5gw['pts_out_5gw']} pts in 5 GWs after you dropped them",
+                ),
+                unsafe_allow_html=True,
+            )
+
+        st.markdown(
+            '<p style="color:#9ca3af;font-size:12px;font-style:italic;margin-top:8px;">'
+            "Best In = highest net (Pts In minus Pts Out, rest of season). "
+            "Worst Out = most pts scored in the 5 GWs immediately after being dropped "
+            "— capped at 5 GWs to make early-season drops comparable to late-season ones.</p>",
+            unsafe_allow_html=True,
+        )
+
+        # Full transfer table
+        with st.expander("All Transfers This Season", expanded=False):
+            df_tx = pd.DataFrame(transfers)[
+                ["gw", "player_in", "player_out", "pts_in_5gw", "pts_out_5gw", "net_5gw", "pts_in", "pts_out", "net"]
+            ].rename(columns={
+                "gw": "GW", "player_in": "Player In", "player_out": "Player Out",
+                "pts_in_5gw": "In (5 GW)", "pts_out_5gw": "Out (5 GW)", "net_5gw": "Net (5 GW)",
+                "pts_in": "In (Season)", "pts_out": "Out (Season)", "net": "Net (Season)",
+            })
+            st.dataframe(df_tx, hide_index=True, use_container_width=True,
+                         height=38 + len(df_tx) * 35)
+    else:
+        st.info("No transfers made this season.")
+
+    # League-wide most transferred
+    if most_in or most_out:
+        col_mi, col_mo = st.columns(2)
+        with col_mi:
+            st.markdown("##### 📈 Most Transferred In (League)")
+            top_in = sorted(most_in.items(), key=lambda x: -x[1])[:5]
+            if top_in:
+                rows_in = "".join(
+                    f'<tr style="border-bottom:1px solid #2a2a4a;background:#1e1e35;">'
+                    f'<td style="padding:10px 14px;color:#ffffff;font-size:14px;">{i+1}. {name}</td>'
+                    f'<td style="padding:10px 14px;text-align:right;">'
+                    f'<span style="background:{_GREEN};color:#000;border-radius:12px;padding:3px 12px;font-size:13px;font-weight:700;">{cnt}</span>'
+                    f'</td></tr>'
+                    for i, (name, cnt) in enumerate(top_in)
+                )
+                st.markdown(
+                    f'<div style="border:1px solid #2a2a4a;border-radius:10px;overflow:hidden;background:#1a1a2e;">'
+                    f'<table style="width:100%;border-collapse:collapse;background:#1a1a2e;">'
+                    f'<thead><tr style="background:rgba(0,255,135,0.2);">'
+                    f'<th style="padding:10px 14px;color:#ffffff;text-align:left;font-size:13px;font-weight:700;text-transform:uppercase;">Player</th>'
+                    f'<th style="padding:10px 14px;color:#ffffff;text-align:right;font-size:13px;font-weight:700;text-transform:uppercase;">Times In</th>'
+                    f'</tr></thead><tbody>{rows_in}</tbody></table></div>',
+                    unsafe_allow_html=True,
+                )
+        with col_mo:
+            st.markdown("##### 📉 Most Transferred Out (League)")
+            top_out = sorted(most_out.items(), key=lambda x: -x[1])[:5]
+            if top_out:
+                rows_out = "".join(
+                    f'<tr style="border-bottom:1px solid #2a2a4a;background:#1e1e35;">'
+                    f'<td style="padding:10px 14px;color:#ffffff;font-size:14px;">{i+1}. {name}</td>'
+                    f'<td style="padding:10px 14px;text-align:right;">'
+                    f'<span style="background:{_RED};color:#fff;border-radius:12px;padding:3px 12px;font-size:13px;font-weight:700;">{cnt}</span>'
+                    f'</td></tr>'
+                    for i, (name, cnt) in enumerate(top_out)
+                )
+                st.markdown(
+                    f'<div style="border:1px solid #2a2a4a;border-radius:10px;overflow:hidden;background:#1a1a2e;">'
+                    f'<table style="width:100%;border-collapse:collapse;background:#1a1a2e;">'
+                    f'<thead><tr style="background:rgba(255,75,75,0.2);">'
+                    f'<th style="padding:10px 14px;color:#ffffff;text-align:left;font-size:13px;font-weight:700;text-transform:uppercase;">Player</th>'
+                    f'<th style="padding:10px 14px;color:#ffffff;text-align:right;font-size:13px;font-weight:700;text-transform:uppercase;">Times Out</th>'
+                    f'</tr></thead><tbody>{rows_out}</tbody></table></div>',
+                    unsafe_allow_html=True,
+                )
+
+
+def _render_draft_retrospective(draft_data: Optional[Dict]) -> None:
+    if not draft_data or not draft_data.get("my_picks"):
+        st.info("Draft analysis data not available.")
         return
 
-    team_list = list(team_dict.values())
-    default_team = team_dict.get(config.FPL_DRAFT_TEAM_ID, team_list[0])
-    try:
-        default_idx = team_list.index(default_team)
-    except ValueError:
-        default_idx = 0
+    picks = draft_data["my_picks"]
+    retention = draft_data["retention_count"]
+    total_orig = draft_data["retention_total"]
 
-    selected_team = st.selectbox("View Season Wrapped for:", team_list, index=default_idx)
-    entry_id = get_team_id_by_name(config.FPL_DRAFT_LEAGUE_ID, selected_team)
-    num_teams = len(team_dict)
+    avg_delta = sum(p["delta"] for p in picks) / len(picks)
+    steals = sorted([p for p in picks if "Steal" in p["grade"] or "Value" in p["grade"]],
+                    key=lambda x: -x["delta"])[:3]
+    busts = sorted([p for p in picks if "Bust" in p["grade"] or "Miss" in p["grade"]],
+                   key=lambda x: x["delta"])[:3]
 
-    _raw_gw = get_current_gameweek()
-    max_gw = min(int(_raw_gw), 38) if _raw_gw is not None else 38
-    if max_gw < 1:
-        st.info("No gameweek data available yet.")
+    col_r, col_d = st.columns(2)
+    with col_r:
+        st.markdown(
+            _stat_card("Retention Rate", f"{retention}/{total_orig}", _PURPLE,
+                       "Original draft picks still on roster"),
+            unsafe_allow_html=True,
+        )
+    with col_d:
+        sign = "+" if avg_delta >= 0 else ""
+        color = _GREEN if avg_delta >= 0 else _RED
+        st.markdown(
+            _stat_card("Avg Pick Delta", f"{sign}{avg_delta:.1f} pts", color,
+                       "vs. league avg for that draft round"),
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("")
+    if steals:
+        st.markdown("##### 🔥 Your Steals")
+        steal_cols = st.columns(min(3, len(steals)))
+        for i, p in enumerate(steals):
+            with steal_cols[i]:
+                st.markdown(
+                    _stat_card(f"Rd {p['round']} Pick {p['pick']}", p["player"],
+                               _GREEN, f"{p['pts']} pts (+{p['delta']:.0f} vs avg)"),
+                    unsafe_allow_html=True,
+                )
+    if busts:
+        st.markdown("##### 💀 Your Busts")
+        bust_cols = st.columns(min(3, len(busts)))
+        for i, p in enumerate(busts):
+            with bust_cols[i]:
+                st.markdown(
+                    _stat_card(f"Rd {p['round']} Pick {p['pick']}", p["player"],
+                               _RED, f"{p['pts']} pts ({p['delta']:.0f} vs avg)"),
+                    unsafe_allow_html=True,
+                )
+
+    with st.expander("Full Draft Board", expanded=False):
+        df_picks = pd.DataFrame(picks)[
+            ["round", "pick", "overall_pick", "player", "pts", "avg_round_pts", "delta", "grade"]
+        ].rename(columns={
+            "round": "Round", "pick": "Pick in Round", "overall_pick": "Overall Pick",
+            "player": "Player", "pts": "Season Pts", "avg_round_pts": "Avg for Round",
+            "delta": "Delta", "grade": "Grade",
+        })
+        st.dataframe(df_picks, hide_index=True, use_container_width=True,
+                     height=38 + len(df_picks) * 35)
+
+
+def _render_team_league_awards(superlatives: Optional[Dict]) -> None:
+    if not superlatives:
+        st.info("League superlatives could not be computed.")
         return
 
-    # Load core data with spinner
-    with st.spinner("Building your Season Wrapped..."):
-        history_df = build_draft_history_df(config.FPL_DRAFT_LEAGUE_ID)
-        league_data = get_draft_league_details(config.FPL_DRAFT_LEAGUE_ID)
-        player_data_dict = get_draft_team_players_with_points(config.FPL_DRAFT_LEAGUE_ID)
-        bootstrap = get_classic_bootstrap_static()
-        bench_data = compute_draft_bench_data(entry_id, max_gw)
+    col1, col2, col3 = st.columns(3)
+    col4, col5 = st.columns(2)
 
-    team_history = pd.DataFrame()
-    if not history_df.empty:
-        team_history = history_df[history_df["Team"] == selected_team].sort_values("Gameweek")
+    with col1:
+        st.markdown(
+            _award_card("🔁", "Most Active Manager",
+                        superlatives["most_active"]["team"],
+                        f"{superlatives['most_active']['value']} transfers", _PURPLE),
+            unsafe_allow_html=True,
+        )
+    with col2:
+        st.markdown(
+            _award_card("🎯", "Best Lineup Manager",
+                        superlatives["best_mgr"]["team"],
+                        superlatives["best_mgr"]["value"], _GREEN),
+            unsafe_allow_html=True,
+        )
+    with col3:
+        st.markdown(
+            _award_card("🧠", "Best Drafter",
+                        superlatives["best_drafter"]["team"],
+                        superlatives["best_drafter"]["value"], _GOLD),
+            unsafe_allow_html=True,
+        )
+    with col4:
+        st.markdown(
+            _award_card("🍀", "Luckiest Manager",
+                        superlatives["luckiest"]["team"],
+                        superlatives["luckiest"]["value"], "#4ade80"),
+            unsafe_allow_html=True,
+        )
+    with col5:
+        st.markdown(
+            _award_card("😢", "Most Unlucky Manager",
+                        superlatives["unluckiest"]["team"],
+                        superlatives["unluckiest"]["value"], _RED),
+            unsafe_allow_html=True,
+        )
 
-    team_players = player_data_dict.get(selected_team, [])
 
-    # Standings for this team
-    standings = league_data.get("standings", []) if league_data else []
-    entries = league_data.get("league_entries", []) if league_data else []
-    entry_id_map = {e["entry_name"]: e["id"] for e in entries}
-    league_entry_id = entry_id_map.get(selected_team)
-    final_rank = "?"
-    total_pts = 0
-    wdl = "?"
-    for row in standings:
-        if row.get("league_entry") == league_entry_id:
-            final_rank = row.get("rank", "?")
-            total_pts = row.get("points_for", 0)
-            w = row.get("matches_won", 0)
-            d = row.get("matches_drawn", 0)
-            lv = row.get("matches_lost", 0)
-            wdl = f"{w}W-{d}D-{lv}L"
-            break
+def _team_history_to_list(team_history: pd.DataFrame) -> List[Dict]:
+    """Convert this team's slice of build_draft_history_df() to a small,
+    archive-friendly list of plain dicts — cheap enough (~38 rows) to store
+    in full, unlike the league-wide history behind League Wrapped's charts,
+    which is why this team's Season Journey / League Position charts CAN be
+    reconstructed for archived seasons while League Wrapped's can't."""
+    if team_history is None or team_history.empty:
+        return []
+    return [
+        {
+            "gw": int(row["Gameweek"]),
+            "gw_points": int(row["GW_Points"]),
+            "total_points": int(row["Total_Points"]),
+            "league_position": int(row["League_Position"]),
+        }
+        for _, row in team_history.sort_values("Gameweek").iterrows()
+    ]
 
-    avg_pts = round(total_pts / max_gw, 1) if max_gw > 0 else 0
 
-    # Seasons of Draft played
-    draft_history = _load_draft_season_history(selected_team, config.FPL_DRAFT_LEAGUE_ID)
-    seasons_played = len(draft_history) if draft_history else 1
+def _render_season_overview(season_label: str, overview: Dict) -> None:
+    """Hero banner + Season Journey/League Position charts + stat cards —
+    shared by the live path and the archived path, both of which pass the
+    exact same overview dict shape (built by _build_overview_dict live, or
+    loaded straight from the archive)."""
+    team = overview.get("team", "?")
+    num_teams = overview.get("num_teams", 0)
+    final_rank = overview.get("final_rank", "?")
+    total_pts = overview.get("total_pts", 0)
+    avg_pts = overview.get("avg_pts", 0)
+    wdl = overview.get("wdl", "?")
+    seasons_played = overview.get("seasons_played", 1)
 
-    st.divider()
-
-    # =========================================================================
-    # PART 1: THE SEASON OVERVIEW
-    # =========================================================================
-    _section_header("📊", "The Season Overview", "How did the season play out?")
-
-    # Hero banner
     hero_html = (
         f'<div style="background:linear-gradient(135deg,#1a1a2e 0%,#2d1b69 50%,#16213e 100%);'
         f'border:2px solid {_PURPLE};border-radius:14px;padding:30px;text-align:center;color:#e0e0e0;margin-bottom:20px;">'
-        f'<div style="font-size:2.5em;font-weight:800;color:#ffffff;margin-bottom:6px;">{selected_team}</div>'
+        f'<div style="font-size:2.5em;font-weight:800;color:#ffffff;margin-bottom:6px;">{team}</div>'
         f'<div style="color:#9ca3af;font-size:14px;letter-spacing:1px;text-transform:uppercase;margin-bottom:20px;">'
-        f'{config.display_pl_season_label()} FPL Draft Season</div>'
+        f'{season_label} FPL Draft Season</div>'
         f'<div style="display:flex;justify-content:center;gap:40px;flex-wrap:wrap;">'
         f'<div><div style="color:{_GOLD};font-size:2em;font-weight:700;">{final_rank}<span style="color:#888;font-size:0.6em;">/{num_teams}</span></div>'
         f'<div style="color:#9ca3af;font-size:12px;text-transform:uppercase;">Final Rank</div></div>'
@@ -789,10 +1027,10 @@ def show_season_wrapped_page():
     )
     st.markdown(hero_html, unsafe_allow_html=True)
 
-    # Season Journey chart
-    if not team_history.empty:
-        gws = team_history["Gameweek"].tolist()
-        pts_list = team_history["GW_Points"].tolist()
+    team_history = overview.get("team_history") or []
+    if team_history:
+        gws = [h["gw"] for h in team_history]
+        pts_list = [h["gw_points"] for h in team_history]
         avg_gw = sum(pts_list) / len(pts_list) if pts_list else 0
         best_gw_idx = pts_list.index(max(pts_list))
         worst_gw_idx = pts_list.index(min(pts_list))
@@ -835,7 +1073,7 @@ def show_season_wrapped_page():
         st.plotly_chart(fig, use_container_width=True, theme=None)
 
         # League position chart — color-coded by rank (gold=1st, pink=high, purple=low)
-        rank_list = team_history["League_Position"].tolist()
+        rank_list = [h["league_position"] for h in team_history]
         worst_rank_val = max(rank_list) if rank_list else num_teams
         best_rank_val = min(rank_list) if rank_list else 1
 
@@ -891,14 +1129,206 @@ def show_season_wrapped_page():
             unsafe_allow_html=True,
         )
 
-    # Stat cards — 2 rows of 4
+    best_gw = overview.get("best_gw")
+    worst_gw = overview.get("worst_gw")
+    best_rank = overview.get("best_rank", 0)
+    worst_rank = overview.get("worst_rank", 0)
+    total_transfers = overview.get("total_transfers", 0)
+    perfect_gws = overview.get("perfect_gws", 0)
+    pts_lost_total = overview.get("pts_lost_total", 0)
+    worst_lineup_gw = overview.get("worst_lineup_gw")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        label = f"GW{best_gw['gw']}: {best_gw['points']} pts" if best_gw else "—"
+        st.markdown(_stat_card("Best GW", label, _GOLD), unsafe_allow_html=True)
+    with col2:
+        label = f"GW{worst_gw['gw']}: {worst_gw['points']} pts" if worst_gw else "—"
+        st.markdown(_stat_card("Worst GW", label, _RED), unsafe_allow_html=True)
+    with col3:
+        st.markdown(_stat_card("Best League Rank", f"#{best_rank}", _GREEN), unsafe_allow_html=True)
+    with col4:
+        st.markdown(_stat_card("Worst League Rank", f"#{worst_rank}", "#9ca3af"), unsafe_allow_html=True)
+
+    st.markdown("")
+    col5, col6, col7, col8 = st.columns(4)
+    with col5:
+        st.markdown(_stat_card("Total Transfers", str(total_transfers), _PURPLE), unsafe_allow_html=True)
+    with col6:
+        st.markdown(_stat_card("Perfect GWs", str(perfect_gws), _GREEN, "Optimal lineup set"), unsafe_allow_html=True)
+    with col7:
+        st.markdown(_stat_card("Points Lost to Bench", str(pts_lost_total), _RED), unsafe_allow_html=True)
+    with col8:
+        wlgw_label = f"GW{worst_lineup_gw['gw']}: {worst_lineup_gw['points_lost']} pts" if worst_lineup_gw else "—"
+        st.markdown(_stat_card("Worst Lineup GW", wlgw_label, _RED), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Main page
+# ---------------------------------------------------------------------------
+
+def _render_archived_season_wrapped(season: str, data: Dict) -> None:
+    """Render a fully-archived past season's Season Wrapped for one team —
+    no live API calls, everything reads from the stored archive."""
+    team = data.get("team", "?")
+    st.write(f"Your complete {season} FPL Draft season in review. *(archived)*")
+    st.divider()
+
+    _section_header("📊", "The Season Overview", "How did the season play out?")
+    _render_season_overview(season, data.get("overview", {}))
+    st.divider()
+
+    _section_header("⚽", "Your Squad", "The players that defined your season")
+    team_players = data.get("team_players", [])
+    if team_players:
+        col_mvp, col_xi = st.columns([5, 6])
+        with col_mvp:
+            st.markdown("#### 🏆 Captain's Armband")
+            _render_mvp_summary(data.get("mvp_summary"))
+        with col_xi:
+            render_season_best_11(team_players)
+    else:
+        st.info("No player data available for this team.")
+    st.divider()
+
+    _section_header("🧠", "Your Decisions", "How well did you manage the team each week?")
+    st.markdown("#### 📐 Most Used Formation")
+    _render_formation_stats(data.get("formation_counts", {}), data.get("max_gw", 38))
+    st.markdown("#### 📋 Lineup Management")
+    bench_data = data.get("bench_data")
+    if bench_data:
+        render_bench_analysis(bench_data, is_classic=False)
+    else:
+        st.info("Lineup data not available.")
+    st.divider()
+
+    _section_header("🔄", "Transfer Window", "How did your waiver wire moves shape the season?")
+    _render_transfer_window_section(
+        data.get("transfers", []), data.get("most_in", {}), data.get("most_out", {})
+    )
+    st.divider()
+
+    _section_header("🧬", "Draft Retrospective", "How did your pre-season draft hold up?")
+    _render_draft_retrospective(data.get("draft_data"))
+    st.divider()
+
+    _section_header("📅", "Looking Back", "How does this season compare to previous years?")
+    st.info(
+        "Looking Back (cross-season comparison against your other saved seasons) "
+        "is only available on **Current Season** — switch back above to see it."
+    )
+    st.divider()
+
+    _section_header("🏆", "League Awards", "Who stood out across the whole league this season?")
+    _render_team_league_awards(data.get("superlatives"))
+
+
+def show_season_wrapped_page():
+    st.title("Season Wrapped 🎬")
+    _inject_print_styles()
+    _render_export_button()
+
+    # Team selector
+    try:
+        team_dict = get_league_teams(config.FPL_DRAFT_LEAGUE_ID)  # {entry_id: team_name}
+    except Exception:
+        st.error("Could not load league teams. Check your FPL_DRAFT_LEAGUE_ID config.")
+        return
+
+    if not team_dict:
+        st.warning("No teams found in your Draft league.")
+        return
+
+    team_list = list(team_dict.values())
+    default_team = team_dict.get(config.FPL_DRAFT_TEAM_ID, team_list[0])
+    try:
+        default_idx = team_list.index(default_team)
+    except ValueError:
+        default_idx = 0
+
+    selected_team = st.selectbox("View Season Wrapped for:", team_list, index=default_idx)
+
+    # Season selector for this team — same auto-archive pattern as League
+    # Wrapped, but scoped per team since this page is a per-manager
+    # narrative rather than a league-wide one (team names are assumed
+    # stable across seasons, same assumption the "Looking Back" section
+    # already makes for cross-season history lookups).
+    archived_seasons = list_archived_team_seasons(selected_team)
+    season_choice = "Current Season"
+    if archived_seasons:
+        options = archived_seasons + ["Current Season"]
+        season_choice = st.selectbox(
+            "Season", options=options, index=len(options) - 1,
+            key=f"season_wrapped_season_select_{selected_team}",
+        )
+
+    if season_choice != "Current Season":
+        archived_data = load_archived_team_season(season_choice, selected_team)
+        if not archived_data:
+            st.error(f"Could not load archived data for {selected_team} in {season_choice}.")
+            return
+        _render_archived_season_wrapped(season_choice, archived_data)
+        return
+
+    st.write(f"Your complete {config.display_pl_season_label()} FPL Draft season in review.")
+
+    entry_id = get_team_id_by_name(config.FPL_DRAFT_LEAGUE_ID, selected_team)
+    num_teams = len(team_dict)
+
+    _raw_gw = get_current_gameweek()
+    max_gw = min(int(_raw_gw), 38) if _raw_gw is not None else 38
+    if max_gw < 1:
+        st.info("No gameweek data available yet.")
+        return
+
+    # Load core data with spinner
+    with st.spinner("Building your Season Wrapped..."):
+        history_df = build_draft_history_df(config.FPL_DRAFT_LEAGUE_ID)
+        league_data = get_draft_league_details(config.FPL_DRAFT_LEAGUE_ID)
+        player_data_dict = get_draft_team_players_with_points(config.FPL_DRAFT_LEAGUE_ID)
+        bootstrap = get_classic_bootstrap_static()
+        bench_data = compute_draft_bench_data(entry_id, max_gw)
+
+    team_history = pd.DataFrame()
+    if not history_df.empty:
+        team_history = history_df[history_df["Team"] == selected_team].sort_values("Gameweek")
+    team_history_list = _team_history_to_list(team_history)
+
+    team_players = player_data_dict.get(selected_team, [])
+
+    # Standings for this team
+    standings = league_data.get("standings", []) if league_data else []
+    entries = league_data.get("league_entries", []) if league_data else []
+    entry_id_map = {e["entry_name"]: e["id"] for e in entries}
+    league_entry_id = entry_id_map.get(selected_team)
+    final_rank = "?"
+    total_pts = 0
+    wdl = "?"
+    for row in standings:
+        if row.get("league_entry") == league_entry_id:
+            final_rank = row.get("rank", "?")
+            total_pts = row.get("points_for", 0)
+            w = row.get("matches_won", 0)
+            d = row.get("matches_drawn", 0)
+            lv = row.get("matches_lost", 0)
+            wdl = f"{w}W-{d}D-{lv}L"
+            break
+
+    avg_pts = round(total_pts / max_gw, 1) if max_gw > 0 else 0
+
+    # Seasons of Draft played
+    draft_history = _load_draft_season_history(selected_team, config.FPL_DRAFT_LEAGUE_ID)
+    seasons_played = len(draft_history) if draft_history else 1
+
     if not team_history.empty:
         best_gw_row = team_history.loc[team_history["GW_Points"].idxmax()]
         worst_gw_row = team_history.loc[team_history["GW_Points"].idxmin()]
+        best_gw = {"gw": int(best_gw_row["Gameweek"]), "points": int(best_gw_row["GW_Points"])}
+        worst_gw = {"gw": int(worst_gw_row["Gameweek"]), "points": int(worst_gw_row["GW_Points"])}
         best_rank = int(team_history["League_Position"].min())
         worst_rank = int(team_history["League_Position"].max())
     else:
-        best_gw_row = worst_gw_row = None
+        best_gw = worst_gw = None
         best_rank = worst_rank = 0
 
     total_transfers = 0
@@ -925,29 +1355,80 @@ def show_season_wrapped_page():
         if eligible:
             worst_lineup_gw = max(eligible, key=lambda g: g["points_lost"])
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        label = f"GW{int(best_gw_row['Gameweek'])}: {int(best_gw_row['GW_Points'])} pts" if best_gw_row is not None else "—"
-        st.markdown(_stat_card("Best GW", label, _GOLD), unsafe_allow_html=True)
-    with col2:
-        label = f"GW{int(worst_gw_row['Gameweek'])}: {int(worst_gw_row['GW_Points'])} pts" if worst_gw_row is not None else "—"
-        st.markdown(_stat_card("Worst GW", label, _RED), unsafe_allow_html=True)
-    with col3:
-        st.markdown(_stat_card("Best League Rank", f"#{best_rank}", _GREEN), unsafe_allow_html=True)
-    with col4:
-        st.markdown(_stat_card("Worst League Rank", f"#{worst_rank}", "#9ca3af"), unsafe_allow_html=True)
+    overview = {
+        "team": selected_team,
+        "num_teams": num_teams,
+        "final_rank": final_rank,
+        "total_pts": total_pts,
+        "avg_pts": avg_pts,
+        "wdl": wdl,
+        "seasons_played": seasons_played,
+        "team_history": team_history_list,
+        "best_gw": best_gw,
+        "worst_gw": worst_gw,
+        "best_rank": best_rank,
+        "worst_rank": worst_rank,
+        "total_transfers": total_transfers,
+        "perfect_gws": perfect_gws,
+        "pts_lost_total": pts_lost_total,
+        "worst_lineup_gw": worst_lineup_gw,
+    }
 
-    st.markdown("")
-    col5, col6, col7, col8 = st.columns(4)
-    with col5:
-        st.markdown(_stat_card("Total Transfers", str(total_transfers), _PURPLE), unsafe_allow_html=True)
-    with col6:
-        st.markdown(_stat_card("Perfect GWs", str(perfect_gws), _GREEN, "Optimal lineup set"), unsafe_allow_html=True)
-    with col7:
-        st.markdown(_stat_card("Points Lost to Bench", str(pts_lost_total), _RED), unsafe_allow_html=True)
-    with col8:
-        wlgw_label = f"GW{worst_lineup_gw['gw']}: {worst_lineup_gw['points_lost']} pts" if worst_lineup_gw else "—"
-        st.markdown(_stat_card("Worst Lineup GW", wlgw_label, _RED), unsafe_allow_html=True)
+    mvp_summary = _compute_mvp_summary(team_players, bootstrap)
+
+    try:
+        formation_counts = _compute_formation_stats(entry_id, max_gw)
+    except Exception:
+        formation_counts = {}
+
+    try:
+        transfers, most_in, most_out = _compute_transfer_stats(entry_id, config.FPL_DRAFT_LEAGUE_ID, max_gw)
+    except Exception:
+        transfers, most_in, most_out = [], {}, {}
+
+    try:
+        draft_data = _compute_draft_analysis(entry_id, config.FPL_DRAFT_LEAGUE_ID, num_teams, team_name=selected_team)
+    except Exception:
+        draft_data = None
+
+    try:
+        superlatives = _compute_league_superlatives(config.FPL_DRAFT_LEAGUE_ID, max_gw)
+    except Exception:
+        superlatives = {}
+
+    # ---------------------------------------------------------------------------
+    # Auto-archive: snapshot this team's Season Wrapped every time this page
+    # is viewed with real gameweek data, overwriting the previous snapshot.
+    # Same rationale as League Wrapped's auto-archive — by the time next
+    # season's Draft league-ID rollover happens, the last live view here is
+    # already safely saved. Best-effort; must never break the live page.
+    # ---------------------------------------------------------------------------
+    if team_history_list and league_data:
+        try:
+            season_label = season_label_from_league_data(league_data)
+            save_archived_team_season(season_label, selected_team, {
+                "overview": overview,
+                "max_gw": max_gw,
+                "team_players": team_players,
+                "mvp_summary": mvp_summary,
+                "formation_counts": formation_counts,
+                "bench_data": bench_data,
+                "transfers": transfers,
+                "most_in": most_in,
+                "most_out": most_out,
+                "draft_data": draft_data,
+                "superlatives": superlatives,
+            })
+        except Exception:
+            pass
+
+    st.divider()
+
+    # =========================================================================
+    # PART 1: THE SEASON OVERVIEW
+    # =========================================================================
+    _section_header("📊", "The Season Overview", "How did the season play out?")
+    _render_season_overview(config.display_pl_season_label(), overview)
 
     st.divider()
 
@@ -960,7 +1441,7 @@ def show_season_wrapped_page():
         col_mvp, col_xi = st.columns([5, 6])
         with col_mvp:
             st.markdown("#### 🏆 Captain's Armband")
-            _render_wrapped_mvp(team_players, bootstrap)
+            _render_mvp_summary(mvp_summary)
         with col_xi:
             render_season_best_11(team_players)
     else:
@@ -973,63 +1454,8 @@ def show_season_wrapped_page():
     # =========================================================================
     _section_header("🧠", "Your Decisions", "How well did you manage the team each week?")
 
-    # Formation stats
     st.markdown("#### 📐 Most Used Formation")
-    try:
-        formation_counts = _compute_formation_stats(entry_id, max_gw)
-        if formation_counts:
-            top_formation = next(iter(formation_counts))
-            top_count = formation_counts[top_formation]
-
-            num_rows = len(formation_counts)
-            row_h = 44  # approx px per data row
-            card_h = max(180, num_rows * row_h + 56)  # header row + padding
-            col_feat, col_tbl = st.columns([2, 3])
-            with col_feat:
-                top_html = (
-                    f'<div style="border:2px solid {_PURPLE};border-radius:12px;padding:32px 24px;'
-                    f'background:linear-gradient(135deg,#1a1a2e 0%,#2d1b69 100%);text-align:center;'
-                    f'min-height:{card_h}px;display:flex;flex-direction:column;justify-content:center;">'
-                    f'<div style="color:#e0e0e0;font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Most Used Formation</div>'
-                    f'<div style="color:#c87bff;font-size:3.2em;font-weight:800;margin:12px 0;letter-spacing:4px;">{top_formation}</div>'
-                    f'<div style="color:#ffffff;font-size:15px;font-weight:600;">{top_count} GWs</div>'
-                    f'<div style="color:#e0e0e0;font-size:12px;margin-top:4px;">out of {max_gw} played</div>'
-                    f'</div>'
-                )
-                st.markdown(top_html, unsafe_allow_html=True)
-            with col_tbl:
-                rows_html = ""
-                for k, v in formation_counts.items():
-                    pct = v / max_gw * 100
-                    bar_w = int(pct)
-                    is_top = k == top_formation
-                    row_bg = "rgba(123,47,190,0.25)" if is_top else "#1e1e35"
-                    badge_color = _PURPLE if is_top else "#4a4a6a"
-                    rows_html += (
-                        f'<tr style="border-bottom:1px solid #2a2a4a;background:{row_bg};">'
-                        f'<td style="padding:11px 14px;color:#ffffff;'
-                        f'font-weight:{"700" if is_top else "500"};font-size:17px;">{k}</td>'
-                        f'<td style="padding:11px 14px;color:#ffffff;text-align:center;font-size:14px;">{v}</td>'
-                        f'<td style="padding:11px 14px;">'
-                        f'<div style="display:flex;align-items:center;gap:8px;">'
-                        f'<div style="background:{badge_color};border-radius:4px;height:8px;width:{bar_w}%;min-width:4px;"></div>'
-                        f'<span style="color:#e0e0e0;font-size:13px;white-space:nowrap;">{pct:.0f}%</span>'
-                        f'</div></td></tr>'
-                    )
-                tbl_html = (
-                    f'<div style="border:1px solid #2a2a4a;border-radius:10px;overflow:hidden;background:#1a1a2e;">'
-                    f'<table style="width:100%;border-collapse:collapse;background:#1a1a2e;">'
-                    f'<thead><tr style="background:rgba(123,47,190,0.4);">'
-                    f'<th style="padding:12px 14px;color:#ffffff;text-align:left;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;">Formation</th>'
-                    f'<th style="padding:12px 14px;color:#ffffff;text-align:center;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;">GWs</th>'
-                    f'<th style="padding:12px 14px;color:#ffffff;text-align:left;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;">Share</th>'
-                    f'</tr></thead><tbody>{rows_html}</tbody></table></div>'
-                )
-                st.markdown(tbl_html, unsafe_allow_html=True)
-        else:
-            st.info("Formation data not available.")
-    except Exception as e:
-        st.info(f"Formation data could not be computed: {e}")
+    _render_formation_stats(formation_counts, max_gw)
 
     # Lineup management
     st.markdown("#### 📋 Lineup Management")
@@ -1044,106 +1470,7 @@ def show_season_wrapped_page():
     # PART 4: YOUR TRANSFER WINDOW
     # =========================================================================
     _section_header("🔄", "Transfer Window", "How did your waiver wire moves shape the season?")
-
-    try:
-        transfers, most_in, most_out = _compute_transfer_stats(entry_id, config.FPL_DRAFT_LEAGUE_ID, max_gw)
-
-        if transfers:
-            best_tx = max(transfers, key=lambda x: x["net"])
-            worst_out_5gw = max(transfers, key=lambda x: x["pts_out_5gw"])
-
-            col_b, col_w = st.columns(2)
-            with col_b:
-                st.markdown(
-                    _stat_card(
-                        "Best Transfer In",
-                        best_tx["player_in"],
-                        _GREEN,
-                        f"+{best_tx['pts_in']} pts rest of season (net {best_tx['net']:+d})",
-                    ),
-                    unsafe_allow_html=True,
-                )
-            with col_w:
-                st.markdown(
-                    _stat_card(
-                        "Worst Transfer Out (5-GW)",
-                        worst_out_5gw["player_out"],
-                        _RED,
-                        f"{worst_out_5gw['pts_out_5gw']} pts in 5 GWs after you dropped them",
-                    ),
-                    unsafe_allow_html=True,
-                )
-
-            st.markdown(
-                '<p style="color:#9ca3af;font-size:12px;font-style:italic;margin-top:8px;">'
-                "Best In = highest net (Pts In minus Pts Out, rest of season). "
-                "Worst Out = most pts scored in the 5 GWs immediately after being dropped "
-                "— capped at 5 GWs to make early-season drops comparable to late-season ones.</p>",
-                unsafe_allow_html=True,
-            )
-
-            # Full transfer table
-            with st.expander("All Transfers This Season", expanded=False):
-                df_tx = pd.DataFrame(transfers)[
-                    ["gw", "player_in", "player_out", "pts_in_5gw", "pts_out_5gw", "net_5gw", "pts_in", "pts_out", "net"]
-                ].rename(columns={
-                    "gw": "GW", "player_in": "Player In", "player_out": "Player Out",
-                    "pts_in_5gw": "In (5 GW)", "pts_out_5gw": "Out (5 GW)", "net_5gw": "Net (5 GW)",
-                    "pts_in": "In (Season)", "pts_out": "Out (Season)", "net": "Net (Season)",
-                })
-                st.dataframe(df_tx, hide_index=True, use_container_width=True,
-                             height=38 + len(df_tx) * 35)
-        else:
-            st.info("No transfers made this season.")
-
-        # League-wide most transferred
-        if most_in or most_out:
-            col_mi, col_mo = st.columns(2)
-            with col_mi:
-                st.markdown("##### 📈 Most Transferred In (League)")
-                top_in = sorted(most_in.items(), key=lambda x: -x[1])[:5]
-                if top_in:
-                    max_in = top_in[0][1]
-                    rows_in = "".join(
-                        f'<tr style="border-bottom:1px solid #2a2a4a;background:#1e1e35;">'
-                        f'<td style="padding:10px 14px;color:#ffffff;font-size:14px;">{i+1}. {name}</td>'
-                        f'<td style="padding:10px 14px;text-align:right;">'
-                        f'<span style="background:{_GREEN};color:#000;border-radius:12px;padding:3px 12px;font-size:13px;font-weight:700;">{cnt}</span>'
-                        f'</td></tr>'
-                        for i, (name, cnt) in enumerate(top_in)
-                    )
-                    st.markdown(
-                        f'<div style="border:1px solid #2a2a4a;border-radius:10px;overflow:hidden;background:#1a1a2e;">'
-                        f'<table style="width:100%;border-collapse:collapse;background:#1a1a2e;">'
-                        f'<thead><tr style="background:rgba(0,255,135,0.2);">'
-                        f'<th style="padding:10px 14px;color:#ffffff;text-align:left;font-size:13px;font-weight:700;text-transform:uppercase;">Player</th>'
-                        f'<th style="padding:10px 14px;color:#ffffff;text-align:right;font-size:13px;font-weight:700;text-transform:uppercase;">Times In</th>'
-                        f'</tr></thead><tbody>{rows_in}</tbody></table></div>',
-                        unsafe_allow_html=True,
-                    )
-            with col_mo:
-                st.markdown("##### 📉 Most Transferred Out (League)")
-                top_out = sorted(most_out.items(), key=lambda x: -x[1])[:5]
-                if top_out:
-                    rows_out = "".join(
-                        f'<tr style="border-bottom:1px solid #2a2a4a;background:#1e1e35;">'
-                        f'<td style="padding:10px 14px;color:#ffffff;font-size:14px;">{i+1}. {name}</td>'
-                        f'<td style="padding:10px 14px;text-align:right;">'
-                        f'<span style="background:{_RED};color:#fff;border-radius:12px;padding:3px 12px;font-size:13px;font-weight:700;">{cnt}</span>'
-                        f'</td></tr>'
-                        for i, (name, cnt) in enumerate(top_out)
-                    )
-                    st.markdown(
-                        f'<div style="border:1px solid #2a2a4a;border-radius:10px;overflow:hidden;background:#1a1a2e;">'
-                        f'<table style="width:100%;border-collapse:collapse;background:#1a1a2e;">'
-                        f'<thead><tr style="background:rgba(255,75,75,0.2);">'
-                        f'<th style="padding:10px 14px;color:#ffffff;text-align:left;font-size:13px;font-weight:700;text-transform:uppercase;">Player</th>'
-                        f'<th style="padding:10px 14px;color:#ffffff;text-align:right;font-size:13px;font-weight:700;text-transform:uppercase;">Times Out</th>'
-                        f'</tr></thead><tbody>{rows_out}</tbody></table></div>',
-                        unsafe_allow_html=True,
-                    )
-    except Exception as e:
-        st.info(f"Transfer data could not be computed: {e}")
+    _render_transfer_window_section(transfers, most_in, most_out)
 
     st.divider()
 
@@ -1151,72 +1478,7 @@ def show_season_wrapped_page():
     # PART 5: DRAFT RETROSPECTIVE
     # =========================================================================
     _section_header("🧬", "Draft Retrospective", "How did your pre-season draft hold up?")
-
-    try:
-        draft_data = _compute_draft_analysis(entry_id, config.FPL_DRAFT_LEAGUE_ID, num_teams, team_name=selected_team)
-        if draft_data and draft_data["my_picks"]:
-            picks = draft_data["my_picks"]
-            retention = draft_data["retention_count"]
-            total_orig = draft_data["retention_total"]
-
-            avg_delta = sum(p["delta"] for p in picks) / len(picks)
-            steals = sorted([p for p in picks if "Steal" in p["grade"] or "Value" in p["grade"]],
-                            key=lambda x: -x["delta"])[:3]
-            busts = sorted([p for p in picks if "Bust" in p["grade"] or "Miss" in p["grade"]],
-                           key=lambda x: x["delta"])[:3]
-
-            col_r, col_d = st.columns(2)
-            with col_r:
-                st.markdown(
-                    _stat_card("Retention Rate", f"{retention}/{total_orig}", _PURPLE,
-                               "Original draft picks still on roster"),
-                    unsafe_allow_html=True,
-                )
-            with col_d:
-                sign = "+" if avg_delta >= 0 else ""
-                color = _GREEN if avg_delta >= 0 else _RED
-                st.markdown(
-                    _stat_card("Avg Pick Delta", f"{sign}{avg_delta:.1f} pts", color,
-                               "vs. league avg for that draft round"),
-                    unsafe_allow_html=True,
-                )
-
-            st.markdown("")
-            if steals:
-                st.markdown("##### 🔥 Your Steals")
-                steal_cols = st.columns(min(3, len(steals)))
-                for i, p in enumerate(steals):
-                    with steal_cols[i]:
-                        st.markdown(
-                            _stat_card(f"Rd {p['round']} Pick {p['pick']}", p["player"],
-                                       _GREEN, f"{p['pts']} pts (+{p['delta']:.0f} vs avg)"),
-                            unsafe_allow_html=True,
-                        )
-            if busts:
-                st.markdown("##### 💀 Your Busts")
-                bust_cols = st.columns(min(3, len(busts)))
-                for i, p in enumerate(busts):
-                    with bust_cols[i]:
-                        st.markdown(
-                            _stat_card(f"Rd {p['round']} Pick {p['pick']}", p["player"],
-                                       _RED, f"{p['pts']} pts ({p['delta']:.0f} vs avg)"),
-                            unsafe_allow_html=True,
-                        )
-
-            with st.expander("Full Draft Board", expanded=False):
-                df_picks = pd.DataFrame(picks)[
-                    ["round", "pick", "overall_pick", "player", "pts", "avg_round_pts", "delta", "grade"]
-                ].rename(columns={
-                    "round": "Round", "pick": "Pick in Round", "overall_pick": "Overall Pick",
-                    "player": "Player", "pts": "Season Pts", "avg_round_pts": "Avg for Round",
-                    "delta": "Delta", "grade": "Grade",
-                })
-                st.dataframe(df_picks, hide_index=True, use_container_width=True,
-                             height=38 + len(df_picks) * 35)
-        else:
-            st.info("Draft analysis data not available.")
-    except Exception as e:
-        st.info(f"Draft analysis could not be computed: {e}")
+    _render_draft_retrospective(draft_data)
 
     st.divider()
 
@@ -1275,52 +1537,7 @@ def show_season_wrapped_page():
     # PART 7: LEAGUE AWARDS
     # =========================================================================
     _section_header("🏆", "League Awards", "Who stood out across the whole league this season?")
-
-    try:
-        superlatives = _compute_league_superlatives(config.FPL_DRAFT_LEAGUE_ID, max_gw)
-        if superlatives:
-            col1, col2, col3 = st.columns(3)
-            col4, col5 = st.columns(2)
-
-            with col1:
-                st.markdown(
-                    _award_card("🔁", "Most Active Manager",
-                                superlatives["most_active"]["team"],
-                                f"{superlatives['most_active']['value']} transfers", _PURPLE),
-                    unsafe_allow_html=True,
-                )
-            with col2:
-                st.markdown(
-                    _award_card("🎯", "Best Lineup Manager",
-                                superlatives["best_mgr"]["team"],
-                                superlatives["best_mgr"]["value"], _GREEN),
-                    unsafe_allow_html=True,
-                )
-            with col3:
-                st.markdown(
-                    _award_card("🧠", "Best Drafter",
-                                superlatives["best_drafter"]["team"],
-                                superlatives["best_drafter"]["value"], _GOLD),
-                    unsafe_allow_html=True,
-                )
-            with col4:
-                st.markdown(
-                    _award_card("🍀", "Luckiest Manager",
-                                superlatives["luckiest"]["team"],
-                                superlatives["luckiest"]["value"], "#4ade80"),
-                    unsafe_allow_html=True,
-                )
-            with col5:
-                st.markdown(
-                    _award_card("😢", "Most Unlucky Manager",
-                                superlatives["unluckiest"]["team"],
-                                superlatives["unluckiest"]["value"], _RED),
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.info("League superlatives could not be computed.")
-    except Exception as e:
-        st.info(f"League awards could not be computed: {e}")
+    _render_team_league_awards(superlatives)
 
     st.divider()
 

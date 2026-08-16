@@ -383,6 +383,31 @@ def get_luck_adjusted_league_standings(draft_league_id):
 # HISTORY DATA BUILDER
 # ---------------------------
 
+def season_label_from_league_data(league_data: dict) -> str:
+    """Season label ('YYYY/YY') derived from this league's own draft date
+    when available, rather than just today's date — more accurate right
+    around the Aug/Sep season-rollover boundary than a pure calendar guess
+    (e.g. a league drafted Aug 9 is unambiguously the season starting that
+    August, even if display_pl_season_label()'s generic cutoff hasn't
+    flipped yet). Falls back to display_pl_season_label() if no draft date
+    is available on this league. Shared by League Wrapped and Season
+    Wrapped (both need it for their auto-archive season key), and lives
+    here rather than in either of those modules since league_wrapped.py
+    imports from season_wrapped.py — putting it in either would risk a
+    circular import."""
+    try:
+        drafts = league_data.get("league", {}).get("drafts") or []
+        draft_dt_str = drafts[0].get("draft_dt") if drafts else None
+        if draft_dt_str:
+            from datetime import datetime
+            dt = datetime.fromisoformat(draft_dt_str.replace("Z", "+00:00"))
+            start_year = dt.year if dt.month >= 7 else dt.year - 1
+            return f"{start_year}/{str(start_year + 1)[-2:]}"
+    except Exception:
+        pass
+    return config.display_pl_season_label()
+
+
 @st.cache_data(ttl=300)
 def build_draft_history_df(draft_league_id):
     """
