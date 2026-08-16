@@ -37,12 +37,14 @@ from scripts.common.fpl_draft_api import (
     get_team_composition_for_gameweek,
     get_team_id_by_name,
     get_waiver_transactions_up_to_gameweek,
+    is_season_complete,
     pull_fpl_player_stats,
 )
 from scripts.common.luck_analysis import (
     calculate_all_play_standings,
     extract_draft_gw_scores,
 )
+from scripts.common.league_config import load_settings
 from scripts.common.player_matching import canonical_normalize
 from scripts.common.team_analysis_helpers import (
     get_team_mvp,
@@ -51,7 +53,8 @@ from scripts.common.team_analysis_helpers import (
 )
 from scripts.draft.home import build_draft_history_df, season_label_from_league_data
 from scripts.common.wrapped_archive import (
-    list_archived_team_seasons,
+    list_archived_team_wrapped_seasons,
+    list_archived_teams_for_season,
     load_archived_team_season,
     save_archived_team_season,
 )
@@ -1228,6 +1231,52 @@ def show_season_wrapped_page():
     _inject_print_styles()
     _render_export_button()
 
+    # Season selector — season-first, mirroring League Wrapped: pick the
+    # season, then pick from whichever teams have archived data for it (or
+    # the live league's current teams, for "Current Season"). This works
+    # regardless of whether the live season has concluded, since selecting
+    # a past archived season doesn't depend on the current season's state.
+    archived_seasons = list_archived_team_wrapped_seasons()
+    season_choice = "Current Season"
+    if archived_seasons:
+        options = archived_seasons + ["Current Season"]
+        season_choice = st.selectbox(
+            "Season", options=options, index=len(options) - 1,
+            key="season_wrapped_season_select",
+        )
+
+    if season_choice != "Current Season":
+        archived_teams = list_archived_teams_for_season(season_choice)
+        if not archived_teams:
+            st.error(f"Could not load archived teams for {season_choice}.")
+            return
+        preferred_team = load_settings().get("draft", {}).get("team_name")
+        try:
+            default_idx = archived_teams.index(preferred_team)
+        except ValueError:
+            default_idx = 0
+        selected_team = st.selectbox(
+            "View Season Wrapped for:", archived_teams, index=default_idx,
+            key=f"season_wrapped_team_select_{season_choice}",
+        )
+        archived_data = load_archived_team_season(season_choice, selected_team)
+        if not archived_data:
+            st.error(f"Could not load archived data for {selected_team} in {season_choice}.")
+            return
+        _render_archived_season_wrapped(season_choice, archived_data)
+        return
+
+    # Season Wrapped, like League Wrapped, is an end-of-season recap rather
+    # than a live progress tracker — it stays hidden until the season has
+    # actually concluded (not just "some gameweeks played").
+    if not is_season_complete():
+        st.info(
+            "🏁 **Season Wrapped isn't available yet.** This is an end-of-season "
+            "recap, so it unlocks once the season has fully concluded. Check back "
+            "after the final gameweek!"
+        )
+        return
+
     # Team selector
     try:
         team_dict = get_league_teams(config.FPL_DRAFT_LEAGUE_ID)  # {entry_id: team_name}
@@ -1247,28 +1296,6 @@ def show_season_wrapped_page():
         default_idx = 0
 
     selected_team = st.selectbox("View Season Wrapped for:", team_list, index=default_idx)
-
-    # Season selector for this team — same auto-archive pattern as League
-    # Wrapped, but scoped per team since this page is a per-manager
-    # narrative rather than a league-wide one (team names are assumed
-    # stable across seasons, same assumption the "Looking Back" section
-    # already makes for cross-season history lookups).
-    archived_seasons = list_archived_team_seasons(selected_team)
-    season_choice = "Current Season"
-    if archived_seasons:
-        options = archived_seasons + ["Current Season"]
-        season_choice = st.selectbox(
-            "Season", options=options, index=len(options) - 1,
-            key=f"season_wrapped_season_select_{selected_team}",
-        )
-
-    if season_choice != "Current Season":
-        archived_data = load_archived_team_season(season_choice, selected_team)
-        if not archived_data:
-            st.error(f"Could not load archived data for {selected_team} in {season_choice}.")
-            return
-        _render_archived_season_wrapped(season_choice, archived_data)
-        return
 
     st.write(f"Your complete {config.display_pl_season_label()} FPL Draft season in review.")
 

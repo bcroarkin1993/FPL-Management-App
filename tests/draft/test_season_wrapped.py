@@ -72,9 +72,22 @@ class TestRenderArchivedSeasonWrapped:
         _render_archived_season_wrapped("2025/26", _MINIMAL_TEAM_ARCHIVE_DATA)  # should not raise
 
 
+class TestShowSeasonWrappedPageSeasonNotConcludedGuard:
+    def test_season_not_complete_shows_notice_not_crash(self, mock_all_utils):
+        """Season Wrapped is an end-of-season recap, not a live tracker — it
+        must stay hidden while the season is in progress, without ever
+        calling get_league_teams (the team selector must not even render)."""
+        with patch("scripts.draft.season_wrapped.list_archived_team_wrapped_seasons", return_value=[]), \
+             patch("scripts.draft.season_wrapped.is_season_complete", return_value=False), \
+             patch("scripts.draft.season_wrapped.get_league_teams") as mock_teams:
+            from scripts.draft.season_wrapped import show_season_wrapped_page
+            show_season_wrapped_page()  # should not raise
+        mock_teams.assert_not_called()
+
+
 class TestShowSeasonWrappedPageAutoArchive:
     def test_live_page_view_saves_team_archive_snapshot(self, mock_all_utils):
-        """Visiting Season Wrapped for a team once real gameweek data exists
+        """Visiting Season Wrapped for a team once the season has concluded
         should auto-save a per-team snapshot via save_archived_team_season,
         the same protection League Wrapped's auto-archive gives at the
         league level — so a manager's own Season Wrapped survives next
@@ -105,6 +118,7 @@ class TestShowSeasonWrappedPageAutoArchive:
 
         with patch("scripts.draft.season_wrapped.get_league_teams", return_value={1: "Alpha", 2: "Beta"}), \
              patch("scripts.draft.season_wrapped.get_team_id_by_name", return_value=1), \
+             patch("scripts.draft.season_wrapped.is_season_complete", return_value=True), \
              patch("scripts.draft.season_wrapped.get_current_gameweek", return_value=1), \
              patch("scripts.draft.season_wrapped.build_draft_history_df", return_value=history_df), \
              patch("scripts.draft.season_wrapped.get_draft_league_details", return_value=league_data), \
@@ -117,7 +131,7 @@ class TestShowSeasonWrappedPageAutoArchive:
              patch("scripts.draft.season_wrapped._compute_league_superlatives", return_value={}), \
              patch("scripts.draft.season_wrapped.get_waiver_transactions_up_to_gameweek", return_value=[]), \
              patch("scripts.draft.season_wrapped._load_draft_season_history", return_value=[]), \
-             patch("scripts.draft.season_wrapped.list_archived_team_seasons", return_value=[]), \
+             patch("scripts.draft.season_wrapped.list_archived_team_wrapped_seasons", return_value=[]), \
              patch("scripts.draft.season_wrapped.save_archived_team_season") as mock_save, \
              patch("config.get_draft_league_history_records", return_value=[]):
             from scripts.draft.season_wrapped import show_season_wrapped_page

@@ -31,6 +31,7 @@ from scripts.common.fpl_draft_api import (
     get_draft_team_players_with_points,
     get_fpl_player_mapping,
     get_waiver_transactions_up_to_gameweek,
+    is_season_complete,
     pull_fpl_player_stats,
 )
 from scripts.common.luck_analysis import calculate_all_play_standings, extract_draft_gw_scores
@@ -1367,18 +1368,6 @@ def _render_lineup_management(bench_data_list: List[Dict]) -> None:
 # Main page
 # ---------------------------------------------------------------------------
 
-def _any_gameweek_played(history_df) -> bool:
-    """Whether this league's history has any real gameweek score yet —
-    used to gate League Wrapped, which needs actual results (champion,
-    awards, draft steals/busts, etc. are all computed from them) to be
-    meaningful, rather than rendering a page of empty sections."""
-    return bool(
-        history_df is not None and not history_df.empty
-        and "GW_Points" in history_df.columns
-        and (history_df["GW_Points"] > 0).any()
-    )
-
-
 # ---------------------------------------------------------------------------
 # Archived-season rendering (no live API calls — reads from wrapped_archive)
 # ---------------------------------------------------------------------------
@@ -1580,6 +1569,19 @@ def show_league_wrapped_page():
         st.error("FPL_DRAFT_LEAGUE_ID is not configured. Check your .env file.")
         return
 
+    # League Wrapped is an end-of-season recap, not a live progress tracker
+    # — champion, awards, draft retrospective, and everything else here are
+    # only meaningful once computed from final results, so the page stays
+    # hidden (with no mention of the in-progress current season at all)
+    # until the season has actually concluded.
+    if not is_season_complete():
+        st.info(
+            "🏆 **League Wrapped isn't available yet.** This is an end-of-season "
+            "recap, so it unlocks once the season has fully concluded. Check back "
+            "after the final gameweek!"
+        )
+        return
+
     # ---------------------------------------------------------------------------
     # Load all data under a single spinner
     # ---------------------------------------------------------------------------
@@ -1605,16 +1607,6 @@ def show_league_wrapped_page():
         except Exception:
             _logger.warning("Failed to build history_df", exc_info=True)
             history_df = pd.DataFrame()
-
-        if not _any_gameweek_played(history_df):
-            st.info(
-                f"🏆 **League Wrapped isn't available yet.** No gameweeks have been played "
-                f"in the {season_label} season — champion, awards, draft "
-                f"retrospective, and everything else here is computed from real gameweek "
-                f"results. Check back once the season is underway (this page is most "
-                f"rewarding once the season wraps up)."
-            )
-            return
 
         try:
             bench_data_list = compute_draft_league_bench_data(league_id, max_gw)

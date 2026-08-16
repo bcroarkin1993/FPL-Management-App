@@ -6,7 +6,6 @@ from unittest.mock import patch
 import pandas as pd
 
 from scripts.draft.league_wrapped import (
-    _any_gameweek_played,
     _compute_league_awards_list,
     _h2h_df_to_dict,
     _season_label_from_league_data,
@@ -30,25 +29,6 @@ _MINIMAL_ARCHIVE_DATA = {
 }
 
 
-class TestAnyGameweekPlayed:
-    def test_empty_history_is_false(self):
-        assert _any_gameweek_played(pd.DataFrame()) is False
-
-    def test_none_is_false(self):
-        assert _any_gameweek_played(None) is False
-
-    def test_all_zero_points_is_false(self):
-        df = pd.DataFrame({"Team": ["A", "B"], "GW_Points": [0, 0]})
-        assert _any_gameweek_played(df) is False
-
-    def test_missing_gw_points_column_is_false(self):
-        assert _any_gameweek_played(pd.DataFrame({"Team": ["A"]})) is False
-
-    def test_real_score_is_true(self):
-        df = pd.DataFrame({"Team": ["A", "B"], "GW_Points": [0, 65]})
-        assert _any_gameweek_played(df) is True
-
-
 class TestSeasonLabelFromLeagueData:
     def test_derives_from_draft_date_in_august(self):
         league_data = {"league": {"drafts": [{"draft_dt": "2026-08-09T16:00:00Z"}]}}
@@ -70,9 +50,11 @@ class TestSeasonLabelFromLeagueData:
             assert _season_label_from_league_data(league_data) == "2099/00"
 
 
-class TestShowLeagueWrappedPagePreseasonGuard:
-    def test_no_games_played_shows_notice_not_crash(self, mock_all_utils):
-        """The guard must short-circuit BEFORE any of the seven downstream
+class TestShowLeagueWrappedPageSeasonNotConcludedGuard:
+    def test_season_not_complete_shows_notice_not_crash(self, mock_all_utils):
+        """League Wrapped is an end-of-season recap, not a live tracker — it
+        must stay hidden while the season is still in progress, and the
+        guard must short-circuit BEFORE any of the seven downstream
         data-computation calls, which otherwise cascade into real,
         unmocked network calls — this test relies on that early return to
         stay fast; it isn't itself a test of the downstream sections."""
@@ -83,10 +65,11 @@ class TestShowLeagueWrappedPagePreseasonGuard:
             "standings": [],
         }
         with patch("scripts.draft.league_wrapped.get_draft_league_details", return_value=league_data), \
-             patch("scripts.draft.league_wrapped.get_current_gameweek", return_value=1), \
-             patch("scripts.draft.league_wrapped.build_draft_history_df", return_value=pd.DataFrame()):
+             patch("scripts.draft.league_wrapped.is_season_complete", return_value=False), \
+             patch("scripts.draft.league_wrapped.build_draft_history_df") as mock_history:
             from scripts.draft.league_wrapped import show_league_wrapped_page
             show_league_wrapped_page()  # should not raise
+        mock_history.assert_not_called()
 
 
 class TestShowLeagueWrappedPageArchivedSeason:
@@ -154,7 +137,7 @@ class TestComputeLeagueAwardsList:
 
 class TestShowLeagueWrappedPageAutoArchive:
     def test_live_page_view_saves_archive_snapshot(self, mock_all_utils):
-        """Visiting League Wrapped once real gameweek data exists should
+        """Visiting League Wrapped once the season has concluded should
         auto-save a season snapshot via save_archived_season, so H2H/awards/
         standings/etc. survive next season's Draft league-ID rollover
         instead of being lost the way 2025/26's data was."""
@@ -177,6 +160,7 @@ class TestShowLeagueWrappedPageAutoArchive:
             "GW_Points": [70, 30], "Total_Points": [70, 30], "League_Position": [1, 2],
         })
         with patch("scripts.draft.league_wrapped.get_draft_league_details", return_value=league_data), \
+             patch("scripts.draft.league_wrapped.is_season_complete", return_value=True), \
              patch("scripts.draft.league_wrapped.get_current_gameweek", return_value=1), \
              patch("scripts.draft.league_wrapped.build_draft_history_df", return_value=history_df), \
              patch("scripts.draft.league_wrapped.compute_draft_league_bench_data", return_value=[]), \

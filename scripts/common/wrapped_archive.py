@@ -114,28 +114,47 @@ def _team_archive_dir(season: str) -> Path:
     return d
 
 
-def list_archived_team_seasons(team: str) -> list:
-    """Season labels for which this specific team has an archived Season
-    Wrapped snapshot, sorted."""
+def list_archived_team_wrapped_seasons() -> list:
+    """All season labels with at least one team's archived Season Wrapped
+    snapshot, sorted — used to drive a season-first selector (pick the
+    season, then pick from whichever teams have data for it), the same
+    flow League Wrapped uses."""
     root = _team_archive_root()
     if not root.exists():
         return []
-    fname = _team_filename(team)
     seasons = []
     for season_dir in root.iterdir():
         if not season_dir.is_dir():
             continue
-        path = season_dir / fname
-        if not path.exists():
+        any_file = next(season_dir.glob("*.json"), None)
+        if not any_file:
             continue
         try:
-            with open(path, "r") as f:
+            with open(any_file, "r") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, OSError):
             continue
         season = data.get("_season") or season_dir.name.replace("_", "/", 1)
         seasons.append(season)
     return sorted(seasons)
+
+
+def list_archived_teams_for_season(season: str) -> list:
+    """Team names with an archived Season Wrapped snapshot for one season, sorted."""
+    root = _team_archive_root()
+    season_dir = root / _season_dir_name(season)
+    if not season_dir.exists():
+        return []
+    teams = []
+    for path in season_dir.glob("*.json"):
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        team = data.get("_team") or path.stem.replace("_", " ")
+        teams.append(team)
+    return sorted(teams)
 
 
 def load_archived_team_season(season: str, team: str) -> Optional[dict]:
