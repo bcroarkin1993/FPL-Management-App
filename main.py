@@ -50,6 +50,7 @@ from scripts.classic.fixture_projections import show_classic_fixture_projections
 from scripts.classic.transfers import show_classic_transfers_page
 from scripts.classic.free_hit import show_free_hit_page
 from scripts.classic.wildcard import show_wildcard_page
+from scripts.classic.initial_squad import show_initial_squad_optimizer_page
 from scripts.classic.league_analysis import show_classic_league_analysis_page
 
 # ------------------------------------------------------------
@@ -790,6 +791,7 @@ CLASSIC_PAGES = {
     "🔄  Transfer Suggestions": show_classic_transfers_page,
     "⚡  Free Hit Optimizer": show_free_hit_page,
     "🃏  Wildcard Optimizer": show_wildcard_page,
+    "🆕  Initial Squad Optimizer": show_initial_squad_optimizer_page,
     "👥  Team Analysis": show_classic_team_analysis_page,
     "🏆  League Analysis": show_classic_league_analysis_page,
 }

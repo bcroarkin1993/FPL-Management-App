@@ -6,7 +6,6 @@ for the Wildcard chip. Unlike the Free Hit Optimizer (single GW, cheap bench),
 this optimizes across **multiple gameweeks** with a **strong bench** and **captain bonus**.
 """
 
-import pulp
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -14,6 +13,7 @@ from typing import Optional, Dict, List, Tuple
 import config
 
 from scripts.common.error_helpers import show_api_error
+from scripts.common.optimization import solve_squad_ilp
 from scripts.common.utils import (
     get_rotowire_player_projections,
     get_classic_bootstrap_static,
@@ -306,103 +306,17 @@ def solve_wildcard_squad(
     - Total projected points for starting XI
     - Bench projected points
     """
-
-    # Filter players with 0 or negative points unless very cheap
-    pool = df[
-        (df['Total_Points'] > 0) | (df['Price'] <= 4.5)
-    ].reset_index(drop=True)
-
-    if pool.empty:
-        return None, None, None
-
-    ids = pool.index.tolist()
-    points = pool['Total_Points'].to_dict()
-    prices = pool['Price'].to_dict()
-    teams = pool['Team'].to_dict()
-    positions = pool['Position'].to_dict()
-
-    # Define variables
-    select = pulp.LpVariable.dicts("Select", ids, cat=pulp.LpBinary)
-    start = pulp.LpVariable.dicts("Start", ids, cat=pulp.LpBinary)
-
-    # Define problem (Maximize)
-    prob = pulp.LpProblem("FPL_Wildcard_Optimizer", pulp.LpMaximize)
-
-    # Objective: Maximize starting XI points + bench_weight * bench points
-    prob += (
-        pulp.lpSum([start[i] * points[i] for i in ids]) +
-        bench_weight * pulp.lpSum([(select[i] - start[i]) * points[i] for i in ids])
+    squad_df, totals = solve_squad_ilp(
+        df,
+        budget,
+        score_col="Total_Points",
+        formation=formation,
+        bench_weight=bench_weight,
+        problem_name="FPL_Wildcard_Optimizer",
     )
-
-    # Constraints
-
-    # Budget constraint
-    prob += pulp.lpSum([select[i] * prices[i] for i in ids]) <= budget
-
-    # Squad size = 15
-    prob += pulp.lpSum([select[i] for i in ids]) == 15
-
-    # Starting XI = 11
-    prob += pulp.lpSum([start[i] for i in ids]) == 11
-
-    # Can only start if selected
-    for i in ids:
-        prob += start[i] <= select[i]
-
-    # Position constraints (full squad of 15)
-    prob += pulp.lpSum([select[i] for i in ids if positions[i] == 'G']) == 2
-    prob += pulp.lpSum([select[i] for i in ids if positions[i] == 'D']) == 5
-    prob += pulp.lpSum([select[i] for i in ids if positions[i] == 'M']) == 5
-    prob += pulp.lpSum([select[i] for i in ids if positions[i] == 'F']) == 3
-
-    # Formation constraints (starting XI)
-    prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'G']) == 1
-
-    if formation != "auto":
-        parts = formation.split("-")
-        if len(parts) == 3:
-            n_def, n_mid, n_fwd = int(parts[0]), int(parts[1]), int(parts[2])
-            prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'D']) == n_def
-            prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'M']) == n_mid
-            prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'F']) == n_fwd
-    else:
-        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'D']) >= 3
-        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'D']) <= 5
-        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'M']) >= 2
-        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'M']) <= 5
-        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'F']) >= 1
-        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'F']) <= 3
-
-    # Max 3 players per team
-    unique_teams = pool['Team'].unique()
-    for t in unique_teams:
-        prob += pulp.lpSum([select[i] for i in ids if teams[i] == t]) <= 3
-
-    # Solve
-    prob.solve(pulp.PULP_CBC_CMD(msg=False))
-
-    if pulp.LpStatus[prob.status] != 'Optimal':
+    if squad_df is None:
         return None, None, None
-
-    # Extract results
-    selected_indices = [i for i in ids if pulp.value(select[i]) == 1]
-    starting_indices = [i for i in ids if pulp.value(start[i]) == 1]
-
-    squad_df = pool.loc[selected_indices].copy()
-    squad_df['Is_Starter'] = squad_df.index.isin(starting_indices)
-
-    # Sort: Starters first (by position G-D-M-F), then Bench
-    pos_order = {'G': 1, 'D': 2, 'M': 3, 'F': 4}
-    squad_df['Pos_Order'] = squad_df['Position'].map(pos_order)
-    squad_df = squad_df.sort_values(
-        by=['Is_Starter', 'Pos_Order', 'Total_Points'],
-        ascending=[False, True, False]
-    )
-
-    starter_points = sum(points[i] for i in starting_indices)
-    bench_points = sum(points[i] for i in selected_indices if i not in starting_indices)
-
-    return squad_df, starter_points, bench_points
+    return squad_df, totals["starter_score"], totals["bench_score"]
 
 
 def _assign_bench_order(squad_df: pd.DataFrame) -> pd.DataFrame:
