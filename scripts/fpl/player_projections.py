@@ -242,7 +242,7 @@ def render_rotowire_projections():
         result = result[result['Price'] <= price_filter]
 
     # Display with gradient coloring and position badges
-    display_gw = data_gw if data_gw else config.CURRENT_GAMEWEEK
+    display_gw = current_gw
     st.markdown(f"#### GW{display_gw} Player Projections")
 
     # Sort controls
