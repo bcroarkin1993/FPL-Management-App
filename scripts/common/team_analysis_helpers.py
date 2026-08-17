@@ -13,6 +13,7 @@ import streamlit as st
 from typing import Dict, List, Optional, Any
 
 from scripts.common.utils import get_classic_bootstrap_static
+from scripts.common.text_helpers import ordinal
 
 
 def get_best_clubs(player_data: List[Dict], top_n: int = 3) -> pd.DataFrame:
@@ -399,3 +400,59 @@ def render_season_highlights(
         render_team_mvp(player_data, bootstrap_data, team_id, is_classic, min_height=180)
         st.markdown("<div style='margin-top:20px;'></div>", unsafe_allow_html=True)
         render_best_clubs_section(player_data, top_n=3, min_height=220)
+
+
+def build_classic_season_history_df(
+    past_seasons: List[Dict], season_notes: Dict[str, Dict], league_history_records: List[Dict]
+) -> pd.DataFrame:
+    """
+    Build the Classic Season History display table: Season/Points/Rank/%
+    Finish are all live from FPL's entry-history endpoint (never stored —
+    FPL keeps the full account history forever, including a `rank_percentage`
+    field per season). League Placements — which private mini-league(s) you
+    were in and how you placed within them — has no live source at all (FPL's
+    API has no concept of a private league in this endpoint), so that's the
+    one piece manually entered via League Setup's Classic League History
+    section.
+
+    Parameters
+    ----------
+    past_seasons : the `past` list from get_classic_team_history()'s response
+        (each dict has season_name/total_points/rank/rank_percentage).
+    season_notes : config.get_classic_season_notes() — {season: {"pct_finish": float}}.
+        Fallback only, for the rare case a season's live data is missing
+        rank_percentage.
+    league_history_records : config.get_classic_league_history_records() —
+        [{"season", "league_id", "league_name", "manual_stats": {"rank", ...}}, ...].
+
+    Returns a DataFrame with columns: Season, Points, Rank, % Finish, League Placements.
+    """
+    past_df = pd.DataFrame(past_seasons).rename(columns={
+        "season_name": "Season", "total_points": "Points", "rank": "Rank",
+    })
+    display_df = past_df[["Season", "Points", "Rank"]].copy()
+    display_df["Points"] = display_df["Points"].apply(lambda x: f"{x:,}" if pd.notna(x) else "N/A")
+    display_df["Rank"] = display_df["Rank"].apply(lambda x: f"{x:,}" if pd.notna(x) and x else "N/A")
+
+    placements_by_season = {}
+    for rec in league_history_records:
+        rank = (rec.get("manual_stats") or {}).get("rank")
+        if rank:
+            placements_by_season.setdefault(rec["season"], []).append(
+                f"{rec.get('league_name') or 'Unnamed'} ({ordinal(rank)})"
+            )
+
+    live_pct_by_season = dict(zip(past_df["Season"], past_df.get("rank_percentage", pd.Series(dtype=object))))
+
+    def _pct_finish(season):
+        live = live_pct_by_season.get(season)
+        if live is not None and pd.notna(live):
+            return f"{float(live):g}%"
+        manual = season_notes.get(season, {}).get("pct_finish")
+        return f"{manual:g}%" if manual is not None else "—"
+
+    display_df["% Finish"] = display_df["Season"].apply(_pct_finish)
+    display_df["League Placements"] = display_df["Season"].apply(
+        lambda s: ", ".join(placements_by_season.get(s, [])) or "—"
+    )
+    return display_df

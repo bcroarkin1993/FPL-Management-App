@@ -814,6 +814,16 @@ def preload_app_data():
     """
     data = {}
 
+    # Best-effort: archive locked league IDs once the PL season has concluded,
+    # so they survive next season's rollover (see league_config.py). Runs once
+    # per session via @st.cache_resource.
+    try:
+        from scripts.common.league_config import auto_archive_completed_season
+        if auto_archive_completed_season():
+            config.refresh_league_settings()
+    except Exception:
+        pass
+
     # Core player data (used by almost every page)
     data['fpl_players'] = get_fpl_player_mapping()
     data['bootstrap_static'] = get_classic_bootstrap_static()

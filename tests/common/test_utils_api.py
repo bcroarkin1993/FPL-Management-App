@@ -20,6 +20,7 @@ from scripts.common.utils import (
     get_classic_team_history,
     get_rotowire_player_projections,
     is_draft_league_reachable,
+    is_classic_league_reachable,
 )
 
 
@@ -187,6 +188,25 @@ class TestGetClassicLeagueStandings:
     def test_returns_none_for_falsy_id(self):
         result = get_classic_league_standings(0)
         assert result is None
+
+
+class TestIsClassicLeagueReachable:
+    def test_unset_league_id_is_unreachable(self):
+        assert is_classic_league_reachable(0) is False
+        assert is_classic_league_reachable(None) is False
+
+    @patch("scripts.common.utils.requests.get")
+    def test_valid_classic_league_is_reachable(self, mock_get):
+        mock_data = {"league": {"id": 668226, "name": "Super League DMV Starboyz"}, "standings": {"results": []}}
+        mock_get.return_value = _mock_response(mock_data)
+        assert is_classic_league_reachable(668226) is True
+
+    @patch("scripts.common.utils.requests.get")
+    def test_stale_league_is_unreachable(self, mock_get):
+        """A prior season's league ID -- both the Classic and H2H endpoints
+        404 -- must surface as False, not raise."""
+        mock_get.side_effect = Exception("Not found")
+        assert is_classic_league_reachable(1161877) is False
 
 
 class TestGetClassicTeamHistory:

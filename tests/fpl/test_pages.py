@@ -116,19 +116,164 @@ class TestLeagueSetupPage:
             show_league_setup_page()
 
     def test_smoke_locked_view(self, mock_all_utils):
-        """Locked settings should render the read-only summary + unlock button."""
+        """Locked settings should render the read-only summary + unlock button.
+
+        is_draft_league_reachable / is_classic_league_reachable are imported
+        directly into scripts.fpl.league_setup (not via scripts.common.utils),
+        so mock_all_utils's patches don't reach them — they must be patched
+        here directly, or the locked view would make real HTTP calls.
+        """
         with patch("scripts.fpl.league_setup.load_settings", return_value={
                 "version": 1,
-                "draft": {"league_id": 4544, "team_id": 17077, "team_name": "My Team", "locked": True},
+                "draft": {
+                    "league_id": 4544, "team_id": 17077, "team_name": "My Team", "locked": True,
+                    "history": [], "last_confirmed_season": "2025/26",
+                },
                 "classic": {
                     "leagues": [{"id": 1555691, "name": "FAFO FPL"}],
                     "team_id": 6720205, "team_name": "My Classic Team", "locked": True,
+                    "league_history": [], "last_confirmed_season": "2025/26",
                 },
             }), \
              patch("scripts.fpl.league_setup.save_settings", return_value=True), \
-             patch("scripts.fpl.league_setup.config.refresh_league_settings"):
+             patch("scripts.fpl.league_setup.config.refresh_league_settings"), \
+             patch("scripts.fpl.league_setup.is_draft_league_reachable", return_value=True), \
+             patch("scripts.fpl.league_setup.is_classic_league_reachable", return_value=True):
             from scripts.fpl.league_setup import show_league_setup_page
             show_league_setup_page()
+
+    def test_smoke_locked_view_stale_ids(self, mock_all_utils):
+        """A locked league ID that no longer resolves should show the stale
+        warning and best-effort archive it, without raising."""
+        with patch("scripts.fpl.league_setup.load_settings", return_value={
+                "version": 1,
+                "draft": {
+                    "league_id": 4544, "team_id": 17077, "team_name": "My Team", "locked": True,
+                    "history": [], "last_confirmed_season": "2025/26",
+                },
+                "classic": {
+                    "leagues": [{"id": 1161877, "name": "Super League DMV Starboys"}],
+                    "team_id": 6720205, "team_name": "My Classic Team", "locked": True,
+                    "league_history": [], "last_confirmed_season": "2025/26",
+                },
+            }), \
+             patch("scripts.fpl.league_setup.save_settings", return_value=True) as mock_save, \
+             patch("scripts.fpl.league_setup.config.refresh_league_settings"), \
+             patch("scripts.fpl.league_setup.is_draft_league_reachable", return_value=False), \
+             patch("scripts.fpl.league_setup.is_classic_league_reachable", return_value=False):
+            from scripts.fpl.league_setup import show_league_setup_page
+            show_league_setup_page()
+        # Best-effort archive of the now-unreachable IDs should have saved.
+        assert mock_save.called
+
+
+class TestArchiveReplacedLeagues:
+    """_archive_replaced_draft_league / _archive_replaced_classic_leagues —
+    called from Save & Lock so a league that was only ever resolved via
+    .env (never previously locked in league_settings.json) isn't silently
+    dropped the first time a new one is saved over it."""
+
+    def test_draft_archives_previously_env_sourced_id(self):
+        from scripts.fpl.league_setup import _archive_replaced_draft_league
+        old_draft = {"history": [], "team_id": 17077, "team_name": "Old Team"}
+        with patch("scripts.fpl.league_setup.config.FPL_DRAFT_LEAGUE_ID", 11347):
+            _archive_replaced_draft_league(old_draft, new_league_id=99999, season_label="2025/26")
+        assert old_draft["history"] == [{
+            "season": "2025/26", "league_id": 11347,
+            "team_id": 17077, "team_name": "Old Team", "manual_stats": None,
+        }]
+
+    def test_draft_noop_when_id_unchanged(self):
+        from scripts.fpl.league_setup import _archive_replaced_draft_league
+        old_draft = {"history": []}
+        with patch("scripts.fpl.league_setup.config.FPL_DRAFT_LEAGUE_ID", 11347):
+            _archive_replaced_draft_league(old_draft, new_league_id=11347, season_label="2025/26")
+        assert old_draft["history"] == []
+
+    def test_draft_noop_when_nothing_previously_effective(self):
+        from scripts.fpl.league_setup import _archive_replaced_draft_league
+        old_draft = {"history": []}
+        with patch("scripts.fpl.league_setup.config.FPL_DRAFT_LEAGUE_ID", 0):
+            _archive_replaced_draft_league(old_draft, new_league_id=99999, season_label="2025/26")
+        assert old_draft["history"] == []
+
+    def test_draft_idempotent_when_already_archived(self):
+        from scripts.fpl.league_setup import _archive_replaced_draft_league
+        old_draft = {"history": [
+            {"season": "2025/26", "league_id": 11347, "team_id": 17077, "team_name": "Old Team",
+             "manual_stats": None},
+        ]}
+        with patch("scripts.fpl.league_setup.config.FPL_DRAFT_LEAGUE_ID", 11347):
+            _archive_replaced_draft_league(old_draft, new_league_id=99999, season_label="2025/26")
+        assert len(old_draft["history"]) == 1
+
+    def test_classic_archives_previously_env_sourced_league(self):
+        """The user's real bug: 1161877 only ever lived in FPL_CLASSIC_LEAGUE_IDS
+        (never locked in JSON), so saving 668226 over it must not lose it."""
+        from scripts.fpl.league_setup import _archive_replaced_classic_leagues
+        old_classic = {"league_history": []}
+        env_leagues = [{"id": 1161877, "name": "Super League DMV Starboys"}]
+        with patch("scripts.fpl.league_setup.config.FPL_CLASSIC_LEAGUE_IDS", env_leagues):
+            _archive_replaced_classic_leagues(old_classic, new_league_ids={668226}, season_label="2025/26")
+        assert old_classic["league_history"] == [{
+            "season": "2025/26", "league_id": 1161877,
+            "league_name": "Super League DMV Starboys", "manual_stats": None,
+        }]
+
+    def test_classic_keeps_leagues_still_present(self):
+        from scripts.fpl.league_setup import _archive_replaced_classic_leagues
+        old_classic = {"league_history": []}
+        env_leagues = [{"id": 1555691, "name": "FAFO FPL"}, {"id": 1161877, "name": "Starboys"}]
+        with patch("scripts.fpl.league_setup.config.FPL_CLASSIC_LEAGUE_IDS", env_leagues):
+            _archive_replaced_classic_leagues(
+                old_classic, new_league_ids={1555691, 668226}, season_label="2025/26"
+            )
+        # Only the dropped league (1161877) is archived; 1555691 is still in the new set.
+        assert len(old_classic["league_history"]) == 1
+        assert old_classic["league_history"][0]["league_id"] == 1161877
+
+    def test_classic_idempotent_when_already_archived(self):
+        from scripts.fpl.league_setup import _archive_replaced_classic_leagues
+        old_classic = {"league_history": [
+            {"season": "2025/26", "league_id": 1161877, "league_name": "Starboys", "manual_stats": None},
+        ]}
+        env_leagues = [{"id": 1161877, "name": "Starboys"}]
+        with patch("scripts.fpl.league_setup.config.FPL_CLASSIC_LEAGUE_IDS", env_leagues):
+            _archive_replaced_classic_leagues(old_classic, new_league_ids={668226}, season_label="2025/26")
+        assert len(old_classic["league_history"]) == 1
+
+
+class TestUpsertClassicHistoryEntryPctFinish:
+    """_upsert_classic_history_entry's optional pct_finish param persists into
+    classic.season_notes (a season-wide stat) in the same write as the
+    per-league placement entry, so the manual-entry form can save both at once."""
+
+    def test_pct_finish_persisted_to_season_notes(self):
+        from scripts.fpl.league_setup import _upsert_classic_history_entry
+        settings = {"classic": {"league_history": [], "season_notes": {}}}
+        with patch("scripts.fpl.league_setup.load_settings", return_value=settings), \
+             patch("scripts.fpl.league_setup.save_settings", return_value=True) as mock_save, \
+             patch("scripts.fpl.league_setup.config.refresh_league_settings"):
+            _upsert_classic_history_entry(
+                "2025/26", 1161877, "Super League DMV Starboys",
+                manual_stats={"rank": 4, "total_points": None}, pct_finish=8.0,
+            )
+        saved_settings = mock_save.call_args[0][0]
+        assert saved_settings["classic"]["season_notes"]["2025/26"] == {"pct_finish": 8.0}
+        assert saved_settings["classic"]["league_history"][0]["league_id"] == 1161877
+
+    def test_pct_finish_none_leaves_season_notes_untouched(self):
+        from scripts.fpl.league_setup import _upsert_classic_history_entry
+        settings = {"classic": {"league_history": [], "season_notes": {"2025/26": {"pct_finish": 8.0}}}}
+        with patch("scripts.fpl.league_setup.load_settings", return_value=settings), \
+             patch("scripts.fpl.league_setup.save_settings", return_value=True) as mock_save, \
+             patch("scripts.fpl.league_setup.config.refresh_league_settings"):
+            _upsert_classic_history_entry(
+                "2025/26", 1555691, "FAFO FPL",
+                manual_stats={"rank": 1, "total_points": None}, pct_finish=None,
+            )
+        saved_settings = mock_save.call_args[0][0]
+        assert saved_settings["classic"]["season_notes"]["2025/26"] == {"pct_finish": 8.0}
 
 
 class TestSettingsPage:

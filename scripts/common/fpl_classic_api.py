@@ -157,6 +157,22 @@ def get_classic_or_h2h_league_standings(league_id: int, page: int = 1) -> Option
     return None
 
 
+def is_classic_league_reachable(league_id) -> bool:
+    """
+    Returns True if the given league ID currently resolves to real league
+    data via either the Classic or H2H standings endpoint.
+
+    Returns False for an unset league ID, or one that no longer resolves —
+    most commonly because it's a prior season's ID and the private league it
+    pointed to has since been recreated (this can happen to Classic/H2H
+    mini-leagues, not just Draft leagues).
+    """
+    if not league_id:
+        return False
+    data = get_classic_or_h2h_league_standings(league_id)
+    return bool(data and data.get("league"))
+
+
 # =============================================================================
 # H2H MATCHES
 # =============================================================================

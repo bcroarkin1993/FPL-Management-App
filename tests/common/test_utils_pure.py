@@ -16,6 +16,7 @@ from scripts.common.utils import (
     _norm_text,
     _strip_accents,
     position_converter,
+    ordinal,
 )
 
 
@@ -109,6 +110,28 @@ class TestPositionConverter:
 
     def test_unknown(self):
         assert position_converter(99) == "Unknown"
+
+
+class TestOrdinal:
+    def test_standard_suffixes(self):
+        assert ordinal(1) == "1st"
+        assert ordinal(2) == "2nd"
+        assert ordinal(3) == "3rd"
+        assert ordinal(4) == "4th"
+
+    def test_teens_are_always_th(self):
+        assert ordinal(11) == "11th"
+        assert ordinal(12) == "12th"
+        assert ordinal(13) == "13th"
+
+    def test_twenties_use_standard_suffix(self):
+        assert ordinal(21) == "21st"
+        assert ordinal(22) == "22nd"
+        assert ordinal(23) == "23rd"
+
+    def test_hundreds_with_teens(self):
+        assert ordinal(111) == "111th"
+        assert ordinal(112) == "112th"
 
 
 class TestCheckValidLineup:

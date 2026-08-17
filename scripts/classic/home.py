@@ -21,6 +21,7 @@ from scripts.common.luck_analysis import (
     render_luck_adjusted_table,
     render_standings_table,
 )
+from scripts.common.error_helpers import show_api_error
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.utils import (
     get_league_standings,
@@ -433,7 +434,7 @@ def show_classic_home_page():
         data = fetch_standings_data(league_id)
 
     if not data:
-        st.error(f"Failed to load standings for league {league_id}. Please check the league ID.")
+        show_api_error(f"loading standings for league {league_id}", hint_key="classic_league_stale")
         return
 
     # Display league info header

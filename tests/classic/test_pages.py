@@ -111,6 +111,41 @@ class TestClassicTeamAnalysisPage:
             from scripts.classic.team_analysis import show_classic_team_analysis_page
             show_classic_team_analysis_page()
 
+    def test_smoke_no_current_season_gws_but_has_past_seasons(self, mock_all_utils):
+        """Regression: a team with no gameweek data yet for the current season
+        (e.g. joined right before a new season, or preseason) must still show
+        Season History from `past` — it shouldn't go completely blank just
+        because `current` is empty."""
+        history = {
+            "current": [],
+            "past": [
+                {"season_name": "2025/26", "total_points": 2187, "rank": 1037838, "rank_percentage": "8"},
+                {"season_name": "2024/25", "total_points": 2125, "rank": 3932974, "rank_percentage": "34"},
+            ],
+            "chips": [],
+        }
+        with patch("scripts.classic.team_analysis.get_classic_bootstrap_static", return_value={"elements": [], "teams": [], "events": []}), \
+             patch("scripts.classic.team_analysis.get_classic_team_picks", return_value=None), \
+             patch("scripts.classic.team_analysis.get_classic_team_history", return_value=history), \
+             patch("scripts.classic.team_analysis.get_classic_team_position_data", return_value={}), \
+             patch("scripts.classic.team_analysis.get_entry_details", return_value={"name": "Test", "id": 1}), \
+             patch("scripts.classic.team_analysis.get_current_gameweek", return_value=1), \
+             patch("scripts.classic.team_analysis.get_rotowire_player_projections", return_value=pd.DataFrame()), \
+             patch("scripts.classic.team_analysis.position_converter", side_effect=lambda x: {1: "G", 2: "D", 3: "M", 4: "F"}.get(x, "M")), \
+             patch("scripts.classic.team_analysis.render_season_highlights"), \
+             patch("scripts.classic.team_analysis.compute_classic_bench_data", return_value=None), \
+             patch("scripts.classic.team_analysis.render_bench_analysis"), \
+             patch("scripts.classic.team_analysis.render_styled_table") as mock_render_table, \
+             patch("scripts.classic.team_analysis.config.get_classic_season_notes", return_value={}), \
+             patch("scripts.classic.team_analysis.config.get_classic_league_history_records", return_value=[]):
+            from scripts.classic.team_analysis import show_classic_team_analysis_page
+            show_classic_team_analysis_page()
+        # Season History table must have rendered despite current==[].
+        assert mock_render_table.called
+        rendered_df = mock_render_table.call_args[0][0]
+        assert list(rendered_df["Season"]) == ["2025/26", "2024/25"]
+        assert rendered_df.iloc[0]["% Finish"] == "8%"
+
 
 class TestClassicLeagueAnalysisPage:
     def test_smoke(self, mock_all_utils):
@@ -124,3 +159,54 @@ class TestClassicLeagueAnalysisPage:
              patch("scripts.classic.league_analysis.render_league_bench_analysis"):
             from scripts.classic.league_analysis import show_classic_league_analysis_page
             show_classic_league_analysis_page()
+
+
+class TestClassicTeamAnalysisSeasonHistory:
+    """Season History table extension (% Finish, League Placements) needs a
+    populated `history` (current + past) and picks data to actually reach
+    that section — the base smoke test above early-returns before it."""
+
+    def test_smoke_with_season_history_and_placements(self, mock_all_utils):
+        history = {
+            "current": [{"event": 1, "points": 60, "total_points": 60, "rank": 100, "overall_rank": 100}],
+            "past": [
+                {"season_name": "2025/26", "total_points": 2187, "rank": 1037838},
+                {"season_name": "2024/25", "total_points": 2125, "rank": 3932974},
+            ],
+            "chips": [],
+        }
+        picks_data = {
+            "picks": [{"element": 1, "position": 1, "is_captain": True, "is_vice_captain": False, "multiplier": 2}],
+            "active_chip": None,
+            "entry_history": {"points": 60, "rank": 100, "value": 1000, "bank": 5},
+        }
+        bootstrap = {
+            "elements": [{
+                "id": 1, "web_name": "Salah", "first_name": "Mohamed", "second_name": "Salah",
+                "team": 1, "element_type": 3,
+            }],
+            "teams": [{"id": 1, "short_name": "LIV"}],
+            "events": [],
+        }
+        with patch("scripts.classic.team_analysis.get_classic_bootstrap_static", return_value=bootstrap), \
+             patch("scripts.classic.team_analysis.get_classic_team_picks", return_value=picks_data), \
+             patch("scripts.classic.team_analysis.get_classic_team_history", return_value=history), \
+             patch("scripts.classic.team_analysis.get_classic_team_position_data", return_value={}), \
+             patch("scripts.classic.team_analysis.get_entry_details", return_value={"name": "Test", "id": 1}), \
+             patch("scripts.classic.team_analysis.get_current_gameweek", return_value=25), \
+             patch("scripts.classic.team_analysis.get_rotowire_player_projections", return_value=pd.DataFrame()), \
+             patch("scripts.classic.team_analysis.position_converter",
+                   side_effect=lambda x: {1: "G", 2: "D", 3: "M", 4: "F"}.get(x, "M")), \
+             patch("scripts.classic.team_analysis.render_season_highlights"), \
+             patch("scripts.classic.team_analysis.compute_classic_bench_data", return_value=None), \
+             patch("scripts.classic.team_analysis.render_bench_analysis"), \
+             patch("scripts.classic.team_analysis.config.get_classic_season_notes",
+                   return_value={"2025/26": {"pct_finish": 8.0}}), \
+             patch("scripts.classic.team_analysis.config.get_classic_league_history_records", return_value=[
+                 {"season": "2025/26", "league_id": 1161877, "league_name": "Super League DMV Starboys",
+                  "manual_stats": {"rank": 4, "total_points": None}},
+                 {"season": "2025/26", "league_id": 1555691, "league_name": "FAFO FPL",
+                  "manual_stats": {"rank": 1, "total_points": None}},
+             ]):
+            from scripts.classic.team_analysis import show_classic_team_analysis_page
+            show_classic_team_analysis_page()

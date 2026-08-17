@@ -517,7 +517,7 @@ def show_classic_league_analysis_page():
         standings_data = get_league_standings(league_id)
 
     if not standings_data:
-        show_api_error(f"loading data for league {league_id}", hint_key="league_id")
+        show_api_error(f"loading data for league {league_id}", hint_key="classic_league_stale")
         return
 
     league_info = standings_data.get("league", {})

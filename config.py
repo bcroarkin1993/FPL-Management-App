@@ -289,6 +289,31 @@ def get_draft_league_history_records():
     return sorted(by_season.values(), key=lambda h: h["season"])
 
 
+def get_classic_league_history_records():
+    """Full Classic/H2H league history records, keyed on (season, league_id)
+    rather than season alone since Classic supports multiple concurrent
+    leagues — a season can have more than one record. Populated via League
+    Setup's automatic season-rollover archiving (or its manual "Classic
+    League History" fallback section); there is no legacy env-var source for
+    this (unlike Draft's FPL_DRAFT_LEAGUE_HISTORY)."""
+    settings = _get_league_settings()
+    history = settings.get("classic", {}).get("league_history", [])
+    return sorted(
+        (dict(h) for h in history if h.get("season")),
+        key=lambda h: (h["season"], h.get("league_id") or 0),
+    )
+
+
+def get_classic_season_notes() -> dict:
+    """Manually-entered per-season notes for Classic — currently just
+    pct_finish, since FPL's live entry-history endpoint
+    (get_classic_team_history) has no total-entrant count to derive a
+    percentile from. Populated via League Setup's Classic League History
+    section. Keyed by season label ('YYYY/YY')."""
+    settings = _get_league_settings()
+    return dict(settings.get("classic", {}).get("season_notes", {}))
+
+
 def _resolve_current_gameweek():
     """Resolve the current gameweek with env override, else FPL Draft API, else fallback to 1."""
     # Optional env override (handy for offline/dev)

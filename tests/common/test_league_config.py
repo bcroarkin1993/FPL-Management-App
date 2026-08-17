@@ -7,6 +7,7 @@ import config
 from scripts.common.league_config import (
     load_settings,
     save_settings,
+    auto_archive_completed_season,
     DEFAULT_SETTINGS,
 )
 
@@ -21,19 +22,27 @@ class TestLoadSettings:
         assert "classic" in settings
         assert settings["draft"]["history"] == []
         assert settings["draft"]["commish_seasons"] == {}
+        assert settings["draft"]["last_confirmed_season"] is None
+        assert settings["classic"]["league_history"] == []
+        assert settings["classic"]["last_confirmed_season"] is None
+        assert settings["classic"]["season_notes"] == {}
 
     def test_legacy_file_without_new_keys_gets_defaults(self, tmp_path):
-        """A settings file saved before the history/Commish Mode features
-        existed should still deep-merge in their empty defaults, not KeyError."""
+        """A settings file saved before the history/Commish Mode/season-rollover
+        features existed should still deep-merge in their empty defaults, not KeyError."""
         config_path = tmp_path / "league_settings.json"
         config_path.write_text(json.dumps({
             "version": 1,
             "draft": {"league_id": 4544, "team_id": 17077, "team_name": "My Team", "locked": True},
+            "classic": {"leagues": [{"id": 1161877, "name": "Old League"}], "locked": True},
         }))
         with patch("scripts.common.league_config._find_config_path", return_value=config_path):
             settings = load_settings()
         assert settings["draft"]["history"] == []
         assert settings["draft"]["commish_seasons"] == {}
+        assert settings["draft"]["last_confirmed_season"] is None
+        assert settings["classic"]["league_history"] == []
+        assert settings["classic"]["last_confirmed_season"] is None
 
     def test_valid_file(self, tmp_path):
         """When config file exists with partial data, merge with defaults."""
@@ -138,6 +147,119 @@ class TestSaveSettings:
             assert len(loaded["draft"]["history"]) == 2
             assert loaded["draft"]["history"][0]["season"] == "2024/25"
 
+    def test_classic_league_history_round_trip(self, tmp_path):
+        """Classic league_history (keyed on season+league_id) should persist
+        unchanged through save/load."""
+        config_path = tmp_path / "league_settings.json"
+        with patch("scripts.common.league_config._find_config_path", return_value=config_path):
+            settings = dict(DEFAULT_SETTINGS)
+            settings["classic"] = {
+                "leagues": [{"id": 668226, "name": "Super League DMV Starboyz"}],
+                "team_id": 4474334, "team_name": "Stoned Squirrels", "locked": True,
+                "league_history": [
+                    {"season": "2025/26", "league_id": 1161877, "league_name": "Super League DMV Starboys",
+                     "manual_stats": None},
+                ],
+                "last_confirmed_season": "2026/27",
+            }
+            save_settings(settings)
+
+            loaded = load_settings()
+            assert len(loaded["classic"]["league_history"]) == 1
+            assert loaded["classic"]["league_history"][0]["league_id"] == 1161877
+
+    def test_classic_season_notes_round_trip(self, tmp_path):
+        """Classic season_notes (% finish, keyed by season) should persist
+        unchanged through save/load."""
+        config_path = tmp_path / "league_settings.json"
+        with patch("scripts.common.league_config._find_config_path", return_value=config_path):
+            settings = dict(DEFAULT_SETTINGS)
+            settings["classic"] = {
+                "leagues": [], "team_id": None, "team_name": None, "locked": False,
+                "league_history": [], "last_confirmed_season": None,
+                "season_notes": {"2025/26": {"pct_finish": 8.0}},
+            }
+            save_settings(settings)
+
+            loaded = load_settings()
+            assert loaded["classic"]["season_notes"] == {"2025/26": {"pct_finish": 8.0}}
+
+
+class TestAutoArchiveCompletedSeason:
+    """auto_archive_completed_season() — best-effort snapshot of locked
+    Draft/Classic league IDs into history once the PL season concludes."""
+
+    def _settings(self, **overrides):
+        base = {
+            "version": 1,
+            "draft": {
+                "league_id": 4544, "team_id": 17077, "team_name": "My Team", "locked": True,
+                "history": [], "commish_seasons": {}, "last_confirmed_season": None,
+            },
+            "classic": {
+                "leagues": [{"id": 668226, "name": "Starboyz"}],
+                "team_id": 4474334, "team_name": "Stoned Squirrels", "locked": True,
+                "league_history": [], "last_confirmed_season": None,
+            },
+        }
+        base.update(overrides)
+        return base
+
+    def test_noop_when_season_in_progress(self, tmp_path):
+        config_path = tmp_path / "league_settings.json"
+        with patch("scripts.common.league_config._find_config_path", return_value=config_path), \
+             patch("scripts.common.fpl_draft_api.is_season_complete", return_value=False):
+            save_settings(self._settings())
+            assert auto_archive_completed_season() is False
+            # Nothing should have been written to history.
+            assert load_settings()["draft"]["history"] == []
+            assert load_settings()["classic"]["league_history"] == []
+
+    def test_archives_locked_leagues_when_season_complete(self, tmp_path):
+        config_path = tmp_path / "league_settings.json"
+        with patch("scripts.common.league_config._find_config_path", return_value=config_path), \
+             patch("scripts.common.fpl_draft_api.is_season_complete", return_value=True), \
+             patch("config.display_pl_season_label", return_value="2026/27"):
+            save_settings(self._settings())
+            assert auto_archive_completed_season() is True
+
+            loaded = load_settings()
+            draft_history = loaded["draft"]["history"]
+            assert len(draft_history) == 1
+            assert draft_history[0] == {
+                "season": "2026/27", "league_id": 4544, "team_id": 17077,
+                "team_name": "My Team", "manual_stats": None,
+            }
+            classic_history = loaded["classic"]["league_history"]
+            assert len(classic_history) == 1
+            assert classic_history[0] == {
+                "season": "2026/27", "league_id": 668226, "league_name": "Starboyz",
+                "manual_stats": None,
+            }
+
+    def test_idempotent_when_already_archived(self, tmp_path):
+        config_path = tmp_path / "league_settings.json"
+        with patch("scripts.common.league_config._find_config_path", return_value=config_path), \
+             patch("scripts.common.fpl_draft_api.is_season_complete", return_value=True), \
+             patch("config.display_pl_season_label", return_value="2026/27"):
+            settings = self._settings()
+            settings["draft"]["history"] = [
+                {"season": "2026/27", "league_id": 4544, "team_id": 17077,
+                 "team_name": "My Team", "manual_stats": None},
+            ]
+            settings["classic"]["league_history"] = [
+                {"season": "2026/27", "league_id": 668226, "league_name": "Starboyz", "manual_stats": None},
+            ]
+            save_settings(settings)
+            assert auto_archive_completed_season() is False
+
+    def test_noop_when_nothing_locked(self, tmp_path):
+        config_path = tmp_path / "league_settings.json"
+        with patch("scripts.common.league_config._find_config_path", return_value=config_path), \
+             patch("scripts.common.fpl_draft_api.is_season_complete", return_value=True):
+            save_settings(dict(DEFAULT_SETTINGS))
+            assert auto_archive_completed_season() is False
+
 
 class TestResolveDraftLeagueHistory:
     """config._resolve_draft_league_history() merge logic (config.py, not league_config.py)."""
@@ -239,3 +361,72 @@ class TestGetDraftLeagueHistoryRecords:
         with patch("config._get_league_settings", return_value=settings):
             records = config.get_draft_league_history_records()
         assert [r["season"] for r in records] == ["2022/23", "2024/25"]
+
+
+class TestGetClassicLeagueHistoryRecords:
+    """config.get_classic_league_history_records() — keyed on (season, league_id)
+    since Classic supports multiple concurrent leagues, unlike Draft's history."""
+
+    def setup_method(self):
+        config.refresh_league_settings()
+
+    def teardown_method(self):
+        config.refresh_league_settings()
+
+    def test_empty_by_default(self):
+        with patch("config._get_league_settings", return_value={"classic": {"league_history": []}}):
+            assert config.get_classic_league_history_records() == []
+
+    def test_records_returned(self):
+        settings = {"classic": {"league_history": [
+            {"season": "2025/26", "league_id": 1161877, "league_name": "Super League DMV Starboys",
+             "manual_stats": None},
+        ]}}
+        with patch("config._get_league_settings", return_value=settings):
+            records = config.get_classic_league_history_records()
+        assert len(records) == 1
+        assert records[0]["league_id"] == 1161877
+
+    def test_multiple_leagues_same_season_both_kept(self):
+        """Unlike Draft's history (one entry per season), Classic can have
+        more than one league for the same season."""
+        settings = {"classic": {"league_history": [
+            {"season": "2025/26", "league_id": 1161877, "league_name": "Starboys", "manual_stats": None},
+            {"season": "2025/26", "league_id": 1555691, "league_name": "FAFO FPL", "manual_stats": None},
+        ]}}
+        with patch("config._get_league_settings", return_value=settings):
+            records = config.get_classic_league_history_records()
+        assert len(records) == 2
+
+    def test_sorted_by_season_then_league_id(self):
+        settings = {"classic": {"league_history": [
+            {"season": "2025/26", "league_id": 999, "league_name": "B", "manual_stats": None},
+            {"season": "2024/25", "league_id": 111, "league_name": "A", "manual_stats": None},
+            {"season": "2025/26", "league_id": 111, "league_name": "C", "manual_stats": None},
+        ]}}
+        with patch("config._get_league_settings", return_value=settings):
+            records = config.get_classic_league_history_records()
+        assert [(r["season"], r["league_id"]) for r in records] == [
+            ("2024/25", 111), ("2025/26", 111), ("2025/26", 999),
+        ]
+
+
+class TestGetClassicSeasonNotes:
+    """config.get_classic_season_notes() — manually-entered % finish per
+    season, since FPL's live entry-history endpoint doesn't expose it."""
+
+    def setup_method(self):
+        config.refresh_league_settings()
+
+    def teardown_method(self):
+        config.refresh_league_settings()
+
+    def test_empty_by_default(self):
+        with patch("config._get_league_settings", return_value={"classic": {"season_notes": {}}}):
+            assert config.get_classic_season_notes() == {}
+
+    def test_returns_notes(self):
+        settings = {"classic": {"season_notes": {"2025/26": {"pct_finish": 8.0}}}}
+        with patch("config._get_league_settings", return_value=settings):
+            notes = config.get_classic_season_notes()
+        assert notes == {"2025/26": {"pct_finish": 8.0}}

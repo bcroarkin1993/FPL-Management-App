@@ -20,7 +20,7 @@ from scripts.common.utils import (
     get_rotowire_player_projections,
     position_converter,
 )
-from scripts.common.team_analysis_helpers import render_season_highlights
+from scripts.common.team_analysis_helpers import render_season_highlights, build_classic_season_history_df
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.bench_analysis import compute_classic_bench_data, render_bench_analysis
 from fuzzywuzzy import fuzz
@@ -176,6 +176,50 @@ def _stat_card(label: str, value: str, accent: str = "#00ff87") -> str:
     )
 
 
+def _render_season_history(past_seasons: list):
+    """Season History: Season/Points/Rank/% Finish are all live from FPL
+    (never stored). Only League Placements is manually entered — see
+    build_classic_season_history_df()'s docstring for why."""
+    st.markdown("### Season History")
+
+    past_df = pd.DataFrame(past_seasons).rename(columns={
+        "season_name": "Season", "total_points": "Points", "rank": "Rank",
+    })
+
+    tab_rank, tab_points = st.tabs(["Overall Rank", "Total Points"])
+
+    with tab_rank:
+        fig_rank = px.line(
+            past_df, x="Season", y="Rank",
+            markers=True, title="Overall Rank by Season",
+        )
+        fig_rank.update_layout(**_DARK_CHART_LAYOUT, height=400)
+        fig_rank.update_yaxes(autorange="reversed", title="Overall Rank")
+        fig_rank.update_xaxes(title="Season")
+        st.plotly_chart(fig_rank, use_container_width=True)
+
+    with tab_points:
+        fig_pts = px.line(
+            past_df, x="Season", y="Points",
+            markers=True, title="Total Points by Season",
+        )
+        fig_pts.update_layout(**_DARK_CHART_LAYOUT, height=400)
+        fig_pts.update_xaxes(title="Season")
+        fig_pts.update_yaxes(title="Total Points")
+        st.plotly_chart(fig_pts, use_container_width=True)
+
+    display_df = build_classic_season_history_df(
+        past_seasons, config.get_classic_season_notes(), config.get_classic_league_history_records(),
+    )
+    render_styled_table(display_df)
+    st.caption(
+        "League Placements are entered by hand on 🆔 League Setup (Classic → League History) — "
+        "FPL's API has no concept of a private mini-league, so there's no live source for this."
+    )
+
+    st.markdown("---")
+
+
 def show_classic_team_analysis_page():
     """Display Classic FPL My Team page with squad, projections, and metrics."""
 
@@ -234,15 +278,26 @@ def show_classic_team_analysis_page():
     current_gw = get_current_gameweek()
     history = get_classic_team_history(team_id)
 
+    # Season History (career points/rank/% finish by season) only depends on
+    # `past`, not on the current season having any gameweek data yet — render
+    # it before the current-season guard below, so a team that's brand new
+    # this season (no GWs played) still sees its career history instead of
+    # the page going completely blank.
+    past_seasons = (history or {}).get("past", [])
+    if past_seasons:
+        _render_season_history(past_seasons)
+
     if not history or not history.get("current"):
-        st.warning("No gameweek history available yet.")
+        st.info(
+            "No gameweek data yet for the current season — check back once Gameweek 1 has been played."
+        )
         return
 
     gw_history = history["current"]
     available_gws = [gw["event"] for gw in gw_history]
 
     if not available_gws:
-        st.warning("No gameweek data available yet.")
+        st.info("No gameweek data yet for the current season.")
         return
 
     # Gameweek Selector and Chip Display
@@ -435,50 +490,6 @@ def show_classic_team_analysis_page():
     render_season_highlights(player_list, bootstrap_data=bootstrap, team_id=team_id, is_classic=True)
 
     st.markdown("---")
-
-    # ---------------------------
-    # SEASON HISTORY
-    # ---------------------------
-    past_seasons = history.get("past", [])
-    if past_seasons:
-        st.markdown("### Season History")
-
-        past_df = pd.DataFrame(past_seasons)
-        past_df = past_df.rename(columns={
-            "season_name": "Season",
-            "total_points": "Points",
-            "rank": "Rank",
-        })
-
-        tab_rank, tab_points = st.tabs(["Overall Rank", "Total Points"])
-
-        with tab_rank:
-            fig_rank = px.line(
-                past_df, x="Season", y="Rank",
-                markers=True, title="Overall Rank by Season",
-            )
-            fig_rank.update_layout(**_DARK_CHART_LAYOUT, height=400)
-            fig_rank.update_yaxes(autorange="reversed", title="Overall Rank")
-            fig_rank.update_xaxes(title="Season")
-            st.plotly_chart(fig_rank, use_container_width=True)
-
-        with tab_points:
-            fig_pts = px.line(
-                past_df, x="Season", y="Points",
-                markers=True, title="Total Points by Season",
-            )
-            fig_pts.update_layout(**_DARK_CHART_LAYOUT, height=400)
-            fig_pts.update_xaxes(title="Season")
-            fig_pts.update_yaxes(title="Total Points")
-            st.plotly_chart(fig_pts, use_container_width=True)
-
-        # Data table
-        display_df = past_df[["Season", "Points", "Rank"]].copy()
-        display_df["Points"] = display_df["Points"].apply(lambda x: f"{x:,}" if pd.notna(x) else "N/A")
-        display_df["Rank"] = display_df["Rank"].apply(lambda x: f"{x:,}" if pd.notna(x) and x else "N/A")
-        render_styled_table(display_df)
-
-        st.markdown("---")
 
     # Build squad dataframe
     squad_df = _build_squad_dataframe(picks, bootstrap)

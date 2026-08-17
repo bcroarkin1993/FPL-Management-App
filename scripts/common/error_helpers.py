@@ -43,6 +43,12 @@ _HINTS = {
         "[draft.premierleague.com](https://draft.premierleague.com), then update it on the "
         "**🆔 League Setup** page (or `FPL_DRAFT_LEAGUE_ID` in `.env`)."
     ),
+    "classic_league_stale": (
+        "This Classic/H2H league ID no longer resolves — private mini-leagues are "
+        "sometimes recreated with a new ID each season. Find the current ID on "
+        "[fantasy.premierleague.com](https://fantasy.premierleague.com), then update it on "
+        "the **🆔 League Setup** page (or `FPL_CLASSIC_LEAGUE_IDS` in `.env`)."
+    ),
     "team_id": (
         "Please verify your team ID on the **🆔 League Setup** page "
         "(or `FPL_DRAFT_TEAM_ID` / `FPL_CLASSIC_TEAM_ID` in `.env` if not using that page)."

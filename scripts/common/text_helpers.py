@@ -221,3 +221,12 @@ def format_team_name(name):
 def position_converter(element_type):
     """Converts element type to position name."""
     return {1: 'G', 2: 'D', 3: 'M', 4: 'F'}.get(element_type, 'Unknown')
+
+
+def ordinal(n: int) -> str:
+    """Formats an integer as an ordinal string, e.g. 1 -> '1st', 4 -> '4th'."""
+    if 11 <= (n % 100) <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
