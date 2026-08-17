@@ -8,6 +8,14 @@ import pandas as pd
 import pytest
 from unittest.mock import patch, MagicMock
 
+# Import eagerly (before any test patches scripts.common.utils.* via
+# mock_all_utils) so this module's `from scripts.common.utils import
+# position_converter, ...` binds the real functions, not a mock that
+# happens to be active during a lazy first import inside a `with patch(...)`
+# block later. See TestInitialSquadOptimizerPage's second test, which
+# exercises this module's internals directly (unmocked) after test_smoke.
+import scripts.classic.initial_squad  # noqa: F401
+
 
 class TestClassicHomePage:
     def test_smoke(self, mock_all_utils):
@@ -93,6 +101,94 @@ class TestWildcardPage:
              patch("scripts.classic.wildcard.show_api_error"):
             from scripts.classic.wildcard import show_wildcard_page
             show_wildcard_page()
+
+
+class TestInitialSquadOptimizerPage:
+    def test_smoke(self, mock_all_utils):
+        with patch("scripts.classic.initial_squad.get_rotowire_player_projections", return_value=pd.DataFrame()), \
+             patch("scripts.classic.initial_squad.get_classic_bootstrap_static", return_value={"elements": [], "teams": [], "events": []}), \
+             patch("scripts.classic.initial_squad.get_current_gameweek", return_value=25), \
+             patch("scripts.classic.initial_squad.get_fixture_difficulty_grid", return_value=pd.DataFrame()), \
+             patch("scripts.classic.initial_squad.get_rotowire_season_rankings", return_value=pd.DataFrame()), \
+             patch("scripts.classic.initial_squad.get_ffp_projections_data", return_value=None), \
+             patch("scripts.classic.initial_squad.position_converter", side_effect=lambda x: {1: "G", 2: "D", 3: "M", 4: "F"}.get(x, "M")), \
+             patch("scripts.classic.initial_squad.show_api_error"):
+            from scripts.classic.initial_squad import show_initial_squad_optimizer_page
+            show_initial_squad_optimizer_page()
+
+    def test_scoring_pipeline_builds_valid_squad(self):
+        """Not a UI smoke test — exercises the real scoring + ILP pipeline end
+        to end with a small synthetic player pool to catch integration bugs
+        the mocked-empty-data UI smoke test above can't reach."""
+        import numpy as np
+        from scripts.classic.initial_squad import (
+            _build_full_player_pool,
+            _apply_eligibility_filters,
+            _compute_scores,
+        )
+        from scripts.common.optimization import solve_squad_ilp
+
+        rng = np.random.default_rng(0)
+        teams = [{"id": i, "short_name": f"T{i}"} for i in range(1, 9)]
+        elements = []
+        pid = 1
+        for team in teams:
+            for pos, count in [(1, 3), (2, 6), (3, 6), (4, 4)]:
+                for _ in range(count):
+                    elements.append({
+                        "id": pid,
+                        "web_name": f"P{pid}",
+                        "first_name": "First",
+                        "second_name": f"Last{pid}",
+                        "team": team["id"],
+                        "element_type": pos,
+                        "now_cost": int(rng.uniform(40, 140)),
+                        "chance_of_playing_next_round": 100,
+                        "news": "",
+                        "total_points": 0,
+                        "form": 0.0,
+                    })
+                    pid += 1
+        bootstrap = {"elements": elements, "teams": teams}
+
+        gw1_df = pd.DataFrame([
+            {
+                "Player": f"First Last{e['id']}", "Team": next(t["short_name"] for t in teams if t["id"] == e["team"]),
+                "Position": {1: "G", 2: "D", 3: "M", 4: "F"}[e["element_type"]],
+                "Points": round(rng.uniform(0, 8), 2),
+            }
+            for e in elements[:150]
+        ])
+        season_df = pd.DataFrame([
+            {
+                "Player": f"First Last{e['id']}", "Team": next(t["short_name"] for t in teams if t["id"] == e["team"]),
+                "Position": {1: "G", 2: "D", 3: "M", 4: "F"}[e["element_type"]],
+                "Points": round(rng.uniform(20, 220), 1),
+            }
+            for e in elements
+        ])
+        fdr_avg = pd.Series({t["short_name"]: rng.uniform(1.5, 4.5) for t in teams})
+
+        full_pool = _build_full_player_pool(bootstrap)
+        scored = _compute_scores(
+            full_pool, gw1_df, season_df, None, fdr_avg,
+            current_gw=1, w_season=0.55, w_week1=0.30, w_fixture=0.15,
+        )
+        candidate = _apply_eligibility_filters(scored, exclude_injured=True, min_chance_of_playing=75)
+
+        squad_df, totals = solve_squad_ilp(
+            candidate, 100.0, score_col="Player Score", formation="auto", bench_weight=0.2,
+            captain_score_col="Captain Score", captain_bonus_weight=0.5,
+        )
+
+        assert squad_df is not None
+        assert len(squad_df) == 15
+        assert squad_df["Is_Starter"].sum() == 11
+        assert squad_df["Price"].sum() <= 100.0 + 1e-6
+        pos_counts = squad_df["Position"].value_counts().to_dict()
+        assert pos_counts == {"D": 5, "M": 5, "F": 3, "G": 2}
+        assert (squad_df["Team"].value_counts() <= 3).all()
+        assert squad_df["Is_Captain"].sum() == 1
 
 
 class TestClassicTeamAnalysisPage:

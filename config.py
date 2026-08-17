@@ -124,6 +124,15 @@ ROTOWIRE_SEASON_RANKINGS_URL = os.getenv(
     "ROTOWIRE_SEASON_RANKINGS_URL",
     "https://www.rotowire.com/soccer/article/fantasy-premier-league-fpl-rankings-top-400-for-2026-27-season-124261",
 )
+# GW1's preseason "best picks" article uses a different slug shape than the
+# regular weekly rankings articles (see get_rotowire_rankings_url), so it
+# isn't auto-discoverable via ARTICLES_INDEX for GW1 specifically — pin it
+# like the season rankings URL above. Only relevant for the Initial Squad
+# Optimizer; re-pin each preseason.
+ROTOWIRE_GW1_URL = os.getenv(
+    "ROTOWIRE_GW1_URL",
+    "https://www.rotowire.com/soccer/article/fpl-gameweek-1-best-players-captain-picks-2026-27-rankings-gw1-127487",
+)
 
 # ----- Notifications / Discord -----
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")

@@ -1,10 +1,13 @@
 """
 Lineup Optimization Functions.
 
-FPL lineup validation and optimal lineup selection.
+FPL lineup validation, optimal lineup selection, and shared squad-building ILP.
 """
 
+from typing import Dict, Optional, Tuple
+
 import pandas as pd
+import pulp
 
 
 def check_valid_lineup(df):
@@ -108,3 +111,185 @@ def find_optimal_lineup(df):
     ).reset_index(drop=True)
 
     return final_selection
+
+
+# =============================================================================
+# SHARED SQUAD-BUILDING ILP
+# =============================================================================
+# The mechanical "pick 15 players under FPL's rules" constraint set is
+# identical across Free Hit, Wildcard, and Initial Squad optimizers — only
+# the *scoring* of a player (which column drives the objective) differs per
+# page, since each makes different assumptions about what data is trustworthy
+# (short-horizon form vs. preseason season-long value, etc). This function
+# owns only the shared constraint/objective mechanics; callers own scoring.
+
+def solve_squad_ilp(
+    df: pd.DataFrame,
+    budget: float,
+    score_col: str,
+    price_col: str = "Price",
+    team_col: str = "Team",
+    position_col: str = "Position",
+    formation: str = "auto",
+    bench_weight: float = 0.0,
+    captain_score_col: Optional[str] = None,
+    captain_bonus_weight: float = 0.0,
+    problem_name: str = "FPL_Squad_Optimizer",
+) -> Tuple[Optional[pd.DataFrame], Optional[Dict[str, float]]]:
+    """
+    Generic PuLP ILP squad-builder shared by the Classic squad optimizers.
+
+    Constraints:
+    - Budget <= budget
+    - Squad size = 15 (2 GK, 5 DEF, 5 MID, 3 FWD)
+    - Starting XI = 11 (1 GK, formation window or exact "D-M-F")
+    - Max 3 players per club
+    - Can only start if selected
+
+    Objective (maximize):
+        sum(start[i] * score[i])
+        + bench_weight * sum((select[i] - start[i]) * score[i])
+        + captain_bonus_weight * sum(is_captain[i] * captain_score[i])   # only if captain args given
+
+    The captain mechanic (only active when both `captain_score_col` and a
+    positive `captain_bonus_weight` are supplied) adds a binary "is this
+    player the captain" variable constrained to a chosen starter, exactly
+    one per squad. Rewarding that pick in the objective gives the solver a
+    real incentive to *acquire* a standout captain-caliber player, not just
+    label one after the fact.
+
+    Args:
+        df: Candidate player pool with score_col, price_col, team_col, position_col.
+        budget: Total squad budget.
+        score_col: Column driving the primary objective (points-per-player value).
+        formation: "auto" (FPL min/max windows) or an exact "D-M-F" string, e.g. "3-4-3".
+        bench_weight: Weight applied to bench players' score in the objective (0 = ignore bench).
+        captain_score_col: Column used for the captain bonus term, if captaincy should
+            influence selection (may differ from score_col — e.g. a season-pedigree-heavy
+            score rather than the general blended score).
+        captain_bonus_weight: Weight applied to the captain bonus term (0 = no captain mechanic).
+        problem_name: PuLP problem name (cosmetic, shows in solver logs only).
+
+    Returns:
+        (squad_df, totals) where squad_df has an added 'Is_Starter' bool column
+        (plus 'Is_Captain' if the captain mechanic was used), and totals is a
+        dict with 'starter_score', 'bench_score', and 'captain_score' (if used).
+        Returns (None, None) if no optimal solution is found.
+    """
+    # Filter players with 0 or negative score unless very cheap (bench fodder)
+    pool = df[
+        (df[score_col] > 0) | (df[price_col] <= 4.5)
+    ].reset_index(drop=True)
+
+    if pool.empty:
+        return None, None
+
+    ids = pool.index.tolist()
+    scores = pool[score_col].to_dict()
+    prices = pool[price_col].to_dict()
+    teams = pool[team_col].to_dict()
+    positions = pool[position_col].to_dict()
+
+    use_captain = captain_score_col is not None and captain_bonus_weight > 0
+    captain_scores = pool[captain_score_col].to_dict() if use_captain else {}
+
+    # Define variables
+    select = pulp.LpVariable.dicts("Select", ids, cat=pulp.LpBinary)
+    start = pulp.LpVariable.dicts("Start", ids, cat=pulp.LpBinary)
+    is_captain = pulp.LpVariable.dicts("Captain", ids, cat=pulp.LpBinary) if use_captain else None
+
+    # Define problem (Maximize)
+    prob = pulp.LpProblem(problem_name, pulp.LpMaximize)
+
+    # Objective
+    objective = (
+        pulp.lpSum([start[i] * scores[i] for i in ids]) +
+        bench_weight * pulp.lpSum([(select[i] - start[i]) * scores[i] for i in ids])
+    )
+    if use_captain:
+        objective += captain_bonus_weight * pulp.lpSum([is_captain[i] * captain_scores[i] for i in ids])
+    prob += objective
+
+    # Constraints
+
+    # Budget constraint
+    prob += pulp.lpSum([select[i] * prices[i] for i in ids]) <= budget
+
+    # Squad size = 15
+    prob += pulp.lpSum([select[i] for i in ids]) == 15
+
+    # Starting XI = 11
+    prob += pulp.lpSum([start[i] for i in ids]) == 11
+
+    # Can only start if selected
+    for i in ids:
+        prob += start[i] <= select[i]
+
+    # Position constraints (full squad of 15)
+    prob += pulp.lpSum([select[i] for i in ids if positions[i] == 'G']) == 2
+    prob += pulp.lpSum([select[i] for i in ids if positions[i] == 'D']) == 5
+    prob += pulp.lpSum([select[i] for i in ids if positions[i] == 'M']) == 5
+    prob += pulp.lpSum([select[i] for i in ids if positions[i] == 'F']) == 3
+
+    # Formation constraints (starting XI)
+    prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'G']) == 1
+
+    if formation != "auto":
+        parts = formation.split("-")
+        if len(parts) == 3:
+            n_def, n_mid, n_fwd = int(parts[0]), int(parts[1]), int(parts[2])
+            prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'D']) == n_def
+            prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'M']) == n_mid
+            prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'F']) == n_fwd
+    else:
+        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'D']) >= 3
+        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'D']) <= 5
+        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'M']) >= 2
+        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'M']) <= 5
+        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'F']) >= 1
+        prob += pulp.lpSum([start[i] for i in ids if positions[i] == 'F']) <= 3
+
+    # Max 3 players per team
+    unique_teams = pool[team_col].unique()
+    for t in unique_teams:
+        prob += pulp.lpSum([select[i] for i in ids if teams[i] == t]) <= 3
+
+    # Captain: must be a starter, exactly one per squad
+    if use_captain:
+        for i in ids:
+            prob += is_captain[i] <= start[i]
+        prob += pulp.lpSum([is_captain[i] for i in ids]) == 1
+
+    # Solve
+    prob.solve(pulp.PULP_CBC_CMD(msg=False))
+
+    if pulp.LpStatus[prob.status] != 'Optimal':
+        return None, None
+
+    # Extract results
+    selected_indices = [i for i in ids if pulp.value(select[i]) == 1]
+    starting_indices = [i for i in ids if pulp.value(start[i]) == 1]
+
+    squad_df = pool.loc[selected_indices].copy()
+    squad_df['Is_Starter'] = squad_df.index.isin(starting_indices)
+
+    # Sort: Starters first (by position G-D-M-F), then Bench
+    pos_order = {'G': 1, 'D': 2, 'M': 3, 'F': 4}
+    squad_df['Pos_Order'] = squad_df[position_col].map(pos_order)
+    squad_df = squad_df.sort_values(
+        by=['Is_Starter', 'Pos_Order', score_col],
+        ascending=[False, True, False]
+    )
+
+    totals = {
+        'starter_score': sum(scores[i] for i in starting_indices),
+        'bench_score': sum(scores[i] for i in selected_indices if i not in starting_indices),
+    }
+
+    if use_captain:
+        captain_indices = [i for i in ids if pulp.value(is_captain[i]) == 1]
+        squad_df['Is_Captain'] = squad_df.index.isin(captain_indices)
+        if captain_indices:
+            totals['captain_score'] = captain_scores[captain_indices[0]]
+
+    return squad_df, totals
