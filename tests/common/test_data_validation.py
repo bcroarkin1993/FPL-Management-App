@@ -41,7 +41,8 @@ class TestSingleGwProjections:
 
     def test_cumulative_multi_gw_table_is_rejected(self):
         """The actual bug: Rotowire's "gameweeks 1-5" article, whose Points
-        column was a 5-week cumulative total (median 22.5, min 18.1, 100 rows).
+        column was a 5-week cumulative total (mean 22.5, median 21.7, min 18.1,
+        100 rows). Rotowire headed the column "Adj Total", not "Pts".
         Kelleher showed 19.6 for a single gameweek."""
         rng = np.random.default_rng(1)
         df = pd.DataFrame({
@@ -49,7 +50,7 @@ class TestSingleGwProjections:
             "Points": np.clip(rng.normal(22.5, 3.6, 100), 18.1, 37.7),
         })
         errors = _errors(check_single_gw_projections(df, source="rotowire GW1-5"))
-        assert errors, "a median of 22.5 points in one gameweek must be rejected"
+        assert errors, "a median of 21.7 points in one gameweek must be rejected"
         assert any("multi-gameweek" in e.hint for e in errors)
 
     def test_season_long_table_is_rejected(self):

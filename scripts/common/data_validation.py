@@ -98,7 +98,7 @@ def check_single_gw_projections(df: Optional[pd.DataFrame],
     """Assert a projection table really is single-gameweek player points.
 
     This is the check that would have caught the "gameweeks 1-5" article: its
-    Points column had a median of 22.5, which is not a gameweek, it is a month.
+    Points column had a median of 21.7, which is not a gameweek, it is a month.
     """
     issues = []
 
