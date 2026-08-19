@@ -206,9 +206,13 @@ def render_rotowire_projections():
     available_cols = [c for c in display_cols if c in player_projections.columns]
     df = player_projections[available_cols].copy()
 
-    # Add value column if we have Points and Price
+    # Add value column if we have Points and Price. Rotowire occasionally lists a
+    # player with no price (Price 0.0), so this must guard the division the same
+    # way the scraper does -- an unguarded points/price yields inf, which is not a
+    # value, sorts to the top, and used to crash the colour scale outright.
     if 'Points' in df.columns and 'Price' in df.columns:
-        df['Value'] = df['Points'] / df['Price']
+        _price = pd.to_numeric(df['Price'], errors='coerce')
+        df['Value'] = (pd.to_numeric(df['Points'], errors='coerce') / _price).where(_price > 0)
 
     # Filters
     with st.expander("Filters", expanded=False):

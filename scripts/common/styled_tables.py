@@ -7,9 +7,16 @@ matching the app's existing dark aesthetic (#1a1a2e backgrounds, #00ff87 accents
 FPL purple gradient headers).
 """
 
+import math
+
+import numpy as np
 import pandas as pd
 import streamlit as st
 from typing import Callable, Dict, List, Optional
+
+from scripts.common.error_helpers import get_logger
+
+_logger = get_logger("fpl_app.styled_tables")
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +36,15 @@ _TR_HIGHLIGHT = "border-left:3px solid #00ff87;"
 # ---------------------------------------------------------------------------
 # Color-scale helpers
 # ---------------------------------------------------------------------------
+def _is_finite(val) -> bool:
+    """True only for a real, finite number. Guards against NaN, +/-inf, and
+    anything non-numeric that happens to be truthy."""
+    try:
+        return math.isfinite(float(val))
+    except (TypeError, ValueError):
+        return False
+
+
 def _color_scale(val, col_min, col_max, direction="positive"):
     """
     Return an inline CSS color string for a numeric value.
@@ -36,7 +52,12 @@ def _color_scale(val, col_min, col_max, direction="positive"):
     direction='positive': low=red, high=green
     direction='negative': low=green, high=red
     """
-    if pd.isna(val) or col_max == col_min:
+    # Non-finite input has to be rejected explicitly. NaN == NaN is False, so an
+    # all-NaN column slips past a `col_max == col_min` check, and an infinite
+    # value (e.g. points/price where price is 0) makes the ratio inf/inf = NaN.
+    # Either way int(NaN) raises and, because this runs inside the render loop,
+    # a single bad cell used to take down the entire page.
+    if not all(_is_finite(v) for v in (val, col_min, col_max)) or col_max == col_min:
         return ""
     ratio = (val - col_min) / (col_max - col_min)
     if direction == "negative":
@@ -99,7 +120,19 @@ def render_styled_table(
     for col in positive_color_cols + negative_color_cols:
         if col in df.columns:
             numeric_vals = pd.to_numeric(df[col], errors="coerce")
-            color_ranges[col] = (numeric_vals.min(), numeric_vals.max())
+            finite_vals = numeric_vals[np.isfinite(numeric_vals)]
+            n_nonfinite = int(numeric_vals.notna().sum() - len(finite_vals))
+            if n_nonfinite:
+                # Worth surfacing: an infinity in a numeric column is almost
+                # always an unguarded division upstream, not real data.
+                _logger.warning(
+                    "Styled table column %r contains %d non-finite value(s) "
+                    "(inf/-inf); they are excluded from the colour range and "
+                    "rendered uncoloured. This usually means a division by zero "
+                    "upstream.", col, n_nonfinite,
+                )
+            if not finite_vals.empty:
+                color_ranges[col] = (finite_vals.min(), finite_vals.max())
 
     # Determine default alignment per column
     def _align(col):

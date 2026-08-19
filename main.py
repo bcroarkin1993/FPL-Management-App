@@ -7,6 +7,7 @@ import requests
 import streamlit as st
 
 import config
+from scripts.common.error_helpers import page_error_boundary
 from scripts.common.text_helpers import TZ_ET
 from scripts.common.utils import (
     get_classic_bootstrap_static,
@@ -915,8 +916,11 @@ def main():
         key="nav_page",
     )
 
-    # Route to the selected page
-    pages[page]()
+    # Route to the selected page. The boundary keeps one page's failure from
+    # replacing the whole app with a raw traceback, and makes sure the error is
+    # both visible to the reader and logged with a stack trace.
+    with page_error_boundary(page.strip()):
+        pages[page]()
 
 
 if __name__ == "__main__":

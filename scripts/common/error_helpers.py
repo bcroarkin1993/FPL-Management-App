@@ -12,7 +12,9 @@ use ``get_logger().warning(…)`` only.  Page-level (non-cached) functions
 may use ``show_api_error(…)`` for user-facing messages.
 """
 
+import contextlib
 import logging
+import traceback
 import streamlit as st
 
 
@@ -86,3 +88,37 @@ def show_api_error(
         get_logger().warning("Error while %s: %s", context, exception)
     if stop:
         st.stop()
+
+
+@contextlib.contextmanager
+def page_error_boundary(page_name: str):
+    """Catch anything a page raises and render it as a legible, actionable error.
+
+    Without this, an unhandled exception anywhere in a page hands the reader
+    Streamlit's raw traceback -- which is both alarming and useless to them --
+    while the log line that would actually help scrolls past in a terminal
+    nobody is watching. The opposite failure is just as bad: a bare `except`
+    that swallows the error and leaves a blank space where a section should be.
+
+    This does neither. The reader gets a plain statement of which page failed
+    and what to try, the traceback stays available behind a disclosure, and the
+    full exception is logged at ERROR with a stack trace.
+
+    Usage::
+
+        with page_error_boundary("Projections Hub"):
+            show_player_projections_page()
+    """
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001 - deliberate catch-all at the page boundary
+        get_logger().error("Unhandled error rendering page %r", page_name, exc_info=True)
+        st.error(
+            f"**Something went wrong on {page_name}.**\n\n"
+            f"`{type(exc).__name__}: {exc}`\n\n"
+            "The rest of the app still works — pick another page from the sidebar, "
+            "or use the Refresh button to re-fetch data. If it keeps happening, the "
+            "details below identify where it broke."
+        )
+        with st.expander("Technical details"):
+            st.code(traceback.format_exc(), language="text")
