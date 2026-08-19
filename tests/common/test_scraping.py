@@ -5,7 +5,10 @@ table shapes (standard weekly rankings vs. preseason "best picks" preview),
 plus the legacy positional fallback for pages with no <thead>.
 """
 
+import logging
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from scripts.common.scraping import (
     _map_rotowire_header_row,
@@ -151,3 +154,50 @@ class TestGetRotowireProjections:
         with patch("scripts.common.scraping.requests.get", side_effect=requests.ConnectionError("network down")):
             df = get_rotowire_player_projections("https://example.com/fails")
         assert df.empty
+
+
+class TestRotowireRangeArticleNormalization:
+    """Rotowire's "best picks for gameweeks X-Y" articles publish a *cumulative*
+    Points total across the range. The rest of the app treats Rotowire Points as a
+    single-gameweek projection, so an unnormalized range article inflated every
+    downstream score by the width of the range (Kelleher showed 18.6 instead of 3.3)."""
+
+    def test_range_article_points_divided_by_span(self):
+        url = (
+            "https://www.rotowire.com/soccer/article/"
+            "best-fpl-picks-for-gameweeks-1-5-fantasy-premier-league-2026-27-126238"
+        )
+        with patch("scripts.common.scraping.requests.get", return_value=_mock_response(PREVIEW_TABLE_HTML)):
+            df = get_rotowire_player_projections(url)
+        haaland = df[df["Player"] == "Erling Haaland"].iloc[0]
+        assert haaland["Points"] == pytest.approx(37.7 / 5)
+        # Value is derived after normalization, so it stays on the same per-GW scale.
+        assert haaland["Value"] == pytest.approx((37.7 / 5) / 15.5)
+
+    def test_single_gw_article_points_untouched(self):
+        url = (
+            "https://www.rotowire.com/soccer/article/"
+            "fpl-gameweek-1-best-players-captain-picks-2026-27-rankings-gw1-127487"
+        )
+        with patch("scripts.common.scraping.requests.get", return_value=_mock_response(WEEKLY_TABLE_HTML)):
+            df = get_rotowire_player_projections(url)
+        assert df[df["Player"] == "Erling Haaland"].iloc[0]["Points"] == 7.15
+
+    def test_single_gameweek_range_is_not_divided(self):
+        """A degenerate "gameweeks 7-7" range is already a single GW -- leave it alone."""
+        url = (
+            "https://www.rotowire.com/soccer/article/"
+            "best-fpl-picks-for-gameweeks-7-7-fantasy-premier-league-2026-27-130000"
+        )
+        with patch("scripts.common.scraping.requests.get", return_value=_mock_response(WEEKLY_TABLE_HTML)):
+            df = get_rotowire_player_projections(url)
+        assert df[df["Player"] == "Erling Haaland"].iloc[0]["Points"] == 7.15
+
+    def test_implausible_median_logs_a_warning(self, caplog):
+        """Tripwire for the next slug shape Rotowire invents: a table that still
+        doesn't look like single-GW data should say so loudly."""
+        url = "https://www.rotowire.com/soccer/article/some-unrecognized-season-long-table-999999"
+        with caplog.at_level(logging.WARNING, logger="fpl_app.scraping"):
+            with patch("scripts.common.scraping.requests.get", return_value=_mock_response(PREVIEW_TABLE_HTML)):
+                get_rotowire_player_projections(url)
+        assert any("implausible for a single gameweek" in r.message for r in caplog.records)

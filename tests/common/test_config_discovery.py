@@ -1,0 +1,77 @@
+"""Tests for config._discover_rotowire_article().
+
+Regression coverage for the GW1 bug: discovery selected Rotowire's
+"Best FPL Picks for Gameweeks 1-5" article, whose Points column is a cumulative
+5-gameweek total, because the correct single-GW article's slug shape
+(fpl-gameweek-1-...-rankings-gw1-<id>) matched none of the discovery patterns.
+Every ROTOWIRE_URL consumer was ~5x inflated as a result.
+"""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+import config
+
+# The four real anchors present on Rotowire's FPL rankings index in 2026-08.
+LIVE_INDEX_HTML = """
+<html><body>
+<a href="/soccer/article/fantrax-sleeper-premier-league-player-rankings-gameweek-1-gw1-127529">Fantrax GW1</a>
+<a href="/soccer/article/fpl-gameweek-1-best-players-captain-picks-2026-27-rankings-gw1-127487">FPL GW1</a>
+<a href="/soccer/article/best-fpl-picks-for-gameweeks-1-5-fantasy-premier-league-2026-27-126238">GW1-5 picks</a>
+<a href="/soccer/article/fantasy-premier-league-fpl-rankings-top-400-for-2026-27-season-124261">Season top 400</a>
+<a href="/soccer/article/fpl-gw38-fantasy-premier-league-player-rankings-gameweek-38-115088">FPL GW38 (last season)</a>
+</body></html>
+"""
+
+RANGE_ONLY_INDEX_HTML = """
+<html><body>
+<a href="/soccer/article/best-fpl-picks-for-gameweeks-1-5-fantasy-premier-league-2026-27-126238">GW1-5 picks</a>
+</body></html>
+"""
+
+
+def _mock_response(html):
+    resp = MagicMock()
+    resp.content = html.encode("utf-8")
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
+@pytest.fixture(autouse=True)
+def _unpin_rotowire_url(monkeypatch):
+    """conftest pins ROTOWIRE_URL in the env, which short-circuits discovery."""
+    monkeypatch.delenv("ROTOWIRE_URL", raising=False)
+    # The season-staleness filter compares against the current PL season string.
+    monkeypatch.setattr(config, "current_pl_season_str", lambda: "2026-27")
+
+
+def _discover(html, gw):
+    with patch("requests.get", return_value=_mock_response(html)):
+        return config._discover_rotowire_article(gw)
+
+
+class TestRotowireArticleDiscovery:
+    def test_gw1_prefers_single_gw_article_over_range_article(self):
+        """The bug: the GW1-5 cumulative article was chosen for GW1."""
+        url = _discover(LIVE_INDEX_HTML, 1)
+        assert url.endswith("fpl-gameweek-1-best-players-captain-picks-2026-27-rankings-gw1-127487")
+        assert "best-fpl-picks-for-gameweeks" not in url
+
+    def test_fantrax_article_is_never_selected(self):
+        """Fantrax is a different scoring system -- its GW1 article must not match."""
+        assert "fantrax" not in _discover(LIVE_INDEX_HTML, 1)
+
+    def test_range_article_still_used_when_nothing_else_covers_the_gw(self):
+        """Fallback intact -- a cumulative article beats no projections at all
+        (get_rotowire_player_projections divides it down to a per-GW average)."""
+        url = _discover(RANGE_ONLY_INDEX_HTML, 3)
+        assert url.endswith("best-fpl-picks-for-gameweeks-1-5-fantasy-premier-league-2026-27-126238")
+
+    def test_prior_season_article_is_not_used_as_a_nearest_gw_match(self):
+        """GW38 from last season must not win GW2 on 'closest gameweek'."""
+        url = _discover(LIVE_INDEX_HTML, 2)
+        assert "115088" not in url
+
+    def test_no_matching_articles_returns_empty_string(self):
+        assert _discover("<html><body><a href='/soccer/news/whatever'>x</a></body></html>", 1) == ""

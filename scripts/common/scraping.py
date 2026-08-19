@@ -90,6 +90,17 @@ def _rotowire_row_from_header_map(cells, header_map, safe_numeric):
     }
 
 
+# Rotowire occasionally publishes "best picks for gameweeks X-Y" articles whose Points
+# column is a *cumulative* total across the whole range rather than a single-GW projection.
+# The rest of the app treats Rotowire Points as one gameweek, so those totals must be
+# divided down before they reach any consumer.
+_ROTOWIRE_RANGE_ARTICLE_RE = re.compile(r"best-fpl-picks-for-gameweeks-(\d+)-(\d+)-")
+
+# Above this, a "single gameweek" projection table is not credible (the highest realistic
+# single-GW Rotowire projection is well under 10) — used as a tripwire, not a correction.
+_ROTOWIRE_MAX_PLAUSIBLE_MEDIAN = 10
+
+
 @st.cache_data(ttl=3600)
 def get_rotowire_player_projections(url, limit=None):
     """
@@ -221,6 +232,30 @@ def get_rotowire_player_projections(url, limit=None):
 
     # Create DataFrame
     player_rankings = pd.DataFrame(data)
+
+    # Multi-GW range article: convert the cumulative total to a per-gameweek average so
+    # downstream consumers (fixture projections, waiver/transfer scoring, lineups) get a
+    # single-GW figure. Done before 'Value' is derived so Value stays per-GW consistent.
+    _range_match = _ROTOWIRE_RANGE_ARTICLE_RE.search(url or "")
+    if _range_match:
+        _span = int(_range_match.group(2)) - int(_range_match.group(1)) + 1
+        if _span > 1:
+            _logger.warning(
+                "Rotowire: %s is a %d-gameweek cumulative article; dividing Points by %d "
+                "to approximate a single-GW projection.",
+                url, _span, _span,
+            )
+            player_rankings['Points'] = player_rankings['Points'] / _span
+
+    # Tripwire for the next slug shape Rotowire invents: if the table still doesn't look
+    # like single-gameweek data, say so loudly rather than silently inflating every score.
+    _median_points = player_rankings['Points'].median()
+    if pd.notna(_median_points) and _median_points > _ROTOWIRE_MAX_PLAUSIBLE_MEDIAN:
+        _logger.warning(
+            "Rotowire: median Points is %.1f for %s -- implausible for a single gameweek. "
+            "This article may be a multi-GW or season-long table; check ROTOWIRE_URL discovery.",
+            _median_points, url,
+        )
 
     # Create 'Pos Rank' by summing the four position ranks
     player_rankings['Pos Rank'] = (
