@@ -852,9 +852,13 @@ def _get_team_squad_and_lineup(
 
     # If predicted lineup, calculate optimal and assign captain
     if is_predicted and not squad_df.empty:
-        # Use find_optimal_lineup to get best 11
+        # Use find_optimal_lineup to get best 11. Rank on the same column the team
+        # total is reported on (_calculate_projected_score prefers Proj_Blended),
+        # otherwise the XI and captain are chosen on raw Rotowire points while the
+        # score shown comes from the blend.
         squad_df["Points"] = pd.to_numeric(squad_df["Points"], errors="coerce").fillna(0.0)
-        optimal_xi = find_optimal_lineup(squad_df.copy())
+        xi_col = "Proj_Blended" if "Proj_Blended" in squad_df.columns else "Points"
+        optimal_xi = find_optimal_lineup(squad_df.copy(), points_col=xi_col)
 
         # Mark starting XI
         optimal_players = optimal_xi["Player"].tolist()
@@ -865,7 +869,7 @@ def _get_team_squad_and_lineup(
         # Assign captain to highest scorer in starting XI
         starting_xi = squad_df[squad_df["squad_position"] <= 11].copy()
         if not starting_xi.empty:
-            max_idx = starting_xi["Points"].idxmax()
+            max_idx = starting_xi[xi_col].idxmax()
             squad_df["is_captain"] = False
             squad_df["multiplier"] = 1
             squad_df.loc[max_idx, "is_captain"] = True

@@ -228,3 +228,54 @@ class TestApplyAvailabilityPenalty:
         })
         result = apply_availability_penalty(df, "Score", "AdjScore")
         assert result.loc[0, "AdjScore"] == 0.0
+
+
+class TestFindOptimalLineupPointsCol:
+    """The XI must be rankable on the same column the team total is reported on.
+    Draft/Classic fixture pages blend projections into 'Proj_Blended' and sum that,
+    but used to select the XI on raw 'Points'."""
+
+    @staticmethod
+    def _squad():
+        # 'cheap' out-projects 'pricey' on raw Points but not on the blend (and vice
+        # versa), so the two columns disagree about who belongs in the XI.
+        rows = [{"Player": "GK1", "Position": "G", "Points": 4.0, "Proj_Blended": 4.0}]
+        for i in range(5):
+            rows.append({"Player": f"D{i}", "Position": "D", "Points": 4.0 - i * 0.1,
+                         "Proj_Blended": 4.0 - i * 0.1})
+        for i in range(5):
+            rows.append({"Player": f"M{i}", "Position": "M", "Points": 5.0 - i * 0.1,
+                         "Proj_Blended": 5.0 - i * 0.1})
+        # Two forwards that rank in opposite orders on the two columns.
+        rows.append({"Player": "raw_favourite", "Position": "F", "Points": 9.0, "Proj_Blended": 1.0})
+        rows.append({"Player": "blend_favourite", "Position": "F", "Points": 1.0, "Proj_Blended": 9.0})
+        return pd.DataFrame(rows)
+
+    def test_defaults_to_points(self):
+        xi = find_optimal_lineup(self._squad())
+        assert "raw_favourite" in xi["Player"].tolist()
+
+    def test_ranks_on_the_requested_column(self):
+        xi = find_optimal_lineup(self._squad(), points_col="Proj_Blended")
+        assert "blend_favourite" in xi["Player"].tolist()
+
+    def test_missing_column_falls_back_to_points(self):
+        df = self._squad().drop(columns=["Proj_Blended"])
+        xi = find_optimal_lineup(df, points_col="Proj_Blended")
+        assert len(xi) == 11
+        assert "raw_favourite" in xi["Player"].tolist()
+
+    def test_ffp_only_player_is_selectable(self):
+        """Points == 0 but a real blended projection -- previously unpickable."""
+        df = self._squad()
+        df.loc[df["Player"] == "blend_favourite", "Points"] = 0.0
+        xi = find_optimal_lineup(df, points_col="Proj_Blended")
+        assert "blend_favourite" in xi["Player"].tolist()
+
+    def test_output_is_ordered_by_position_then_points_descending(self):
+        xi = find_optimal_lineup(self._squad(), points_col="Proj_Blended")
+        assert xi["Position"].tolist() == sorted(
+            xi["Position"].tolist(), key={"G": 0, "D": 1, "M": 2, "F": 3}.get
+        )
+        for _pos, grp in xi.groupby("Position", sort=False):
+            assert grp["Proj_Blended"].is_monotonic_decreasing

@@ -40,7 +40,7 @@ def check_valid_lineup(df):
     return (player_check & gk_check & def_check & mid_check & fwd_check)
 
 
-def find_optimal_lineup(df):
+def find_optimal_lineup(df, points_col='Points'):
     """
     Function to find a team's optimal lineup given their player_projections_df.
 
@@ -52,21 +52,27 @@ def find_optimal_lineup(df):
     - Total of 11 players
 
     :param df: a dataframe of the team's player projections
+    :param points_col: column to rank players by. Callers that have already blended
+        projections (e.g. 'Proj_Blended') must pass that column, otherwise the XI is
+        selected on one metric while the team total is reported on another -- an
+        FFP-only player (Points == 0, Proj_Blended > 0) could never be picked.
     :return: optimal 11-player lineup DataFrame
     """
+    if points_col not in df.columns:
+        points_col = 'Points'
     # 1. Find the top scoring GK (exactly 1)
-    top_gk = df[df['Position'] == 'G'].sort_values(by='Points', ascending=False).head(1)
+    top_gk = df[df['Position'] == 'G'].sort_values(by=points_col, ascending=False).head(1)
 
     # 2. Find the top 3 scoring DEF (minimum required)
-    all_def = df[df['Position'] == 'D'].sort_values(by='Points', ascending=False)
+    all_def = df[df['Position'] == 'D'].sort_values(by=points_col, ascending=False)
     top_def = all_def.head(3)
 
     # 3. Find the top 2 scoring MID (minimum required, need at least 2)
-    all_mid = df[df['Position'] == 'M'].sort_values(by='Points', ascending=False)
+    all_mid = df[df['Position'] == 'M'].sort_values(by=points_col, ascending=False)
     top_mid = all_mid.head(2)
 
     # 4. Find the top scoring FWD (minimum 1)
-    all_fwd = df[df['Position'] == 'F'].sort_values(by='Points', ascending=False)
+    all_fwd = df[df['Position'] == 'F'].sort_values(by=points_col, ascending=False)
     top_fwd = all_fwd.head(1)
 
     # 5. Combine the base selected players (1 GK + 3 DEF + 2 MID + 1 FWD = 7 players)
@@ -81,7 +87,7 @@ def find_optimal_lineup(df):
 
     # Combine remaining candidates (no GKs allowed)
     remaining_pool = pd.concat([remaining_def, remaining_mid, remaining_fwd])
-    remaining_pool = remaining_pool.sort_values(by='Points', ascending=False)
+    remaining_pool = remaining_pool.sort_values(by=points_col, ascending=False)
 
     # Track position counts as we add players
     pos_counts = {'G': 1, 'D': 3, 'M': 2, 'F': 1}
@@ -103,12 +109,15 @@ def find_optimal_lineup(df):
     else:
         final_selection = selected_players
 
-    # 8. Organize the final selection by Position and descending Projected_Points
-    final_selection = final_selection.sort_values(
-        by=['Position', 'Points'],
-        key=lambda x: x.map({'G': 0, 'D': 1, 'M': 2, 'F': 3}),
+    # 8. Organize the final selection by Position, then descending projected points.
+    # The position key must only be applied to the Position column -- a shared `key=`
+    # maps the points column to all-NaN and silently disables the secondary sort.
+    final_selection = final_selection.assign(
+        __pos_order=final_selection['Position'].map({'G': 0, 'D': 1, 'M': 2, 'F': 3})
+    ).sort_values(
+        by=['__pos_order', points_col],
         ascending=[True, False]
-    ).reset_index(drop=True)
+    ).drop(columns='__pos_order').reset_index(drop=True)
 
     return final_selection
 

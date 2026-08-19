@@ -3,7 +3,9 @@ import math
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from typing import Optional
 from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections
+from scripts.common.error_helpers import get_logger
 from scripts.common.scraping import get_ffp_projections_data
 from scripts.common.utils import (
     find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures,
@@ -14,6 +16,9 @@ from scripts.common.utils import (
 )
 from scripts.common.fixture_helpers import compute_key_differentials, render_key_differentials
 from scripts.common.styled_tables import render_styled_table
+
+_logger = get_logger("fpl_app.draft.fixture_projections")
+
 
 def _blend_live_with_projections(team_df: pd.DataFrame, live_stats: dict, player_mapping: dict) -> pd.DataFrame:
     """
@@ -124,36 +129,105 @@ def _blend_live_with_projections(team_df: pd.DataFrame, live_stats: dict, player
 def _normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
-def _estimate_score_std(league_id: int) -> tuple[float, int]:  # <<< ADD
+# League-wide prior for the spread of single-gameweek team scores, used whenever
+# real history can't produce a usable estimate. Never let sigma reach 0: the win
+# probability is Phi(diff / sqrt(2*sigma^2)), so a near-zero sigma turns a 1-point
+# projection edge into a ~100% win call.
+_DEFAULT_SCORE_STD = 15.0
+
+
+def _weekly_score_std(df: pd.DataFrame) -> Optional[float]:
+    """Std of single-gameweek team scores from a historical scores frame.
+
+    Prefers the per-gameweek column ('points'/'score') over the cumulative
+    season running total ('total_points') -- the model wants the spread of one
+    week's scores, and the std of a monotonically increasing season total is a
+    completely different (and much larger) number.
+
+    Unplayed gameweeks are dropped: the Draft API returns a full 38-gameweek
+    grid from day one, so preseason every row is 0 and the std collapses to 0.
+    A gameweek is treated as unplayed only when *every* team scored 0 -- an
+    individual 0 is left in, since it could in principle be a real result.
+
+    Returns None when no usable estimate can be made.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+
+    col = next((c for c in ('points', 'score', 'total_points') if c in df.columns), None)
+    if col is None:
+        return None
+    if col == 'total_points' and 'event' in df.columns:
+        # Cumulative totals -- recover per-gameweek scores by differencing per team.
+        key = 'entry_id' if 'entry_id' in df.columns else ('entry_name' if 'entry_name' in df.columns else None)
+        if key:
+            tmp = df[[key, 'event', 'total_points']].copy()
+            tmp['total_points'] = pd.to_numeric(tmp['total_points'], errors='coerce')
+            tmp = tmp.sort_values([key, 'event'])
+            tmp['__weekly'] = tmp.groupby(key)['total_points'].diff().fillna(tmp['total_points'])
+            df, col = tmp, '__weekly'
+
+    scores = df[[col] + (['event'] if 'event' in df.columns else [])].copy()
+    scores[col] = pd.to_numeric(scores[col], errors='coerce')
+    scores = scores.dropna(subset=[col])
+
+    # Drop gameweeks nobody has played yet (every team on 0).
+    if 'event' in scores.columns:
+        played = scores.groupby('event')[col].transform(lambda g: (g != 0).any())
+        scores = scores[played]
+    elif not (scores[col] != 0).any():
+        return None
+
+    s = scores[col]
+    if len(s) < 2:
+        return None
+    std = float(s.std(ddof=1))
+    if not math.isfinite(std) or std <= 0:
+        return None
+    return std
+
+
+def _estimate_score_std(league_id: int) -> tuple[float, int]:
     """
     Returns (std, n) for historical single-team weekly scores if available.
-    Tries: scripts.common.utils.get_historical_team_scores(league_id) -> DataFrame with 'total_points' or 'score'.
+    Tries: scripts.common.utils.get_historical_team_scores(league_id).
     Fallback: CSV path in config.HISTORICAL_SCORES_CSV (or 'data/historical_team_scores.csv').
-    Final fallback: (15.0, 0) — a reasonable league-wide prior.
+    Final fallback: (_DEFAULT_SCORE_STD, 0) — a reasonable league-wide prior.
+
+    n is 0 whenever the returned std is the prior rather than a real estimate, so
+    callers can label it as a default in the UI.
     """
     # Try utils function if it exists
     try:
         hist = get_historical_team_scores(league_id)
     except Exception:
         hist = None
-    if isinstance(hist, pd.DataFrame) and not hist.empty:
-        col = 'total_points' if 'total_points' in hist.columns else ('score' if 'score' in hist.columns else None)
-        if col:
-            s = pd.to_numeric(hist[col], errors='coerce').dropna()
-            if len(s) >= 2:
-                return float(s.std(ddof=1)), int(len(s))
+    std = _weekly_score_std(hist)
+    if std is not None:
+        return std, int(len(hist))
+
     # Try CSV from config or default path
     try:
         csv_path = getattr(config, 'HISTORICAL_SCORES_CSV', 'data/historical_team_scores.csv')
         df = pd.read_csv(csv_path)
-        col = 'total_points' if 'total_points' in df.columns else ('score' if 'score' in df.columns else None)
-        if col:
-            s = pd.to_numeric(df[col], errors='coerce').dropna()
-            if len(s) >= 2:
-                return float(s.std(ddof=1)), int(len(s))
+        std = _weekly_score_std(df)
+        if std is not None:
+            return std, int(len(df))
     except Exception:
         pass
-    return 15.0, 0  # conservative default if nothing available
+    return _DEFAULT_SCORE_STD, 0  # conservative default if nothing available
+
+
+def _winprob_denom(sigma: float) -> float:
+    """sqrt(2*sigma^2) for P(A>B) = Phi((muA - muB) / denom).
+
+    Falls back to the league prior rather than 1.0 when sigma is missing or
+    degenerate -- a denominator of 1.0 makes a 1-point projection edge read as
+    an ~85% win, which is what this guard exists to prevent.
+    """
+    if sigma is None or not math.isfinite(sigma) or sigma <= 0:
+        sigma = _DEFAULT_SCORE_STD
+    return math.sqrt(2.0 * (sigma ** 2))
 
 
 def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = False):
@@ -551,9 +625,12 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
     team2_df['Points'] = pd.to_numeric(team2_df['Points'], errors='coerce').fillna(0.0)
 
     if not use_actual_lineup:
-        # Find the optimal lineup (top 11 players) for each team
-        team1_df = find_optimal_lineup(team1_df)
-        team2_df = find_optimal_lineup(team2_df)
+        # Find the optimal lineup (top 11 players) for each team. Rank on the same
+        # column the team total is reported on, otherwise the XI is chosen on raw
+        # Rotowire points while the score shown comes from the blend.
+        _xi_col = 'Proj_Blended' if 'Proj_Blended' in team1_full.columns else 'Points'
+        team1_df = find_optimal_lineup(team1_df, points_col=_xi_col)
+        team2_df = find_optimal_lineup(team2_df, points_col=_xi_col)
 
         # Bench = players not in the optimal XI, sorted by blended proj pts desc (optimal auto-sub order)
         _bench_sort = 'Proj_Blended' if 'Proj_Blended' in team1_full.columns else 'Points'
@@ -628,10 +705,15 @@ def _get_win_pct_color(pct: float) -> str:
 
 
 def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd.DataFrame, sigma: float,
-                              live_stats: dict = None, player_mapping: dict = None, gw_is_live: bool = False):
+                              live_stats: dict = None, player_mapping: dict = None, gw_is_live: bool = False,
+                              ffp_df: pd.DataFrame = None):
     """
     Render an overview table showing all fixtures with projected scores and win probabilities.
     If gw_is_live, blends actual points with projections for remaining players.
+
+    ffp_df must be the same frame the Detailed Match Analysis below uses -- without it
+    this table falls back to raw Rotowire points and reports a different projected score
+    (and therefore a different win probability) for the very same fixture.
     """
     if not fixtures:
         return
@@ -640,7 +722,7 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
     player_mapping = player_mapping or {}
 
     overview_data = []
-    denom = math.sqrt(2.0 * (sigma ** 2)) if sigma > 0 else 1.0
+    denom = _winprob_denom(sigma)
 
     spinner_msg = "Calculating live scores..." if gw_is_live else "Calculating projections for all fixtures..."
     with st.spinner(spinner_msg):
@@ -651,6 +733,7 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
                     fixture, league_id, projections_df,
                     use_actual_lineup=gw_is_live,
                     live_stats=live_stats if gw_is_live else None,
+                    ffp_df=ffp_df,
                 )
                 if result is None:
                     continue
@@ -673,8 +756,11 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
                     team1_live = team1_df['Live_Points'].sum()
                     team2_live = team2_df['Live_Points'].sum()
                 else:
-                    team1_blended = team1_df['Points'].sum()
-                    team2_blended = team2_df['Points'].sum()
+                    # Same column precedence as the Detailed Match Analysis below, so the
+                    # two sections can never disagree about a fixture's projected score.
+                    _proj_col = 'Proj_Blended' if 'Proj_Blended' in team1_df.columns else 'Points'
+                    team1_blended = team1_df[_proj_col].sum()
+                    team2_blended = team2_df[_proj_col].sum()
                     team1_live = 0
                     team2_live = 0
 
@@ -696,6 +782,7 @@ def _render_fixtures_overview(fixtures: list, league_id: int, projections_df: pd
                     "team2": format_team_name(team2_name),
                 })
             except Exception:
+                _logger.warning("Fixtures overview: skipping fixture %r", fixture, exc_info=True)
                 continue
 
     if not overview_data:
@@ -921,7 +1008,8 @@ def show_fixtures_page():
 
     # Render the fixtures overview table (with live data if available)
     _render_fixtures_overview(gameweek_fixtures, config.FPL_DRAFT_LEAGUE_ID, fpl_player_projections, sigma,
-                              live_stats=live_stats, player_mapping=player_mapping, gw_is_live=gw_is_live)
+                              live_stats=live_stats, player_mapping=player_mapping, gw_is_live=gw_is_live,
+                              ffp_df=ffp_df)
 
     if gw_is_live:
         st.caption("🔴 **LIVE**: Scores update as players finish. Projected points shown for players yet to play.")
@@ -978,7 +1066,7 @@ def show_fixtures_page():
             team2_live = None
 
         # --- Win Probability (Normal model) ---
-        denom = math.sqrt(2.0 * (sigma ** 2)) if sigma > 0 else 1.0
+        denom = _winprob_denom(sigma)
         z = (team1_score - team2_score) / denom
         p_team1 = _normal_cdf(z)
 
