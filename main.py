@@ -481,8 +481,11 @@ def _build_league_card_html(league_name, all_rows, icon):
         show_separator = False
 
     def _row_html(rank, team_name, pts_display, record, is_me):
-        rank_icon = rank_icons.get(rank, f"<b>{rank}</b>")
-        row_class = f"standings-row-{rank}" if rank <= 3 and not is_me else ""
+        # A single unranked row must not raise and cost the reader every league
+        # on the page -- render it without a medal instead.
+        rank_icon = rank_icons.get(rank, f"<b>{rank}</b>" if rank is not None else "–")
+        is_podium = rank is not None and rank <= 3
+        row_class = f"standings-row-{rank}" if is_podium and not is_me else ""
         highlight = "my-team-row" if is_me else ""
         record_part = f'<span class="standings-record">{record}</span>' if record else ""
         return (
@@ -556,6 +559,17 @@ def _format_draft_countdown(draft_dt_str, tz_name):
     return f"Draft: {date_str} — {countdown}"
 
 
+def _has_ranked_rows(rows):
+    """True if any standings row carries a usable rank.
+
+    The FPL APIs distinguish "no standings" from "standings that exist but
+    haven't been ranked yet" only by the value of `rank`, which is null for
+    every row until the first gameweek is scored. Callers that skip only on an
+    empty list will hand None ranks to the renderer.
+    """
+    return any(r.get("rank") is not None for r in (rows or []))
+
+
 def _build_league_info_card(icon, league_name, member_count, subtitle):
     """Fallback card for a league with no standings/results yet (e.g.
     preseason, before any gameweek has been played) — shows the league
@@ -583,7 +597,11 @@ def _build_draft_snapshot(league_id):
     entries_list = details.get("league_entries", [])
     entries_map = {e["id"]: e for e in entries_list}
     standings = details.get("standings", [])
-    if not standings:
+    # Preseason the Draft API returns a *full* standings array in which every
+    # rank (and rank_sort, and last_rank) is null. `not standings` therefore
+    # isn't enough -- an unranked table carries no ordering and must take the
+    # same "season not started" path, or the card builder trips over None.
+    if not _has_ranked_rows(standings):
         if not entries_list:
             return None
         subtitle = "Season not started yet"
@@ -632,6 +650,8 @@ def _build_classic_snapshot(league_id, league_name_override=None):
     icon = "⚔️" if league_scoring == "h" else "🏆"
 
     results = data.get("standings", {}).get("results", [])
+    if results and not _has_ranked_rows(results):
+        results = []  # present but unranked (preseason) -- treat as no standings
     if not results:
         member_count = len(data.get("new_entries", {}).get("results", []))
         if not member_count:
