@@ -60,11 +60,22 @@ def is_rotowire_available_for_gw(gw: int) -> bool:
 
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(resp.content, "html.parser")
-    anchors = soup.select('a[href*="fantasy-premier-league-player-rankings-gameweek-"]')
+    # Keep these slug shapes in step with config._discover_rotowire_article(): if this
+    # check doesn't recognise the article discovery uses, the "Rotowire published GW N"
+    # alert never fires even though the data is there.
+    anchors = soup.select(
+        'a[href*="fantasy-premier-league-player-rankings-gameweek-"], '
+        'a[href*="/soccer/article/fpl-gw"], '
+        'a[href*="/soccer/article/fpl-gameweek-"]'
+    )
 
     patterns = [
         re.compile(r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?-(\d+)$"),
         re.compile(r"/soccer/article/fantasy-premier-league-player-rankings-gameweek-(\d+)(?:-[a-z0-9-]+)?$"),
+        # New format (GW33+): fpl-gwNN-...
+        re.compile(r"/soccer/article/fpl-gw(\d+)-[a-z0-9-]+(?:-(\d+))?$"),
+        # Preseason/weekly single-GW slug: fpl-gameweek-N-...-gwN-<id>
+        re.compile(r"/soccer/article/fpl-gameweek-(\d+)-[a-z0-9-]*gw\1-(\d+)$"),
     ]
 
     for a in anchors:

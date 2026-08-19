@@ -445,15 +445,17 @@ def _discover_rotowire_article(gw: int):
         ]
         # Pre-season "best picks for gameweeks X-Y" range articles carry an explicit
         # season token, e.g. best-fpl-picks-for-gameweeks-1-5-fantasy-premier-league-2026-27-126238
+        # These are NEVER a valid projection source: the column is headed "Adj Total"
+        # and holds an adjusted value metric accumulated over the whole range, not
+        # projected points for a gameweek. Dividing it down would only make a
+        # fabricated number look plausible. They are matched here solely to harvest
+        # their article id for the current-season floor below.
         range_pattern = re.compile(
             r"/soccer/article/best-fpl-picks-for-gameweeks-(\d+)-(\d+)-fantasy-premier-league-(\d{4}-\d{2})(?:-[a-z0-9-]+)?-(\d+)$"
         )
 
-        # candidates: (gw_found, art_id, url, season_or_None, is_range) — selectable for
-        # this GW. is_range marks "best picks for gameweeks X-Y" articles, whose Points
-        # column is a *cumulative* multi-GW total rather than a single-GW projection —
-        # they are only ever selected when no single-GW article covers this GW.
-        # all_article_ids: every season-tagged article id seen on the page, regardless
+        # candidates: (gw_found, art_id, url, season_or_None) — single-gameweek
+        # rankings articles only. all_article_ids: every season-tagged article id seen on the page, regardless
         # of whether it's selectable for this GW, so the season floor (below) reflects
         # the whole page rather than only articles that happen to cover this GW.
         candidates = []
@@ -463,12 +465,10 @@ def _discover_rotowire_article(gw: int):
 
             rm = range_pattern.search(href)
             if rm:
-                gw_start, gw_end, season, art_id = int(rm.group(1)), int(rm.group(2)), rm.group(3), int(rm.group(4))
+                season, art_id = rm.group(3), int(rm.group(4))
                 if season == current_season:
                     current_season_ids.append(art_id)
-                if gw_start <= int(gw) <= gw_end:
-                    candidates.append((int(gw), art_id, urljoin(index_url, href), season, True))
-                continue
+                continue  # season floor only -- never a candidate
 
             for pat in patterns:
                 m = pat.search(href)
@@ -479,7 +479,7 @@ def _discover_rotowire_article(gw: int):
                     season = _extract_season_from_href(href)
                     if season == current_season and art_id:
                         current_season_ids.append(art_id)
-                    candidates.append((gw_found, art_id, urljoin(index_url, href), season, False))
+                    candidates.append((gw_found, art_id, urljoin(index_url, href), season))
                     break
 
         if not candidates:
@@ -502,7 +502,7 @@ def _discover_rotowire_article(gw: int):
         season_floor_id = min(current_season_ids) if current_season_ids else None
 
         def _is_stale(c):
-            _gw, art_id, _url, season, _is_range = c
+            _gw, art_id, _url, season = c
             if season == current_season:
                 return False
             if season is not None:
@@ -521,39 +521,19 @@ def _discover_rotowire_article(gw: int):
             return ""
         candidates = fresh_candidates
 
-        # Multi-GW "gameweeks X-Y" articles publish cumulative totals, so treating one as a
-        # single-GW projection inflates every downstream score by the width of the range.
-        # Resolve against single-GW articles first and only fall back to a range article
-        # when nothing else covers this GW.
-        single_gw = [c for c in candidates if not c[4]]
-        range_only = [c for c in candidates if c[4]]
-
-        def _select(pool):
-            exact = [c for c in pool if c[0] == int(gw)]
-            if exact:
-                # Prefer a current-season-tagged exact match over an untagged one, then newest article id.
-                result = max(exact, key=lambda x: (x[3] == current_season, x[1]))[2]
-                _logger.debug("Rotowire: Exact GW match found: %s", result)
-                return result
-
-            # nearest GW, tie-break by newest article id
-            result = min(pool, key=lambda x: (abs(x[0] - int(gw)), -x[1]))[2]
-            closest_gw = min(pool, key=lambda x: abs(x[0] - int(gw)))[0]
-            _logger.info(
-                "Rotowire: No exact match for GW %d, using closest GW %d: %s",
-                gw, closest_gw, result
-            )
+        exact = [c for c in candidates if c[0] == int(gw)]
+        if exact:
+            # Prefer a current-season-tagged exact match over an untagged one, then newest article id.
+            result = max(exact, key=lambda x: (x[3] == current_season, x[1]))[2]
+            _logger.debug("Rotowire: Exact GW match found: %s", result)
             return result
 
-        if single_gw:
-            return _select(single_gw)
-
-        result = _select(range_only)
+        # nearest GW, tie-break by newest article id
+        result = min(candidates, key=lambda x: (abs(x[0] - int(gw)), -x[1]))[2]
+        closest_gw = min(candidates, key=lambda x: abs(x[0] - int(gw)))[0]
         _logger.info(
-            "Rotowire: No single-gameweek article found for GW %d — falling back to the "
-            "multi-gameweek range article %s. Its Points column is a cumulative total and "
-            "gets divided down to a per-gameweek average on scrape.",
-            gw, result,
+            "Rotowire: No exact match for GW %d, using closest GW %d: %s",
+            gw, closest_gw, result
         )
         return result
     except Exception:

@@ -90,10 +90,13 @@ def _rotowire_row_from_header_map(cells, header_map, safe_numeric):
     }
 
 
-# Rotowire occasionally publishes "best picks for gameweeks X-Y" articles whose Points
-# column is a *cumulative* total across the whole range rather than a single-GW projection.
-# The rest of the app treats Rotowire Points as one gameweek, so those totals must be
-# divided down before they reach any consumer.
+# Rotowire's "best picks for gameweeks X-Y" articles are not a projection source at
+# all. Their points column is headed "Adj Total" and holds an adjusted value metric
+# accumulated over the whole range -- not projected points for any single gameweek.
+# Scaling it down by the number of gameweeks would not recover a projection, it would
+# just make a fabricated number look plausible, so these are refused outright.
+# config._discover_rotowire_article() already declines to select them; this is the
+# backstop for a URL pinned by hand via ROTOWIRE_URL.
 _ROTOWIRE_RANGE_ARTICLE_RE = re.compile(r"best-fpl-picks-for-gameweeks-(\d+)-(\d+)-")
 
 # Above this, a "single gameweek" projection table is not credible (the highest realistic
@@ -233,19 +236,18 @@ def get_rotowire_player_projections(url, limit=None):
     # Create DataFrame
     player_rankings = pd.DataFrame(data)
 
-    # Multi-GW range article: convert the cumulative total to a per-gameweek average so
-    # downstream consumers (fixture projections, waiver/transfer scoring, lineups) get a
-    # single-GW figure. Done before 'Value' is derived so Value stays per-GW consistent.
-    _range_match = _ROTOWIRE_RANGE_ARTICLE_RE.search(url or "")
-    if _range_match:
-        _span = int(_range_match.group(2)) - int(_range_match.group(1)) + 1
-        if _span > 1:
-            _logger.warning(
-                "Rotowire: %s is a %d-gameweek cumulative article; dividing Points by %d "
-                "to approximate a single-GW projection.",
-                url, _span, _span,
-            )
-            player_rankings['Points'] = player_rankings['Points'] / _span
+    # Refuse multi-gameweek range articles outright -- see _ROTOWIRE_RANGE_ARTICLE_RE.
+    # Returning nothing surfaces the app's existing "projections unavailable" warning,
+    # which is a far better outcome than plausible-looking invented numbers.
+    if _ROTOWIRE_RANGE_ARTICLE_RE.search(url or ""):
+        _logger.error(
+            "Rotowire: %s is a multi-gameweek 'best picks' article, not a gameweek "
+            "projection table (its column is an adjusted value total, not points). "
+            "Refusing to use it. Pin a single-gameweek rankings article via "
+            "ROTOWIRE_URL, or leave it unset to let discovery find one.",
+            url,
+        )
+        return pd.DataFrame()
 
     # Tripwire for the next slug shape Rotowire invents: if the table still doesn't look
     # like single-gameweek data, say so loudly rather than silently inflating every score.

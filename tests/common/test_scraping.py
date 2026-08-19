@@ -5,6 +5,7 @@ table shapes (standard weekly rankings vs. preseason "best picks" preview),
 plus the legacy positional fallback for pages with no <thead>.
 """
 
+import contextlib
 import logging
 from unittest.mock import MagicMock, patch
 
@@ -91,6 +92,25 @@ class TestMapRotowireHeaderRow:
         assert _map_rotowire_header_row(["Foo", "Bar"]) == {}
 
 
+@contextlib.contextmanager
+def caplog_at_error():
+    """Collect fpl_app.scraping ERROR records (caplog fixture isn't available
+    inside the plain-class tests below)."""
+    records = []
+
+    class _Handler(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    logger = logging.getLogger("fpl_app.scraping")
+    handler = _Handler(level=logging.ERROR)
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+
+
 def _safe_numeric(val, default=0):
     """Stand-in matching get_rotowire_player_projections' nested _safe_numeric
     (not separately importable) for isolated unit tests of the row mapper."""
@@ -156,23 +176,33 @@ class TestGetRotowireProjections:
         assert df.empty
 
 
-class TestRotowireRangeArticleNormalization:
-    """Rotowire's "best picks for gameweeks X-Y" articles publish a *cumulative*
-    Points total across the range. The rest of the app treats Rotowire Points as a
-    single-gameweek projection, so an unnormalized range article inflated every
-    downstream score by the width of the range (Kelleher showed 18.6 instead of 3.3)."""
+class TestRotowireRangeArticleIsRefused:
+    """Rotowire's "best picks for gameweeks X-Y" articles are not a projection
+    source. Their column is headed "Adj Total" -- an adjusted value metric
+    accumulated over the range, not points for any gameweek. Using one made
+    Kelleher show 18.6 for a single gameweek instead of 3.31, and scaling it down
+    by the range width would not recover a projection, only disguise a made-up
+    number. The scraper refuses it so the app's "projections unavailable" warning
+    shows instead."""
 
-    def test_range_article_points_divided_by_span(self):
+    def test_range_article_returns_nothing(self):
         url = (
             "https://www.rotowire.com/soccer/article/"
             "best-fpl-picks-for-gameweeks-1-5-fantasy-premier-league-2026-27-126238"
         )
         with patch("scripts.common.scraping.requests.get", return_value=_mock_response(PREVIEW_TABLE_HTML)):
             df = get_rotowire_player_projections(url)
-        haaland = df[df["Player"] == "Erling Haaland"].iloc[0]
-        assert haaland["Points"] == pytest.approx(37.7 / 5)
-        # Value is derived after normalization, so it stays on the same per-GW scale.
-        assert haaland["Value"] == pytest.approx((37.7 / 5) / 15.5)
+        assert df.empty, "a multi-gameweek 'best picks' article must not be used"
+
+    def test_refusal_is_logged_loudly(self):
+        url = (
+            "https://www.rotowire.com/soccer/article/"
+            "best-fpl-picks-for-gameweeks-2-6-fantasy-premier-league-2026-27-126999"
+        )
+        with caplog_at_error() as records:
+            with patch("scripts.common.scraping.requests.get", return_value=_mock_response(PREVIEW_TABLE_HTML)):
+                get_rotowire_player_projections(url)
+        assert any("Refusing to use it" in r.message for r in records)
 
     def test_single_gw_article_points_untouched(self):
         url = (
@@ -183,15 +213,16 @@ class TestRotowireRangeArticleNormalization:
             df = get_rotowire_player_projections(url)
         assert df[df["Player"] == "Erling Haaland"].iloc[0]["Points"] == 7.15
 
-    def test_single_gameweek_range_is_not_divided(self):
-        """A degenerate "gameweeks 7-7" range is already a single GW -- leave it alone."""
+    def test_refusal_does_not_depend_on_the_range_width(self):
+        """It is the article *type* that is wrong, not the width of its window --
+        a one-gameweek "best picks" article still reports Adj Total, not points."""
         url = (
             "https://www.rotowire.com/soccer/article/"
             "best-fpl-picks-for-gameweeks-7-7-fantasy-premier-league-2026-27-130000"
         )
         with patch("scripts.common.scraping.requests.get", return_value=_mock_response(WEEKLY_TABLE_HTML)):
             df = get_rotowire_player_projections(url)
-        assert df[df["Player"] == "Erling Haaland"].iloc[0]["Points"] == 7.15
+        assert df.empty
 
     def test_implausible_median_logs_a_warning(self, caplog):
         """Tripwire for the next slug shape Rotowire invents: a table that still

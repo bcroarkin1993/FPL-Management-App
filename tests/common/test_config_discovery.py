@@ -62,11 +62,22 @@ class TestRotowireArticleDiscovery:
         """Fantrax is a different scoring system -- its GW1 article must not match."""
         assert "fantrax" not in _discover(LIVE_INDEX_HTML, 1)
 
-    def test_range_article_still_used_when_nothing_else_covers_the_gw(self):
-        """Fallback intact -- a cumulative article beats no projections at all
-        (get_rotowire_player_projections divides it down to a per-GW average)."""
-        url = _discover(RANGE_ONLY_INDEX_HTML, 3)
-        assert url.endswith("best-fpl-picks-for-gameweeks-1-5-fantasy-premier-league-2026-27-126238")
+    def test_range_article_is_never_selected_even_as_a_last_resort(self):
+        """"Best picks for gameweeks X-Y" is not a projection source at any
+        priority: its column is an adjusted value total over the range, not
+        points for a gameweek. No projections beats invented ones -- the app
+        already surfaces a clear "projections unavailable" warning."""
+        assert _discover(RANGE_ONLY_INDEX_HTML, 3) == ""
+
+    def test_range_article_still_sets_the_current_season_floor(self):
+        """It stays parsed for its article id, which is how stale prior-season
+        articles get filtered out before the season's own articles exist."""
+        html = RANGE_ONLY_INDEX_HTML.replace(
+            "</body>",
+            '<a href="/soccer/article/fpl-gw38-fantasy-premier-league-player-rankings-gameweek-38-115088">old</a></body>',
+        )
+        # The GW38 article predates the 2026-27 floor (126238), so it is stale.
+        assert _discover(html, 38) == ""
 
     def test_prior_season_article_is_not_used_as_a_nearest_gw_match(self):
         """GW38 from last season must not win GW2 on 'closest gameweek'."""
