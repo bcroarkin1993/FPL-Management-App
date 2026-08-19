@@ -23,9 +23,12 @@ streamlit run main.py
 python -m scripts.common.waiver_alerts
 
 # Run tests
-pytest                        # All tests
+pytest                        # All tests (includes live plausibility checks)
 pytest tests/common/          # Unit tests only
 pytest tests/draft/ tests/classic/ tests/fpl/  # Smoke tests only
+pytest tests/live/            # Live data plausibility only
+pytest -m "not live"          # Skip anything that hits the network
+FPL_SKIP_LIVE_TESTS=1 pytest  # Same, via env var
 pytest -x                     # Stop on first failure
 ```
 
@@ -94,6 +97,60 @@ Two-tier caching strategy for fast page navigation:
    - 5 minutes: bootstrap static, league standings, ownership data
 
 Gameweek is cached at module level in config.py via lazy loading.
+
+## Data Plausibility Testing
+
+The app's worst bugs have not been logic errors. They were upstream data quietly
+changing shape while every mocked unit test stayed green:
+
+- Rotowire published a *"Best FPL Picks for Gameweeks 1-5"* article whose `Points`
+  column was a cumulative 5-week total. Discovery selected it, nothing crashed, and
+  every projection app-wide was 5x too big (a goalkeeper showing 18.6 for one GW).
+- The Draft API returns a full 38-gameweek score grid from day one, so preseason
+  every historical score is `0`. `_estimate_score_std` returned `0.0`, the caller
+  substituted a denominator of `1.0`, and a 1.1-point projection edge rendered as
+  an 85% win probability.
+
+Neither is detectable by asserting on mocked inputs. What they share is that the
+*output* was far outside any plausible norm — cheap to assert automatically.
+
+### `scripts/common/data_validation.py`
+
+Pure, network-free predicates over real numbers. Each returns a list of `Issue`
+tuples (`check`, `severity`, `message`, `hint`); `raise_on_error()` turns errors
+into an `AssertionError` with the hint attached. No Streamlit, no requests — safe
+to import from GitHub Actions.
+
+| Check | Catches |
+|-------|---------|
+| `check_single_gw_projections()` | Multi-GW or season-long tables masquerading as one gameweek; truncated/unparsed tables; all-zero sources |
+| `check_score_std()` | Degenerate sigma (0, NaN, negative) and sigma taken over cumulative season totals |
+| `check_win_probability()` | Near-ties reported as near-certainties; extreme calls on small gaps; probability that contradicts the scoreline |
+| `check_projected_team_total()` | Inflated XI totals; illegal lineup sizes |
+| `check_source_scale_agreement()` | Two sources denominated in different units (the original bug's signature) |
+
+Ranges are deliberately wide — these are "this cannot be right" boundaries, not
+"this looks unusual" ones. A check that cries wolf gets muted. Note the XI floor is
+permissive on purpose: a squad with several players not expected to start
+legitimately projects in the high teens, because **absence from Rotowire's weekly
+table is itself the "not starting" signal** (it lists 20 teams x 11 = 220 projected
+starters, so an unlisted player scoring 0 is correct, not a matching failure).
+
+### Test layers
+
+| Layer | Location | Runs | Catches |
+|-------|----------|------|---------|
+| Unit tests for the checks | `tests/common/test_data_validation.py` | Always, offline | A check silently ceasing to fire. Every "bad data" fixture is a real number the app actually displayed. |
+| Live plausibility | `tests/live/` | Default run; skips offline | Upstream sources changing shape. Contract: **unreachable → SKIP, reachable but implausible → FAIL.** |
+| Page wiring | `tests/draft/test_fixture_page_wiring.py` | Always, offline | Two callsites of the same function being fed different inputs (the Fixtures Overview omitting `ffp_df`). Plausibility can't catch this — both numbers are individually plausible. |
+
+`tests/live/conftest.py` clears the `FPL_CURRENT_GAMEWEEK` / `ROTOWIRE_URL` pins that
+the root conftest sets, so live tests resolve real config. Everything there is
+auto-marked `live`.
+
+**When adding a data source or a derived metric, add a plausibility check for it.**
+The question to answer is not "is this value correct" (untestable against live data)
+but "is this value *possible*".
 
 ## Transfer Scoring Model — Design Reference
 
