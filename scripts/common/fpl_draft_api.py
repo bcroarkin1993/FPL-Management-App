@@ -47,7 +47,13 @@ def get_current_gameweek():
             else:
                 current_gameweek = next_ev
         else:
-            current_gameweek = game_data.get('current_event', 1)
+            # NB: .get('current_event', 1) is not enough -- the key is present with
+            # value null during the off-season, so the default never fires.
+            current_gameweek = game_data.get('current_event')
+            if current_gameweek is None:
+                # Off-season: current_event stays null until GW1 goes live, and
+                # next_event names the gameweek the season will open with.
+                current_gameweek = game_data.get('next_event') or 1
 
         return int(current_gameweek)
     except Exception as e:

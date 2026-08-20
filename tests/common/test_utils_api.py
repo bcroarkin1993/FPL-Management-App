@@ -75,6 +75,37 @@ class TestGetCurrentGameweek:
         assert result == 26
 
     @patch("scripts.common.utils.requests.get")
+    def test_off_season_uses_next_event(self, mock_get, caplog):
+        """Before GW1, current_event is null and next_event names the opener.
+
+        The key is present with value null, so .get('current_event', 1) returns
+        None rather than the default -- this must be handled by logic, not by
+        int(None) raising into the except branch, which would log a spurious
+        "Failed to fetch current gameweek" warning every call all summer.
+        """
+        mock_get.return_value = _mock_response({
+            "current_event": None,
+            "current_event_finished": False,
+            "next_event": 1,
+        })
+        with caplog.at_level("WARNING"):
+            result = get_current_gameweek()
+        assert result == 1
+        assert not any("Failed to fetch current gameweek" in r.message
+                       for r in caplog.records), (
+            "the off-season is not a failure and must not warn"
+        )
+
+    @patch("scripts.common.utils.requests.get")
+    def test_off_season_with_no_next_event_defaults_to_one(self, mock_get):
+        mock_get.return_value = _mock_response({
+            "current_event": None,
+            "current_event_finished": False,
+            "next_event": None,
+        })
+        assert get_current_gameweek() == 1
+
+    @patch("scripts.common.utils.requests.get")
     def test_handles_error_falls_back(self, mock_get):
         mock_get.side_effect = Exception("timeout")
         # Should fall back to config.CURRENT_GAMEWEEK (set to 25 in conftest)
