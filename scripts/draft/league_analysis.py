@@ -704,7 +704,7 @@ def show_draft_league_analysis_page():
         st.markdown(f"### {league_name}")
         st.info(
             "No match data yet — the season hasn't started, so head-to-head, scoring "
-            "and bench analysis have nothing to show. Power rankings work now."
+            "and bench analysis have nothing to show."
         )
         st.divider()
         st.subheader("Team Power Rankings")
