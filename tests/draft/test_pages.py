@@ -143,6 +143,23 @@ class TestLeagueAnalysisPage:
             from scripts.draft.league_analysis import _render_power_rankings
             _render_power_rankings(league_id=12345, current_gw=25)
 
+    def test_preseason_still_renders_power_rankings(self, mock_all_utils):
+        """With no matches played, the page must still show power rankings.
+
+        Every other tab needs played matches, but rosters exist from the draft --
+        and just after the draft is when these are most useful.
+        """
+        team_df, player_df = _power_rankings_fixture()
+        with patch("scripts.draft.league_analysis.get_current_gameweek", return_value=1), \
+             patch("scripts.draft.league_analysis.get_matches_df", return_value=pd.DataFrame()), \
+             patch("scripts.draft.league_analysis.fetch_league_data",
+                   return_value={"league": {"name": "Test"}, "league_entries": [], "matches": []}), \
+             patch("scripts.draft.league_analysis.build_league_strength",
+                   return_value=(team_df, player_df)) as mock_build:
+            from scripts.draft.league_analysis import show_draft_league_analysis_page
+            show_draft_league_analysis_page()
+            assert mock_build.called, "power rankings must render even with no matches"
+
     def test_power_rankings_handles_no_rosters(self, mock_all_utils):
         """Pre-draft leagues must show an info message, not raise."""
         with patch("scripts.draft.league_analysis.build_league_strength",

@@ -693,18 +693,30 @@ def show_draft_league_analysis_page():
     team_names = get_team_names(league_data)
     matches_df = get_matches_df(league_data, team_names)
 
+    league_name = league_data.get("league", {}).get("name", "Draft League")
+    current_gw = get_current_gameweek() or 1
+
     if matches_df.empty:
-        st.info("No match data available yet. The season may not have started.")
+        # Every other tab on this page is built from played matches, but power
+        # rankings only need drafted rosters -- and just after the draft is exactly
+        # when they are most useful.  Render that tab alone rather than the whole
+        # page bailing out.
+        st.markdown(f"### {league_name}")
+        st.info(
+            "No match data yet — the season hasn't started, so head-to-head, scoring "
+            "and bench analysis have nothing to show. Power rankings work now."
+        )
+        st.divider()
+        st.subheader("Team Power Rankings")
+        _render_power_rankings(league_id, current_gw)
         return
 
     weekly_scores = get_team_weekly_scores(matches_df)
     scoring_stats = calculate_scoring_stats(weekly_scores)
 
     # League name header
-    league_name = league_data.get("league", {}).get("name", "Draft League")
     st.markdown(f"### {league_name}")
 
-    current_gw = get_current_gameweek()
     if current_gw:
         st.caption(f"Analysis through Gameweek {current_gw - 1}")
 
