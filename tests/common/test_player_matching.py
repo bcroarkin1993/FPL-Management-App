@@ -3,7 +3,11 @@
 import pandas as pd
 import pytest
 
-from scripts.common.player_matching import canonical_normalize, PlayerRegistry
+from scripts.common.player_matching import (
+    canonical_normalize,
+    PlayerRegistry,
+    ReferenceMatcher,
+)
 
 
 # ---- canonical_normalize tests ----
@@ -128,3 +132,110 @@ class TestPlayerRegistry:
         assert len(reg) == 0
         assert reg.lookup_by_id(1) is None
         assert reg.lookup_by_name("anyone") is None
+
+
+class TestReferenceMatcher:
+    """Tiered matching against a projection source.
+
+    Every fixture below is a real name pair from the Rotowire season rankings
+    that the previous strict (name, team) merge silently dropped. Rotowire
+    publishes common names, the FPL bootstrap publishes full legal names, so a
+    single exact key missed 69 of 425 rows -- including the #2 asset in the game
+    -- and every miss rendered as a neutral 0.5 default with no error anywhere.
+    """
+
+    REFERENCE = pd.DataFrame([
+        # name,               web_name,    team,  position
+        ("Bruno Fernandes",   "Fernandes", "MUN", "M"),
+        ("Gabriel",           "Gabriel",   "ARS", "D"),
+        ("David Raya",        "Raya",      "ARS", "G"),
+        ("Ezri Konsa",        "Konsa",     "AVL", "D"),
+        ("Dominic Solanke",   "Solanke",   "TOT", "F"),
+        ("Djordje Petrovic",  "Petrovic",  "BOU", "G"),
+        ("Ferdi Kadioglu",    "Kadioglu",  "BHA", "D"),
+        ("Kaoru Mitoma",      "Mitoma",    "BHA", "M"),
+        ("Harry Wilson",      "Wilson",    "LEE", "M"),
+        ("Cole Palmer",       "Palmer",    "CHE", "M"),
+    ], columns=["Player", "Web_Name", "Team", "Position"])
+
+    def _matcher(self):
+        return ReferenceMatcher(self.REFERENCE)
+
+    @pytest.mark.parametrize("fpl_name, team, position, expected", [
+        # Tier 1 -- exact.
+        ("Bruno Fernandes", "MUN", "M", "Bruno Fernandes"),
+        # Full legal name vs common name.
+        ("Bruno Borges Fernandes", "MUN", "M", "Bruno Fernandes"),
+        # Token subset: FPL appends further surnames.
+        ("David Raya Martin", "ARS", "G", "David Raya"),
+        ("Ezri Konsa Ngoyo", "AVL", "D", "Ezri Konsa"),
+        # Hyphenated surname -- canonical_normalize deletes the hyphen, so this
+        # only matches if tokens are split on it first.
+        ("Dominic Solanke-Mitchell", "TOT", "F", "Dominic Solanke"),
+        # Transliteration that canonical_normalize folds to ASCII.
+        ("Đorđe Petrović", "BOU", "G", "Djordje Petrovic"),
+        # Reversed name order -- token sets are unordered, so tier 4 covers it.
+        ("Mitoma Kaoru", "BHA", "M", "Kaoru Mitoma"),
+        # Spelling variant: fuzzy, but shares the complete token "Ferdi".
+        ("Ferdi Kadoglu", "BHA", "D", "Ferdi Kadioglu"),
+    ])
+    def test_matches_known_name_variants(self, fpl_name, team, position, expected):
+        idx = self._matcher().match(fpl_name, team, position)
+        assert idx is not None, "%r should have matched %r" % (fpl_name, expected)
+        assert self.REFERENCE.at[idx, "Player"] == expected
+
+    @pytest.mark.parametrize("fpl_name", ["Gabriel dos Santos Magalhaes", "Gabriel"])
+    def test_mononym_matches_from_either_name_column(self, fpl_name):
+        """Rotowire publishes bare "Gabriel"; FPL carries both a long legal name
+        and the web_name. Token-subset resolves the long form, so the caller
+        matches whether it passes Player or Web_Name."""
+        idx = self._matcher().match(fpl_name, "ARS", "D")
+        assert idx is not None and self.REFERENCE.at[idx, "Player"] == "Gabriel"
+
+    def test_fuzzy_requires_a_shared_complete_token(self):
+        """The guard against handing one player another's projection.
+
+        "Harrison" scores ~0.79 against team-mate "Harry Wilson" on raw character
+        similarity while sharing no name part. Without a shared-token rule this
+        silently gave Jack Harrison Harry Wilson's season points.
+        """
+        assert self._matcher().match("Harrison", "LEE", "M") is None
+
+    def test_never_matches_across_position(self):
+        """Alex Palmer (backup GK) must never inherit Cole Palmer's (elite MID) stats.
+
+        A team-agnostic surname tier did exactly this once and pushed a backup
+        goalkeeper into the top 10 overall, which is why every loose tier here is
+        scoped to team *and* position.
+        """
+        assert self._matcher().match("Alex Palmer", "CHE", "G") is None
+
+    def test_never_matches_across_team(self):
+        assert self._matcher().match("Bruno Fernandes", "ARS", "M") is None
+
+    def test_ambiguity_resolves_to_no_match(self):
+        """Two equally good candidates is a reason to abstain, not to guess."""
+        ref = pd.DataFrame([
+            ("Danny Ings", "Ings", "AVL", "F"),
+            ("Danny Ings", "Ings", "AVL", "F"),
+        ], columns=["Player", "Web_Name", "Team", "Position"])
+        assert ReferenceMatcher(ref).match("Danny Ings", "AVL", "F") is None
+
+    def test_degrades_without_position_column(self):
+        """Callers lacking Position keep the exact tiers and lose the loose ones."""
+        ref = self.REFERENCE.drop(columns=["Position"])
+        m = ReferenceMatcher(ref, position_col=None)
+        assert m.match("Bruno Fernandes", "MUN") is not None
+        assert m.match("Bruno Borges Fernandes", "MUN") is None
+
+    def test_empty_and_blank_inputs_are_safe(self):
+        assert ReferenceMatcher(pd.DataFrame()).match("Anyone", "MUN", "M") is None
+        assert self._matcher().match("", "MUN", "M") is None
+        assert self._matcher().match(None, "MUN", "M") is None
+
+    def test_reports_which_tier_matched(self):
+        m = self._matcher()
+        m.match("Bruno Fernandes", "MUN", "M")
+        m.match("David Raya Martin", "ARS", "G")
+        assert m.tier_counts["exact_name"] == 1
+        assert m.tier_counts["token_subset"] == 1

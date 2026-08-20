@@ -82,8 +82,30 @@ Players are matched across sources using a two-step approach:
 2. **Team-prioritized fuzzy matching** tries same-team matches first, then falls back to cross-team matching
 
 Key modules:
-- `scripts/common/player_matching.py` - `canonical_normalize()`, `PlayerRegistry` class for centralized lookups
+- `scripts/common/player_matching.py` - `canonical_normalize()`, `PlayerRegistry` class for centralized lookups, `ReferenceMatcher` for tiered source matching
 - `scripts/common/utils.py` - `merge_fpl_players_and_projections()` with 80% threshold (60% if team+position match)
+
+**`ReferenceMatcher` — the shared tiered matcher.** Projection sources publish
+common names ("Bruno Fernandes"); the FPL bootstrap publishes full legal names
+("Bruno Borges Fernandes"). A strict `(name, team)` key misses ~16% of a 425-row
+table, and the misses are *silent* — the caller sees NaN, substitutes a neutral
+default, and the #2 asset in the game renders as exactly average.
+
+Tiers, loosest last: (1) exact `(name, team)`, (2) exact `(web_name, team)`,
+(3) last word, (4) token subset either direction — token sets are unordered so
+this also covers reversed names like "Mitoma Kaoru", (5) difflib ≥ 0.78.
+
+Two rules exist because breaking them caused real bugs:
+- **Every tier below the first two is scoped to Team *and* Position.** There is
+  no team-agnostic tier — a surname-only match once gave Alex Palmer (backup GK)
+  Cole Palmer's (elite MID) stats and ranked him top 10.
+- **The fuzzy tier requires a shared complete token.** Character similarity
+  alone matched "Harrison" to team-mate "Harry Wilson" at 0.79.
+
+Ambiguity (>1 candidate at a tier) resolves to *no match*. `match_with_tier()`
+returns the tier rank so callers can resolve two players contending for one
+reference row in favour of the stronger tier — without that, a fuzzy guess can
+steal a row an exact match already earned.
 
 ### Caching
 
@@ -130,6 +152,8 @@ to import from GitHub Actions.
 | `check_win_probability()` | Near-ties reported as near-certainties; extreme calls on small gaps; probability that contradicts the scoreline |
 | `check_projected_team_total()` | Inflated XI totals; illegal lineup sizes |
 | `check_source_scale_agreement()` | Two sources denominated in different units (the original bug's signature) |
+| `check_merge_match_rate()` | A name-based merge quietly ceasing to match (the 356/425 season-rankings regression) |
+| `check_initial_squad()` | Illegal or implausibly-priced Classic squads; a scale-free objective, whose signature is unspent budget |
 | `check_team_strength()` | Degenerate power rankings — every team scoring ~50 because position codes were `GKP/DEF/MID/FWD` instead of `G/D/M/F`, short squads, impossible injury costs |
 
 Ranges are deliberately wide — these are "this cannot be right" boundaries, not
@@ -263,6 +287,58 @@ All scores are **positional percentiles** (0-1) computed against the full FPL pl
 
 **FFP name matching — 4-level fallback**: Both `merge_ffp_single_gw_data()` and `blend_multi_gw_projections()` use a 4-step lookup to handle name mismatches between FFP short names ("Eze") and FPL full names ("Eberechi Eze"), as well as FFP team name variants: (1) exact `(norm_name, team_short)`, (2) `(last_word, team_short)`, (3) `norm_name` only, (4) `last_word` only.
 
+
+## Initial Squad Model — Classic FPL
+
+`scripts/classic/initial_squad.py`. Answers "what 15 should I start the season with?"
+
+**The objective is denominated in expected points per gameweek, not percentiles.**
+This is the single most important thing about this page, and the opposite of how
+Draft scoring works.
+
+```
+SeasonPG = SeasonProjection / 38          # Rotowire Top-400, as a per-GW rate
+GW1PG    = _effective_proj                # blended GW1 projection x start likelihood
+ExpPts   = (0.70*SeasonPG + 0.30*GW1PG) * (1 + 0.04*(3.0 - Team_AvgFDR))
+CapPts   = 0.85*SeasonPG + 0.15*GW1PG     # armband goes on a week-in producer
+```
+
+Percentiles are the right currency for Draft, where you compare rank and there is
+no budget. They are actively wrong for Classic, where the budget makes you buy
+points per pound — and they fail in two compounding ways:
+
+1. **They saturate.** Haaland projects 213.7 season points against a mid-price
+   midfielder's 178.3 (+20%), but as percentiles that is 0.974 vs 0.977. The
+   premium ranks *lower*, because percentile has no headroom above 1.0.
+2. **They invert across positions.** Percentile is computed within position, so
+   the best of 32 forwards scores 31/32 = 0.969 while the best of 48 midfielders
+   scores 47/48 = 0.979. Depth of pool, not quality, decides the ranking.
+
+The live symptom was a page that refused to buy any premium, captained a £7.0m
+midfielder, spent £99.0 of £100, and put £5–7m players on the bench.
+`check_initial_squad()` catches all of it; **underspend is the tell.**
+
+Percentile columns (`Season Score`, `Week1 Score`, `Player Score`) are still
+computed and displayed — they read far better than raw points — but nothing
+optimizes on them. The captain bonus is also in points, so `captain_bonus_weight
+= 1.0` models what the armband is actually worth (a doubled score) rather than a
+rounding error on a percentile.
+
+**ROS is deliberately unused** here — it depends on live-season signals (form,
+starts, multi-GW FFP data) that don't exist before GW1.
+
+**Unranked players get a positional floor, not the median.** A player outside a
+400-deep season ranking is not average; absence is itself the signal, the same
+way absence from Rotowire's weekly table means "not starting". They take the
+10th-percentile `SeasonPG` for their position. Letting `positional_percentile()`
+hand its 0.5 default to 243 of 599 players made genuine fodder look mid-table.
+
+Both Rotowire URLs (season and GW1) are pinned in `config.py` — neither slug is
+auto-discoverable — and both are editable in the page's **Data Sources** panel,
+which shows fetch status, row counts and **match rate** per source. That panel
+exists because every fetch degrades to an empty frame on failure: without it, a
+broken season URL renders a page identical to a working one, just with every
+Season score silently at 0.50.
 
 ## Team Strength Model — Draft Power Rankings
 

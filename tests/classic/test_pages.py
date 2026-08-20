@@ -15,6 +15,7 @@ from unittest.mock import patch, MagicMock
 # block later. See TestInitialSquadOptimizerPage's second test, which
 # exercises this module's internals directly (unmocked) after test_smoke.
 import scripts.classic.initial_squad  # noqa: F401
+from scripts.common.data_validation import check_initial_squad
 
 
 class TestClassicHomePage:
@@ -129,7 +130,10 @@ class TestInitialSquadOptimizerPage:
         from scripts.common.optimization import solve_squad_ilp
 
         rng = np.random.default_rng(0)
-        teams = [{"id": i, "short_name": f"T{i}"} for i in range(1, 9)]
+        # Real-looking 3-letter codes: _to_short_team_code() passes those through
+        # untouched, where "T1" trips its "unknown team, guessing" warning path.
+        _CODES = ["ARS", "AVL", "BHA", "BOU", "BRE", "CHE", "CRY", "EVE"]
+        teams = [{"id": i, "short_name": _CODES[i - 1]} for i in range(1, 9)]
         elements = []
         pid = 1
         for team in teams:
@@ -172,13 +176,13 @@ class TestInitialSquadOptimizerPage:
         full_pool = _build_full_player_pool(bootstrap)
         scored = _compute_scores(
             full_pool, gw1_df, season_df, None, fdr_avg,
-            current_gw=1, w_season=0.55, w_week1=0.30, w_fixture=0.15,
+            current_gw=1, w_season=0.70, w_week1=0.30,
         )
         candidate = _apply_eligibility_filters(scored, exclude_injured=True, min_chance_of_playing=75)
 
         squad_df, totals = solve_squad_ilp(
-            candidate, 100.0, score_col="Player Score", formation="auto", bench_weight=0.2,
-            captain_score_col="Captain Score", captain_bonus_weight=0.5,
+            candidate, 100.0, score_col="ExpPts", formation="auto", bench_weight=0.2,
+            captain_score_col="CapPts", captain_bonus_weight=1.0,
         )
 
         assert squad_df is not None
@@ -189,6 +193,108 @@ class TestInitialSquadOptimizerPage:
         assert pos_counts == {"D": 5, "M": 5, "F": 3, "G": 2}
         assert (squad_df["Team"].value_counts() <= 3).all()
         assert squad_df["Is_Captain"].sum() == 1
+        assert not check_initial_squad(squad_df, 100.0)
+
+    def test_premium_player_is_worth_its_price(self):
+        """The regression test for the defect that made this page unusable.
+
+        The objective used to be a weighted sum of positional *percentiles*.
+        Percentile is scale-free and saturates, so under a budget it cannot
+        trade points against pounds -- and worse, it inverts across positions.
+        A forward at the very top of a 32-deep pool scores 31/32 = 0.969, while
+        a midfielder at the top of a 48-deep pool scores 47/48 = 0.979. The
+        cheaper midfielder therefore *outranks* the premium forward no matter
+        how many more points the forward actually projects. That is exactly how
+        the live page ended up refusing to buy the best asset in the game and
+        banking the change instead.
+
+        This pool reproduces that inversion: the star forward projects twice the
+        points of anyone else but scores *below* a 4.5m midfielder on percentile,
+        and prices are tight enough that the budget genuinely binds. Under the
+        old percentile objective the solver leaves the star on the shelf; an
+        expected-points objective must buy him and captain him.
+        """
+        import numpy as np
+        from scripts.classic.initial_squad import (
+            _apply_eligibility_filters,
+            _build_full_player_pool,
+            _compute_scores,
+        )
+        from scripts.common.optimization import solve_squad_ilp
+
+        rng = np.random.default_rng(7)
+        _CODES = ["ARS", "AVL", "BHA", "BOU", "BRE", "CHE", "CRY", "EVE"]
+        teams = [{"id": i, "short_name": _CODES[i - 1]} for i in range(1, 9)]
+        elements, pid = [], 1
+        for team in teams:
+            for pos, count in [(1, 3), (2, 6), (3, 6), (4, 4)]:
+                for _ in range(count):
+                    elements.append({
+                        "id": pid, "web_name": f"P{pid}", "first_name": "First",
+                        "second_name": f"Last{pid}", "team": team["id"],
+                        "element_type": pos,
+                        # 6.0-7.8m: a baseline 15 costs ~100m, so the budget
+                        # actually binds and the premium has to be paid for.
+                        "now_cost": int(rng.uniform(60, 78)),
+                        "chance_of_playing_next_round": 100, "news": "",
+                        "total_points": 0, "form": 0.0,
+                    })
+                    pid += 1
+
+        star = next(e for e in elements if e["element_type"] == 4)
+        star["now_cost"] = 145
+        # Top of the deeper midfield pool, priced as bench fodder -- the player
+        # a percentile objective prefers over the star.
+        ringer = next(e for e in elements if e["element_type"] == 3)
+        ringer["now_cost"] = 45
+        star_name = f"First Last{star['id']}"
+
+        def _rows(season):
+            out = []
+            for e in elements:
+                if e["id"] == star["id"]:
+                    pts = 400.0
+                elif e["id"] == ringer["id"]:
+                    pts = 200.0
+                else:
+                    pts = round(rng.uniform(150, 175), 1)
+                out.append({
+                    "Player": f"First Last{e['id']}",
+                    "Team": next(t["short_name"] for t in teams if t["id"] == e["team"]),
+                    "Position": {1: "G", 2: "D", 3: "M", 4: "F"}[e["element_type"]],
+                    "Points": pts if season else round(pts / 38, 2),
+                })
+            return pd.DataFrame(out)
+
+        fdr_avg = pd.Series({t["short_name"]: 3.0 for t in teams})
+        scored = _compute_scores(
+            _build_full_player_pool({"elements": elements, "teams": teams}),
+            _rows(season=False), _rows(season=True), None, fdr_avg,
+            current_gw=1, w_season=0.70, w_week1=0.30,
+        )
+        candidate = _apply_eligibility_filters(scored, exclude_injured=True, min_chance_of_playing=75)
+
+        # The inversion this test exists to defeat must actually be present,
+        # otherwise the assertions below would pass for the wrong reason.
+        star_row = candidate[candidate["Player"] == star_name].iloc[0]
+        ringer_row = candidate[candidate["Player"] == f"First Last{ringer['id']}"].iloc[0]
+        assert star_row["Player Score"] < ringer_row["Player Score"]
+        assert star_row["ExpPts"] > ringer_row["ExpPts"] * 1.5
+
+        squad_df, _ = solve_squad_ilp(
+            candidate, 100.0, score_col="ExpPts", formation="auto", bench_weight=0.2,
+            captain_score_col="CapPts", captain_bonus_weight=1.0,
+        )
+
+        assert squad_df is not None
+        assert star_name in squad_df["Player"].tolist(), (
+            "the best player in the pool was priced out of the squad -- the "
+            "percentile-scale regression is back"
+        )
+        assert bool(squad_df.loc[squad_df["Player"] == star_name, "Is_Starter"].iloc[0])
+        assert bool(squad_df.loc[squad_df["Player"] == star_name, "Is_Captain"].iloc[0])
+        # A scale-free objective also shows up as money left in the bank.
+        assert squad_df["Price"].sum() >= 95.0
 
 
 class TestClassicTeamAnalysisPage:

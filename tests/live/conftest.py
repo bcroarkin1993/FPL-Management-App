@@ -92,3 +92,29 @@ def draft_league_id():
     if not league_id:
         pytest.skip("No Draft league configured")
     return league_id
+
+
+@pytest.fixture(scope="session")
+def classic_player_pool():
+    """The full FPL player pool as the Initial Squad Optimizer builds it."""
+    from scripts.classic.initial_squad import _build_full_player_pool
+    from scripts.common.utils import get_classic_bootstrap_static
+
+    bootstrap = skip_if_unreachable(get_classic_bootstrap_static, "FPL bootstrap")
+    pool = _build_full_player_pool(bootstrap or {})
+    if pool.empty:
+        pytest.skip("FPL bootstrap returned no players")
+    return pool
+
+
+@pytest.fixture(scope="session")
+def rotowire_season_rankings():
+    from scripts.common.scraping import get_rotowire_season_rankings
+
+    df = skip_if_unreachable(
+        lambda: get_rotowire_season_rankings(config.ROTOWIRE_SEASON_RANKINGS_URL),
+        "Rotowire season rankings",
+    )
+    if df is None or df.empty:
+        pytest.skip("Rotowire season rankings parsed to zero rows")
+    return df

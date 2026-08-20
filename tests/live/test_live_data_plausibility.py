@@ -16,7 +16,9 @@ import pytest
 
 from tests.live.conftest import skip_if_unreachable
 
+from scripts.common.analytics import merge_season_projections
 from scripts.common.data_validation import (
+    check_merge_match_rate,
     check_projected_team_total,
     check_score_std,
     check_team_strength,
@@ -264,3 +266,55 @@ class TestDraftTeamStrength:
         assert (player_df["Player_Strength"] <= player_df["Raw_Strength"] + 1e-9).all(), (
             "the injury discount can only reduce a score"
         )
+
+
+class TestSeasonRankingsMerge:
+    """The merge that silently stopped matching.
+
+    Rotowire publishes common names ("Bruno Fernandes"); the FPL bootstrap
+    publishes full legal names ("Bruno Borges Fernandes"). A strict single-key
+    merge matched 356 of 425 season-ranking rows and said nothing about the
+    other 69 -- among them the #2 asset in the game -- each of which fell back
+    to a neutral 0.5 percentile and rendered as an exactly average player.
+
+    Nothing here asserts *which* players match; upstream squads change weekly.
+    It asserts that the merge is still doing its job at all.
+    """
+
+    def test_season_rankings_match_the_fpl_pool(self, classic_player_pool,
+                                                rotowire_season_rankings):
+        stats = {}
+        merge_season_projections(
+            classic_player_pool, rotowire_season_rankings, stats=stats)
+        issues = check_merge_match_rate(
+            stats["matched"], stats["total"], "Rotowire season rankings")
+        raise_on_error(issues, "season rankings merge")
+        assert not issues, format_issues(issues)
+
+    def test_no_reference_row_is_claimed_twice(self, classic_player_pool,
+                                               rotowire_season_rankings):
+        """Two FPL players sharing one ranking row means a false positive.
+
+        A fuzzy tier once matched "Harrison" to team-mate "Harry Wilson" on
+        character similarity alone, handing one player the other's season total.
+        """
+        stats = {}
+        merge_season_projections(
+            classic_player_pool, rotowire_season_rankings, stats=stats)
+        assert stats["matched"] <= stats["total"], (
+            "matched more players than there are reference rows -- some ranking "
+            "row was claimed by two different players"
+        )
+
+    def test_top_ranked_players_all_resolve(self, classic_player_pool,
+                                            rotowire_season_rankings):
+        """The elite end is where a miss costs most, so hold it to a higher bar."""
+        top = rotowire_season_rankings.nsmallest(50, "Overall Rank") \
+            if "Overall Rank" in rotowire_season_rankings.columns \
+            else rotowire_season_rankings.nlargest(50, "Points")
+        stats = {}
+        merge_season_projections(classic_player_pool, top, stats=stats)
+        issues = check_merge_match_rate(
+            stats["matched"], stats["total"],
+            "Rotowire season rankings (top 50)", min_rate=0.95)
+        raise_on_error(issues, "top-50 season rankings merge")

@@ -10,6 +10,7 @@ while Rotowire uses ASCII names (e.g., "Raul Jimenez"). By normalizing both
 to a canonical form, we can match players reliably.
 """
 
+import difflib
 import unicodedata
 import re
 from typing import Dict, Optional, NamedTuple
@@ -1014,3 +1015,196 @@ def normalize_rotowire_players(rotowire_df: pd.DataFrame) -> pd.DataFrame:
     df["Player_Clean"] = df["Player"].map(_clean_player_name)
 
     return df
+
+
+# ---------------------------------------------------------------------------
+# Tiered reference matching
+# ---------------------------------------------------------------------------
+#
+# Rotowire (and other projection sources) publish *common* names — "Bruno
+# Fernandes", "Gabriel", "David Raya" — while the FPL bootstrap publishes full
+# legal names — "Bruno Borges Fernandes", "Gabriel dos Santos Magalhaes",
+# "David Raya Martin". A single exact (name, team) key therefore misses ~16% of
+# a 425-row season-rankings table, and the misses are silent: the caller sees
+# NaN and substitutes a neutral default, so an elite asset scores as average
+# with no error anywhere.
+#
+# ReferenceMatcher applies progressively looser tiers, and **every** loose tier
+# is scoped to both Team and Position. There is deliberately no team-agnostic
+# tier: a surname-only match once attached Cole Palmer's stats (elite MID) to
+# Alex Palmer (backup GK) and pushed him into the top 10 overall.
+#
+# Ambiguity always resolves to "no match" rather than an arbitrary pick.
+
+
+def _hyphen_split_normalize(name) -> str:
+    """canonical_normalize, but hyphens/apostrophes become word breaks.
+
+    canonical_normalize *deletes* them ("Solanke-Mitchell" -> "solankemitchell"),
+    which is right for whole-string equality but wrong for token comparison,
+    where we need {"solanke", "mitchell"}.
+    """
+    if name is None or (isinstance(name, float) and pd.isna(name)):
+        return ""
+    return canonical_normalize(str(name).replace("-", " ").replace("'", " "))
+
+
+def _name_tokens(name) -> frozenset:
+    """Token set of a name, hyphen-aware. Empty set for blanks."""
+    return frozenset(_hyphen_split_normalize(name).split())
+
+
+class ReferenceMatcher:
+    """Match player names against a reference table using tiered fallbacks.
+
+    Build once over the reference frame, then call :meth:`match` per player.
+
+    Tiers, in order:
+      1. exact (normalized name, team)
+      2. exact (normalized web name, team)
+      3. last word, scoped to (team, position)
+      4. token subset in either direction, scoped to (team, position)
+         -- token sets are unordered, so this also covers reversed name order
+            ("Kaoru Mitoma" vs "Mitoma Kaoru")
+      5. difflib ratio >= fuzzy_threshold, scoped to (team, position)
+
+    Args:
+        reference_df: Frame to match against.
+        name_col: Primary name column in the reference.
+        web_name_col: Optional short/display name column. Tier skipped if absent.
+        team_col: Team column. Required -- without it only ambiguity-free
+            global name matches are possible, so all tiers degrade to tier 1.
+        position_col: Position column. Tiers 3-5 are skipped if absent, since
+            they rely on it as the corroborating signal.
+        fuzzy_threshold: Minimum difflib ratio for tier 5.
+    """
+
+    def __init__(
+        self,
+        reference_df: pd.DataFrame,
+        name_col: str = "Player",
+        web_name_col: Optional[str] = "Web_Name",
+        team_col: Optional[str] = "Team",
+        position_col: Optional[str] = "Position",
+        fuzzy_threshold: float = 0.78,
+    ):
+        self.fuzzy_threshold = fuzzy_threshold
+        self._exact: Dict[tuple, list] = {}
+        self._exact_web: Dict[tuple, list] = {}
+        self._groups: Dict[tuple, list] = {}
+        self.tier_counts: Dict[str, int] = {}
+
+        if reference_df is None or reference_df.empty or name_col not in reference_df.columns:
+            return
+
+        has_web = bool(web_name_col) and web_name_col in reference_df.columns
+        has_team = bool(team_col) and team_col in reference_df.columns
+        has_pos = bool(position_col) and position_col in reference_df.columns
+        self._has_pos = has_pos
+
+        for idx, row in reference_df.iterrows():
+            team = _to_short_team_code(row[team_col]) if has_team else ""
+            pos = str(row[position_col]) if has_pos else ""
+
+            norm = _hyphen_split_normalize(row[name_col])
+            if norm:
+                self._exact.setdefault((norm, team), []).append(idx)
+
+            web_norm = ""
+            if has_web:
+                web_norm = _hyphen_split_normalize(row[web_name_col])
+                if web_norm:
+                    self._exact_web.setdefault((web_norm, team), []).append(idx)
+
+            if has_pos:
+                self._groups.setdefault((team, pos), []).append(
+                    (idx, norm, web_norm, _name_tokens(row[name_col]),
+                     _name_tokens(row[web_name_col]) if has_web else frozenset())
+                )
+
+    @staticmethod
+    def _sole(hits) -> Optional[object]:
+        """Unique hit, or None. Ambiguity is treated as no match."""
+        return hits[0] if hits and len(hits) == 1 else None
+
+    def match(self, name, team=None, position=None) -> Optional[object]:
+        """Return the reference index label for `name`, or None.
+
+        Args:
+            name: Player name to look up.
+            team: Team code/name. Normalized to a short code internally.
+            position: Single-letter position (G/D/M/F). Required for tiers 3-5.
+        """
+        return self.match_with_tier(name, team, position)[0]
+
+    def match_with_tier(self, name, team=None, position=None):
+        """Like :meth:`match`, but returns ``(index, tier_rank)``.
+
+        tier_rank is 1 (strongest) to 5 (weakest), or None when unmatched.
+        Callers resolving contention for the same reference row should prefer
+        the lower rank.
+        """
+        norm = _hyphen_split_normalize(name)
+        if not norm:
+            return None, None
+        team_code = _to_short_team_code(team) if team is not None else ""
+
+        hit = self._sole(self._exact.get((norm, team_code)))
+        if hit is not None:
+            self.tier_counts["exact_name"] = self.tier_counts.get("exact_name", 0) + 1
+            return hit, 1
+
+        hit = self._sole(self._exact_web.get((norm, team_code)))
+        if hit is not None:
+            self.tier_counts["exact_web_name"] = self.tier_counts.get("exact_web_name", 0) + 1
+            return hit, 2
+
+        # Tiers 3-5 require position as a corroborating signal.
+        if not getattr(self, "_has_pos", False) or position is None:
+            return None, None
+        group = self._groups.get((team_code, str(position)))
+        if not group:
+            return None, None
+
+        tokens = _name_tokens(name)
+        last_word = norm.split()[-1]
+
+        hits = [g[0] for g in group if g[1] and g[1].split()[-1] == last_word]
+        hit = self._sole(hits)
+        if hit is not None:
+            self.tier_counts["last_word"] = self.tier_counts.get("last_word", 0) + 1
+            return hit, 3
+
+        hits = [
+            g[0] for g in group
+            if (g[3] and (tokens <= g[3] or g[3] <= tokens))
+            or (g[4] and (tokens <= g[4] or g[4] <= tokens))
+        ]
+        hit = self._sole(hits)
+        if hit is not None:
+            self.tier_counts["token_subset"] = self.tier_counts.get("token_subset", 0) + 1
+            return hit, 4
+
+        # A fuzzy match must still agree on at least one *complete* name part.
+        # Character-level similarity alone is not enough: "Harrison" scores 0.79
+        # against team-mate "Harry Wilson" while sharing no token, and quietly
+        # hands one player another's projection. The real variants this tier
+        # exists for -- "Yarmoliuk"/"Yarmolyuk", "Kadoglu"/"Kadioglu" -- all
+        # share a full token and score above 0.93.
+        best_idx, best_score, runner_up = None, 0.0, 0.0
+        for g in group:
+            if not (tokens & g[3] or tokens & g[4]):
+                continue
+            for target in (g[1], g[2]):
+                if not target:
+                    continue
+                score = difflib.SequenceMatcher(None, norm, target).ratio()
+                if score > best_score:
+                    best_idx, runner_up, best_score = g[0], best_score, score
+                elif score > runner_up:
+                    runner_up = score
+        # Require a clear winner, not a coin flip between two similar names.
+        if best_score >= self.fuzzy_threshold and best_score > runner_up:
+            self.tier_counts["fuzzy"] = self.tier_counts.get("fuzzy", 0) + 1
+            return best_idx, 5
+        return None, None

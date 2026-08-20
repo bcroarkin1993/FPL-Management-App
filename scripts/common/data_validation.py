@@ -32,6 +32,8 @@ __all__ = [
     "check_projected_team_total",
     "check_source_scale_agreement",
     "check_team_strength",
+    "check_merge_match_rate",
+    "check_initial_squad",
     "format_issues",
     "raise_on_error",
 ]
@@ -484,6 +486,167 @@ def check_team_strength(team_df: Optional[pd.DataFrame],
                     "The injury multiplier is over-penalising -- check the floor in "
                     "injury_helpers.injury_multiplier().",
                 ))
+
+    return issues
+
+
+def check_merge_match_rate(matched: int, total: int, source_name: str,
+                           min_rate: float = 0.90) -> List[Issue]:
+    """Assert a name-based merge actually matched most of its reference rows.
+
+    This is the tripwire for the quietest failure mode in the app. Projection
+    sources publish common names ("Bruno Fernandes"); the FPL bootstrap publishes
+    full legal names ("Bruno Borges Fernandes"). When a merge misses, the caller
+    sees NaN, substitutes a neutral default, and the page renders a table where
+    the #2 asset in the game is scored as exactly average. Nothing raises,
+    nothing looks wrong, and every mocked unit test stays green.
+
+    A real miss rate is small and consists of genuinely unlisted players, so the
+    floor is set well below any healthy run rather than at a target.
+    """
+    check = "merge_match_rate"
+    issues: List[Issue] = []
+
+    if not total:
+        return [Issue(
+            check, "warning",
+            "%s: reference table was empty, nothing to match" % source_name,
+            "Check the source URL and that the scrape returned rows.",
+        )]
+
+    rate = matched / float(total)
+    if rate < min_rate:
+        severity = "error" if rate < min_rate * 0.8 else "warning"
+        issues.append(Issue(
+            check, severity,
+            "%s: matched %d/%d reference rows (%.1f%%), below the %.0f%% floor"
+            % (source_name, matched, total, rate * 100, min_rate * 100),
+            "Unmatched players fall back to a neutral default, so elite assets "
+            "silently score as average. Inspect the misses for a naming pattern "
+            "and add a tier to player_matching.ReferenceMatcher.",
+        ))
+    return issues
+
+
+# A starting XI's expected points per gameweek. Wide on purpose: a strong squad
+# on a good week runs high, and an early-season squad with rotation risk runs
+# low. Outside this band the objective is denominated in the wrong unit.
+_MIN_XI_EXP_POINTS = 30.0
+_MAX_XI_EXP_POINTS = 75.0
+_MIN_BUDGET_SPEND = 0.95
+
+_SQUAD_POSITION_QUOTA = {"G": 2, "D": 5, "M": 5, "F": 3}
+
+
+def check_initial_squad(squad_df: Optional[pd.DataFrame], budget: float,
+                        exp_points_col: str = "ExpPts") -> List[Issue]:
+    """Assert an optimized 15-man Classic squad is legal and sensibly priced.
+
+    Beyond the FPL rulebook, this catches a scale-free objective. When the ILP
+    maximizes positional percentiles instead of expected points, percentile has
+    no headroom above ~1.0, so a premium can never repay its price: the solver
+    buys a flat mid-price squad, leaves money in the bank, and puts real money on
+    the bench. Underspend is the visible symptom of that.
+    """
+    check = "initial_squad"
+    issues: List[Issue] = []
+
+    if squad_df is None or not isinstance(squad_df, pd.DataFrame) or squad_df.empty:
+        return [Issue(
+            check, "error", "squad is empty",
+            "The ILP returned no solution. Check budget, eligibility filters, "
+            "and that the score column has non-zero values.",
+        )]
+
+    if len(squad_df) != 15:
+        issues.append(Issue(
+            check, "error", "squad has %d players, expected 15" % len(squad_df),
+            "solve_squad_ilp() constrains the squad to 15; a different count "
+            "means the frame was filtered after solving.",
+        ))
+
+    if "Is_Starter" in squad_df.columns:
+        n_start = int(squad_df["Is_Starter"].sum())
+        if n_start != 11:
+            issues.append(Issue(
+                check, "error", "starting XI has %d players, expected 11" % n_start,
+                "Check the formation constraints in solve_squad_ilp().",
+            ))
+
+    if "Position" in squad_df.columns:
+        counts = squad_df["Position"].value_counts().to_dict()
+        for pos, want in _SQUAD_POSITION_QUOTA.items():
+            got = int(counts.get(pos, 0))
+            if got != want:
+                issues.append(Issue(
+                    check, "error",
+                    "squad has %d %s, expected %d" % (got, pos, want),
+                    "Positions must be single-letter G/D/M/F. GKP/DEF/MID/FWD "
+                    "codes silently match no quota -- convert with "
+                    "_map_position_to_rw() first.",
+                ))
+
+    if "Team" in squad_df.columns:
+        over = squad_df["Team"].value_counts()
+        over = over[over > 3]
+        if not over.empty:
+            issues.append(Issue(
+                check, "error",
+                "more than 3 players from: %s" % ", ".join(
+                    "%s (%d)" % (t, n) for t, n in over.items()),
+                "FPL allows at most 3 per club. If the team column contains "
+                "placeholders like '???', unresolved players collide into one bucket.",
+            ))
+
+    if "Price" in squad_df.columns and budget:
+        cost = float(pd.to_numeric(squad_df["Price"], errors="coerce").sum())
+        if cost > budget + 1e-6:
+            issues.append(Issue(
+                check, "error",
+                "squad costs %.1f, over the %.1f budget" % (cost, budget),
+                "Check the price column is in millions, not tenths.",
+            ))
+        elif cost < budget * _MIN_BUDGET_SPEND:
+            issues.append(Issue(
+                check, "warning",
+                "squad spends only %.1f of %.1f (%.0f%%)"
+                % (cost, budget, cost / budget * 100),
+                "Leaving money unspent usually means the objective cannot trade "
+                "points against price -- the classic symptom of optimizing on "
+                "percentiles rather than expected points.",
+            ))
+
+    if exp_points_col in squad_df.columns and "Is_Starter" in squad_df.columns:
+        xi = pd.to_numeric(
+            squad_df.loc[squad_df["Is_Starter"], exp_points_col], errors="coerce")
+        # Check for missing values before summing: pandas skips NaN, so a player
+        # with no projection would silently contribute nothing to the total and
+        # the squad would still look plausible.
+        n_missing = int(xi.isna().sum())
+        total = float(xi.sum())
+        if n_missing:
+            issues.append(Issue(
+                check, "error",
+                "%d of the starting XI have no %s value" % (n_missing, exp_points_col),
+                "A missing projection contributes 0 to the objective, so those "
+                "players were effectively picked at random. Check the merge that "
+                "populates this column.",
+            ))
+        elif not math.isfinite(total):
+            issues.append(Issue(
+                check, "error",
+                "starting XI expected points is not finite (%r)" % total,
+                "An inf projection propagated into the objective.",
+            ))
+        elif total < _MIN_XI_EXP_POINTS or total > _MAX_XI_EXP_POINTS:
+            issues.append(Issue(
+                check, "error",
+                "starting XI projects %.1f points/GW, outside the plausible "
+                "%.0f-%.0f range" % (total, _MIN_XI_EXP_POINTS, _MAX_XI_EXP_POINTS),
+                "Values near 10 suggest a percentile scale; values in the "
+                "hundreds suggest season totals were never divided down to a "
+                "per-gameweek rate.",
+            ))
 
     return issues
 

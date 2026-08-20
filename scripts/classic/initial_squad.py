@@ -2,20 +2,30 @@
 Classic FPL - Initial Squad Optimizer
 
 Builds a season-opening 15-man squad (before GW1) using PuLP ILP, blending:
-- Season Score:  literal preseason Rotowire Season Rankings (season-long value)
-- Week1 Score:   GW1 Rotowire + FFP blended projection x start likelihood,
+- Season value:  literal preseason Rotowire Season Rankings, as points per GW
+- Week 1 value:  GW1 Rotowire + FFP blended projection x start likelihood,
                  reusing the app's exact 1GW methodology via compute_player_scores()
-- Fixture Score: opening-slate fixture ease (configurable GW horizon)
+- Fixtures:      a small multiplier on the opening slate, not a headline term
+
+The optimizer's objective is denominated in **expected points per gameweek**,
+not percentiles. That distinction decides the whole squad, because Classic has a
+budget: a premium out-projects a mid-price player by ~20% in points, but as a
+positional percentile can rank *below* one (percentile has no headroom above
+1.0). Optimizing percentiles makes every premium bad value, leaves money in the
+bank, and parks real cash on the bench. Percentiles are still shown — they read
+far better than raw points — but nothing optimizes on them.
 
 Unlike Wildcard/Free Hit, this intentionally does NOT use ROS/Transfer/Keep
 Score — those are diluted by live-season signals (form, starts, multi-GW
 FFP data) that don't exist yet before GW1. See CLAUDE.md's "Transfer Scoring
 Model" section for why ROS is a poor fit here.
 
-Captaincy is baked into the optimizer's objective (not just assigned
-post-hoc): a season-pedigree-heavy Captain Score is rewarded for whichever
-starter the solver designates captain, giving it a real incentive to
-*acquire* one standout option rather than several merely-good players.
+Captaincy is baked into the objective (not just assigned post-hoc): a
+season-pedigree-heavy CapPts is rewarded for whichever starter the solver
+designates captain, giving it a real incentive to *acquire* one standout option
+rather than several merely-good players. In points currency that bonus is worth
+what the armband is actually worth — a doubled score — rather than a rounding
+error on a percentile.
 """
 
 import pandas as pd
@@ -23,7 +33,7 @@ import streamlit as st
 from typing import Optional
 import config
 
-from scripts.common.error_helpers import show_api_error
+from scripts.common.error_helpers import get_logger, show_api_error
 from scripts.common.optimization import solve_squad_ilp
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.utils import (
@@ -39,7 +49,24 @@ from scripts.common.analytics import (
     merge_season_projections,
     positional_percentile,
 )
+from scripts.common.data_validation import check_initial_squad, format_issues
 from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
+
+_logger = get_logger("fpl_app.initial_squad")
+
+# --- Scoring constants ---
+# Defaults are fixed rather than dialled in: a season-opening squad is a
+# hold-for-many-weeks decision, so season-long pedigree should dominate. The
+# sliders in the advanced expander exist for experimentation, not routine use.
+DEFAULT_W_SEASON = 0.70
+DEFAULT_W_WEEK1 = 0.30
+GWS_PER_SEASON = 38
+NEUTRAL_FDR = 3.0
+# ~4% per FDR point away from neutral. Deliberately small — see _compute_scores.
+FIXTURE_TILT = 0.04
+# Where an unranked player sits within their position (see _compute_scores).
+UNRANKED_SEASON_QUANTILE = 0.10
+CAPTAIN_SEASON_WEIGHT = 0.85
 
 
 # ---------------------------
@@ -61,23 +88,74 @@ def _score_card(label: str, value: str, accent: str = "#00ff87") -> str:
     )
 
 
-def rotowire_gw1_url_selector() -> str:
-    """Manual GW1 Rotowire URL input.
+def _data_source_urls():
+    """Editable URLs for both Rotowire feeds.
 
-    GW1's preseason "best picks" article uses a different slug shape than
-    the regular weekly rankings articles, so it isn't auto-discoverable —
-    defaults to the pinned config value (re-pin each preseason) and lets
-    the user override.
+    Neither slug is auto-discoverable the way weekly rankings articles are, so
+    both are pinned in config and re-pinned each preseason. The season URL used
+    to be uneditable, which meant a stale slug could only be fixed by editing
+    config.py — and because a failed fetch degrades to an empty frame, the page
+    looked identical either way.
     """
-    with st.expander("GW1 Rotowire URL", expanded=False):
-        url = st.text_input(
+    with st.expander("Data Sources — Rotowire article URLs", expanded=False):
+        st.caption(
+            "This squad is built from **two** Rotowire tables: the season-long "
+            "Top 400 and the GW1 rankings. Neither article slug is "
+            "auto-discoverable, so update them here each preseason."
+        )
+        season_url = st.text_input(
+            "Season rankings article URL",
+            value=config.ROTOWIRE_SEASON_RANKINGS_URL or "",
+            placeholder="https://www.rotowire.com/soccer/article/...",
+            help="Rotowire's 'Top 400 for the season' article — drives season-long value.",
+        )
+        gw1_url = st.text_input(
             "GW1 rankings article URL",
             value=config.ROTOWIRE_GW1_URL or "",
             placeholder="https://www.rotowire.com/soccer/article/...",
-            help="Rotowire's GW1 'best picks' article isn't auto-discoverable like "
-                 "weekly rankings articles — paste/update the URL here each preseason.",
+            help="Rotowire's GW1 'best picks' article — drives the Week 1 projection.",
         )
-        return url.strip()
+    return season_url.strip(), gw1_url.strip()
+
+
+def _source_status_row(name: str, feeds: str, rows: int, matched: Optional[int],
+                       ok: bool, note: str = "") -> dict:
+    """One row of the Data Sources status table."""
+    if not ok or not rows:
+        status = "🔴 Failed"
+    elif note:
+        status = f"🟡 {note}"
+    else:
+        status = "🟢 OK"
+    if matched is None:
+        match_txt = "—"
+    elif rows:
+        match_txt = f"{matched} ({matched / rows:.0%})"
+    else:
+        match_txt = "0"
+    return {"Source": name, "Feeds": feeds, "Status": status,
+            "Rows": rows if rows else 0, "Matched": match_txt}
+
+
+def _render_source_status(rows: list) -> None:
+    """Render the Data Sources status table.
+
+    Match rate is the headline number here. A name-based merge that silently
+    misses is the quietest bug in this app — unmatched players fall back to a
+    neutral default, so the #2 asset in the game can score as exactly average
+    with nothing on screen to suggest anything went wrong.
+    """
+    if not rows:
+        return
+    st.markdown("##### Data Sources")
+    render_styled_table(pd.DataFrame(rows))
+    degraded = [r for r in rows if r["Status"].startswith("🔴")]
+    if degraded:
+        st.warning(
+            "⚠️ %s did not load. Scores fall back to neutral defaults, which makes "
+            "the squad below unreliable — check the URLs under **Data Sources**."
+            % ", ".join(r["Source"] for r in degraded)
+        )
 
 
 def _build_full_player_pool(bootstrap: dict) -> pd.DataFrame:
@@ -145,19 +223,33 @@ def _compute_scores(
     current_gw: int,
     w_season: float,
     w_week1: float,
-    w_fixture: float,
+    fixture_tilt: float = FIXTURE_TILT,
+    stats: Optional[dict] = None,
 ) -> pd.DataFrame:
-    """Merge Season/Week1/Fixture signals and compute the blended Player
-    Score + Captain Score that drive squad selection."""
+    """Merge Season/Week1/Fixture signals into an expected-points objective.
+
+    The optimizer maximizes ``ExpPts`` -- expected points per gameweek -- not a
+    percentile. Under a budget constraint that distinction decides the whole
+    squad: Haaland out-projects a mid-price midfielder by ~20% in points, but as
+    a positional percentile he can rank *below* one (0.974 vs 0.977), because
+    percentile has no headroom above 1.0. Optimizing percentiles therefore makes
+    every premium bad value, leaves money unspent, and puts real cash on the
+    bench. Percentile columns are still computed -- they are far more readable
+    than raw points -- but only for display.
+    """
     result = pool.copy()
+
+    season_stats, gw1_stats = {}, {}
 
     # Season-long value: literal preseason Rotowire Season Rankings, not the
     # ongoing (and pre-season-unreliable) ROS blend.
-    result = merge_season_projections(result, season_rankings_df, output_col="SeasonProjection")
+    result = merge_season_projections(
+        result, season_rankings_df, output_col="SeasonProjection", stats=season_stats)
 
     # GW1 projection — reuses merge_season_projections since Rotowire's weekly
     # rankings table has the same Player/Team/Points shape as season rankings.
-    result = merge_season_projections(result, gw1_projections_df, output_col="Points")
+    result = merge_season_projections(
+        result, gw1_projections_df, output_col="Points", stats=gw1_stats)
     result["Points"] = result["Points"].fillna(0)
 
     # FFP single-GW data (Predicted, Start, LongStart) for the 1GW blend.
@@ -169,7 +261,7 @@ def _compute_scores(
     # exist pre-season.
     scored = compute_player_scores(result, result, current_gw=current_gw, format_context="classic")
     result["Week1 Score"] = scored["1GW"]
-    result["GW1 Proj Pts"] = scored["_effective_proj"]
+    result["GW1 Proj Pts"] = pd.to_numeric(scored["_effective_proj"], errors="coerce").fillna(0.0)
 
     # Season Score: positional percentile of the literal season-long ranking.
     result["Season Score"] = positional_percentile(
@@ -183,14 +275,52 @@ def _compute_scores(
         result, result, value_col="_fixture_ease_raw", position_col="Position"
     )
 
+    # --- Expected points per gameweek (the optimizer's actual currency) ---
+
+    # Season total -> per-GW rate, so both components are in the same unit.
+    result["SeasonPG"] = pd.to_numeric(result["SeasonProjection"], errors="coerce") / GWS_PER_SEASON
+
+    # A player absent from a 400-deep season ranking is not average — absence is
+    # itself the signal, the same way absence from Rotowire's weekly table means
+    # "not starting". Give them a low positional baseline rather than the median
+    # a NaN percentile would otherwise hand them for free.
+    n_unmatched = int(result["SeasonPG"].isna().sum())
+    for pos, group in result.groupby("Position"):
+        floor = group["SeasonPG"].quantile(UNRANKED_SEASON_QUANTILE)
+        if pd.isna(floor):
+            floor = 0.0
+        result.loc[(result["Position"] == pos) & result["SeasonPG"].isna(), "SeasonPG"] = floor
+    result["SeasonPG"] = result["SeasonPG"].fillna(0.0)
+
+    # Opening fixtures nudge, they don't override: a season-long projection
+    # already prices in the full 38-game schedule, and you can transfer around a
+    # bad opening run long before it costs you the season.
+    fixture_mult = 1.0 + fixture_tilt * (NEUTRAL_FDR - result["Team_AvgFDR"])
+
+    result["ExpPts"] = (w_season * result["SeasonPG"] + w_week1 * result["GW1 Proj Pts"]) * fixture_mult
+
+    # The armband goes on a week-in, week-out producer, so it leans harder on
+    # season pedigree than the squad score does.
+    result["CapPts"] = (CAPTAIN_SEASON_WEIGHT * result["SeasonPG"]
+                        + (1.0 - CAPTAIN_SEASON_WEIGHT) * result["GW1 Proj Pts"])
+
     result["Player Score"] = (
         w_season * result["Season Score"]
         + w_week1 * result["Week1 Score"]
-        + w_fixture * result["Fixture Score"]
     )
-    # Captain should be a nailed-on week-to-week producer, not a one-week
-    # fixture bet — heavier season weighting than the general Player Score.
-    result["Captain Score"] = 0.75 * result["Season Score"] + 0.25 * result["Week1 Score"]
+    result["Captain Score"] = (CAPTAIN_SEASON_WEIGHT * result["Season Score"]
+                               + (1.0 - CAPTAIN_SEASON_WEIGHT) * result["Week1 Score"])
+
+    if n_unmatched:
+        _logger.info(
+            "Initial squad: %d/%d players had no season ranking — using the "
+            "%.0fth-percentile positional baseline.",
+            n_unmatched, len(result), UNRANKED_SEASON_QUANTILE * 100,
+        )
+    if stats is not None:
+        stats["season"] = season_stats
+        stats["gw1"] = gw1_stats
+        stats["unmatched_season"] = n_unmatched
 
     return result
 
@@ -209,6 +339,7 @@ def _display_rows(df: pd.DataFrame) -> pd.DataFrame:
             "Week1": row["Week1 Score"],
             "Fixture": row["Fixture Score"],
             "Score": row["Player Score"],
+            "Exp Pts/GW": row["ExpPts"],
             "GW1 Proj": row["GW1 Proj Pts"],
         })
     return pd.DataFrame(rows)
@@ -216,7 +347,7 @@ def _display_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 _SCORE_COL_FORMATS = {
     "Season": "{:.2f}", "Week1": "{:.2f}", "Fixture": "{:.2f}",
-    "Score": "{:.2f}", "GW1 Proj": "{:.1f}",
+    "Score": "{:.2f}", "Exp Pts/GW": "{:.2f}", "GW1 Proj": "{:.1f}",
 }
 
 
@@ -227,9 +358,11 @@ _SCORE_COL_FORMATS = {
 def show_initial_squad_optimizer_page():
     st.title("🆕 Initial Squad Optimizer")
     st.caption(
-        "Build your season-opening 15-man squad by blending preseason season-long "
-        "value with Week 1 projections and opening-fixture ease — with captaincy "
-        "baked into player selection, not just assigned after the fact."
+        f"Build your season-opening 15-man squad from **{DEFAULT_W_SEASON:.0%} "
+        f"season-long Rotowire value + {DEFAULT_W_WEEK1:.0%} GW1 projection**, "
+        "adjusted for opening fixtures. Players are ranked by expected points per "
+        "gameweek, so a premium has to out-score its price tag — and captaincy is "
+        "part of that maths, not assigned after the fact."
     )
 
     current_gw = get_current_gameweek() or 1
@@ -254,23 +387,29 @@ def show_initial_squad_optimizer_page():
             help="Auto lets the optimizer choose the best formation",
         )
 
-    with st.expander("Scoring Weights", expanded=False):
+    with st.expander("Advanced — Scoring Weights & Filters", expanded=False):
         st.caption(
-            "How much each signal drives player selection. Premium players tend to "
-            "score well on both Season and Week1, so these weights mostly matter for "
-            "choosing among similarly-priced budget/rotation options."
+            f"Defaults to {DEFAULT_W_SEASON:.0%} season-long / {DEFAULT_W_WEEK1:.0%} Week 1 — "
+            "a season-opening squad is a hold-for-many-weeks decision, so pedigree "
+            "should lead. You shouldn't need to touch these."
         )
-        wcol1, wcol2, wcol3 = st.columns(3)
+        wcol1, wcol2 = st.columns(2)
         with wcol1:
-            w_season_pct = st.slider("Season-Long Weight (%)", 0, 100, 55)
+            w_season_pct = st.slider(
+                "Season-Long Weight (%)", 0, 100, int(DEFAULT_W_SEASON * 100))
         with wcol2:
-            w_week1_pct = st.slider("Week 1 Weight (%)", 0, 100, 30)
-        with wcol3:
-            w_fixture_pct = st.slider("Fixture Ease Weight (%)", 0, 100, 15)
-        w_total = max(w_season_pct + w_week1_pct + w_fixture_pct, 1)
+            w_week1_pct = st.slider(
+                "Week 1 Weight (%)", 0, 100, int(DEFAULT_W_WEEK1 * 100))
+        w_total = max(w_season_pct + w_week1_pct, 1)
         w_season = w_season_pct / w_total
         w_week1 = w_week1_pct / w_total
-        w_fixture = w_fixture_pct / w_total
+
+        fixture_tilt = st.slider(
+            "Opening Fixture Tilt (% per FDR point)", 0.0, 15.0, FIXTURE_TILT * 100, step=1.0,
+            help="How much easier opening fixtures inflate a player's expected points. "
+                 "Kept small by default — season projections already price in the full "
+                 "38-game schedule, and you can transfer around a bad opening run.",
+        ) / 100.0
 
         st.markdown("---")
         bcol1, bcol2 = st.columns(2)
@@ -282,9 +421,10 @@ def show_initial_squad_optimizer_page():
             )
         with bcol2:
             captain_bonus_weight = st.slider(
-                "Captain Bonus Weight", min_value=0.0, max_value=1.0, value=0.5, step=0.1,
-                help="How strongly the optimizer is rewarded for acquiring one standout "
-                     "captain-caliber player, rather than just picking a captain afterward.",
+                "Captain Bonus Weight", min_value=0.0, max_value=2.0, value=1.0, step=0.1,
+                help="Extra weight on the captain's expected points. 1.0 models the real "
+                     "armband (points are doubled), which is what justifies paying a "
+                     "premium price for a standout captain.",
             )
 
         st.markdown("#### Player Filters")
@@ -297,7 +437,7 @@ def show_initial_squad_optimizer_page():
                 disabled=not exclude_injured,
             )
 
-    gw1_url = rotowire_gw1_url_selector()
+    season_url, gw1_url = _data_source_urls()
 
     st.markdown("---")
 
@@ -309,16 +449,23 @@ def show_initial_squad_optimizer_page():
                 return
 
             gw1_projections_df = pd.DataFrame()
+            gw1_error = None
             if gw1_url:
                 try:
                     gw1_projections_df = get_rotowire_player_projections(gw1_url)
                 except Exception as e:
-                    st.warning(f"Could not load GW1 Rotowire projections: {e}")
+                    gw1_error = str(e)
+            else:
+                gw1_error = "no URL configured"
 
+            season_error = None
             try:
-                season_rankings_df = get_rotowire_season_rankings(config.ROTOWIRE_SEASON_RANKINGS_URL)
+                season_rankings_df = get_rotowire_season_rankings(season_url) \
+                    if season_url else pd.DataFrame()
+                if not season_url:
+                    season_error = "no URL configured"
             except Exception as e:
-                st.warning(f"Could not load Rotowire season rankings: {e}")
+                season_error = str(e)
                 season_rankings_df = pd.DataFrame()
 
             try:
@@ -337,9 +484,10 @@ def show_initial_squad_optimizer_page():
                 st.error("No players available.")
                 return
 
+            merge_stats = {}
             scored_pool = _compute_scores(
                 full_pool, gw1_projections_df, season_rankings_df, ffp_df, fdr_avg,
-                current_gw, w_season, w_week1, w_fixture,
+                current_gw, w_season, w_week1, fixture_tilt, stats=merge_stats,
             )
             candidate_pool = _apply_eligibility_filters(
                 scored_pool, exclude_injured=exclude_injured, min_chance_of_playing=min_chance
@@ -349,22 +497,47 @@ def show_initial_squad_optimizer_page():
                 st.error("No players available after filtering.")
                 return
 
-            has_gw1 = not gw1_projections_df.empty
-            has_season = season_rankings_df is not None and not season_rankings_df.empty
-            st.info(
-                f"Candidate pool: {len(candidate_pool)} players | "
-                f"GW1 projections: {'loaded' if has_gw1 else 'unavailable — Week1 Score falls back to FFP/neutral'} | "
-                f"Season rankings: {'loaded' if has_season else 'unavailable — Season Score falls back to neutral'}"
+        season_stats = merge_stats.get("season", {})
+        gw1_stats = merge_stats.get("gw1", {})
+        ffp_rows = 0 if ffp_df is None else len(ffp_df)
+        ffp_note = ""
+        if ffp_rows and "FFP_Predicted" in scored_pool.columns \
+                and not scored_pool["FFP_Predicted"].notna().any():
+            # Expected preseason: FFP publishes Predicted only once GW1 is close,
+            # so the Week 1 projection is Rotowire-only until then.
+            ffp_note = "Predicted not published yet"
+
+        _render_source_status([
+            _source_status_row(
+                "Rotowire Season Rankings", f"Season value — {w_season:.0%} of score",
+                len(season_rankings_df), season_stats.get("matched"),
+                ok=season_error is None and not season_rankings_df.empty),
+            _source_status_row(
+                "Rotowire GW1 Rankings", f"Week 1 projection — {w_week1:.0%} of score",
+                len(gw1_projections_df), gw1_stats.get("matched"),
+                ok=gw1_error is None and not gw1_projections_df.empty),
+            _source_status_row(
+                "FFP Points Predictor", "Start likelihood",
+                ffp_rows, None, ok=ffp_rows > 0, note=ffp_note),
+        ])
+        for label, err in (("season rankings", season_error), ("GW1 rankings", gw1_error)):
+            if err:
+                st.warning(f"Could not load Rotowire {label}: {err}")
+        if ffp_note:
+            st.caption(
+                "ℹ️ FFP hasn't published GW1 point predictions yet, so the Week 1 "
+                "component is Rotowire-only. FFP start percentages are still applied."
             )
+        st.caption(f"Candidate pool: {len(candidate_pool)} players")
 
         with st.spinner("Running optimization..."):
             squad_df, totals = solve_squad_ilp(
                 candidate_pool,
                 budget,
-                score_col="Player Score",
+                score_col="ExpPts",
                 formation=formation,
                 bench_weight=bench_weight,
-                captain_score_col="Captain Score",
+                captain_score_col="CapPts",
                 captain_bonus_weight=captain_bonus_weight,
                 problem_name="FPL_Initial_Squad_Optimizer",
             )
@@ -381,22 +554,31 @@ def show_initial_squad_optimizer_page():
         starters = squad_df[squad_df["Is_Starter"]].copy()
         bench = squad_df[~squad_df["Is_Starter"]].copy()
         bench_gk = bench[bench["Position"] == "G"]
-        bench_outfield = bench[bench["Position"] != "G"].sort_values("Player Score", ascending=False)
+        bench_outfield = bench[bench["Position"] != "G"].sort_values("ExpPts", ascending=False)
         bench_ordered = pd.concat([bench_gk, bench_outfield])
         bench_ordered["Bench_Order"] = range(1, len(bench_ordered) + 1)
 
         if "Is_Captain" in squad_df.columns and squad_df["Is_Captain"].any():
             cap_name = squad_df.loc[squad_df["Is_Captain"], "Player"].iloc[0]
         else:
-            cap_name = starters.loc[starters["Player Score"].idxmax(), "Player"]
+            cap_name = starters.loc[starters["CapPts"].idxmax(), "Player"]
 
         total_cost = squad_df["Price"].sum()
         remaining = budget - total_cost
+        xi_exp_pts = starters["ExpPts"].sum()
+
+        issues = check_initial_squad(squad_df, budget)
+        if issues:
+            _logger.warning(format_issues(issues))
+            for issue in issues:
+                if issue.severity == "error":
+                    st.error(f"⚠️ {issue.message}. {issue.hint}")
 
         st.markdown("### Squad Summary")
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.markdown(_score_card("Starting XI Score", f"{totals['starter_score']:.2f}"), unsafe_allow_html=True)
+            st.markdown(
+                _score_card("Starting XI", f"{xi_exp_pts:.1f} pts/GW"), unsafe_allow_html=True)
         with col2:
             st.markdown(_score_card("Captain", cap_name, accent="#f0c419"), unsafe_allow_html=True)
         with col3:
@@ -418,7 +600,7 @@ def show_initial_squad_optimizer_page():
         render_styled_table(
             _display_rows(starters),
             col_formats=_SCORE_COL_FORMATS,
-            positive_color_cols=["Score"],
+            positive_color_cols=["Exp Pts/GW"],
         )
 
         st.markdown("---")

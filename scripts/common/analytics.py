@@ -16,7 +16,8 @@ import streamlit as st
 
 import config
 from scripts.common.error_helpers import get_logger
-from scripts.common.player_matching import canonical_normalize
+from scripts.common.data_validation import check_merge_match_rate, format_issues
+from scripts.common.player_matching import ReferenceMatcher, canonical_normalize
 from scripts.common.text_helpers import TEAM_FULL_TO_SHORT
 
 _logger = get_logger("fpl_app.analytics")
@@ -905,6 +906,7 @@ def merge_season_projections(
     player_df: pd.DataFrame,
     season_rankings_df: Optional[pd.DataFrame],
     output_col: str = "SeasonProjection",
+    stats: Optional[dict] = None,
 ) -> pd.DataFrame:
     """Merge Rotowire season-long projected points onto a player DataFrame.
 
@@ -932,34 +934,59 @@ def merge_season_projections(
     if name_col is None:
         return result
 
-    # Build lookup: (normalized_name, team_short) -> Points
-    sr = season_rankings_df[["Player", "Team", "Points"]].dropna(subset=["Points"]).copy()
-    sr["__norm"] = sr["Player"].apply(canonical_normalize)
-    sr["__team_short"] = sr["Team"].replace(TEAM_FULL_TO_SHORT)
+    # Tiered matching: Rotowire publishes common names ("Bruno Fernandes")
+    # while the FPL pool carries full legal names ("Bruno Borges Fernandes").
+    # A strict single-key match silently dropped ~16% of a 425-row table --
+    # including top-5 assets -- so callers scored elite players as average.
+    sr = season_rankings_df.dropna(subset=["Points"]).copy()
     sr["Points"] = pd.to_numeric(sr["Points"], errors="coerce")
-
-    lookup = {}
-    for _, row in sr.iterrows():
-        key = (row["__norm"], str(row["__team_short"]))
-        val = row["Points"]
-        if pd.notna(val):
-            lookup[key] = val
-
-    if not lookup:
+    sr = sr[sr["Points"].notna()]
+    if sr.empty:
         return result
 
-    result["__norm"] = result[name_col].apply(canonical_normalize)
+    matcher = ReferenceMatcher(
+        sr,
+        name_col="Player",
+        web_name_col="Web_Name" if "Web_Name" in sr.columns else None,
+        team_col="Team" if "Team" in sr.columns else None,
+        position_col="Position" if "Position" in sr.columns else None,
+    )
+
     team_col = "Team" if "Team" in result.columns else None
+    pos_col = "Position" if "Position" in result.columns else None
+    web_col = "Web_Name" if "Web_Name" in result.columns else None
 
+    # Two players must never share one reference row. Collect every candidate
+    # with the tier that produced it, then let the strongest tier win -- so a
+    # fuzzy guess can't steal the row an exact match already earned.
+    claims = {}
     for idx in result.index:
-        norm_name = result.at[idx, "__norm"]
-        team_short = str(result.at[idx, team_col]) if team_col else ""
-        team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
-        key = (norm_name, team_short)
-        if key in lookup:
-            result.at[idx, output_col] = lookup[key]
+        team = result.at[idx, team_col] if team_col else None
+        pos = result.at[idx, pos_col] if pos_col else None
+        ref_idx, tier = matcher.match_with_tier(result.at[idx, name_col], team, pos)
+        # Mononyms ("Gabriel", "Alisson") live in the pool's Web_Name, not its
+        # full-name column, so retry on that before giving up.
+        if ref_idx is None and web_col:
+            ref_idx, tier = matcher.match_with_tier(result.at[idx, web_col], team, pos)
+        if ref_idx is None:
+            continue
+        prev = claims.get(ref_idx)
+        if prev is None or tier < prev[1]:
+            claims[ref_idx] = (idx, tier)
 
-    result.drop(columns=["__norm"], inplace=True, errors="ignore")
+    matched = 0
+    for ref_idx, (idx, _tier) in claims.items():
+        result.at[idx, output_col] = sr.at[ref_idx, "Points"]
+        matched += 1
+
+    if stats is not None:
+        stats.update(matched=matched, total=len(sr),
+                     rate=matched / len(sr) if len(sr) else 0.0,
+                     tiers=dict(matcher.tier_counts))
+
+    issues = check_merge_match_rate(matched, len(sr), "season projections -> %s" % output_col)
+    if issues:
+        _logger.warning(format_issues(issues))
     return result
 
 

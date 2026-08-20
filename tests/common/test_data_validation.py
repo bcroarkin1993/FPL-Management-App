@@ -14,6 +14,8 @@ from scripts.common.data_validation import (
     check_score_std,
     check_single_gw_projections,
     check_source_scale_agreement,
+    check_initial_squad,
+    check_merge_match_rate,
     check_team_strength,
     check_win_probability,
     format_issues,
@@ -280,3 +282,126 @@ class TestCheckTeamStrength:
         for col in ("Score", "Healthy_Score", "GK", "DEF", "MID", "FWD", "Injury_Cost"):
             df[col] = 0.0
         assert any(i.severity == "error" for i in check_team_strength(df))
+
+
+class TestCheckMergeMatchRate:
+    """The tripwire for a name merge that quietly stops matching.
+
+    The real numbers: Rotowire's season rankings hold 425 rows, and the old
+    strict (name, team) key matched 356 of them. Nothing raised. The 69 misses
+    -- Bruno Fernandes, Gabriel, Alisson, David Raya, Ruben Dias among them --
+    each fell back to a neutral 0.5 percentile, so the #2 asset in the game
+    rendered as an exactly average player.
+    """
+
+    def test_full_match_is_silent(self):
+        assert check_merge_match_rate(425, 425, "season rankings") == []
+
+    def test_healthy_match_rate_is_silent(self):
+        assert check_merge_match_rate(410, 425, "season rankings") == []
+
+    def test_the_real_regression_is_flagged(self):
+        issues = check_merge_match_rate(356, 425, "season rankings")
+        assert issues and "356/425" in issues[0].message
+
+    def test_severe_miss_rate_is_an_error(self):
+        assert _errors(check_merge_match_rate(100, 425, "season rankings"))
+
+    def test_total_collapse_is_an_error(self):
+        assert _errors(check_merge_match_rate(0, 425, "season rankings"))
+
+    def test_empty_reference_warns_rather_than_dividing_by_zero(self):
+        issues = check_merge_match_rate(0, 0, "season rankings")
+        assert issues and issues[0].severity == "warning"
+
+
+class TestCheckInitialSquad:
+    """A legal, sensibly-priced 15-man Classic squad."""
+
+    @staticmethod
+    def _good():
+        positions = ["G"] * 2 + ["D"] * 5 + ["M"] * 5 + ["F"] * 3
+        return pd.DataFrame({
+            "Player": ["P%d" % i for i in range(15)],
+            "Position": positions,
+            "Team": ["T%d" % (i % 8) for i in range(15)],
+            "Price": [6.5] * 15,
+            "ExpPts": [4.7] * 11 + [3.0] * 4,
+            "Is_Starter": [True] * 11 + [False] * 4,
+        })
+
+    def test_valid_squad_is_silent(self):
+        assert check_initial_squad(self._good(), 100.0) == []
+
+    def test_empty_squad_is_an_error(self):
+        assert _errors(check_initial_squad(pd.DataFrame(), 100.0))
+        assert _errors(check_initial_squad(None, 100.0))
+
+    def test_wrong_squad_size_is_an_error(self):
+        assert _errors(check_initial_squad(self._good().head(14), 100.0))
+
+    def test_wrong_starter_count_is_an_error(self):
+        df = self._good()
+        df.loc[11, "Is_Starter"] = True
+        assert _errors(check_initial_squad(df, 100.0))
+
+    def test_position_quota_violation_is_an_error(self):
+        df = self._good()
+        df.loc[0, "Position"] = "D"
+        assert _errors(check_initial_squad(df, 100.0))
+
+    def test_gkp_style_position_codes_are_caught(self):
+        """analytics.py groups on G/D/M/F; the bootstrap supplies GKP/DEF/MID/FWD.
+
+        Feeding the long codes through matches no quota at all, which is the
+        same class of silent failure check_team_strength() guards against.
+        """
+        df = self._good()
+        df["Position"] = df["Position"].map(
+            {"G": "GKP", "D": "DEF", "M": "MID", "F": "FWD"})
+        assert _errors(check_initial_squad(df, 100.0))
+
+    def test_more_than_three_from_one_club_is_an_error(self):
+        df = self._good()
+        df.loc[:3, "Team"] = "MCI"
+        assert _errors(check_initial_squad(df, 100.0))
+
+    def test_over_budget_is_an_error(self):
+        df = self._good()
+        df["Price"] = 8.0
+        assert _errors(check_initial_squad(df, 100.0))
+
+    def test_underspend_warns(self):
+        """The visible symptom of a scale-free objective.
+
+        When the ILP maximizes percentiles, a premium can never repay its price,
+        so the solver buys a flat mid-price squad and banks the change.
+        """
+        df = self._good()
+        df["Price"] = 5.0  # 75.0 total against a 100.0 budget
+        issues = check_initial_squad(df, 100.0)
+        assert issues and all(i.severity == "warning" for i in issues)
+
+    def test_percentile_scale_objective_is_an_error(self):
+        """An XI summing to ~10 means the objective is still in percentiles."""
+        df = self._good()
+        df["ExpPts"] = 0.9
+        assert _errors(check_initial_squad(df, 100.0))
+
+    def test_season_totals_not_divided_down_is_an_error(self):
+        """An XI summing to ~2000 means season totals never became a per-GW rate."""
+        df = self._good()
+        df["ExpPts"] = 180.0
+        assert _errors(check_initial_squad(df, 100.0))
+
+    def test_missing_projection_is_an_error(self):
+        """pandas .sum() skips NaN, so an unprojected starter would otherwise
+        contribute 0 to the objective and leave a plausible-looking total."""
+        df = self._good()
+        df.loc[0, "ExpPts"] = np.nan
+        issues = _errors(check_initial_squad(df, 100.0))
+        assert issues and "no ExpPts value" in issues[0].message
+
+    def test_missing_optional_columns_are_tolerated(self):
+        df = self._good().drop(columns=["ExpPts", "Team"])
+        assert check_initial_squad(df, 100.0) == []
