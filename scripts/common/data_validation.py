@@ -31,6 +31,7 @@ __all__ = [
     "check_win_probability",
     "check_projected_team_total",
     "check_source_scale_agreement",
+    "check_team_strength",
     "format_issues",
     "raise_on_error",
 ]
@@ -370,6 +371,121 @@ def check_source_scale_agreement(values_a: Sequence[float], values_b: Sequence[f
             "multi-gameweek or season total where a single gameweek is expected.",
         )]
     return []
+
+
+DRAFT_SQUAD_SIZE = 15
+
+#: A whole league scoring within this band of each other means the percentile join
+#: silently failed and every player came back as the 0.5 default.
+MIN_LEAGUE_SCORE_SPREAD = 0.5
+
+#: Injuries cannot plausibly cost a team more than this much of its score.
+MAX_PLAUSIBLE_INJURY_COST = 60.0
+
+
+def check_team_strength(team_df: Optional[pd.DataFrame],
+                        expected_teams: Optional[int] = None) -> List[Issue]:
+    """Assert Draft power-ranking scores are in a range they could actually occupy.
+
+    The failure this is really guarding against is silent: every function in
+    analytics.py groups on position codes G/D/M/F, but the FPL bootstrap supplies
+    GKP/DEF/MID/FWD. Feed it the wrong ones and positional_percentile() matches no
+    group, returns its 0.5 default for every player, and the page renders a
+    plausible-looking table in which every team scores exactly 50.0.
+    """
+    check = "team_strength"
+
+    if team_df is None or not isinstance(team_df, pd.DataFrame) or team_df.empty:
+        return [Issue(
+            check, "error", "team strength table is empty",
+            "Rosters or the bootstrap pool failed to load; the page should show an "
+            "info message rather than an empty table.",
+        )]
+
+    issues = []
+    score_cols = [c for c in ("Score", "Healthy_Score", "GK", "DEF", "MID", "FWD")
+                  if c in team_df.columns]
+
+    # --- Every score must sit on the 0-100 scale ---------------------------
+    for col in score_cols:
+        vals = pd.to_numeric(team_df[col], errors="coerce").dropna()
+        if vals.empty:
+            issues.append(Issue(
+                check, "error", "column %s is entirely non-numeric or missing" % col,
+                "A percentile computation returned NaN for every team.",
+            ))
+            continue
+        if (vals < 0).any() or (vals > 100).any():
+            issues.append(Issue(
+                check, "error",
+                "%s ranges %.1f to %.1f, outside the 0-100 scale"
+                % (col, vals.min(), vals.max()),
+                "Scores are positional percentiles x100 and cannot leave [0, 100]. "
+                "Check that Raw_Strength is clipped before aggregation.",
+            ))
+
+    # --- The league must not be degenerate ---------------------------------
+    if "Score" in team_df.columns and len(team_df) > 1:
+        scores = pd.to_numeric(team_df["Score"], errors="coerce").dropna()
+        if not scores.empty:
+            spread = float(scores.max() - scores.min())
+            if spread < MIN_LEAGUE_SCORE_SPREAD:
+                issues.append(Issue(
+                    check, "error",
+                    "all %d teams score within %.2f of each other (around %.1f)"
+                    % (len(scores), spread, scores.mean()),
+                    "This is what a failed percentile join looks like -- every "
+                    "player fell back to the 0.5 default. Check that Position holds "
+                    "G/D/M/F, not GKP/DEF/MID/FWD, before scoring.",
+                ))
+            if float(scores.max()) == 0.0:
+                issues.append(Issue(
+                    check, "error", "every team scores zero",
+                    "No scoring inputs resolved for any player.",
+                ))
+
+    # --- Squad shape --------------------------------------------------------
+    if "Players" in team_df.columns:
+        counts = pd.to_numeric(team_df["Players"], errors="coerce").fillna(0)
+        wrong = team_df.loc[counts != DRAFT_SQUAD_SIZE]
+        if not wrong.empty:
+            issues.append(Issue(
+                check, "error",
+                "%d team(s) do not hold %d players (saw %s)"
+                % (len(wrong), DRAFT_SQUAD_SIZE,
+                   sorted(set(counts[counts != DRAFT_SQUAD_SIZE].astype(int)))),
+                "Draft enforces 2 GK / 5 DEF / 5 MID / 3 FWD. A short squad means "
+                "rostered element IDs were missing from the bootstrap pool.",
+            ))
+
+    if expected_teams is not None and len(team_df) != expected_teams:
+        issues.append(Issue(
+            check, "error",
+            "table has %d teams, league has %d" % (len(team_df), expected_teams),
+            "A team's roster failed to resolve and was dropped silently.",
+        ))
+
+    # --- Injury cost --------------------------------------------------------
+    if "Injury_Cost" in team_df.columns:
+        cost = pd.to_numeric(team_df["Injury_Cost"], errors="coerce").dropna()
+        if not cost.empty:
+            if (cost < -1e-6).any():
+                issues.append(Issue(
+                    check, "error",
+                    "negative injury cost (%.1f)" % cost.min(),
+                    "Injuries can only reduce a score; Player_Strength must never "
+                    "exceed Raw_Strength.",
+                ))
+            if (cost > MAX_PLAUSIBLE_INJURY_COST).any():
+                issues.append(Issue(
+                    check, "error",
+                    "injury cost of %.1f exceeds the plausible maximum of %.0f"
+                    % (cost.max(), MAX_PLAUSIBLE_INJURY_COST),
+                    "The injury multiplier is over-penalising -- check the floor in "
+                    "injury_helpers.injury_multiplier().",
+                ))
+
+    return issues
 
 
 def format_issues(issues: Sequence[Issue]) -> str:

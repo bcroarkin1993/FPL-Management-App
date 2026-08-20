@@ -360,6 +360,66 @@ def get_league_player_ownership(league_id):
     return league_ownership
 
 
+@st.cache_data(ttl=300)
+def get_league_rosters_with_ids(league_id):
+    """
+    Fetch current Draft league rosters keyed by team, keeping raw FPL element IDs.
+
+    Sibling of :func:`get_league_player_ownership`, which resolves elements to player
+    *name* strings.  This variant keeps the integer element ID so downstream joins
+    against the bootstrap stats frame are exact — no fuzzy name matching, which is a
+    documented recurring source of false positives in this codebase (e.g. Alex Palmer
+    vs. Cole Palmer).
+
+    Returns:
+      {
+        <team_id>: {"team_name": <str>, "player_ids": [<int>, ...]},
+        ...
+      }
+    Returns {} if the league has not drafted yet or the API is unreachable.
+    """
+    element_status_url = f"https://draft.premierleague.com/api/league/{league_id}/element-status"
+    league_details_url = f"https://draft.premierleague.com/api/league/{league_id}/details"
+
+    try:
+        element_status = requests.get(element_status_url, timeout=30).json().get("element_status", [])
+        league_details = requests.get(league_details_url, timeout=30).json()
+    except Exception as e:
+        _logger.warning("Failed to fetch league rosters for league %s: %s", league_id, e)
+        return {}
+
+    # Build owner (entry) map robustly — handles both 'entry_id' and 'id' keys
+    owner_map = {}
+    try:
+        owner_map = get_league_entries(league_id)  # {entry_id: entry_name}
+    except Exception:
+        _logger.warning("Failed to fetch league entries for league %s", league_id, exc_info=True)
+
+    for entry in league_details.get("league_entries", []):
+        eid = entry.get("entry_id", entry.get("id"))
+        name = entry.get("entry_name")
+        if eid is not None and name:
+            owner_map.setdefault(eid, name)
+
+    rosters = {}
+    for status in element_status:
+        owner_id = status.get("owner")
+        player_id = status.get("element")
+        if owner_id is None or player_id is None:
+            continue
+        if owner_id not in rosters:
+            rosters[owner_id] = {
+                "team_name": owner_map.get(owner_id, f"Unknown Team ({owner_id})"),
+                "player_ids": [],
+            }
+        try:
+            rosters[owner_id]["player_ids"].append(int(player_id))
+        except (ValueError, TypeError):
+            _logger.warning("Non-integer element id %r in league %s", player_id, league_id)
+
+    return rosters
+
+
 # =============================================================================
 # LIVE POINTS & PICKS
 # =============================================================================

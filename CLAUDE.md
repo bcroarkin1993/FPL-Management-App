@@ -52,6 +52,8 @@ The Odds API ────────────┘
 - `player_matching.py` - `canonical_normalize()`, `PlayerRegistry` for centralized player lookups
 - `analytics.py` - `compute_player_scores()` (shared Keep/Transfer scoring via positional percentiles — see "Transfer Scoring Model" section), `compute_dynamic_alpha()`, `merge_ffp_single_gw_data()`, `positional_percentile()`, `positional_rank()`, form dampening, multi-GW blending, season projection merging
 - `waiver_alerts.py` - Discord notification system for Draft waiver and Classic transfer deadlines
+- `team_strength.py` - Draft power rankings (`build_league_strength()`, `compute_player_strength()`, `aggregate_team_strength()`) — 0-100 team + positional scores from positional percentiles
+- `injury_helpers.py` - `estimate_games_to_miss()` (parses expected-return dates out of FPL news text) and `injury_multiplier()` (season-aware availability discount)
 
 **main.py** - Streamlit entry point with three-section navigation:
 - FPL App Home: Cross-format tools (fixtures, lineups, stats, injuries)
@@ -128,6 +130,7 @@ to import from GitHub Actions.
 | `check_win_probability()` | Near-ties reported as near-certainties; extreme calls on small gaps; probability that contradicts the scoreline |
 | `check_projected_team_total()` | Inflated XI totals; illegal lineup sizes |
 | `check_source_scale_agreement()` | Two sources denominated in different units (the original bug's signature) |
+| `check_team_strength()` | Degenerate power rankings — every team scoring ~50 because position codes were `GKP/DEF/MID/FWD` instead of `G/D/M/F`, short squads, impossible injury costs |
 
 Ranges are deliberately wide — these are "this cannot be right" boundaries, not
 "this looks unusual" ones. A check that cries wolf gets muted. Note the XI floor is
@@ -260,6 +263,49 @@ All scores are **positional percentiles** (0-1) computed against the full FPL pl
 
 **FFP name matching — 4-level fallback**: Both `merge_ffp_single_gw_data()` and `blend_multi_gw_projections()` use a 4-step lookup to handle name mismatches between FFP short names ("Eze") and FPL full names ("Eberechi Eze"), as well as FFP team name variants: (1) exact `(norm_name, team_short)`, (2) `(last_word, team_short)`, (3) `norm_name` only, (4) `last_word` only.
 
+
+## Team Strength Model — Draft Power Rankings
+
+`scripts/common/team_strength.py`. Answers "how good is each roster in my league?"
+
+**Everything is a positional percentile against the full FPL pool**, so 85 means "top
+15% at this position" regardless of position. Draft enforces 2 GK / 5 DEF / 5 MID /
+3 FWD, so a flat mean across all 15 players is directly comparable between teams.
+
+```
+quality = p*actuals + (1-p)*pedigree      # p = season_progress_weight(gw)
+actuals = 0.70*pctile(points_per_START) + 0.30*pctile(form)
+          -> pedigree alone when starts < _MIN_STARTS_FOR_ACTUALS (4)
+          -> points-per-start alone when form is flat across the pool (preseason)
+
+raw = 0.60*quality + 0.25*pctile(Proj_Blended) + 0.10*start_security + 0.05*fixture_ease
+player_strength = raw * injury_multiplier(gws_missed, current_gw)
+
+Team Score = 100 * mean(player_strength over all 15)
+Injury Cost = Healthy Score - Team Score
+```
+
+**Points per START, not total points**: a star returning from six weeks out has fewer
+total points than an ever-present squad player but is plainly the better asset. Total
+points ranks them backwards.
+
+**Injuries scale by fraction of the *remaining* season missed** (`injury_helpers.py`),
+so the same five-week absence costs ~14% at GW3 and hits the floor at GW34. Return
+dates come from parsing the FPL `news` text.
+
+### Two traps this code exists to avoid
+
+1. **Position codes.** `pull_fpl_player_stats()` returns `GKP/DEF/MID/FWD`; everything
+   in `analytics.py` groups on `G/D/M/F`. Feed it the wrong ones and
+   `positional_percentile()` matches no group, returns its 0.5 default for every
+   player, and the page renders a plausible table where every team scores exactly 50.
+   Convert with `_map_position_to_rw()` first. `check_team_strength()` catches it.
+2. **Reference-pool contamination.** `positional_percentile()` silently falls back to
+   min-max over the *input* frame when the reference lacks the value column — turning
+   an absolute percentile into a within-roster one, with no error. And a 2-start
+   player scoring 17.5/start will outrank Haaland unless excluded from the
+   denominator. `attach_reference_pps()` handles both; do not bypass it.
+
 ## Environment Variables
 
 Required in `.env` (or set/locked via the in-app **🆔 League Setup** page under FPL App Home,
@@ -351,6 +397,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Notes |
 |------|-------|
+| Draft Team Power Rankings | New "💪 Power Rankings" tab on Draft League Analysis. Team Score 0-100 plus GK/DEF/MID/FWD scores with league rank badges, all positional percentiles against the full ~700-player FPL pool. Player strength = 60% quality (preseason Rotowire pedigree blended into in-season actuals via `season_progress_weight()`) + 25% this-GW blended projection + 10% start security + 5% FDR, times a season-aware injury discount. Actuals use **points per start** (not total points) so a player returning from a long injury isn't penalised for missed games; below 4 starts the sample is too thin and pedigree is used alone. Rosters join to stats on integer element ID via new `get_league_rosters_with_ids()` — no name matching in this path. See "Team Strength Model" section below. |
 | League Setup Admin Page | In-app "🆔 League Setup" page (FPL App Home) to set/validate/lock Draft and Classic league & team IDs instead of hand-editing `.env`. Draft: enter league ID, look it up, pick your team from a resolved dropdown (no need to know your entry ID). Classic: add/remove multiple leagues, resolve team via entry ID lookup. Locked read-only view with two-step "Unlock to Edit" confirmation. Persisted to gitignored `league_settings.json` (repo is public — not committed, unlike `alert_settings.json`). `config.py`'s 4 ID attributes (`FPL_DRAFT_LEAGUE_ID`, `FPL_DRAFT_TEAM_ID`, `FPL_CLASSIC_TEAM_ID`, `FPL_CLASSIC_LEAGUE_IDS`) converted from eager to lazy PEP 562 resolution (same pattern as `CURRENT_GAMEWEEK`), prioritizing locked JSON settings over `.env`, so saved changes take effect immediately without an app restart. |
 | Gameweek Fixtures GW38 Cap | Auto-constrain FDR Horizon and "How many weeks?" sliders to never exceed GW38; defensive cap added inside `get_fixture_difficulty_grid()`; fetch range hard-capped at `end_gw = min(start_gw + weeks - 1, 38)` |
 | Team Difficulty Visualizations | FDR heatmap, defensive stats, attack vs defense ratings (inspired by fpl.page/team-dds) |

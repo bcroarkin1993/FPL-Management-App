@@ -10,6 +10,7 @@ from datetime import datetime
 
 import config
 from openai import OpenAI
+from scripts.common.injury_helpers import estimate_games_to_miss
 from scripts.common.error_helpers import get_logger
 
 _logger = get_logger("fpl_app.draft.waiver_wire")
@@ -783,63 +784,8 @@ def _availability_multiplier(chance, status) -> float:
     return 1.0
 
 
-def _estimate_games_to_miss(news, chance, status) -> int:
-    """Parse FPL news field for estimated games to miss."""
-    news_str = "" if pd.isna(news) else str(news).strip()
-
-    if news_str:
-        # 1. Try "Expected back DD Mon" or similar date patterns
-        back_match = re.search(
-            r'(?:expected\s+back|return[s]?\s+)\s*(\d{1,2}\s+\w+(?:\s+\d{4})?)',
-            news_str, re.IGNORECASE
-        )
-        if back_match:
-            date_str = back_match.group(1)
-            for fmt in ('%d %b %Y', '%d %B %Y', '%d %b', '%d %B'):
-                try:
-                    parsed = datetime.strptime(date_str, fmt)
-                    if parsed.year == 1900:  # no year in format
-                        now = datetime.now()
-                        parsed = parsed.replace(year=now.year)
-                        if parsed < now:
-                            parsed = parsed.replace(year=now.year + 1)
-                    days_until = (parsed - datetime.now()).days
-                    return max(0, (days_until + 6) // 7)  # round up to GWs
-                except ValueError:
-                    continue
-
-        # 2. Try "Suspended for X" matches
-        susp_match = re.search(r'suspended\s+(?:for\s+)?(\d+)', news_str, re.IGNORECASE)
-        if susp_match:
-            return int(susp_match.group(1))
-
-    # 3. Fallback from chance_of_playing
-    if not pd.isna(chance):
-        try:
-            c = float(chance)
-            if c >= 75:
-                return 1
-            if c >= 50:
-                return 2
-            if c >= 25:
-                return 3
-            return 5
-        except (ValueError, TypeError):
-            pass
-
-    # 4. Fallback from status
-    if not pd.isna(status):
-        s = str(status).lower()
-        if s == 'a':
-            return 0
-        if s == 'd':
-            return 2
-        if s in ('i', 'n'):
-            return 4
-        if s in ('s', 'u'):
-            return 3
-
-    return 0
+# Shared with team-strength scoring; see scripts/common/injury_helpers.py
+_estimate_games_to_miss = estimate_games_to_miss
 
 
 def _roster_injury_factor(chance, status, news, season_pts_pctile) -> float:

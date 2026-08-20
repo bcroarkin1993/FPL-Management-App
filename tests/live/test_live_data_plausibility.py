@@ -14,9 +14,12 @@ assert that the numbers are *possible*.
 import pandas as pd
 import pytest
 
+from tests.live.conftest import skip_if_unreachable
+
 from scripts.common.data_validation import (
     check_projected_team_total,
     check_score_std,
+    check_team_strength,
     check_single_gw_projections,
     check_source_scale_agreement,
     check_win_probability,
@@ -209,4 +212,55 @@ class TestDraftFixtureProjections:
                         )
         assert not offenders, (
             "No player scores this much in a single gameweek:\n  " + "\n  ".join(offenders)
+        )
+
+
+class TestDraftTeamStrength:
+    """Power rankings over the real league.
+
+    The silent failure this guards against: analytics.py groups on position codes
+    G/D/M/F while the FPL bootstrap supplies GKP/DEF/MID/FWD. Get that wrong and
+    every percentile falls back to its 0.5 default, so every team scores exactly
+    50.0 -- a table that looks entirely reasonable until you read it closely.
+    """
+
+    @pytest.fixture(scope="class")
+    def league_strength(self, draft_league_id, current_gw):
+        from scripts.common.team_strength import build_league_strength
+
+        team_df, player_df = skip_if_unreachable(
+            lambda: build_league_strength(draft_league_id, current_gw),
+            "Draft league strength",
+        )
+        if team_df is None or team_df.empty:
+            pytest.skip("league has no drafted rosters yet")
+        return team_df, player_df
+
+    def test_scores_are_plausible(self, league_strength):
+        team_df, _ = league_strength
+        raise_on_error(check_team_strength(team_df), context="Draft power rankings")
+
+    def test_league_is_not_flat(self, league_strength):
+        """Distinct rosters must produce distinct scores."""
+        team_df, _ = league_strength
+        assert team_df["Score"].nunique() > 1, (
+            "every team scored identically -- the percentile join failed"
+        )
+
+    def test_positional_scores_differ_within_a_team(self, league_strength):
+        """A team strong everywhere and weak nowhere means the split isn't working."""
+        team_df, _ = league_strength
+        spreads = (team_df[["GK", "DEF", "MID", "FWD"]].max(axis=1)
+                   - team_df[["GK", "DEF", "MID", "FWD"]].min(axis=1))
+        assert spreads.max() > 1.0, (
+            "no team shows any positional variation -- positions are not being "
+            "grouped separately"
+        )
+
+    def test_player_strengths_stay_in_range(self, league_strength):
+        _, player_df = league_strength
+        assert player_df["Player_Strength"].between(0.0, 1.0).all()
+        assert player_df["Raw_Strength"].between(0.0, 1.0).all()
+        assert (player_df["Player_Strength"] <= player_df["Raw_Strength"] + 1e-9).all(), (
+            "the injury discount can only reduce a score"
         )

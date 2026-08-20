@@ -14,6 +14,7 @@ from scripts.common.data_validation import (
     check_score_std,
     check_single_gw_projections,
     check_source_scale_agreement,
+    check_team_strength,
     check_win_probability,
     format_issues,
     raise_on_error,
@@ -200,3 +201,82 @@ class TestReporting:
         text = format_issues([Issue("c", "error", "impossible", "do this instead")])
         assert "ERROR" in text and "impossible" in text and "do this instead" in text
         assert format_issues([]) == "no issues"
+
+
+class TestCheckTeamStrength:
+    """Draft power-ranking scores.
+
+    Every "bad" fixture below is a number this model could actually emit.
+    """
+
+    @staticmethod
+    def _good(n=4):
+        import numpy as np
+        return pd.DataFrame({
+            "Team_Name": [f"T{i}" for i in range(n)],
+            "Score": np.linspace(72, 41, n),
+            "Healthy_Score": np.linspace(75, 43, n),
+            "Injury_Cost": np.linspace(3, 2, n),
+            "GK": np.linspace(70, 40, n),
+            "DEF": np.linspace(80, 44, n),
+            "MID": np.linspace(76, 39, n),
+            "FWD": np.linspace(65, 35, n),
+            "Players": [15] * n,
+        })
+
+    def test_plausible_table_passes(self):
+        assert check_team_strength(self._good()) == []
+
+    def test_empty_table_is_an_error(self):
+        issues = check_team_strength(pd.DataFrame())
+        assert any(i.severity == "error" for i in issues)
+
+    def test_none_is_an_error(self):
+        assert any(i.severity == "error" for i in check_team_strength(None))
+
+    def test_all_teams_identical_is_an_error(self):
+        """The position-code bug: every player defaults to 0.5, every team to 50.0."""
+        df = self._good()
+        for col in ("Score", "Healthy_Score", "GK", "DEF", "MID", "FWD"):
+            df[col] = 50.0
+        df["Injury_Cost"] = 0.0
+        issues = check_team_strength(df)
+        assert any(i.severity == "error" for i in issues)
+        assert any("percentile join" in i.hint for i in issues)
+
+    def test_score_above_one_hundred_is_an_error(self):
+        df = self._good()
+        df.loc[0, "Score"] = 340.0
+        assert any(i.severity == "error" and "0-100" in i.message
+                   for i in check_team_strength(df))
+
+    def test_negative_score_is_an_error(self):
+        df = self._good()
+        df.loc[0, "DEF"] = -12.0
+        assert any(i.severity == "error" for i in check_team_strength(df))
+
+    def test_short_squad_is_an_error(self):
+        df = self._good()
+        df.loc[0, "Players"] = 13
+        assert any(i.severity == "error" and "players" in i.message
+                   for i in check_team_strength(df))
+
+    def test_wrong_team_count_is_an_error(self):
+        assert any(i.severity == "error"
+                   for i in check_team_strength(self._good(n=4), expected_teams=10))
+
+    def test_negative_injury_cost_is_an_error(self):
+        df = self._good()
+        df.loc[0, "Injury_Cost"] = -5.0
+        assert any(i.severity == "error" for i in check_team_strength(df))
+
+    def test_absurd_injury_cost_is_an_error(self):
+        df = self._good()
+        df.loc[0, "Injury_Cost"] = 85.0
+        assert any(i.severity == "error" for i in check_team_strength(df))
+
+    def test_all_zero_scores_is_an_error(self):
+        df = self._good()
+        for col in ("Score", "Healthy_Score", "GK", "DEF", "MID", "FWD", "Injury_Cost"):
+            df[col] = 0.0
+        assert any(i.severity == "error" for i in check_team_strength(df))

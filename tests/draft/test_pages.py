@@ -103,14 +103,52 @@ class TestTeamAnalysisPage:
                 pass  # May call st.stop() on empty data
 
 
+def _power_rankings_fixture():
+    """A two-team league with full 15-player Draft squads, already scored."""
+    players = []
+    for team_id, name, base in [(101, "Alpha", 0.80), (202, "Bravo", 0.45)]:
+        for pos, count in [("G", 2), ("D", 5), ("M", 5), ("F", 3)]:
+            for i in range(count):
+                players.append({
+                    "Team_ID": team_id, "Team_Name": name, "Position": pos,
+                    "Player": f"{name}-{pos}{i}", "Team": "ARS",
+                    "Player_Strength": base, "Raw_Strength": base,
+                    "PPS": 5.0, "form": 4.0, "GWs_Missed": 0,
+                })
+    player_df = pd.DataFrame(players)
+    from scripts.common.team_strength import aggregate_team_strength
+    return aggregate_team_strength(player_df), player_df
+
+
 class TestLeagueAnalysisPage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.draft.league_analysis.get_current_gameweek", return_value=25), \
              patch("scripts.draft.league_analysis.get_draft_points_by_position", return_value={}), \
              patch("scripts.draft.league_analysis.compute_draft_league_bench_data", return_value=[]), \
-             patch("scripts.draft.league_analysis.render_league_bench_analysis"):
+             patch("scripts.draft.league_analysis.render_league_bench_analysis"), \
+             patch("scripts.draft.league_analysis.build_league_strength",
+                   return_value=(pd.DataFrame(), pd.DataFrame())):
             from scripts.draft.league_analysis import show_draft_league_analysis_page
             show_draft_league_analysis_page()
+
+    def test_power_rankings_renders_with_data(self, mock_all_utils):
+        """Exercise the Power Rankings tab body itself, not just the empty path.
+
+        The page early-returns on empty league data, so the smoke test above never
+        reaches tab 8 -- this drives the renderer directly.
+        """
+        team_df, player_df = _power_rankings_fixture()
+        with patch("scripts.draft.league_analysis.build_league_strength",
+                   return_value=(team_df, player_df)):
+            from scripts.draft.league_analysis import _render_power_rankings
+            _render_power_rankings(league_id=12345, current_gw=25)
+
+    def test_power_rankings_handles_no_rosters(self, mock_all_utils):
+        """Pre-draft leagues must show an info message, not raise."""
+        with patch("scripts.draft.league_analysis.build_league_strength",
+                   return_value=(pd.DataFrame(), pd.DataFrame())):
+            from scripts.draft.league_analysis import _render_power_rankings
+            _render_power_rankings(league_id=12345, current_gw=1)
 
 
 class TestTradeAnalyzerPage:

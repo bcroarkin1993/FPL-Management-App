@@ -21,6 +21,7 @@ from scripts.common.error_helpers import get_logger, show_api_error
 from scripts.common.utils import get_current_gameweek, get_draft_points_by_position
 from scripts.common.luck_analysis import calculate_h2h_streaks
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.team_strength import build_league_strength, describe_blend
 
 _logger = get_logger("fpl_app.draft.league_analysis")
 
@@ -514,6 +515,163 @@ def calculate_records(matches_df: pd.DataFrame, weekly_scores: pd.DataFrame) -> 
 # MAIN PAGE
 # ---------------------------
 
+
+# =============================================================================
+# POWER RANKINGS — RENDER HELPERS
+# =============================================================================
+
+# Positional accent colours, and the ordering used everywhere on this tab.
+_POWER_POS = [("GK", "#00b4d8"), ("DEF", "#00ff87"), ("MID", "#ffd166"), ("FWD", "#ef476f")]
+
+
+def _rank_suffix(n: int) -> str:
+    """1 -> 1st, 2 -> 2nd, 11 -> 11th."""
+    if 10 <= n % 100 <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
+def _positional_card(label: str, score: float, rank, n_teams: int, accent: str) -> str:
+    """One dark positional-strength card.
+
+    Every element carries an explicit light `color` — Streamlit's default body text
+    is dark and would be invisible against these backgrounds.
+    """
+    if pd.isna(score):
+        score_txt, rank_txt = "—", "no players"
+    else:
+        score_txt = f"{score:.0f}"
+        try:
+            r = int(rank)
+            rank_txt = f"{r}{_rank_suffix(r)} of {n_teams}"
+        except (TypeError, ValueError):
+            rank_txt = f"of {n_teams}"
+
+    return (
+        f'<div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);'
+        f' border-left: 4px solid {accent}; border-radius: 8px; padding: 12px 14px;'
+        f' margin-bottom: 8px; color: #e0e0e0;">'
+        f'<div style="color: #a0a0b0; font-size: 12px; letter-spacing: 1px;'
+        f' text-transform: uppercase;">{label}</div>'
+        f'<div style="color: {accent}; font-size: 28px; font-weight: 700;'
+        f' line-height: 1.1;">{score_txt}</div>'
+        f'<div style="color: #c0c0d0; font-size: 12px;">{rank_txt}</div>'
+        f'</div>'
+    )
+
+
+def _render_power_rankings(league_id, current_gw):
+    """Render the Power Rankings tab body."""
+    with st.spinner("Scoring every roster in the league..."):
+        team_df, player_df = build_league_strength(league_id, current_gw)
+
+    if team_df.empty:
+        st.info(
+            "No power rankings yet — this needs drafted rosters. If your league has "
+            "drafted, the FPL Draft API may be temporarily unavailable."
+        )
+        return
+
+    st.caption(
+        f"Roster strength on a 0–100 scale, where each player is scored by percentile "
+        f"against every FPL player at their position. Currently weighting "
+        f"**{describe_blend(current_gw)}**."
+    )
+
+    # Highlight the user's own team. element-status keys rosters by `owner`, which is
+    # the entry_id — the same ID config exposes — so this compares directly.
+    my_team_name = None
+    try:
+        my_id = int(config.FPL_DRAFT_TEAM_ID)
+        mine = team_df[team_df["Team_ID"] == my_id]
+        if not mine.empty:
+            my_team_name = mine["Team_Name"].iloc[0]
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+    n_teams = len(team_df)
+    display = team_df.rename(columns={"Team_Name": "Team", "Injury_Cost": "Inj. Cost"})
+    cols = ["Rank", "Team", "Score", "GK", "DEF", "MID", "FWD", "Inj. Cost"]
+    render_styled_table(
+        display[cols],
+        title="League Power Rankings",
+        col_formats={c: "{:.0f}" for c in ("Score", "GK", "DEF", "MID", "FWD")}
+        | {"Inj. Cost": "{:.1f}"},
+        positive_color_cols=["Score", "GK", "DEF", "MID", "FWD"],
+        negative_color_cols=["Inj. Cost"],
+        highlight_row=(lambda row: row.get("Team") == my_team_name) if my_team_name else None,
+    )
+
+    st.markdown("")
+    st.markdown("#### Team Detail")
+
+    for _, team in team_df.iterrows():
+        header = f"#{int(team['Rank'])} · {team['Team_Name']} — {team['Score']:.0f}"
+        if team["Injury_Cost"] >= 1.0:
+            header += f"  (injuries costing {team['Injury_Cost']:.0f})"
+
+        with st.expander(header):
+            card_cols = st.columns(4)
+            for (label, accent), col in zip(_POWER_POS, card_cols):
+                with col:
+                    st.markdown(
+                        _positional_card(label, team[label], team[f"{label}_Rank"],
+                                         n_teams, accent),
+                        unsafe_allow_html=True,
+                    )
+
+            squad = player_df[player_df["Team_ID"] == team["Team_ID"]].copy()
+            if squad.empty:
+                continue
+            squad = squad.sort_values("Player_Strength", ascending=False)
+            squad["Strength"] = squad["Player_Strength"] * 100
+            squad["Pos"] = squad["Position"].map(
+                {"G": "GK", "D": "DEF", "M": "MID", "F": "FWD"}
+            )
+            squad["Status"] = [
+                "Fit" if g <= 0 else f"Out ~{int(g)} GW{'s' if g != 1 else ''}"
+                for g in squad["GWs_Missed"]
+            ]
+            squad["Pts/Start"] = squad["PPS"]
+            render_styled_table(
+                squad[["Player", "Pos", "Team", "Strength", "Pts/Start", "form", "Status"]]
+                .rename(columns={"Team": "Club", "form": "Form"}),
+                col_formats={"Strength": "{:.0f}", "Pts/Start": "{:.1f}", "Form": "{:.1f}"},
+                positive_color_cols=["Strength"],
+                font_size=13,
+            )
+
+    with st.expander("How this is calculated"):
+        st.markdown(
+            f"""
+Every player is scored as a **positional percentile against the full FPL player pool**
+(~700 players), so 85 means *top 15% at that position*. A team's score is the flat mean
+across all 15 players — Draft enforces 2 GK / 5 DEF / 5 MID / 3 FWD, so squads are
+directly comparable.
+
+**Player strength** combines four signals:
+
+| Signal | Weight | What it is |
+|---|---|---|
+| Quality | 60% | Preseason pedigree blended with in-season actuals |
+| This GW | 25% | Rotowire + FFP projection, scaled by start likelihood |
+| Start security | 10% | How reliably they start, vs. rotation risk |
+| Fixtures | 5% | Difficulty of the next 5 gameweeks |
+
+**Quality** shifts from preseason to actuals as the season runs: currently
+**{describe_blend(current_gw)}**. Actuals are 70% *points per start* and 30% recent
+form — points per *start* rather than total points, so a player returning from a long
+injury isn't penalised for the games he missed. Below 4 starts the sample is too thin,
+and preseason pedigree is used alone.
+
+**Injuries** are discounted by the fraction of the *remaining* season a player will
+miss, read from the FPL news feed's expected return date. The same five-week absence
+costs far more in April than in August. **Inj. Cost** is the gap between a team's
+injury-free score and its actual one.
+"""
+        )
+
+
 def show_draft_league_analysis_page():
     """Display the Draft League Analysis page."""
 
@@ -553,14 +711,15 @@ def show_draft_league_analysis_page():
     st.divider()
 
     # Create tabs for different analyses
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "Head-to-Head",
         "Scoring Analysis",
         "Weekly Trends",
         "Strength of Schedule",
         "Records & Streaks",
         "Points by Position",
-        "Bench Analysis"
+        "Bench Analysis",
+        "💪 Power Rankings"
     ])
 
     # ---------------------------
@@ -940,3 +1099,11 @@ def show_draft_league_analysis_page():
             render_league_bench_analysis(league_bench, is_classic=False)
         else:
             st.info("Not enough data for bench analysis.")
+
+
+    # ---------------------------
+    # TAB 8: POWER RANKINGS
+    # ---------------------------
+    with tab8:
+        st.subheader("Team Power Rankings")
+        _render_power_rankings(league_id, current_gw)
