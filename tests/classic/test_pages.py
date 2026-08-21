@@ -123,6 +123,8 @@ class TestInitialSquadOptimizerPage:
         the mocked-empty-data UI smoke test above can't reach."""
         import numpy as np
         from scripts.classic.initial_squad import (
+            CAPTAIN_BONUS_WEIGHT,
+            DEFAULT_BENCH_WEIGHT,
             _build_full_player_pool,
             _apply_eligibility_filters,
             _compute_scores,
@@ -181,8 +183,9 @@ class TestInitialSquadOptimizerPage:
         candidate = _apply_eligibility_filters(scored, exclude_injured=True, min_chance_of_playing=75)
 
         squad_df, totals = solve_squad_ilp(
-            candidate, 100.0, score_col="ExpPts", formation="auto", bench_weight=0.2,
-            captain_score_col="CapPts", captain_bonus_weight=1.0,
+            candidate, 100.0, score_col="ExpPts", formation="auto",
+            bench_weight=DEFAULT_BENCH_WEIGHT,
+            captain_score_col="CapPts", captain_bonus_weight=CAPTAIN_BONUS_WEIGHT,
         )
 
         assert squad_df is not None
@@ -216,6 +219,8 @@ class TestInitialSquadOptimizerPage:
         """
         import numpy as np
         from scripts.classic.initial_squad import (
+            CAPTAIN_BONUS_WEIGHT,
+            DEFAULT_BENCH_WEIGHT,
             _apply_eligibility_filters,
             _build_full_player_pool,
             _compute_scores,
@@ -282,8 +287,9 @@ class TestInitialSquadOptimizerPage:
         assert star_row["ExpPts"] > ringer_row["ExpPts"] * 1.5
 
         squad_df, _ = solve_squad_ilp(
-            candidate, 100.0, score_col="ExpPts", formation="auto", bench_weight=0.2,
-            captain_score_col="CapPts", captain_bonus_weight=1.0,
+            candidate, 100.0, score_col="ExpPts", formation="auto",
+            bench_weight=DEFAULT_BENCH_WEIGHT,
+            captain_score_col="CapPts", captain_bonus_weight=CAPTAIN_BONUS_WEIGHT,
         )
 
         assert squad_df is not None

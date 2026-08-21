@@ -230,3 +230,63 @@ def ordinal(n: int) -> str:
     else:
         suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
     return f"{n}{suffix}"
+
+
+def to_display_name(first_name, second_name=None, web_name=None) -> str:
+    """Build the app's standard display name for a player.
+
+    **This is the preferred format for player names anywhere in the UI.**
+
+    The FPL bootstrap stores a full legal name that nobody uses in conversation
+    ("Bruno Borges Fernandes", "Rúben dos Santos Gato Alves Dias") and a
+    `web_name` that is often too terse or abbreviated to stand alone
+    ("B.Fernandes", "A.Becker", "Raya"). Neither is what a manager expects to
+    read. This returns the common name instead: "Bruno Fernandes", "Alisson
+    Becker", "David Raya".
+
+    Rules, in order:
+      1. Abbreviated web_name ("B.Fernandes") -> expand the initial from
+         first_name: "Bruno Fernandes".
+      2. web_name is already the whole name people use (it equals first_name,
+         or first_name already contains it) -> use the longer of the two, so
+         "Gabriel" stays "Gabriel" and "Thiago" becomes "Igor Thiago".
+      3. web_name is a surname drawn from second_name -> "first_name web_name".
+      4. Anything unexpected -> web_name, else the full name.
+
+    Args:
+        first_name: FPL `first_name`, or a full name if the others are omitted.
+        second_name: FPL `second_name`.
+        web_name: FPL `web_name`.
+
+    Returns:
+        The display name, or "" when there is nothing usable.
+    """
+    first = clean_text(first_name)
+    second = clean_text(second_name)
+    web = clean_text(web_name)
+
+    if not web:
+        return " ".join(p for p in (first, second) if p).strip()
+    if not first:
+        return web
+
+    # 1. "B.Fernandes" / "A. Becker" -> take the surname, keep the real first name.
+    if "." in web:
+        surname = web.split(".")[-1].strip()
+        if surname:
+            return ("%s %s" % (first, surname)).strip()
+
+    first_norm = _strip_accents(first).lower()
+    web_norm = _strip_accents(web).lower()
+
+    # 2. web_name adds nothing to first_name (mononyms, and players whose
+    #    surname already sits in the first_name field).
+    if web_norm == first_norm or web_norm in first_norm.split():
+        return first if len(first) >= len(web) else web
+
+    # 3. The usual case: web_name is the surname.
+    if not second or web_norm in _strip_accents(second).lower():
+        return ("%s %s" % (first, web)).strip()
+
+    # 4. Unrecognised shape -- web_name is still the safer of the two to show.
+    return web

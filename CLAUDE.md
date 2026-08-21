@@ -107,6 +107,25 @@ returns the tier rank so callers can resolve two players contending for one
 reference row in favour of the stronger tier — without that, a fuzzy guess can
 steal a row an exact match already earned.
 
+### Player Display Names
+
+**Always render player names via `to_display_name()` (`scripts/common/text_helpers.py`).
+This is the preferred format for player names on every page.**
+
+Neither raw FPL field is presentable on its own. The bootstrap's full legal name
+is what nobody says out loud ("Bruno Borges Fernandes", "Rúben dos Santos Gato
+Alves Dias"), and `web_name` is frequently abbreviated or too terse to stand
+alone ("B.Fernandes", "A.Becker"). `to_display_name(first_name, second_name,
+web_name)` returns the common name — "Bruno Fernandes", "Alisson Becker",
+"David Raya", "Matheus Cunha" — handling dotted initials, mononyms
+("Gabriel"), and players whose surname sits in the `first_name` field
+("Igor Thiago").
+
+Keep the full legal name in a `Player` column for matching, and put the rendered
+value in `Display_Name`. **Match on `Player`, display `Display_Name`** — swapping
+them silently degrades match rates, since projection sources are matched against
+the full name.
+
 ### Caching
 
 Two-tier caching strategy for fast page navigation:

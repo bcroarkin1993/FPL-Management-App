@@ -43,6 +43,8 @@ from scripts.common.utils import (
     get_fixture_difficulty_grid,
     position_converter,
 )
+from scripts.common.fixture_helpers import style_fixture_difficulty
+from scripts.common.text_helpers import to_display_name
 from scripts.common.analytics import (
     compute_player_scores,
     merge_ffp_single_gw_data,
@@ -60,6 +62,10 @@ _logger = get_logger("fpl_app.initial_squad")
 # sliders in the advanced expander exist for experimentation, not routine use.
 DEFAULT_W_SEASON = 0.70
 DEFAULT_W_WEEK1 = 0.30
+# Bench slots are worth something (rotation cover, an early Bench Boost) but not
+# much: every pound spent on the bench is a pound not in the XI, and at 0.2 the
+# solver was buying real players to sit them.
+DEFAULT_BENCH_WEIGHT = 0.10
 GWS_PER_SEASON = 38
 NEUTRAL_FDR = 3.0
 # ~4% per FDR point away from neutral. Deliberately small — see _compute_scores.
@@ -67,6 +73,17 @@ FIXTURE_TILT = 0.04
 # Where an unranked player sits within their position (see _compute_scores).
 UNRANKED_SEASON_QUANTILE = 0.10
 CAPTAIN_SEASON_WEIGHT = 0.85
+
+# The armband doubles a player's score, so the captain is worth one *extra* copy
+# of himself. That is not a tunable preference -- it is the rule -- so it is a
+# constant rather than a slider.
+CAPTAIN_MULTIPLIER = 2.0
+# Triple Captain is available twice a season (once per half), and each use buys
+# one further multiple for a single gameweek. Amortised over the season that is
+# worth a few percent more, and it accrues to whoever your standout captain is
+# -- which is a reason to pay up for one at squad build time.
+TRIPLE_CAPTAIN_USES = 2
+CAPTAIN_BONUS_WEIGHT = (CAPTAIN_MULTIPLIER - 1.0) + TRIPLE_CAPTAIN_USES / GWS_PER_SEASON
 
 
 # ---------------------------
@@ -179,7 +196,12 @@ def _build_full_player_pool(bootstrap: dict) -> pd.DataFrame:
 
         rows.append({
             "Player_ID": p.get("id"),
+            # `Player` stays the full legal name because the projection merges
+            # match on it. `Display_Name` is what the UI shows -- see
+            # to_display_name() for why neither raw field is presentable.
             "Player": full_name or p.get("web_name", "Unknown"),
+            "Display_Name": to_display_name(
+                p.get("first_name"), p.get("second_name"), p.get("web_name")),
             "Web_Name": p.get("web_name", "Unknown"),
             "Team": team_short,
             "Position": position,
@@ -329,7 +351,8 @@ def _display_rows(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, row in df.iterrows():
         is_cap = bool(row.get("Is_Captain", False))
-        name = f"{row['Player']} (C)" if is_cap else row["Player"]
+        display = row.get("Display_Name") or row["Player"]
+        name = f"{display} (C)" if is_cap else display
         rows.append({
             "Player": name,
             "Team": row["Team"],
@@ -412,20 +435,22 @@ def show_initial_squad_optimizer_page():
         ) / 100.0
 
         st.markdown("---")
-        bcol1, bcol2 = st.columns(2)
-        with bcol1:
-            bench_weight = st.slider(
-                "Bench Weight", min_value=0.0, max_value=0.5, value=0.2, step=0.05,
-                help="How much bench players' score counts toward the objective. "
-                     "Lower than Wildcard's default — this is a starting point, not a final squad.",
-            )
-        with bcol2:
-            captain_bonus_weight = st.slider(
-                "Captain Bonus Weight", min_value=0.0, max_value=2.0, value=1.0, step=0.1,
-                help="Extra weight on the captain's expected points. 1.0 models the real "
-                     "armband (points are doubled), which is what justifies paying a "
-                     "premium price for a standout captain.",
-            )
+        bench_weight = st.slider(
+            "Bench Weight", min_value=0.0, max_value=0.5,
+            value=DEFAULT_BENCH_WEIGHT, step=0.05,
+            help="How much bench players' score counts toward the objective. "
+                 "Well below Wildcard's default — this is a starting point, not a "
+                 "final squad, and budget spent on the bench is budget missing "
+                 "from the XI. Raise it if you want a Bench-Boost-ready squad.",
+        )
+        st.caption(
+            f"**Captaincy is fixed at {CAPTAIN_MULTIPLIER:.0f}x**, because that is the "
+            f"rule rather than a preference — your captain scores double, so the "
+            f"optimizer counts one standout player twice when choosing the squad. "
+            f"It is nudged to {CAPTAIN_BONUS_WEIGHT:.2f}x to account for the two "
+            f"Triple Captain chips (one per half-season), whose value also lands on "
+            f"whoever your best captain is."
+        )
 
         st.markdown("#### Player Filters")
         fcol1, fcol2 = st.columns(2)
@@ -538,7 +563,7 @@ def show_initial_squad_optimizer_page():
                 formation=formation,
                 bench_weight=bench_weight,
                 captain_score_col="CapPts",
-                captain_bonus_weight=captain_bonus_weight,
+                captain_bonus_weight=CAPTAIN_BONUS_WEIGHT,
                 problem_name="FPL_Initial_Squad_Optimizer",
             )
 
@@ -559,9 +584,9 @@ def show_initial_squad_optimizer_page():
         bench_ordered["Bench_Order"] = range(1, len(bench_ordered) + 1)
 
         if "Is_Captain" in squad_df.columns and squad_df["Is_Captain"].any():
-            cap_name = squad_df.loc[squad_df["Is_Captain"], "Player"].iloc[0]
+            cap_name = squad_df.loc[squad_df["Is_Captain"], "Display_Name"].iloc[0]
         else:
-            cap_name = starters.loc[starters["CapPts"].idxmax(), "Player"]
+            cap_name = starters.loc[starters["CapPts"].idxmax(), "Display_Name"]
 
         total_cost = squad_df["Price"].sum()
         remaining = budget - total_cost
@@ -611,6 +636,10 @@ def show_initial_squad_optimizer_page():
 
         st.markdown("---")
         st.markdown("### Opening Fixture Difficulty (Squad Teams)")
+        st.caption(
+            "Difficulty of each squad team's opening fixtures, easiest first. "
+            "1 = easiest, 5 = hardest."
+        )
         try:
             _, fdr_diffs, _ = get_fixture_difficulty_grid(weeks=horizon)
             squad_teams = squad_df["Team"].unique().tolist()
@@ -620,21 +649,29 @@ def show_initial_squad_optimizer_page():
                 fdr_filtered = fdr_diffs.loc[fdr_diffs.index.isin(squad_teams), available_cols].copy()
                 avg_fdr = fdr_filtered.fillna(3).mean(axis=1)
                 fdr_filtered = fdr_filtered.loc[avg_fdr.sort_values().index]
-                palette = {1: "#00c853", 2: "#86efac", 3: "#ffc107", 4: "#ff9800", 5: "#dc3545"}
 
-                def style_cell(val):
-                    if pd.isna(val):
-                        return "background-color: #e5e7eb; color: #111; text-align: center;"
-                    fdr_int = max(1, min(5, int(round(val))))
-                    color = palette[fdr_int]
-                    txt = "#ffffff" if fdr_int >= 5 else "#111111"
-                    return f"background-color: {color}; color: {txt}; text-align: center; font-weight: 600;"
+                # A single gameweek's FDR is one of five discrete grades, so it
+                # renders as an integer. Only the average across gameweeks is a
+                # real fraction and keeps a decimal.
+                disp = pd.DataFrame(index=fdr_filtered.index)
+                disp.insert(0, "Team", fdr_filtered.index)
+                for col in available_cols:
+                    disp[col] = [
+                        "—" if pd.isna(v) else str(int(round(float(v))))
+                        for v in fdr_filtered[col]
+                    ]
+                disp["Avg FDR"] = avg_fdr.loc[fdr_filtered.index].round(1)
 
-                styled = fdr_filtered.style.applymap(style_cell)
-                st.dataframe(styled, use_container_width=True)
+                # Shared renderer, so this grid matches the FDR tables elsewhere
+                # in the app rather than inventing its own palette.
+                st.markdown(
+                    style_fixture_difficulty(disp, fdr_filtered),
+                    unsafe_allow_html=True,
+                )
             else:
                 st.info("FDR data not available for the selected horizon.")
-        except Exception:
+        except Exception as e:
+            _logger.warning("Squad FDR grid unavailable: %s", e)
             st.info("FDR data not available.")
 
         st.markdown("---")
