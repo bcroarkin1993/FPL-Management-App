@@ -11,6 +11,8 @@ so an all-NaN range slips through too.
 """
 
 import logging
+import re
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -98,3 +100,49 @@ class TestRenderStyledTable:
         render_styled_table(df, positive_color_cols=["Value"])
         rendered = " ".join(str(c) for c in mock_streamlit["markdown"].call_args_list)
         assert "color: rgb(" in rendered
+
+
+class TestColorRangeOverrides:
+    """Colouring a selection against the population it was drawn from.
+
+    An optimizer's starting XI is the best 11 of ~600 players. Scaled against
+    only its own rows, the weakest of them renders pure red even though it sits
+    in the top 5% of the league -- the colour says the opposite of the truth.
+    """
+
+    DF = pd.DataFrame({"Player": ["Best", "Weakest starter", "Bench GK"],
+                       "Exp Pts/GW": [6.06, 4.01, 1.90]})
+
+    def _colors(self, **kwargs):
+        out = {}
+        with patch("scripts.common.styled_tables.st") as mock_st:
+            mock_st.markdown.side_effect = lambda html, *a, **k: out.setdefault("html", html)
+            render_styled_table(self.DF, positive_color_cols=["Exp Pts/GW"], **kwargs)
+        return re.findall(r"color: (rgb\([^)]*\)); font-weight: 600", out["html"])
+
+    @staticmethod
+    def _redness(color):
+        r, g, _ = (int(v) for v in re.findall(r"\d+", color))
+        return r - g
+
+    def test_without_override_the_weakest_row_is_pure_red(self):
+        """Documents the behaviour the override exists to correct."""
+        assert self._colors()[-1] == "rgb(220,60,60)"
+
+    def test_override_lifts_a_row_that_is_good_in_the_wider_pool(self):
+        pool = self._colors(color_range_overrides={"Exp Pts/GW": (0.23, 6.06)})
+        squad = self._colors()
+        assert self._redness(pool[-1]) < self._redness(squad[-1])
+        assert self._redness(pool[1]) < self._redness(squad[1])
+
+    def test_top_value_stays_green_either_way(self):
+        assert self._colors()[0] == self._colors(
+            color_range_overrides={"Exp Pts/GW": (0.23, 6.06)})[0]
+
+    def test_degenerate_range_falls_back_to_the_table(self):
+        """A zero-width or non-finite range must not blank out the column."""
+        for bad in ((5.0, 5.0), (float("nan"), 6.0), (0.0, float("inf"))):
+            assert self._colors(color_range_overrides={"Exp Pts/GW": bad}) == self._colors()
+
+    def test_override_for_an_uncoloured_column_is_ignored(self):
+        assert self._colors(color_range_overrides={"Player": (0.0, 1.0)}) == self._colors()

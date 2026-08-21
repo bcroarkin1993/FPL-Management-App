@@ -83,6 +83,7 @@ def render_styled_table(
     highlight_row: Callable = None,
     positive_color_cols: List[str] = None,
     negative_color_cols: List[str] = None,
+    color_range_overrides: Dict[str, tuple] = None,
     max_height: int = None,
     font_size: int = 14,
     title_font_size: int = None,
@@ -99,6 +100,12 @@ def render_styled_table(
     text_align : {col: "left"|"center"|"right"}.
     highlight_row : fn(row) -> bool. Matching rows get an accent left-border.
     positive_color_cols : Columns where higher values are greener.
+    color_range_overrides : {col: (min, max)} to colour against an external
+        reference instead of the rows being rendered. Use this whenever the
+        table is a *selection* from a larger population: the weakest of 11
+        hand-picked players is not a bad value, but scaled against only its
+        peers it renders as pure red. Colour it against the full pool and it
+        reads as what it is.
     negative_color_cols : Columns where higher values are redder.
     max_height : Optional max-height in px (enables vertical scroll).
     font_size : Data and column-header font size in px (default 14).
@@ -114,10 +121,19 @@ def render_styled_table(
     text_align = text_align or {}
     positive_color_cols = positive_color_cols or []
     negative_color_cols = negative_color_cols or []
+    color_range_overrides = color_range_overrides or {}
 
     # Pre-compute min/max for color-scaled columns
     color_ranges = {}
     for col in positive_color_cols + negative_color_cols:
+        if col in color_range_overrides:
+            lo, hi = color_range_overrides[col]
+            if _is_finite(lo) and _is_finite(hi) and hi != lo:
+                color_ranges[col] = (lo, hi)
+                continue
+            _logger.warning(
+                "Ignoring degenerate colour range %r for column %r; falling "
+                "back to the table's own values.", color_range_overrides[col], col)
         if col in df.columns:
             numeric_vals = pd.to_numeric(df[col], errors="coerce")
             finite_vals = numeric_vals[np.isfinite(numeric_vals)]

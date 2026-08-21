@@ -28,6 +28,7 @@ what the armband is actually worth — a doubled score — rather than a roundin
 error on a percentile.
 """
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 from typing import Optional
@@ -380,6 +381,21 @@ def _compute_scores(
     return result
 
 
+def _pool_value_range(pool: pd.DataFrame, col: str):
+    """(min, max) of `col` across the full player pool, for colour scaling.
+
+    Returns None when the column is missing or degenerate, so callers fall back
+    to the renderer's own per-table range.
+    """
+    if pool is None or col not in pool.columns:
+        return None
+    values = pd.to_numeric(pool[col], errors="coerce")
+    values = values[np.isfinite(values)]
+    if values.empty or values.min() == values.max():
+        return None
+    return float(values.min()), float(values.max())
+
+
 def _display_rows(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, row in df.iterrows():
@@ -677,17 +693,29 @@ def show_initial_squad_optimizer_page():
         )
         st.caption(f"Formation: {formation_str} | Captain: {cap_name}")
 
+        # Colour both tables against the whole player pool, not against the 15
+        # players shown. Scaled within the squad, the weakest of an optimal XI
+        # renders pure red even when it sits in the top 5% of the league — which
+        # says the opposite of what is true.
+        exp_pts_range = _pool_value_range(scored_pool, "ExpPts")
+
         render_styled_table(
             _display_rows(starters),
             col_formats=_SCORE_COL_FORMATS,
             positive_color_cols=["Exp Pts/GW"],
+            color_range_overrides={"Exp Pts/GW": exp_pts_range} if exp_pts_range else None,
         )
 
         st.markdown("---")
         st.markdown("### Bench")
         bench_display = _display_rows(bench_ordered)
         bench_display.insert(0, "Order", bench_ordered["Bench_Order"].values)
-        render_styled_table(bench_display, col_formats=_SCORE_COL_FORMATS)
+        render_styled_table(
+            bench_display,
+            col_formats=_SCORE_COL_FORMATS,
+            positive_color_cols=["Exp Pts/GW"],
+            color_range_overrides={"Exp Pts/GW": exp_pts_range} if exp_pts_range else None,
+        )
 
         st.markdown("---")
         st.markdown("### Opening Fixture Difficulty (Squad Teams)")
