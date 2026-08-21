@@ -12,7 +12,7 @@ import math
 import numpy as np
 import pandas as pd
 import streamlit as st
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
 from scripts.common.error_helpers import get_logger
 
@@ -84,6 +84,7 @@ def render_styled_table(
     positive_color_cols: List[str] = None,
     negative_color_cols: List[str] = None,
     color_range_overrides: Dict[str, tuple] = None,
+    color_values: Dict[str, Sequence[float]] = None,
     max_height: int = None,
     font_size: int = 14,
     title_font_size: int = None,
@@ -106,6 +107,13 @@ def render_styled_table(
         hand-picked players is not a bad value, but scaled against only its
         peers it renders as pure red. Colour it against the full pool and it
         reads as what it is.
+    color_values : {col: sequence aligned to df rows} to drive the colour from
+        something other than the displayed number. Needed when the right
+        comparison differs per row -- e.g. grading a goalkeeper against other
+        goalkeepers and a midfielder against midfielders, where one column-wide
+        range cannot express both. Pair it with color_range_overrides, since
+        otherwise the range is taken from these values within this table and
+        the outside reference is lost again.
     negative_color_cols : Columns where higher values are redder.
     max_height : Optional max-height in px (enables vertical scroll).
     font_size : Data and column-header font size in px (default 14).
@@ -122,6 +130,18 @@ def render_styled_table(
     positive_color_cols = positive_color_cols or []
     negative_color_cols = negative_color_cols or []
     color_range_overrides = color_range_overrides or {}
+    color_values = color_values or {}
+    # Align supplied colour values positionally to the rendered rows.
+    color_series = {}
+    for col, values in color_values.items():
+        series = pd.Series(list(values))
+        if len(series) != len(df):
+            _logger.warning(
+                "color_values for %r has %d entries but the table has %d rows; "
+                "ignoring and colouring by the displayed value.",
+                col, len(series), len(df))
+            continue
+        color_series[col] = pd.to_numeric(series, errors="coerce").to_numpy()
 
     # Pre-compute min/max for color-scaled columns
     color_ranges = {}
@@ -134,7 +154,9 @@ def render_styled_table(
             _logger.warning(
                 "Ignoring degenerate colour range %r for column %r; falling "
                 "back to the table's own values.", color_range_overrides[col], col)
-        if col in df.columns:
+        if col in color_series:
+            numeric_vals = pd.Series(color_series[col])
+        elif col in df.columns:
             numeric_vals = pd.to_numeric(df[col], errors="coerce")
             finite_vals = numeric_vals[np.isfinite(numeric_vals)]
             n_nonfinite = int(numeric_vals.notna().sum() - len(finite_vals))
@@ -219,12 +241,15 @@ def render_styled_table(
 
             # Color scaling
             extra_style = ""
-            if col in positive_color_cols and col in color_ranges and pd.notna(val):
+            # Colour from the supplied series when given, so the shade can
+            # reflect a comparison the displayed number doesn't encode.
+            color_val = color_series[col][row_idx] if col in color_series else val
+            if col in positive_color_cols and col in color_ranges and pd.notna(color_val):
                 cmin, cmax = color_ranges[col]
-                extra_style = _color_scale(float(val), cmin, cmax, "positive")
-            elif col in negative_color_cols and col in color_ranges and pd.notna(val):
+                extra_style = _color_scale(float(color_val), cmin, cmax, "positive")
+            elif col in negative_color_cols and col in color_ranges and pd.notna(color_val):
                 cmin, cmax = color_ranges[col]
-                extra_style = _color_scale(float(val), cmin, cmax, "negative")
+                extra_style = _color_scale(float(color_val), cmin, cmax, "negative")
 
             parts.append(
                 f'<td style="{_TD_STYLE}{td_pad}text-align:{align};{extra_style}">{display_val}</td>'

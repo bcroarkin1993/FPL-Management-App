@@ -357,6 +357,61 @@ class TestInitialSquadWeightSliders:
         assert state[season_key] + state[week1_key] == 100
 
 
+class TestPositionalColorRatios:
+    """Grading a squad's expected points within position, for the colour scale.
+
+    A goalkeeper projecting 4.3 is the best in the game; a midfielder
+    projecting 4.3 is ordinary. One shared scale cannot say both, so it says
+    the wrong thing about whichever position projects lower.
+    """
+
+    POOL = pd.DataFrame({
+        "Position": ["G"] * 3 + ["M"] * 3,
+        "ExpPts": [0.6, 2.5, 4.3, 0.3, 3.2, 6.1],
+    })
+
+    def _ratios(self, rows):
+        from scripts.classic.initial_squad import _positional_color_ratios
+        return _positional_color_ratios(rows, self.POOL)
+
+    def test_best_in_each_position_both_grade_top(self):
+        rows = pd.DataFrame({"Position": ["G", "M"], "ExpPts": [4.3, 6.1]})
+        assert self._ratios(rows) == [1.0, 1.0]
+
+    def test_same_raw_value_grades_differently_by_position(self):
+        """4.3 is the best keeper in the pool but a mid-tier midfielder."""
+        rows = pd.DataFrame({"Position": ["G", "M"], "ExpPts": [4.3, 4.3]})
+        gk, mid = self._ratios(rows)
+        assert gk == 1.0
+        assert mid < gk
+
+    def test_worst_in_position_grades_bottom(self):
+        rows = pd.DataFrame({"Position": ["G"], "ExpPts": [0.6]})
+        assert self._ratios(rows) == [0.0]
+
+    def test_values_outside_the_pool_range_are_clamped(self):
+        rows = pd.DataFrame({"Position": ["G", "G"], "ExpPts": [99.0, -5.0]})
+        assert self._ratios(rows) == [1.0, 0.0]
+
+    def test_unknown_position_yields_nan_not_a_wrong_colour(self):
+        rows = pd.DataFrame({"Position": ["F"], "ExpPts": [4.0]})
+        assert pd.isna(self._ratios(rows)[0])
+
+    @pytest.mark.parametrize("rows", [
+        pd.DataFrame(),
+        pd.DataFrame({"ExpPts": [4.0]}),           # no Position column
+        pd.DataFrame({"Position": ["G"]}),          # no value column
+    ])
+    def test_unusable_input_returns_none_to_trigger_fallback(self, rows):
+        assert self._ratios(rows) is None
+
+    def test_flat_pool_returns_none(self):
+        """No spread means no meaningful grading; fall back to the default."""
+        from scripts.classic.initial_squad import _positional_color_ratios
+        flat = pd.DataFrame({"Position": ["G", "G"], "ExpPts": [3.0, 3.0]})
+        assert _positional_color_ratios(flat, flat) is None
+
+
 class TestClassicTeamAnalysisPage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.classic.team_analysis.get_classic_bootstrap_static", return_value={"elements": [], "teams": [], "events": []}), \

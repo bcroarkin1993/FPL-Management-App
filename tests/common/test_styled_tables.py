@@ -146,3 +146,67 @@ class TestColorRangeOverrides:
 
     def test_override_for_an_uncoloured_column_is_ignored(self):
         assert self._colors(color_range_overrides={"Player": (0.0, 1.0)}) == self._colors()
+
+
+class TestColorValues:
+    """Colouring a column by a parallel series instead of its own numbers.
+
+    Needed when the right comparison differs per row. Positions are not
+    comparable on raw expected points -- the best goalkeeper in the game
+    projects roughly what a mid-table midfielder does -- so one column-wide
+    range paints every keeper red for being a keeper.
+    """
+
+    DF = pd.DataFrame({
+        "Player": ["Best GK", "Best MID", "Backup GK"],
+        "Pos": ["G", "M", "G"],
+        "Exp Pts/GW": [4.31, 6.06, 1.90],
+    })
+
+    def _colors(self, **kwargs):
+        out = {}
+        with patch("scripts.common.styled_tables.st") as mock_st:
+            mock_st.markdown.side_effect = lambda html, *a, **k: out.setdefault("html", html)
+            render_styled_table(self.DF, positive_color_cols=["Exp Pts/GW"], **kwargs)
+        return re.findall(r"color: (rgb\([^)]*\)); font-weight: 600", out["html"])
+
+    def _positional(self):
+        # Best-in-position both grade 1.0 despite very different raw values.
+        return self._colors(
+            color_values={"Exp Pts/GW": [1.0, 1.0, 0.34]},
+            color_range_overrides={"Exp Pts/GW": (0.0, 1.0)},
+        )
+
+    def test_best_in_position_grade_equally(self):
+        colors = self._positional()
+        assert colors[0] == colors[1], (
+            "the best goalkeeper and the best midfielder should read the same, "
+            "even though the keeper's raw projection is far lower"
+        )
+
+    def test_without_it_the_best_gk_is_penalised_for_being_a_gk(self):
+        """Documents the behaviour color_values exists to correct."""
+        assert self._colors()[0] != self._colors()[1]
+
+    def test_displayed_values_are_untouched(self):
+        out = {}
+        with patch("scripts.common.styled_tables.st") as mock_st:
+            mock_st.markdown.side_effect = lambda html, *a, **k: out.setdefault("html", html)
+            render_styled_table(
+                self.DF, positive_color_cols=["Exp Pts/GW"],
+                col_formats={"Exp Pts/GW": "{:.2f}"},
+                color_values={"Exp Pts/GW": [1.0, 1.0, 0.34]},
+                color_range_overrides={"Exp Pts/GW": (0.0, 1.0)},
+            )
+        assert "4.31" in out["html"] and "1.90" in out["html"]
+
+    def test_length_mismatch_falls_back_rather_than_misaligning(self):
+        """Colouring row 0 with row 1's grade would be worse than not colouring."""
+        assert self._colors(color_values={"Exp Pts/GW": [1.0, 0.5]}) == self._colors()
+
+    def test_nan_grade_leaves_the_cell_uncoloured(self):
+        colors = self._colors(
+            color_values={"Exp Pts/GW": [1.0, float("nan"), 0.34]},
+            color_range_overrides={"Exp Pts/GW": (0.0, 1.0)},
+        )
+        assert len(colors) == 2

@@ -381,19 +381,46 @@ def _compute_scores(
     return result
 
 
-def _pool_value_range(pool: pd.DataFrame, col: str):
-    """(min, max) of `col` across the full player pool, for colour scaling.
+def _positional_color_ratios(rows: pd.DataFrame, pool: pd.DataFrame,
+                             col: str = "ExpPts"):
+    """Grade each row's `col` against others in the *same position*, as 0-1.
 
-    Returns None when the column is missing or degenerate, so callers fall back
-    to the renderer's own per-table range.
+    Positions are not comparable on raw expected points: the best goalkeeper in
+    the game projects about what a mid-table midfielder does. Grading everyone
+    on one scale therefore paints every keeper red for being a keeper. Scaled
+    within position, the best available GK reads 1.00 — which is the useful
+    statement.
+
+    Returns None if the inputs can't support it, so callers fall back to the
+    renderer's own column-wide range.
     """
-    if pool is None or col not in pool.columns:
+    if pool is None or rows is None or rows.empty:
         return None
-    values = pd.to_numeric(pool[col], errors="coerce")
-    values = values[np.isfinite(values)]
-    if values.empty or values.min() == values.max():
+    if col not in pool.columns or col not in rows.columns:
         return None
-    return float(values.min()), float(values.max())
+    if "Position" not in pool.columns or "Position" not in rows.columns:
+        return None
+
+    bounds = {}
+    pool_vals = pd.to_numeric(pool[col], errors="coerce")
+    for position, group in pool.groupby("Position"):
+        vals = pool_vals.loc[group.index]
+        vals = vals[np.isfinite(vals)]
+        if not vals.empty and vals.min() != vals.max():
+            bounds[position] = (float(vals.min()), float(vals.max()))
+    if not bounds:
+        return None
+
+    ratios = []
+    for _, row in rows.iterrows():
+        value = pd.to_numeric(row.get(col), errors="coerce")
+        span = bounds.get(row.get("Position"))
+        if span is None or not np.isfinite(value):
+            ratios.append(np.nan)
+        else:
+            lo, hi = span
+            ratios.append(min(1.0, max(0.0, (value - lo) / (hi - lo))))
+    return ratios
 
 
 def _display_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -693,17 +720,20 @@ def show_initial_squad_optimizer_page():
         )
         st.caption(f"Formation: {formation_str} | Captain: {cap_name}")
 
-        # Colour both tables against the whole player pool, not against the 15
-        # players shown. Scaled within the squad, the weakest of an optimal XI
-        # renders pure red even when it sits in the top 5% of the league — which
-        # says the opposite of what is true.
-        exp_pts_range = _pool_value_range(scored_pool, "ExpPts")
+        # Colour both tables by where each player sits among others in their
+        # own position across the whole pool — not among the 15 shown. Scaled
+        # within the squad, the weakest of an optimal XI renders pure red while
+        # sitting in the top 5% of the league; scaled across all positions at
+        # once, every goalkeeper looks bad for being a goalkeeper.
+        starter_ratios = _positional_color_ratios(starters, scored_pool)
+        bench_ratios = _positional_color_ratios(bench_ordered, scored_pool)
 
         render_styled_table(
             _display_rows(starters),
             col_formats=_SCORE_COL_FORMATS,
             positive_color_cols=["Exp Pts/GW"],
-            color_range_overrides={"Exp Pts/GW": exp_pts_range} if exp_pts_range else None,
+            color_values={"Exp Pts/GW": starter_ratios} if starter_ratios else None,
+            color_range_overrides={"Exp Pts/GW": (0.0, 1.0)} if starter_ratios else None,
         )
 
         st.markdown("---")
@@ -714,7 +744,8 @@ def show_initial_squad_optimizer_page():
             bench_display,
             col_formats=_SCORE_COL_FORMATS,
             positive_color_cols=["Exp Pts/GW"],
-            color_range_overrides={"Exp Pts/GW": exp_pts_range} if exp_pts_range else None,
+            color_values={"Exp Pts/GW": bench_ratios} if bench_ratios else None,
+            color_range_overrides={"Exp Pts/GW": (0.0, 1.0)} if bench_ratios else None,
         )
 
         st.markdown("---")
