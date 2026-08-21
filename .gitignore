@@ -54,3 +54,8 @@ archive/
 
 # Environment configuration (sensitive values go in .env, not config.py)
 .env
+# Finder/sync duplicates ("file 2.py"). These are never intentional, and one
+# sweep of `git add -A` once committed nine of them by accident.
+*[[:space:]]2.py
+*[[:space:]]2.db
+*[[:space:]]2.db-wal
