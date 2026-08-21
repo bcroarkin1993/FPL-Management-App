@@ -4,6 +4,7 @@ Each test calls the page's show_*() function with all dependencies mocked,
 verifying no exception is raised.
 """
 
+import numpy as np
 import pandas as pd
 import pytest
 from unittest.mock import patch, MagicMock
@@ -355,6 +356,95 @@ class TestInitialSquadWeightSliders:
         assert state[season_key] == season
         assert state[opening_key] == 100 - season
         assert state[season_key] + state[opening_key] == 100
+
+
+class TestUnrankedFloorAndDeadWeight:
+    """Scoring players who appear in no ranking, and keeping them off the bench.
+
+    Rotowire's Top 400 does not sample positions evenly: it lists roughly one
+    goalkeeper per club, so only ~21 of 67 GKs are ranked and every one of them
+    is a starter. A floor taken as a quantile *inside* the ranked distribution
+    therefore paid backup keepers a starter's rate -- 2.65 against a backup
+    defender's 0.40 -- which bought them onto the bench ahead of players who
+    could actually score.
+    """
+
+    @staticmethod
+    def _pool():
+        # GK ranked coverage is deliberately sparse and elite, mirroring reality.
+        rows = []
+        for i, pts in enumerate([190.0, 180.0, 170.0]):
+            rows.append({"Position": "G", "SeasonPG": pts / 38, "Points": 4.0})
+        for i in range(6):
+            rows.append({"Position": "G", "SeasonPG": np.nan, "Points": 0.0})
+        for pts in [180.0, 120.0, 60.0, 30.0]:
+            rows.append({"Position": "D", "SeasonPG": pts / 38, "Points": 3.0})
+        rows.append({"Position": "D", "SeasonPG": np.nan, "Points": 0.0})
+        return pd.DataFrame(rows)
+
+    def _floored(self):
+        from scripts.classic.initial_squad import UNRANKED_FLOOR_FRACTION
+        pool = self._pool()
+        out = pool.copy()
+        for pos, group in pool.groupby("Position"):
+            ranked = group["SeasonPG"].dropna()
+            floor = float(ranked.min()) * UNRANKED_FLOOR_FRACTION
+            out.loc[(out["Position"] == pos) & out["SeasonPG"].isna(), "SeasonPG"] = floor
+        return out
+
+    def test_unranked_scores_below_every_ranked_player_in_position(self):
+        """Absence from a 400-deep list is evidence of being worse than all of it."""
+        out = self._floored()
+        for pos in ("G", "D"):
+            at_pos = out[out["Position"] == pos]
+            ranked_min = self._pool()[self._pool()["Position"] == pos]["SeasonPG"].min()
+            assert at_pos["SeasonPG"].min() < ranked_min
+
+    def test_floor_is_immune_to_sparse_elite_coverage(self):
+        """The specific regression, stated as a property of the two formulas.
+
+        When a position's ranked players are few and uniformly strong -- exactly
+        the goalkeeper case -- a quantile taken *inside* that group lands on a
+        starter-quality number. Anchoring to the group's minimum instead cannot,
+        because it is bounded below by the weakest ranked player and then
+        discounted further.
+        """
+        from scripts.classic.initial_squad import UNRANKED_FLOOR_FRACTION
+        gk_ranked = self._pool().query("Position == 'G'")["SeasonPG"].dropna()
+
+        old_floor = gk_ranked.quantile(0.10)      # what shipped before
+        new_floor = gk_ranked.min() * UNRANKED_FLOOR_FRACTION
+
+        assert new_floor < old_floor
+        assert new_floor < gk_ranked.min(), (
+            "an unranked keeper must score below every ranked keeper"
+        )
+
+    def test_dead_weight_is_flagged_only_when_invisible_to_both_sources(self):
+        from scripts.classic.initial_squad import _drop_dead_weight
+        # Enough live candidates that the solvability guard stays out of the way.
+        pool = pd.DataFrame({
+            "Display_Name": [f"live{i}" for i in range(12)] + ["dead"],
+            "Position": ["D"] * 13,
+            "No_Appeal": [False] * 12 + [True],
+        })
+        kept = _drop_dead_weight(pool)
+        assert "dead" not in kept["Display_Name"].tolist()
+        assert len(kept) == 12
+
+    def test_thin_positions_keep_dead_weight_to_stay_solvable(self):
+        """An unsolvable squad is worse than one weak bench slot."""
+        from scripts.classic.initial_squad import _drop_dead_weight
+        pool = pd.DataFrame({
+            "Position": ["G"] * 5,
+            "No_Appeal": [False, True, True, True, True],
+        })
+        assert len(_drop_dead_weight(pool)) == 5
+
+    def test_missing_flag_column_is_a_no_op(self):
+        from scripts.classic.initial_squad import _drop_dead_weight
+        pool = pd.DataFrame({"Position": ["D", "M"]})
+        assert len(_drop_dead_weight(pool)) == 2
 
 
 class TestPositionalColorRatios:

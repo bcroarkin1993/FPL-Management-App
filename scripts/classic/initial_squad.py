@@ -78,8 +78,11 @@ NEUTRAL_FDR = 3.0
 # against a ~1.9-point gap between the best and 10th-best midfielder -- so
 # fixtures separate similar players without ever outranking quality.
 FIXTURE_TILT = 0.10
-# Where an unranked player sits within their position (see _compute_scores).
-UNRANKED_SEASON_QUANTILE = 0.10
+# What an unranked player is worth, as a fraction of the *weakest ranked* player
+# at their position. Absence from a 400-deep list is evidence of being worse than
+# everyone on it, so the floor sits below the ranked minimum rather than inside
+# the ranked distribution -- see _compute_scores.
+UNRANKED_FLOOR_FRACTION = 0.5
 CAPTAIN_SEASON_WEIGHT = 0.85
 
 # The armband doubles a player's score. That is the rule, not a tunable
@@ -253,12 +256,50 @@ def _build_full_player_pool(bootstrap: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# Below this many candidates at a position, dropping dead weight risks making
+# the squad unsolvable, so the rule yields rather than the optimizer failing.
+_MIN_CANDIDATES_PER_POSITION = {"G": 4, "D": 10, "M": 10, "F": 6}
+
+
+def _drop_dead_weight(pool: pd.DataFrame) -> pd.DataFrame:
+    """Remove players with no points appeal at all.
+
+    A player in neither the season rankings nor the GW1 table has no evidence
+    he will ever score. That is fine for a slot you never use, but Bench Boost
+    turns all four bench slots live, and the alternative costs almost nothing:
+    a ranked replacement is the same price at DEF/MID/FWD and £0.5m more at GK.
+
+    This is deliberately not the same lever as bench weight. Bench weight asks
+    how much bench *points* count; this asks whether a slot can score at all.
+
+    Positions that would be left too thin keep their dead weight — an
+    unsolvable squad is worse than a weak bench slot.
+    """
+    if "No_Appeal" not in pool.columns:
+        return pool
+
+    keep = ~pool["No_Appeal"].fillna(False)
+    for position, minimum in _MIN_CANDIDATES_PER_POSITION.items():
+        at_pos = pool["Position"] == position
+        if int((keep & at_pos).sum()) < minimum:
+            _logger.warning(
+                "Only %d %s candidates survive the dead-weight filter (need %d); "
+                "keeping them to stay solvable.",
+                int((keep & at_pos).sum()), position, minimum,
+            )
+            keep = keep | at_pos
+    return pool[keep].reset_index(drop=True)
+
+
 def _apply_eligibility_filters(
     pool: pd.DataFrame,
     exclude_injured: bool = True,
     min_chance_of_playing: int = 75,
+    exclude_dead_weight: bool = True,
 ) -> pd.DataFrame:
     """Narrow the scored pool down to squad-selection candidates."""
+    if exclude_dead_weight:
+        pool = _drop_dead_weight(pool)
     if not exclude_injured:
         return pool
 
@@ -341,15 +382,27 @@ def _compute_scores(
 
     # A player absent from a 400-deep season ranking is not average — absence is
     # itself the signal, the same way absence from Rotowire's weekly table means
-    # "not starting". Give them a low positional baseline rather than the median
-    # a NaN percentile would otherwise hand them for free.
-    n_unmatched = int(result["SeasonPG"].isna().sum())
+    # "not starting".
+    #
+    # The floor must be a fraction of the position's *weakest ranked* player, not
+    # a quantile inside the ranked distribution. Coverage is not uniform across
+    # positions: Rotowire lists roughly one goalkeeper per club, so only ~21 of
+    # 67 GKs are ranked and they are all starters. A 10th-percentile-of-ranked
+    # floor therefore paid every backup keeper a starter's rate — 2.65 against a
+    # backup defender's 0.40 — and bought them onto the bench.
+    result["Unranked"] = result["SeasonPG"].isna()
+    n_unmatched = int(result["Unranked"].sum())
     for pos, group in result.groupby("Position"):
-        floor = group["SeasonPG"].quantile(UNRANKED_SEASON_QUANTILE)
-        if pd.isna(floor):
-            floor = 0.0
+        ranked = group["SeasonPG"].dropna()
+        floor = float(ranked.min()) * UNRANKED_FLOOR_FRACTION if not ranked.empty else 0.0
         result.loc[(result["Position"] == pos) & result["SeasonPG"].isna(), "SeasonPG"] = floor
     result["SeasonPG"] = result["SeasonPG"].fillna(0.0)
+
+    # "Dead weight": invisible to both sources, so there is no evidence they will
+    # ever score. Distinct from simply being cheap — a cheap ranked player still
+    # returns something on a Bench Boost, these return nothing.
+    result["No_Appeal"] = result["Unranked"] & ~(pd.to_numeric(
+        result["Points"], errors="coerce").fillna(0) > 0)
 
     # Opening fixtures modify the *opening* term only. Applying them to the
     # whole blend double-counts: a season-long projection already prices in all
@@ -378,9 +431,9 @@ def _compute_scores(
 
     if n_unmatched:
         _logger.info(
-            "Initial squad: %d/%d players had no season ranking — using the "
-            "%.0fth-percentile positional baseline.",
-            n_unmatched, len(result), UNRANKED_SEASON_QUANTILE * 100,
+            "Initial squad: %d/%d players had no season ranking — floored at "
+            "%.0f%% of the weakest ranked player in their position.",
+            n_unmatched, len(result), UNRANKED_FLOOR_FRACTION * 100,
         )
     if stats is not None:
         stats["season"] = season_stats
@@ -555,6 +608,15 @@ def show_initial_squad_optimizer_page():
         )
 
         st.markdown("#### Player Filters")
+        exclude_dead_weight = st.checkbox(
+            "Avoid players with no points appeal", value=True,
+            help="Skip players who appear in neither the season rankings nor the "
+                 "GW1 table — there is no evidence they will ever score. Bench "
+                 "Boost makes all four bench slots live, and a ranked "
+                 "replacement costs the same at DEF/MID/FWD and £0.5m more at GK. "
+                 "Separate from Bench Weight, which asks how much bench points "
+                 "count rather than whether a slot can score at all.",
+        )
         fcol1, fcol2 = st.columns(2)
         with fcol1:
             exclude_injured = st.checkbox("Exclude injured/doubtful players", value=True)
@@ -617,7 +679,9 @@ def show_initial_squad_optimizer_page():
                 current_gw, w_season, w_opening, stats=merge_stats,
             )
             candidate_pool = _apply_eligibility_filters(
-                scored_pool, exclude_injured=exclude_injured, min_chance_of_playing=min_chance
+                scored_pool, exclude_injured=exclude_injured,
+                min_chance_of_playing=min_chance,
+                exclude_dead_weight=exclude_dead_weight,
             )
 
             if candidate_pool.empty:

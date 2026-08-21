@@ -376,11 +376,24 @@ rounding error on a percentile.
 **ROS is deliberately unused** here — it depends on live-season signals (form,
 starts, multi-GW FFP data) that don't exist before GW1.
 
-**Unranked players get a positional floor, not the median.** A player outside a
-400-deep season ranking is not average; absence is itself the signal, the same
-way absence from Rotowire's weekly table means "not starting". They take the
-10th-percentile `SeasonPG` for their position. Letting `positional_percentile()`
-hand its 0.5 default to 243 of 599 players made genuine fodder look mid-table.
+**Unranked players are floored below every ranked player at their position.** A
+player outside a 400-deep season ranking is not average; absence is itself the
+signal, the same way absence from Rotowire's weekly table means "not starting".
+
+The floor must anchor to the position's *ranked minimum* (times
+`UNRANKED_FLOOR_FRACTION`), **not** a quantile inside the ranked distribution.
+Rotowire does not sample positions evenly — it lists roughly one goalkeeper per
+club, so only ~21 of 67 GKs are ranked and all of them are starters. A
+10th-percentile-of-ranked floor therefore paid every backup keeper a starter's
+rate (2.65 against a backup defender's 0.40) and bought them onto the bench.
+
+**Dead weight** — players in neither the season rankings nor the GW1 table — is
+dropped from the candidate pool by default (`_drop_dead_weight()`). Bench Boost
+makes all four bench slots live, and a ranked replacement costs the same at
+DEF/MID/FWD and £0.5m more at GK. This is a different lever from bench weight:
+bench weight asks how much bench *points* count, this asks whether a slot can
+score at all. Positions that would be left too thin keep their dead weight — an
+unsolvable squad is worse than one weak slot.
 
 Both Rotowire URLs (season and GW1) are pinned in `config.py` — neither slug is
 auto-discoverable — and both are editable in the page's **Data Sources** panel,
