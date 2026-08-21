@@ -97,7 +97,7 @@ def _data_source_urls():
     config.py — and because a failed fetch degrades to an empty frame, the page
     looked identical either way.
     """
-    with st.expander("Data Sources — Rotowire article URLs", expanded=False):
+    with st.expander("Rotowire URLs", expanded=False):
         st.caption(
             "This squad is built from **two** Rotowire tables: the season-long "
             "Top 400 and the GW1 rankings. Neither article slug is "
