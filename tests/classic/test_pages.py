@@ -303,6 +303,60 @@ class TestInitialSquadOptimizerPage:
         assert squad_df["Price"].sum() >= 95.0
 
 
+class TestInitialSquadWeightSliders:
+    """The two scoring weights are one split, bound to always total 100%.
+
+    They used to be free sliders normalized after the fact, which silently
+    rescaled the input -- 70/70 rendered as 70 and 70 but scored as 50/50, so
+    the numbers on screen stopped meaning what they said.
+    """
+
+    def _state(self, season, week1):
+        import streamlit as st
+        from scripts.classic.initial_squad import _W_SEASON_KEY, _W_WEEK1_KEY
+        st.session_state = {_W_SEASON_KEY: season, _W_WEEK1_KEY: week1}
+        return st.session_state, _W_SEASON_KEY, _W_WEEK1_KEY
+
+    def test_defaults_are_the_documented_split(self):
+        import streamlit as st
+        from scripts.classic.initial_squad import (
+            DEFAULT_W_SEASON, DEFAULT_W_WEEK1, _W_SEASON_KEY, _W_WEEK1_KEY,
+            _init_weight_state,
+        )
+        st.session_state = {}
+        _init_weight_state()
+        assert st.session_state[_W_SEASON_KEY] == int(round(DEFAULT_W_SEASON * 100))
+        assert st.session_state[_W_WEEK1_KEY] == int(round(DEFAULT_W_WEEK1 * 100))
+
+    def test_existing_values_are_not_clobbered(self):
+        """Re-running the page must not reset a split the user chose."""
+        import streamlit as st
+        from scripts.classic.initial_squad import (
+            _W_SEASON_KEY, _W_WEEK1_KEY, _init_weight_state,
+        )
+        st.session_state = {_W_SEASON_KEY: 40, _W_WEEK1_KEY: 60}
+        _init_weight_state()
+        assert st.session_state[_W_SEASON_KEY] == 40
+
+    @pytest.mark.parametrize("week1", [0, 30, 60, 100])
+    def test_moving_week1_drives_season_down(self, week1):
+        from scripts.classic.initial_squad import _sync_weight_from_week1
+        state, season_key, week1_key = self._state(70, week1)
+        _sync_weight_from_week1()
+        assert state[week1_key] == week1
+        assert state[season_key] == 100 - week1
+        assert state[season_key] + state[week1_key] == 100
+
+    @pytest.mark.parametrize("season", [0, 55, 85, 100])
+    def test_moving_season_drives_week1_down(self, season):
+        from scripts.classic.initial_squad import _sync_weight_from_season
+        state, season_key, week1_key = self._state(season, 30)
+        _sync_weight_from_season()
+        assert state[season_key] == season
+        assert state[week1_key] == 100 - season
+        assert state[season_key] + state[week1_key] == 100
+
+
 class TestClassicTeamAnalysisPage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.classic.team_analysis.get_classic_bootstrap_static", return_value={"elements": [], "teams": [], "events": []}), \

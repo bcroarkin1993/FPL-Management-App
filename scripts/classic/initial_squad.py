@@ -111,6 +111,29 @@ def _score_card(label: str, value: str, accent: str = "#00ff87") -> str:
     )
 
 
+# Streamlit widgets own their value via session_state, so binding two sliders
+# together means writing the partner's key in an on_change callback -- which
+# runs before the rerun that redraws it.
+_W_SEASON_KEY = "isq_w_season_pct"
+_W_WEEK1_KEY = "isq_w_week1_pct"
+
+
+def _init_weight_state() -> None:
+    """Seed the weight sliders once per session."""
+    if _W_SEASON_KEY not in st.session_state:
+        st.session_state[_W_SEASON_KEY] = int(round(DEFAULT_W_SEASON * 100))
+    if _W_WEEK1_KEY not in st.session_state:
+        st.session_state[_W_WEEK1_KEY] = int(round(DEFAULT_W_WEEK1 * 100))
+
+
+def _sync_weight_from_season() -> None:
+    st.session_state[_W_WEEK1_KEY] = 100 - st.session_state[_W_SEASON_KEY]
+
+
+def _sync_weight_from_week1() -> None:
+    st.session_state[_W_SEASON_KEY] = 100 - st.session_state[_W_WEEK1_KEY]
+
+
 def _data_source_urls():
     """Editable URLs for both Rotowire feeds.
 
@@ -426,16 +449,35 @@ def show_initial_squad_optimizer_page():
             "a season-opening squad is a hold-for-many-weeks decision, so pedigree "
             "should lead. You shouldn't need to touch these."
         )
+        # The two weights are a single split, so they are bound to each other:
+        # moving one drives the other down to keep the total at 100%. The
+        # alternative -- two free sliders normalized after the fact -- silently
+        # rescales whatever you type, so 70/70 becomes 50/50 and the numbers on
+        # screen stop meaning what they say.
+        _init_weight_state()
         wcol1, wcol2 = st.columns(2)
         with wcol1:
-            w_season_pct = st.slider(
-                "Season-Long Weight (%)", 0, 100, int(DEFAULT_W_SEASON * 100))
+            st.slider(
+                "Season-Long Weight (%)", 0, 100, step=5,
+                key=_W_SEASON_KEY, on_change=_sync_weight_from_season,
+                help="Rotowire's season-long Top 400. Leads by default — a "
+                     "season-opening squad is a hold-for-many-weeks decision.",
+            )
         with wcol2:
-            w_week1_pct = st.slider(
-                "Week 1 Weight (%)", 0, 100, int(DEFAULT_W_WEEK1 * 100))
-        w_total = max(w_season_pct + w_week1_pct, 1)
-        w_season = w_season_pct / w_total
-        w_week1 = w_week1_pct / w_total
+            st.slider(
+                "Week 1 Weight (%)", 0, 100, step=5,
+                key=_W_WEEK1_KEY, on_change=_sync_weight_from_week1,
+                help="Rotowire's GW1 rankings. Raise this to prioritise a fast "
+                     "start over season-long value.",
+            )
+        w_season_pct = st.session_state[_W_SEASON_KEY]
+        w_week1_pct = st.session_state[_W_WEEK1_KEY]
+        st.caption(
+            f"Split: **{w_season_pct}% season-long / {w_week1_pct}% Week 1** "
+            "— the two always total 100%."
+        )
+        w_season = w_season_pct / 100.0
+        w_week1 = w_week1_pct / 100.0
 
         fixture_tilt = st.slider(
             "Opening Fixture Tilt (% per FDR point)", 0.0, 15.0, FIXTURE_TILT * 100, step=1.0,
