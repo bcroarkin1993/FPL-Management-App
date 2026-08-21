@@ -178,7 +178,7 @@ class TestInitialSquadOptimizerPage:
         full_pool = _build_full_player_pool(bootstrap)
         scored = _compute_scores(
             full_pool, gw1_df, season_df, None, fdr_avg,
-            current_gw=1, w_season=0.70, w_week1=0.30,
+            current_gw=1, w_season=0.70, w_opening=0.30,
         )
         candidate = _apply_eligibility_filters(scored, exclude_injured=True, min_chance_of_playing=75)
 
@@ -275,7 +275,7 @@ class TestInitialSquadOptimizerPage:
         scored = _compute_scores(
             _build_full_player_pool({"elements": elements, "teams": teams}),
             _rows(season=False), _rows(season=True), None, fdr_avg,
-            current_gw=1, w_season=0.70, w_week1=0.30,
+            current_gw=1, w_season=0.70, w_opening=0.30,
         )
         candidate = _apply_eligibility_filters(scored, exclude_injured=True, min_chance_of_playing=75)
 
@@ -311,50 +311,50 @@ class TestInitialSquadWeightSliders:
     the numbers on screen stopped meaning what they said.
     """
 
-    def _state(self, season, week1):
+    def _state(self, season, opening):
         import streamlit as st
-        from scripts.classic.initial_squad import _W_SEASON_KEY, _W_WEEK1_KEY
-        st.session_state = {_W_SEASON_KEY: season, _W_WEEK1_KEY: week1}
-        return st.session_state, _W_SEASON_KEY, _W_WEEK1_KEY
+        from scripts.classic.initial_squad import _W_SEASON_KEY, _W_OPENING_KEY
+        st.session_state = {_W_SEASON_KEY: season, _W_OPENING_KEY: opening}
+        return st.session_state, _W_SEASON_KEY, _W_OPENING_KEY
 
     def test_defaults_are_the_documented_split(self):
         import streamlit as st
         from scripts.classic.initial_squad import (
-            DEFAULT_W_SEASON, DEFAULT_W_WEEK1, _W_SEASON_KEY, _W_WEEK1_KEY,
+            DEFAULT_W_SEASON, DEFAULT_W_OPENING, _W_SEASON_KEY, _W_OPENING_KEY,
             _init_weight_state,
         )
         st.session_state = {}
         _init_weight_state()
         assert st.session_state[_W_SEASON_KEY] == int(round(DEFAULT_W_SEASON * 100))
-        assert st.session_state[_W_WEEK1_KEY] == int(round(DEFAULT_W_WEEK1 * 100))
+        assert st.session_state[_W_OPENING_KEY] == int(round(DEFAULT_W_OPENING * 100))
 
     def test_existing_values_are_not_clobbered(self):
         """Re-running the page must not reset a split the user chose."""
         import streamlit as st
         from scripts.classic.initial_squad import (
-            _W_SEASON_KEY, _W_WEEK1_KEY, _init_weight_state,
+            _W_SEASON_KEY, _W_OPENING_KEY, _init_weight_state,
         )
-        st.session_state = {_W_SEASON_KEY: 40, _W_WEEK1_KEY: 60}
+        st.session_state = {_W_SEASON_KEY: 40, _W_OPENING_KEY: 60}
         _init_weight_state()
         assert st.session_state[_W_SEASON_KEY] == 40
 
     @pytest.mark.parametrize("week1", [0, 30, 60, 100])
-    def test_moving_week1_drives_season_down(self, week1):
-        from scripts.classic.initial_squad import _sync_weight_from_week1
-        state, season_key, week1_key = self._state(70, week1)
-        _sync_weight_from_week1()
-        assert state[week1_key] == week1
+    def test_moving_fast_start_drives_season_down(self, week1):
+        from scripts.classic.initial_squad import _sync_weight_from_opening
+        state, season_key, opening_key = self._state(70, week1)
+        _sync_weight_from_opening()
+        assert state[opening_key] == week1
         assert state[season_key] == 100 - week1
-        assert state[season_key] + state[week1_key] == 100
+        assert state[season_key] + state[opening_key] == 100
 
     @pytest.mark.parametrize("season", [0, 55, 85, 100])
-    def test_moving_season_drives_week1_down(self, season):
+    def test_moving_season_drives_fast_start_down(self, season):
         from scripts.classic.initial_squad import _sync_weight_from_season
-        state, season_key, week1_key = self._state(season, 30)
+        state, season_key, opening_key = self._state(season, 30)
         _sync_weight_from_season()
         assert state[season_key] == season
-        assert state[week1_key] == 100 - season
-        assert state[season_key] + state[week1_key] == 100
+        assert state[opening_key] == 100 - season
+        assert state[season_key] + state[opening_key] == 100
 
 
 class TestPositionalColorRatios:

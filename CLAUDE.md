@@ -333,11 +333,24 @@ This is the single most important thing about this page, and the opposite of how
 Draft scoring works.
 
 ```
-SeasonPG = SeasonProjection / 38          # Rotowire Top-400, as a per-GW rate
-GW1PG    = _effective_proj                # blended GW1 projection x start likelihood
-ExpPts   = (0.70*SeasonPG + 0.30*GW1PG) * (1 + 0.04*(3.0 - Team_AvgFDR))
-CapPts   = 0.85*SeasonPG + 0.15*GW1PG     # armband goes on a week-in producer
+SeasonPG  = SeasonProjection / 38          # Rotowire Top-400, as a per-GW rate
+GW1PG     = _effective_proj                # blended GW1 projection x start likelihood
+OpeningPG = GW1PG * (1 + 0.10*(3.0 - Team_AvgFDR))   # "fast start"
+ExpPts    = 0.70*SeasonPG + 0.30*OpeningPG
+CapPts    = 0.85*SeasonPG + 0.15*GW1PG     # armband goes on a week-in producer
 ```
+
+**Fixtures modify the opening term only, never the blend.** Multiplying the whole
+expression -- as this once did -- inflates the *season-long* projection for a soft
+opening month, but that projection already prices in all 38 fixtures. The player
+will have been transferred around a bad opening run long before it costs a
+season. Confining the tilt to the opening term also lets it be meaningful: at 10%
+per FDR point it is worth ~0.25 expected points across the league's actual FDR
+spread, against a ~1.9-point gap between the best and 10th-best midfielder -- a
+tiebreaker between similar players, never an override of quality.
+
+The UI therefore exposes **one** trade-off, not three: season-long quality versus
+a fast start, as two sliders bound to total 100%.
 
 Percentiles are the right currency for Draft, where you compare rank and there is
 no budget. They are actively wrong for Classic, where the budget makes you buy

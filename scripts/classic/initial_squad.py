@@ -66,15 +66,18 @@ _logger = get_logger("fpl_app.initial_squad")
 # hold-for-many-weeks decision, so season-long pedigree should dominate. The
 # sliders in the advanced expander exist for experimentation, not routine use.
 DEFAULT_W_SEASON = 0.70
-DEFAULT_W_WEEK1 = 0.30
+DEFAULT_W_OPENING = 0.30
 # Bench slots are worth something (rotation cover, an early Bench Boost) but not
 # much: every pound spent on the bench is a pound not in the XI, and at 0.2 the
 # solver was buying real players to sit them.
 DEFAULT_BENCH_WEIGHT = 0.10
 GWS_PER_SEASON = 38
 NEUTRAL_FDR = 3.0
-# ~4% per FDR point away from neutral. Deliberately small — see _compute_scores.
-FIXTURE_TILT = 0.04
+# 10% per FDR point away from neutral, applied to the opening component only.
+# Across the league's actual FDR spread that is worth ~0.25 expected points,
+# against a ~1.9-point gap between the best and 10th-best midfielder -- so
+# fixtures separate similar players without ever outranking quality.
+FIXTURE_TILT = 0.10
 # Where an unranked player sits within their position (see _compute_scores).
 UNRANKED_SEASON_QUANTILE = 0.10
 CAPTAIN_SEASON_WEIGHT = 0.85
@@ -116,23 +119,23 @@ def _score_card(label: str, value: str, accent: str = "#00ff87") -> str:
 # together means writing the partner's key in an on_change callback -- which
 # runs before the rerun that redraws it.
 _W_SEASON_KEY = "isq_w_season_pct"
-_W_WEEK1_KEY = "isq_w_week1_pct"
+_W_OPENING_KEY = "isq_w_opening_pct"
 
 
 def _init_weight_state() -> None:
     """Seed the weight sliders once per session."""
     if _W_SEASON_KEY not in st.session_state:
         st.session_state[_W_SEASON_KEY] = int(round(DEFAULT_W_SEASON * 100))
-    if _W_WEEK1_KEY not in st.session_state:
-        st.session_state[_W_WEEK1_KEY] = int(round(DEFAULT_W_WEEK1 * 100))
+    if _W_OPENING_KEY not in st.session_state:
+        st.session_state[_W_OPENING_KEY] = int(round(DEFAULT_W_OPENING * 100))
 
 
 def _sync_weight_from_season() -> None:
-    st.session_state[_W_WEEK1_KEY] = 100 - st.session_state[_W_SEASON_KEY]
+    st.session_state[_W_OPENING_KEY] = 100 - st.session_state[_W_SEASON_KEY]
 
 
-def _sync_weight_from_week1() -> None:
-    st.session_state[_W_SEASON_KEY] = 100 - st.session_state[_W_WEEK1_KEY]
+def _sync_weight_from_opening() -> None:
+    st.session_state[_W_SEASON_KEY] = 100 - st.session_state[_W_OPENING_KEY]
 
 
 def _data_source_urls():
@@ -278,7 +281,7 @@ def _compute_scores(
     fdr_avg: pd.Series,
     current_gw: int,
     w_season: float,
-    w_week1: float,
+    w_opening: float,
     fixture_tilt: float = FIXTURE_TILT,
     stats: Optional[dict] = None,
 ) -> pd.DataFrame:
@@ -348,12 +351,18 @@ def _compute_scores(
         result.loc[(result["Position"] == pos) & result["SeasonPG"].isna(), "SeasonPG"] = floor
     result["SeasonPG"] = result["SeasonPG"].fillna(0.0)
 
-    # Opening fixtures nudge, they don't override: a season-long projection
-    # already prices in the full 38-game schedule, and you can transfer around a
-    # bad opening run long before it costs you the season.
-    fixture_mult = 1.0 + fixture_tilt * (NEUTRAL_FDR - result["Team_AvgFDR"])
+    # Opening fixtures modify the *opening* term only. Applying them to the
+    # whole blend double-counts: a season-long projection already prices in all
+    # 38 fixtures, so multiplying it by opening-slate ease inflates a player's
+    # full-season value for a soft first month he will have long since
+    # transferred around.
+    result["OpeningPG"] = result["GW1 Proj Pts"] * (
+        1.0 + fixture_tilt * (NEUTRAL_FDR - result["Team_AvgFDR"])
+    )
 
-    result["ExpPts"] = (w_season * result["SeasonPG"] + w_week1 * result["GW1 Proj Pts"]) * fixture_mult
+    # The trade-off is now a single question: how much does a fast start matter
+    # against season-long quality?
+    result["ExpPts"] = w_season * result["SeasonPG"] + w_opening * result["OpeningPG"]
 
     # The armband goes on a week-in, week-out producer, so it leans harder on
     # season pedigree than the squad score does.
@@ -362,7 +371,7 @@ def _compute_scores(
 
     result["Player Score"] = (
         w_season * result["Season Score"]
-        + w_week1 * result["Week1 Score"]
+        + w_opening * result["Week1 Score"]
     )
     result["Captain Score"] = (CAPTAIN_SEASON_WEIGHT * result["Season Score"]
                                + (1.0 - CAPTAIN_SEASON_WEIGHT) * result["Week1 Score"])
@@ -457,11 +466,12 @@ _SCORE_COL_FORMATS = {
 def show_initial_squad_optimizer_page():
     st.title("🆕 Initial Squad Optimizer")
     st.caption(
-        f"Build your season-opening 15-man squad from **{DEFAULT_W_SEASON:.0%} "
-        f"season-long Rotowire value + {DEFAULT_W_WEEK1:.0%} GW1 projection**, "
-        "adjusted for opening fixtures. Players are ranked by expected points per "
-        "gameweek, so a premium has to out-score its price tag — and captaincy is "
-        "part of that maths, not assigned after the fact."
+        f"Build your season-opening 15-man squad by trading **season-long value "
+        f"({DEFAULT_W_SEASON:.0%})** against a **fast start ({DEFAULT_W_OPENING:.0%})** "
+        "— the latter combining the GW1 projection with opening-fixture ease. "
+        "Players are ranked by expected points per gameweek, so a premium has to "
+        "out-score its price tag, and captaincy is part of that maths rather than "
+        "assigned after the fact."
     )
 
     current_gw = get_current_gameweek() or 1
@@ -488,9 +498,10 @@ def show_initial_squad_optimizer_page():
 
     with st.expander("Advanced — Scoring Weights & Filters", expanded=False):
         st.caption(
-            f"Defaults to {DEFAULT_W_SEASON:.0%} season-long / {DEFAULT_W_WEEK1:.0%} Week 1 — "
-            "a season-opening squad is a hold-for-many-weeks decision, so pedigree "
-            "should lead. You shouldn't need to touch these."
+            f"One trade-off: season-long quality versus a fast start. Defaults to "
+            f"{DEFAULT_W_SEASON:.0%}/{DEFAULT_W_OPENING:.0%} — a season-opening squad is a "
+            "hold-for-many-weeks decision, so pedigree should lead. You shouldn't "
+            "need to touch this."
         )
         # The two weights are a single split, so they are bound to each other:
         # moving one drives the other down to keep the total at 100%. The
@@ -503,31 +514,27 @@ def show_initial_squad_optimizer_page():
             st.slider(
                 "Season-Long Weight (%)", 0, 100, step=5,
                 key=_W_SEASON_KEY, on_change=_sync_weight_from_season,
-                help="Rotowire's season-long Top 400. Leads by default — a "
-                     "season-opening squad is a hold-for-many-weeks decision.",
+                help="Rotowire's season-long Top 400 — value over all 38 "
+                     "gameweeks. Leads by default.",
             )
         with wcol2:
             st.slider(
-                "Week 1 Weight (%)", 0, 100, step=5,
-                key=_W_WEEK1_KEY, on_change=_sync_weight_from_week1,
-                help="Rotowire's GW1 rankings. Raise this to prioritise a fast "
-                     "start over season-long value.",
+                "Fast Start Weight (%)", 0, 100, step=5,
+                key=_W_OPENING_KEY, on_change=_sync_weight_from_opening,
+                help="Rotowire's GW1 projection, scaled by how kind the opening "
+                     "fixtures are over your chosen horizon. Raise it to "
+                     "prioritise points now over points across the season.",
             )
         w_season_pct = st.session_state[_W_SEASON_KEY]
-        w_week1_pct = st.session_state[_W_WEEK1_KEY]
+        w_opening_pct = st.session_state[_W_OPENING_KEY]
         st.caption(
-            f"Split: **{w_season_pct}% season-long / {w_week1_pct}% Week 1** "
-            "— the two always total 100%."
+            f"Split: **{w_season_pct}% season-long / {w_opening_pct}% fast start** "
+            "— the two always total 100%. Fast start = GW1 projection adjusted "
+            f"by opening fixtures (±{FIXTURE_TILT:.0%} per FDR point away from average)."
         )
         w_season = w_season_pct / 100.0
-        w_week1 = w_week1_pct / 100.0
+        w_opening = w_opening_pct / 100.0
 
-        fixture_tilt = st.slider(
-            "Opening Fixture Tilt (% per FDR point)", 0.0, 15.0, FIXTURE_TILT * 100, step=1.0,
-            help="How much easier opening fixtures inflate a player's expected points. "
-                 "Kept small by default — season projections already price in the full "
-                 "38-game schedule, and you can transfer around a bad opening run.",
-        ) / 100.0
 
         st.markdown("---")
         bench_weight = st.slider(
@@ -607,7 +614,7 @@ def show_initial_squad_optimizer_page():
             merge_stats = {}
             scored_pool = _compute_scores(
                 full_pool, gw1_projections_df, season_rankings_df, ffp_df, fdr_avg,
-                current_gw, w_season, w_week1, fixture_tilt, stats=merge_stats,
+                current_gw, w_season, w_opening, stats=merge_stats,
             )
             candidate_pool = _apply_eligibility_filters(
                 scored_pool, exclude_injured=exclude_injured, min_chance_of_playing=min_chance
@@ -634,7 +641,7 @@ def show_initial_squad_optimizer_page():
                 ok=season_error is None and not season_rankings_df.empty,
                 updated=get_rotowire_article_updated(season_url)),
             _source_status_row(
-                "Rotowire GW1 Rankings", f"Week 1 projection — {w_week1:.0%} of score",
+                "Rotowire GW1 Rankings", f"Fast start — {w_opening:.0%} of score",
                 len(gw1_projections_df), gw1_stats.get("matched"),
                 ok=gw1_error is None and not gw1_projections_df.empty,
                 updated=get_rotowire_article_updated(gw1_url)),
