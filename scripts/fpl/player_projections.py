@@ -15,6 +15,8 @@ import config
 import pandas as pd
 import requests
 import streamlit as st
+from scripts.common.text_helpers import format_last_updated
+from scripts.common.scraping import get_rotowire_article_updated
 from scripts.common.utils import (
     get_rotowire_player_projections,
     get_rotowire_rankings_url,
@@ -110,13 +112,26 @@ def _is_ffp_data_current(ffp_df: pd.DataFrame) -> bool:
     return overlap >= len(ffp_teams) * 0.5
 
 
-def _render_source_banner(source: str, description: str, bg_color: str, border_color: str, url: str = None):
-    """Render a styled data source attribution banner."""
+def _render_source_banner(source: str, description: str, bg_color: str, border_color: str,
+                          url: str = None, updated=None):
+    """Render a styled data source attribution banner.
+
+    `updated` adds the source's own publish time. Worth showing: a projection
+    table written before the last team-news cycle is materially less reliable
+    than one written after it, and nothing else on the page reveals which you
+    are looking at.
+    """
     link_html = f'<a href="{url}" target="_blank" style="color: {border_color}; font-weight: 600;">{source}</a>' if url else f'<strong>{source}</strong>'
+    updated_html = ""
+    if updated is not None:
+        updated_html = (
+            f'<br><small style="opacity: 0.85;">'
+            f'<strong>Updated:</strong> {format_last_updated(updated)}</small>'
+        )
     st.markdown(f"""
     <div style="background: {bg_color}; border-left: 4px solid {border_color}; padding: 12px 16px; border-radius: 4px; margin-bottom: 16px;">
         <strong>Data Source:</strong> {link_html}<br>
-        <small style="opacity: 0.85;">{description}</small>
+        <small style="opacity: 0.85;">{description}</small>{updated_html}
     </div>
     """, unsafe_allow_html=True)
 
@@ -171,18 +186,20 @@ def is_rotowire_url_stale(url: str, current_gw: int) -> bool:
 
 def render_rotowire_projections():
     """Render the Rotowire player projections tab."""
-    _render_source_banner(
-        "Rotowire",
-        "Weekly gameweek projections based on expert analysis, matchups, and form.",
-        "#f0f9ff", "#0ea5e9",
-        "https://www.rotowire.com/soccer/"
-    )
-
-    # Get projections
+    # Resolve the URL before the banner so the banner can report when that
+    # specific article was last updated.
     if config.ROTOWIRE_URL:
         url = config.ROTOWIRE_URL
     else:
         url = rotowire_url_selector()
+
+    _render_source_banner(
+        "Rotowire",
+        "Weekly gameweek projections based on expert analysis, matchups, and form.",
+        "#f0f9ff", "#0ea5e9",
+        "https://www.rotowire.com/soccer/",
+        updated=get_rotowire_article_updated(url) if url else None,
+    )
 
     if not url:
         st.info("No Rotowire URL available. Please configure one above.")

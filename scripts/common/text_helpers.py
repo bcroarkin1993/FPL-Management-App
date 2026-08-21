@@ -18,6 +18,7 @@ import pandas as pd
 # CONSTANTS & CONFIGURATION
 # =============================================================================
 
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 _logger = logging.getLogger("fpl_app.text_helpers")
@@ -290,3 +291,43 @@ def to_display_name(first_name, second_name=None, web_name=None) -> str:
 
     # 4. Unrecognised shape -- web_name is still the safer of the two to show.
     return web
+
+
+def format_last_updated(when, include_age: bool = True) -> str:
+    """Render a source's publish time as "Aug 20, 2026 10:54 AM ET (3h ago)".
+
+    The age is the point of this: a weekly projection table published before the
+    last team-news cycle is worth materially less than one published after it,
+    and the raw timestamp alone doesn't make that obvious at a glance.
+
+    Args:
+        when: Timezone-aware datetime, or None.
+        include_age: Append the relative age in parentheses.
+
+    Returns:
+        Formatted string, or "Unknown" when `when` is None.
+    """
+    if when is None:
+        return "Unknown"
+
+    try:
+        local = when.astimezone(TZ_ET)
+    except (ValueError, TypeError):
+        return "Unknown"
+
+    stamp = local.strftime("%b %-d, %Y %-I:%M %p ET")
+    if not include_age:
+        return stamp
+
+    delta = datetime.now(TZ_ET) - local
+    minutes = delta.total_seconds() / 60.0
+    if minutes < 0:
+        age = "just now"          # clock skew between us and the source
+    elif minutes < 60:
+        age = "%dm ago" % int(minutes)
+    elif minutes < 60 * 24:
+        age = "%dh ago" % int(minutes // 60)
+    else:
+        days = int(minutes // (60 * 24))
+        age = "1 day ago" if days == 1 else "%d days ago" % days
+    return "%s (%s)" % (stamp, age)

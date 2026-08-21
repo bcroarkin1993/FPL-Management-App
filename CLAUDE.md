@@ -71,7 +71,7 @@ The Odds API ────────────┘
 |--------|-------|
 | `draft.premierleague.com/api/` | League data, rosters, transactions |
 | `fantasy.premierleague.com/api/` | Player stats, fixtures, FDR |
-| `rotowire.com/soccer/` | Player projections, EPL lineups |
+| `rotowire.com/soccer/` | Player projections, EPL lineups, article publish times |
 | `fantasyfootballpundit.com` | Points predictions, goal/assist odds, clean sheet odds (via Google Sheets) |
 | `api.the-odds-api.com` | Match betting odds (h2h, BTTS, totals) |
 
@@ -106,6 +106,23 @@ Ambiguity (>1 candidate at a tier) resolves to *no match*. `match_with_tier()`
 returns the tier rank so callers can resolve two players contending for one
 reference row in favour of the stronger tier — without that, a fuzzy guess can
 steal a row an exact match already earned.
+
+### Source Freshness
+
+`get_rotowire_article_updated()` (`scripts/common/scraping.py`) scrapes an
+article's "Updated on ..." stamp from its `div.article__date`; render it with
+`format_last_updated()` (`text_helpers.py`), which appends the age
+("Aug 20, 2026 10:54 AM ET (3h ago)").
+
+Show this wherever projections are displayed. A weekly rankings table written
+before the last team-news cycle is materially less reliable than one written
+after it, and nothing else on the page distinguishes them. Currently surfaced in
+the Initial Squad Optimizer's Data Sources panel and the Projections Hub source
+banner. FFP is a live Google Sheet with no published revision time, so it shows
+"—" rather than a fabricated one.
+
+A missing timestamp is cosmetic: the scraper returns `None` on any failure and
+must never take a page down.
 
 ### Player Display Names
 

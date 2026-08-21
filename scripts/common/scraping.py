@@ -6,6 +6,7 @@ Rotowire scraping, Fantasy Football Pundit data, and The Odds API integration.
 
 import os
 import re
+from datetime import datetime
 
 from bs4 import BeautifulSoup
 import numpy as np
@@ -17,6 +18,7 @@ from urllib.parse import urljoin
 
 import config
 from scripts.common.error_helpers import get_logger
+from scripts.common.text_helpers import TZ_ET
 
 _logger = get_logger("fpl_app.scraping")
 
@@ -283,6 +285,54 @@ def get_rotowire_player_projections(url, limit=None):
 
     _logger.debug("Rotowire: Successfully parsed %d players from %s", len(player_rankings), url)
     return player_rankings
+
+
+# Rotowire stamps every article with "Updated on August 20, 2026 10:54AM EST" in
+# a div.article__date. Worth surfacing: a weekly rankings table published before
+# the last team-news cycle is materially less useful than one published after it,
+# and nothing else on the page tells you which you are looking at.
+_ROTOWIRE_UPDATED_RE = re.compile(
+    r"Updated\s+on\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s*[AaPp][Mm])",
+)
+
+
+@st.cache_data(ttl=1800)
+def get_rotowire_article_updated(url: str, timeout: int = 15):
+    """Scrape an article's "Updated on ..." timestamp.
+
+    Rotowire labels the time "EST" year-round; it is really wall-clock New York
+    time, so it is localized to America/New_York rather than a fixed offset.
+
+    Args:
+        url: Rotowire article URL.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        A timezone-aware datetime, or None if the page is unreachable or the
+        stamp is missing. Never raises -- a missing timestamp is cosmetic and
+        must not take a page down.
+    """
+    if not url:
+        return None
+    try:
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        node = soup.find("div", class_="article__date")
+        text = node.get_text(" ", strip=True) if node else soup.get_text(" ", strip=True)
+
+        match = _ROTOWIRE_UPDATED_RE.search(" ".join(text.split()))
+        if not match:
+            _logger.info("Rotowire: no 'Updated on' stamp found at %s", url)
+            return None
+
+        stamp = re.sub(r"\s+", " ", match.group(1)).replace(" AM", "AM").replace(" PM", "PM")
+        parsed = datetime.strptime(stamp, "%B %d, %Y %I:%M%p")
+        return parsed.replace(tzinfo=TZ_ET)
+    except Exception as e:
+        _logger.warning("Rotowire: could not read update time from %s: %s", url, e)
+        return None
 
 
 def get_rotowire_rankings_url(current_gameweek=None, timeout=15):

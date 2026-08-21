@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from scripts.common.scraping import (
+    get_rotowire_article_updated,
     _map_rotowire_header_row,
     _rotowire_row_from_header_map,
     get_rotowire_player_projections,
@@ -232,3 +233,57 @@ class TestRotowireRangeArticleIsRefused:
             with patch("scripts.common.scraping.requests.get", return_value=_mock_response(PREVIEW_TABLE_HTML)):
                 get_rotowire_player_projections(url)
         assert any("implausible for a single gameweek" in r.message for r in caplog.records)
+
+
+class TestRotowireArticleUpdated:
+    """Parsing the "Updated on ..." stamp off a Rotowire article.
+
+    Surfacing this matters because a weekly rankings table published before the
+    last team-news cycle is materially less useful than one published after it,
+    and nothing else on the page distinguishes them.
+    """
+
+    HTML = (
+        '<html><body><div class="article__meta">'
+        '<div class="article__date"><span>Updated on</span> '
+        'August 20, 2026 10:54AM EST</div>'
+        '</div></body></html>'
+    )
+
+    def _resp(self, html, status=200):
+        resp = MagicMock()
+        resp.text = html
+        resp.status_code = status
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_parses_the_stamp(self):
+        with patch("scripts.common.scraping.requests.get", return_value=self._resp(self.HTML)):
+            when = get_rotowire_article_updated("https://example.com/a")
+        assert (when.year, when.month, when.day) == (2026, 8, 20)
+        assert (when.hour, when.minute) == (10, 54)
+        assert when.tzinfo is not None, "must be timezone-aware, not a naive local time"
+
+    def test_pm_times_are_not_read_as_am(self):
+        html = self.HTML.replace("10:54AM", "5:06PM")
+        with patch("scripts.common.scraping.requests.get", return_value=self._resp(html)):
+            when = get_rotowire_article_updated("https://example.com/a")
+        assert when.hour == 17
+
+    def test_falls_back_to_page_text_without_the_date_div(self):
+        html = "<html><body><p>Updated on August 20, 2026 10:54AM EST</p></body></html>"
+        with patch("scripts.common.scraping.requests.get", return_value=self._resp(html)):
+            assert get_rotowire_article_updated("https://example.com/a") is not None
+
+    def test_missing_stamp_returns_none(self):
+        with patch("scripts.common.scraping.requests.get",
+                   return_value=self._resp("<html><body>no date here</body></html>")):
+            assert get_rotowire_article_updated("https://example.com/a") is None
+
+    def test_network_failure_returns_none_rather_than_raising(self):
+        """A missing timestamp is cosmetic and must never take a page down."""
+        with patch("scripts.common.scraping.requests.get", side_effect=Exception("boom")):
+            assert get_rotowire_article_updated("https://example.com/a") is None
+
+    def test_empty_url_short_circuits(self):
+        assert get_rotowire_article_updated("") is None

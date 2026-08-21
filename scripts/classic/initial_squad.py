@@ -44,7 +44,7 @@ from scripts.common.utils import (
     position_converter,
 )
 from scripts.common.fixture_helpers import style_fixture_difficulty
-from scripts.common.text_helpers import to_display_name
+from scripts.common.text_helpers import format_last_updated, to_display_name
 from scripts.common.analytics import (
     compute_player_scores,
     merge_ffp_single_gw_data,
@@ -52,7 +52,11 @@ from scripts.common.analytics import (
     positional_percentile,
 )
 from scripts.common.data_validation import check_initial_squad, format_issues
-from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
+from scripts.common.scraping import (
+    get_ffp_projections_data,
+    get_rotowire_article_updated,
+    get_rotowire_season_rankings,
+)
 
 _logger = get_logger("fpl_app.initial_squad")
 
@@ -74,16 +78,18 @@ FIXTURE_TILT = 0.04
 UNRANKED_SEASON_QUANTILE = 0.10
 CAPTAIN_SEASON_WEIGHT = 0.85
 
-# The armband doubles a player's score, so the captain is worth one *extra* copy
-# of himself. That is not a tunable preference -- it is the rule -- so it is a
-# constant rather than a slider.
+# The armband doubles a player's score. That is the rule, not a tunable
+# preference, so it is a constant rather than a slider.
 CAPTAIN_MULTIPLIER = 2.0
-# Triple Captain is available twice a season (once per half), and each use buys
-# one further multiple for a single gameweek. Amortised over the season that is
-# worth a few percent more, and it accrues to whoever your standout captain is
-# -- which is a reason to pay up for one at squad build time.
+# Triple Captain is available twice a season (once per half), and each use turns
+# one gameweek into 3x instead of 2x. Amortised across the season that lifts the
+# captain's effective multiplier slightly above 2x -- and it accrues to whoever
+# your standout captain is, which is a reason to pay up for one at build time.
 TRIPLE_CAPTAIN_USES = 2
-CAPTAIN_BONUS_WEIGHT = (CAPTAIN_MULTIPLIER - 1.0) + TRIPLE_CAPTAIN_USES / GWS_PER_SEASON
+CAPTAIN_EFFECTIVE_MULTIPLIER = CAPTAIN_MULTIPLIER + TRIPLE_CAPTAIN_USES / GWS_PER_SEASON
+# solve_squad_ilp() adds this on top of the player's own score, so the bonus is
+# the multiplier minus the one copy already counted in the starting XI.
+CAPTAIN_BONUS_WEIGHT = CAPTAIN_EFFECTIVE_MULTIPLIER - 1.0
 
 
 # ---------------------------
@@ -136,7 +142,8 @@ def _data_source_urls():
 
 
 def _source_status_row(name: str, feeds: str, rows: int, matched: Optional[int],
-                       ok: bool, note: str = "") -> dict:
+                       ok: bool, note: str = "", updated=None,
+                       show_updated: bool = True) -> dict:
     """One row of the Data Sources status table."""
     if not ok or not rows:
         status = "🔴 Failed"
@@ -151,7 +158,10 @@ def _source_status_row(name: str, feeds: str, rows: int, matched: Optional[int],
     else:
         match_txt = "0"
     return {"Source": name, "Feeds": feeds, "Status": status,
-            "Rows": rows if rows else 0, "Matched": match_txt}
+            "Rows": rows if rows else 0, "Matched": match_txt,
+            # When the rankings were published. A table written before the last
+            # team-news cycle is worth less than one written after it.
+            "Updated": format_last_updated(updated) if show_updated else "—"}
 
 
 def _render_source_status(rows: list) -> None:
@@ -444,12 +454,12 @@ def show_initial_squad_optimizer_page():
                  "from the XI. Raise it if you want a Bench-Boost-ready squad.",
         )
         st.caption(
-            f"**Captaincy is fixed at {CAPTAIN_MULTIPLIER:.0f}x**, because that is the "
-            f"rule rather than a preference — your captain scores double, so the "
-            f"optimizer counts one standout player twice when choosing the squad. "
-            f"It is nudged to {CAPTAIN_BONUS_WEIGHT:.2f}x to account for the two "
-            f"Triple Captain chips (one per half-season), whose value also lands on "
-            f"whoever your best captain is."
+            f"**Captaincy is fixed, not adjustable.** Your captain scores "
+            f"{CAPTAIN_MULTIPLIER:.0f}x, so the optimizer counts your best player "
+            f"twice over when choosing the squad — that is the rule, not a "
+            f"preference. It values him at **{CAPTAIN_EFFECTIVE_MULTIPLIER:.2f}x** "
+            f"rather than exactly {CAPTAIN_MULTIPLIER:.0f}x because Triple Captain "
+            f"can be played twice a season, turning two of his gameweeks into 3x."
         )
 
         st.markdown("#### Player Filters")
@@ -536,14 +546,17 @@ def show_initial_squad_optimizer_page():
             _source_status_row(
                 "Rotowire Season Rankings", f"Season value — {w_season:.0%} of score",
                 len(season_rankings_df), season_stats.get("matched"),
-                ok=season_error is None and not season_rankings_df.empty),
+                ok=season_error is None and not season_rankings_df.empty,
+                updated=get_rotowire_article_updated(season_url)),
             _source_status_row(
                 "Rotowire GW1 Rankings", f"Week 1 projection — {w_week1:.0%} of score",
                 len(gw1_projections_df), gw1_stats.get("matched"),
-                ok=gw1_error is None and not gw1_projections_df.empty),
+                ok=gw1_error is None and not gw1_projections_df.empty,
+                updated=get_rotowire_article_updated(gw1_url)),
+            # FFP is a live Google Sheet with no published revision time.
             _source_status_row(
                 "FFP Points Predictor", "Start likelihood",
-                ffp_rows, None, ok=ffp_rows > 0, note=ffp_note),
+                ffp_rows, None, ok=ffp_rows > 0, note=ffp_note, show_updated=False),
         ])
         for label, err in (("season rankings", season_error), ("GW1 rankings", gw1_error)):
             if err:
