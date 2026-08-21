@@ -54,6 +54,7 @@ from scripts.common.analytics import (
 )
 from scripts.common.data_validation import check_initial_squad, format_issues
 from scripts.common.scraping import (
+    FFP_POINTS_PREDICTOR_URL,
     get_ffp_projections_data,
     get_rotowire_article_updated,
     get_rotowire_season_rankings,
@@ -142,19 +143,23 @@ def _sync_weight_from_opening() -> None:
 
 
 def _data_source_urls():
-    """Editable URLs for both Rotowire feeds.
+    """Where every input to this page comes from.
 
-    Neither slug is auto-discoverable the way weekly rankings articles are, so
-    both are pinned in config and re-pinned each preseason. The season URL used
-    to be uneditable, which meant a stale slug could only be fixed by editing
-    config.py — and because a failed fetch degrades to an empty frame, the page
-    looked identical either way.
+    The two Rotowire articles are editable: neither slug is auto-discoverable
+    the way weekly rankings articles are, so both are pinned in config and
+    re-pinned each preseason. The season URL used to be uneditable, which meant
+    a stale slug could only be fixed by editing config.py — and because a failed
+    fetch degrades to an empty frame, the page looked identical either way.
+
+    FFP is a published Google Sheet on a fixed address, so it is shown as a
+    link rather than an input: there is nothing to re-point each season.
     """
-    with st.expander("Rotowire URLs", expanded=False):
+    with st.expander("Data URLs", expanded=False):
         st.caption(
-            "This squad is built from **two** Rotowire tables: the season-long "
-            "Top 400 and the GW1 rankings. Neither article slug is "
-            "auto-discoverable, so update them here each preseason."
+            "Three feeds build this squad: Rotowire's season-long Top 400 and "
+            "GW1 rankings, plus FFP for start likelihood and its own GW1 "
+            "projection. The Rotowire article slugs aren't auto-discoverable, "
+            "so update them here each preseason."
         )
         season_url = st.text_input(
             "Season rankings article URL",
@@ -167,6 +172,14 @@ def _data_source_urls():
             value=config.ROTOWIRE_GW1_URL or "",
             placeholder="https://www.rotowire.com/soccer/article/...",
             help="Rotowire's GW1 'best picks' article — drives the Week 1 projection.",
+        )
+        st.markdown(
+            "**Fantasy Football Pundit** — start likelihood and a second GW1 "
+            f"projection · [open the Points Predictor]({FFP_POINTS_PREDICTOR_URL})"
+        )
+        st.caption(
+            "Read from a published Google Sheet at a fixed address, so there is "
+            "no URL to update here."
         )
     return season_url.strip(), gw1_url.strip()
 
@@ -692,8 +705,10 @@ def show_initial_squad_optimizer_page():
         gw1_stats = merge_stats.get("gw1", {})
         ffp_rows = 0 if ffp_df is None else len(ffp_df)
         ffp_note = ""
-        if ffp_rows and "FFP_Predicted" in scored_pool.columns \
-                and not scored_pool["FFP_Predicted"].notna().any():
+        ffp_pred_col = ("FFP_Starting_Predicted"
+                        if "FFP_Starting_Predicted" in scored_pool.columns else "FFP_Predicted")
+        if ffp_rows and ffp_pred_col in scored_pool.columns \
+                and not scored_pool[ffp_pred_col].notna().any():
             # Expected preseason: FFP publishes Predicted only once GW1 is close,
             # so the Week 1 projection is Rotowire-only until then.
             ffp_note = "Predicted not published yet"
@@ -711,7 +726,7 @@ def show_initial_squad_optimizer_page():
                 updated=get_rotowire_article_updated(gw1_url)),
             # FFP is a live Google Sheet with no published revision time.
             _source_status_row(
-                "FFP Points Predictor", "Start likelihood",
+                "FFP Points Predictor", "Start likelihood + GW1 projection",
                 ffp_rows, None, ok=ffp_rows > 0, note=ffp_note, show_updated=False),
         ])
         for label, err in (("season rankings", season_error), ("GW1 rankings", gw1_error)):

@@ -608,6 +608,10 @@ def get_rotowire_season_rankings(url: str, limit: Optional[int] = None) -> pd.Da
 # FFP Google Sheets URL (public CSV export)
 FFP_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRaiTmUKjtQ7MxiGibN2GAZ8m9NHF3IA2U-yE0PhBpCOXHewhs57PrjZO7GQzZvrEGGBW7HFEE43yX0/pub?output=csv"
 
+#: The human-readable page behind FFP_SHEET_URL. The sheet is the data feed; this
+#: is where a person goes to read it, so it is what the UI should link to.
+FFP_POINTS_PREDICTOR_URL = "https://www.fantasyfootballpundit.com/fpl-points-predictor/"
+
 
 @st.cache_data(ttl=300)
 def get_ffp_projections_data() -> Optional[pd.DataFrame]:

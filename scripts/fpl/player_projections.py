@@ -16,7 +16,10 @@ import pandas as pd
 import requests
 import streamlit as st
 from scripts.common.text_helpers import format_last_updated
-from scripts.common.scraping import get_rotowire_article_updated
+from scripts.common.scraping import (
+    FFP_POINTS_PREDICTOR_URL,
+    get_rotowire_article_updated,
+)
 from scripts.common.utils import (
     get_rotowire_player_projections,
     get_rotowire_rankings_url,
@@ -312,7 +315,7 @@ def render_ffp_data():
         "Fantasy Football Pundit",
         "Player data with start probability, ownership, and betting-derived probabilities.",
         "#fef3c7", "#f59e0b",
-        "https://www.fantasyfootballpundit.com/fpl-points-predictor/"
+        FFP_POINTS_PREDICTOR_URL
     )
 
     raw_df = get_ffp_projections_data()
