@@ -96,15 +96,54 @@ class TestCrossSourceAgreement:
     def test_rotowire_and_ffp_are_in_the_same_units(self, rotowire_projections, ffp_projections):
         """A systematic multiple between two independent sources means a unit
         mismatch, which is what a multi-gameweek total masquerading as one
-        gameweek looks like from the outside."""
-        ffp_predicted = pd.to_numeric(ffp_projections["Predicted"], errors="coerce").dropna()
+        gameweek looks like from the outside.
+
+        Compare against FFP's *StartingPredicted*, not `Predicted`. Rotowire
+        projects a player's points if he starts; `Predicted` is already
+        multiplied by start probability, so comparing the two conflates a
+        difference of basis with a difference of units.
+        """
+        col = "StartingPredicted" if "StartingPredicted" in ffp_projections.columns else "Predicted"
+        ffp_predicted = pd.to_numeric(ffp_projections[col], errors="coerce").dropna()
         if not (ffp_predicted > 0).any():
-            pytest.skip("FFP has not published Predicted points for this gameweek yet")
+            pytest.skip("FFP has not published %s for this gameweek yet" % col)
         raise_on_error(
             check_source_scale_agreement(
-                rotowire_projections["Points"], ffp_predicted, "Rotowire", "FFP Predicted"
+                rotowire_projections["Points"], ffp_predicted, "Rotowire", "FFP %s" % col
             ),
             context="Rotowire vs FFP",
+        )
+
+    def test_ffp_predicted_is_still_the_start_weighted_column(self, ffp_projections):
+        """Pin down the relationship the 1GW blend depends on.
+
+        FFP publishes both bases: `Predicted` == `StartingPredicted` * `Start`/100.
+        The blend uses the conditional column and applies start likelihood once
+        itself. If FFP ever redefines either column, blending would silently
+        charge the start probability twice (or stop charging it at all), which
+        moved the FFP term ~44% at a 60% median start rate -- a shift no mocked
+        test would notice.
+        """
+        needed = {"Predicted", "StartingPredicted", "Start"}
+        if not needed.issubset(ffp_projections.columns):
+            pytest.skip("FFP sheet is missing %s" % ", ".join(sorted(needed - set(ffp_projections.columns))))
+
+        df = ffp_projections[list(needed)].apply(pd.to_numeric, errors="coerce").dropna()
+        df = df[(df["Start"] > 0) & (df["StartingPredicted"] > 0)]
+        if len(df) < 25:
+            pytest.skip("FFP has not published predictions for this gameweek yet")
+
+        implied = df["StartingPredicted"] * df["Start"] / 100.0
+        correlation = float(df["Predicted"].corr(implied))
+        assert correlation > 0.95, (
+            "FFP's Predicted no longer equals StartingPredicted x Start%% "
+            "(correlation %.3f). The 1GW blend assumes StartingPredicted is "
+            "conditional on starting -- re-check compute_player_scores()."
+            % correlation
+        )
+        assert (df["Predicted"] <= df["StartingPredicted"] + 0.5).mean() > 0.95, (
+            "Predicted should not exceed StartingPredicted -- it is the same "
+            "projection discounted by start probability."
         )
 
 

@@ -319,6 +319,18 @@ Score = α × 1GW + (1-α) × ROS
 
 All scores are **positional percentiles** (0-1) computed against the full FPL player pool (~700 players). A score of 0.85 means "top 15% at this position" — immediately interpretable regardless of position.
 
+**FFP has two prediction bases — blend the conditional one.** FFP publishes
+`StartingPredicted` (points *if he starts*, the same basis as a Rotowire
+projection) and `Predicted`, which is that number already multiplied by start
+probability: verified live at `Predicted == StartingPredicted * Start/100`,
+r=0.9998. `compute_player_scores()` blends `StartingPredicted` and applies start
+likelihood once itself. Blending `Predicted` instead charges the start
+probability twice and ran the FFP term ~44% low at a 60% median start rate —
+a silent, everyone-slightly-too-low distortion. When only `Predicted` is
+available the conditional value is recovered by dividing the start rate back
+out. `tests/live/` pins the relationship so a change at FFP surfaces as a
+failure rather than a quiet re-scaling.
+
 **`_effective_proj` column**: `compute_player_scores()` retains `_effective_proj` (blended_proj × start_likelihood) in its output. Consumers (Waiver Wire suggestion engine, card rendering) rely on it for GW projection display and sanity checking. Do not drop it from the result.
 
 **FFP name matching — 4-level fallback**: Both `merge_ffp_single_gw_data()` and `blend_multi_gw_projections()` use a 4-step lookup to handle name mismatches between FFP short names ("Eze") and FPL full names ("Eberechi Eze"), as well as FFP team name variants: (1) exact `(norm_name, team_short)`, (2) `(last_word, team_short)`, (3) `norm_name` only, (4) `last_word` only.

@@ -832,6 +832,70 @@ class TestComputePlayerScores:
         assert result_with_ffp["1GW"].notna().all()
 
 
+class TestFFPStartBasis:
+    """The 1GW blend must not charge the start probability twice.
+
+    FFP publishes two bases for the same projection: `StartingPredicted` is
+    conditional on the player starting -- the same basis as a Rotowire
+    projection -- and `Predicted` is that number already multiplied by start
+    probability. Blending `Predicted` and then applying start likelihood ran
+    the FFP term ~44% low at a 60% median start rate. Nothing crashed; the
+    projections were just quietly too small for everyone who wasn't nailed on.
+    """
+
+    @staticmethod
+    def _ffp(starting=8.0, start=50.0):
+        return pd.DataFrame([{
+            "Name": "Test Player", "Team": "ARS",
+            "StartingPredicted": starting, "Predicted": starting * start / 100.0,
+            "Start": start, "LongStart": start,
+        }])
+
+    @staticmethod
+    def _players():
+        return pd.DataFrame([{
+            "Player": "Test Player", "Team": "ARS", "Position": "M",
+            "Points": 0.0, "total_points": 0, "form": 0.0, "AvgFDR": 3.0,
+        }])
+
+    def test_merge_attaches_both_bases(self):
+        out = merge_ffp_single_gw_data(self._players(), self._ffp())
+        assert out.loc[0, "FFP_Starting_Predicted"] == 8.0
+        assert out.loc[0, "FFP_Predicted"] == 4.0
+
+    def test_blend_uses_the_conditional_column(self):
+        """With no Rotowire projection, the FFP term drives the result alone."""
+        merged = merge_ffp_single_gw_data(self._players(), self._ffp())
+        scored = compute_player_scores(merged, merged, current_gw=1, format_context="classic")
+        # 8.0 conditional x 50% start = 4.0. Using Predicted would give 2.0.
+        assert scored.loc[0, "_effective_proj"] == pytest.approx(4.0, abs=1e-6)
+
+    def test_start_probability_is_charged_exactly_once(self):
+        """Halving the start rate should halve the effective projection, not quarter it."""
+        results = {}
+        for start in (100.0, 50.0):
+            merged = merge_ffp_single_gw_data(self._players(), self._ffp(start=start))
+            scored = compute_player_scores(merged, merged, current_gw=1, format_context="classic")
+            results[start] = scored.loc[0, "_effective_proj"]
+        assert results[50.0] == pytest.approx(results[100.0] * 0.5, rel=1e-6)
+
+    def test_falls_back_when_only_the_unconditional_column_exists(self):
+        """Older/partial FFP payloads must still produce a sane projection."""
+        ffp = self._ffp().drop(columns=["StartingPredicted"])
+        merged = merge_ffp_single_gw_data(self._players(), ffp)
+        assert pd.isna(merged.loc[0, "FFP_Starting_Predicted"])
+        scored = compute_player_scores(merged, merged, current_gw=1, format_context="classic")
+        # Predicted 4.0 is un-discounted back to 8.0, then re-discounted by 50%.
+        assert scored.loc[0, "_effective_proj"] == pytest.approx(4.0, abs=1e-6)
+
+    def test_unpublished_predictions_are_ignored(self):
+        ffp = self._ffp()
+        ffp[["Predicted", "StartingPredicted"]] = 0.0
+        merged = merge_ffp_single_gw_data(self._players(), ffp)
+        assert pd.isna(merged.loc[0, "FFP_Starting_Predicted"])
+        assert merged.loc[0, "FFP_Start"] == 50.0, "start data is still usable"
+
+
 class TestMergeSeasonProjections:
     """Tests for merge_season_projections()."""
 

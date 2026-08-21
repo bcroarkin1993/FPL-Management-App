@@ -320,9 +320,28 @@ def compute_player_scores(
     ref_season_col = "total_points" if (all_players_df is not None and "total_points" in all_players_df.columns) else season_col
 
     # --- 1GW Score (pure expected value) ---
-    # Blend Rotowire projection with FFP Predicted (average if both, whichever if one)
+    # Blend Rotowire's projection with FFP's, then apply start likelihood once.
+    #
+    # Both inputs must be on the same basis for that to be valid. Rotowire
+    # projects a player's points *if he starts*. FFP publishes both bases, and
+    # its `Predicted` is the unconditional one -- verified against live data,
+    # Predicted == StartingPredicted * Start/100 at r=0.9998. Blending
+    # `Predicted` here and multiplying by start_likelihood below therefore
+    # charged the start probability twice, running the FFP term ~44% low at a
+    # median start rate of 60%. Use the conditional column, and fall back to
+    # un-discounting `Predicted` when FFP hasn't published it.
     rotowire_proj = pd.to_numeric(result.get(proj_col), errors="coerce").fillna(0)
-    ffp_pred = pd.to_numeric(result.get("FFP_Predicted"), errors="coerce") if "FFP_Predicted" in result.columns else pd.Series(np.nan, index=result.index)
+    ffp_start_raw = (pd.to_numeric(result.get("FFP_Start"), errors="coerce")
+                     if "FFP_Start" in result.columns else pd.Series(np.nan, index=result.index))
+    if "FFP_Starting_Predicted" in result.columns:
+        ffp_pred = pd.to_numeric(result["FFP_Starting_Predicted"], errors="coerce")
+    else:
+        ffp_pred = pd.Series(np.nan, index=result.index)
+    if "FFP_Predicted" in result.columns:
+        unconditional = pd.to_numeric(result["FFP_Predicted"], errors="coerce")
+        # Recover the conditional value from the unconditional one where needed.
+        recovered = unconditional / (ffp_start_raw / 100.0).clip(lower=0.05)
+        ffp_pred = ffp_pred.fillna(recovered.where(ffp_start_raw.gt(0), unconditional))
 
     blended_proj = rotowire_proj.copy()
     # Treat FFP_Predicted <= 0 as missing (FFP publishes 0 when predictions aren't available)
@@ -994,20 +1013,31 @@ def merge_ffp_single_gw_data(
     player_df: pd.DataFrame,
     ffp_df: Optional[pd.DataFrame],
 ) -> pd.DataFrame:
-    """Merge FFP single-GW data (Predicted, Start, LongStart) onto a player DataFrame.
+    """Merge FFP single-GW data onto a player DataFrame.
 
     Matches by normalized name + team short code, following the same pattern as
     blend_multi_gw_projections().
 
+    Note the two prediction columns are on different bases, verified against
+    live data at r=0.9998: ``Predicted`` == ``StartingPredicted`` * ``Start``/100.
+    So ``Predicted`` is an unconditional expectation that already carries the
+    start discount, while ``StartingPredicted`` is conditional on the player
+    starting -- the same basis as a Rotowire projection. Blend the conditional
+    one and apply start likelihood yourself; blending ``Predicted`` and then
+    discounting again charges the start probability twice.
+
     Args:
         player_df: DataFrame with player names and Team column.
-        ffp_df: FFP projections DataFrame with Name, Team, Predicted, Start, LongStart.
+        ffp_df: FFP projections with Name, Team, Predicted, StartingPredicted,
+            Start, LongStart.
 
     Returns:
-        player_df with FFP_Predicted, FFP_Start, FFP_LongStart columns added (NaN if unmatched).
+        player_df with FFP_Predicted, FFP_Starting_Predicted, FFP_Start and
+        FFP_LongStart added (NaN if unmatched).
     """
     result = player_df.copy()
     result["FFP_Predicted"] = np.nan
+    result["FFP_Starting_Predicted"] = np.nan
     result["FFP_Start"] = np.nan
     result["FFP_LongStart"] = np.nan
 
@@ -1016,19 +1046,21 @@ def merge_ffp_single_gw_data(
         return result
 
     # Check that at least one useful column exists
-    ffp_cols = [c for c in ("Predicted", "Start", "LongStart") if c in ffp_df.columns]
+    ffp_cols = [c for c in ("Predicted", "StartingPredicted", "Start", "LongStart")
+                if c in ffp_df.columns]
     if not ffp_cols or "Name" not in ffp_df.columns:
         return result
 
     # Skip prediction columns that aren't ready (all-zero = FFP hasn't published yet).
     # Start/LongStart can legitimately be 0 for individual players, so only check Predicted.
-    if "Predicted" in ffp_cols:
-        pred_vals = pd.to_numeric(ffp_df["Predicted"], errors="coerce")
-        if not pred_vals.gt(0).any():
-            _logger.info("FFP Predicted not ready (all zero) — skipping single-GW predictions")
-            ffp_cols = [c for c in ffp_cols if c != "Predicted"]
-            if not ffp_cols:
-                return result
+    for _pred_col in ("Predicted", "StartingPredicted"):
+        if _pred_col in ffp_cols:
+            pred_vals = pd.to_numeric(ffp_df[_pred_col], errors="coerce")
+            if not pred_vals.gt(0).any():
+                _logger.info("FFP %s not ready (all zero) — skipping it", _pred_col)
+                ffp_cols = [c for c in ffp_cols if c != _pred_col]
+    if not ffp_cols:
+        return result
 
     # Build lookup: (normalized_name, team_short) -> {Predicted, Start, LongStart}
     ffp = ffp_df[["Name", "Team"] + ffp_cols].copy()
@@ -1062,7 +1094,9 @@ def merge_ffp_single_gw_data(
     result["__norm"] = result[name_col].apply(canonical_normalize)
     team_col = "Team" if "Team" in result.columns else None
 
-    col_map = {"Predicted": "FFP_Predicted", "Start": "FFP_Start", "LongStart": "FFP_LongStart"}
+    col_map = {"Predicted": "FFP_Predicted",
+               "StartingPredicted": "FFP_Starting_Predicted",
+               "Start": "FFP_Start", "LongStart": "FFP_LongStart"}
 
     for idx in result.index:
         norm_name = result.at[idx, "__norm"]
