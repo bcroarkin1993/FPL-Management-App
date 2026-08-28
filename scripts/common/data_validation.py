@@ -34,6 +34,7 @@ __all__ = [
     "check_team_strength",
     "check_merge_match_rate",
     "check_initial_squad",
+    "check_element_states",
     "format_issues",
     "raise_on_error",
 ]
@@ -647,6 +648,105 @@ def check_initial_squad(squad_df: Optional[pd.DataFrame], budget: float,
                 "hundreds suggest season totals were never divided down to a "
                 "per-gameweek rate.",
             ))
+
+    return issues
+
+
+#: Valid `status` codes on the Draft element-status endpoint.
+VALID_ELEMENT_STATES = frozenset({"o", "a", "l"})
+
+#: Locking is a transient state applied to a handful of recently-moved players.
+#: A large fraction locked means the field is being misread, not that the league
+#: dropped half the game.
+MAX_PLAUSIBLE_LOCKED_FRACTION = 0.25
+
+
+def check_element_states(states: Optional[dict],
+                         expected_teams: Optional[int] = None) -> List[Issue]:
+    """Assert Draft per-player transaction states could actually be what they say.
+
+    The Waiver Wire decides what to suggest from these states. If the endpoint
+    changes shape — a renamed status code, an owner field that stops populating —
+    the failure is silent: every player reads as available and the page happily
+    suggests someone who was dropped an hour ago and cannot be picked up.
+
+    `expected_teams` lets the owned count be checked against the only number it can
+    legally be: every team holds exactly DRAFT_SQUAD_SIZE players.
+    """
+    check = "element_states"
+
+    if not states or not isinstance(states, dict):
+        return [Issue(
+            check, "error", "element state map is empty",
+            "The element-status endpoint returned nothing. The Waiver Wire falls "
+            "back to treating every player as available, so locked players will be "
+            "suggested again.",
+        )]
+
+    issues = []
+
+    codes = {s.get("status") for s in states.values()}
+    unknown = codes - VALID_ELEMENT_STATES
+    if unknown:
+        issues.append(Issue(
+            check, "error",
+            "unrecognised status code(s) %s" % sorted(str(c) for c in unknown),
+            "Draft publishes exactly 'o' (owned), 'a' (available) and 'l' (locked). "
+            "A new code means ELEMENT_STATE_* in fpl_draft_api.py needs updating "
+            "before the Waiver Wire can trust these states.",
+        ))
+
+    owned = [s for s in states.values() if s.get("status") == "o"]
+    unowned = [s for s in states.values() if s.get("status") != "o"]
+    locked = [s for s in states.values() if s.get("status") == "l"]
+
+    # --- Owner field must agree with the status ----------------------------
+    owned_without_owner = sum(1 for s in owned if s.get("owner") is None)
+    if owned_without_owner:
+        issues.append(Issue(
+            check, "error",
+            "%d owned player(s) have no owner" % owned_without_owner,
+            "Status and owner disagree. Anything keying off owner alone (the "
+            "ownership anti-join) will treat these players as free agents.",
+        ))
+
+    unowned_with_owner = sum(1 for s in unowned if s.get("owner") is not None)
+    if unowned_with_owner:
+        issues.append(Issue(
+            check, "error",
+            "%d unowned player(s) still carry an owner" % unowned_with_owner,
+            "A locked or available player belongs to nobody by definition.",
+        ))
+
+    # --- Squad arithmetic ---------------------------------------------------
+    if expected_teams is not None:
+        expected_owned = int(expected_teams) * DRAFT_SQUAD_SIZE
+        if len(owned) != expected_owned:
+            issues.append(Issue(
+                check, "error",
+                "%d players are owned, but %d teams x %d players = %d"
+                % (len(owned), expected_teams, DRAFT_SQUAD_SIZE, expected_owned),
+                "Draft squads are fixed size, so this is arithmetic, not an "
+                "estimate. A mismatch means the status codes are being misread.",
+            ))
+
+    # --- Locking is transient ----------------------------------------------
+    locked_fraction = len(locked) / len(states)
+    if locked_fraction > MAX_PLAUSIBLE_LOCKED_FRACTION:
+        issues.append(Issue(
+            check, "warning",
+            "%.0f%% of players (%d of %d) are locked"
+            % (locked_fraction * 100, len(locked), len(states)),
+            "Locking normally applies to a handful of recently dropped or newly "
+            "added players. This many suggests 'l' is being read as something else.",
+        ))
+
+    if not any(s.get("status") == "a" for s in states.values()):
+        issues.append(Issue(
+            check, "error", "no player is available",
+            "Every player being owned or locked would leave the waiver wire empty; "
+            "far more players exist than a league can roster.",
+        ))
 
     return issues
 

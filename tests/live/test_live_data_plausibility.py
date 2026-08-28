@@ -18,6 +18,7 @@ from tests.live.conftest import skip_if_unreachable
 
 from scripts.common.analytics import merge_season_projections
 from scripts.common.data_validation import (
+    check_element_states,
     check_merge_match_rate,
     check_projected_team_total,
     check_score_std,
@@ -206,6 +207,73 @@ class TestTeamNameMapping:
         }
         assert not mismatched, (
             "_to_short_team_code() returns the wrong code for: %s" % mismatched
+        )
+
+
+class TestDraftElementStates:
+    """The Waiver Wire decides what to suggest from these states.
+
+    If Draft renames a status code or stops populating `owner`, every player
+    silently reads as available and the page resumes suggesting players who were
+    dropped an hour ago and cannot be picked up. Nothing crashes; the advice is
+    just wrong. That is exactly the class of failure this suite exists for.
+    """
+
+    @pytest.fixture(scope="class")
+    def element_states(self, draft_league_id):
+        from scripts.common.fpl_draft_api import get_league_element_states
+
+        states = skip_if_unreachable(
+            lambda: get_league_element_states(draft_league_id), "Draft element-status"
+        )
+        if not states:
+            pytest.skip("Draft league has no element states (pre-draft?)")
+        return states
+
+    @pytest.fixture(scope="class")
+    def team_count(self, draft_league_id):
+        from scripts.common.fpl_draft_api import get_league_entries
+
+        entries = skip_if_unreachable(
+            lambda: get_league_entries(draft_league_id), "Draft league entries"
+        )
+        if not entries:
+            pytest.skip("Draft league has no entries")
+        return len(entries)
+
+    def test_states_are_plausible(self, element_states, team_count):
+        raise_on_error(
+            check_element_states(element_states, expected_teams=team_count),
+            context="Draft element states",
+        )
+
+    def test_locked_players_exist_and_are_unowned(self, element_states):
+        """Locked is the state the Waiver Wire fix turns on. Assert it is real
+        and distinguishable — not merely absent from the payload."""
+        locked = [s for s in element_states.values() if s.get("status") == "l"]
+        for state in locked:
+            assert state.get("owner") is None, (
+                "A locked player belongs to nobody -- they were just dropped or "
+                "added. An owner here means the status codes have shifted meaning."
+            )
+
+    def test_transaction_window_is_one_of_the_two_known_modes(self, draft_league_id):
+        from scripts.common.fpl_draft_api import (
+            get_draft_transaction_window,
+            TRANSACTION_MODE_FREE_AGENCY,
+            TRANSACTION_MODE_WAIVERS,
+        )
+
+        window = skip_if_unreachable(
+            lambda: get_draft_transaction_window(draft_league_id), "Draft transaction window"
+        )
+        mode = window.get("mode")
+        if mode is None:
+            pytest.skip("transaction_mode not published for this league")
+        assert mode in (TRANSACTION_MODE_FREE_AGENCY, TRANSACTION_MODE_WAIVERS), (
+            "Unknown transaction_mode %r. The Waiver Wire banner labels anything "
+            "that is not free-agency as a pending waiver round, so a third mode "
+            "would be mislabelled." % mode
         )
 
 

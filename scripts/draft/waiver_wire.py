@@ -30,6 +30,13 @@ from scripts.common.utils import (
     _backfill_player_ids,
     TEAM_FULL_TO_SHORT
 )
+from scripts.common.fpl_draft_api import (
+    get_league_element_states,
+    get_draft_transaction_window,
+    ELEMENT_STATE_LOCKED,
+    ELEMENT_STATE_AVAILABLE,
+    TRANSACTION_MODE_FREE_AGENCY,
+)
 from scripts.common.player_matching import canonical_normalize, get_player_registry
 from scripts.common.text_helpers import _strip_accents
 from scripts.common.styled_tables import render_styled_table
@@ -403,14 +410,71 @@ def _prepare_proj_for_merge(df_in: pd.DataFrame) -> pd.DataFrame:
     # Only the columns used by the merge helper
     return df[required]
 
+def _locked_rotowire_names(
+    element_states: Optional[Dict[int, Dict[str, Any]]],
+    proj_for_merge: pd.DataFrame,
+) -> set:
+    """Rotowire canonical names of players currently in the Draft *locked* state.
+
+    A locked player is on nobody's roster but cannot be acquired — most often
+    because another manager just dropped them. They only become claimable at the
+    next waiver deadline, so suggesting one as a free-agency pickup is advice the
+    manager cannot act on.
+
+    Locked element IDs are mapped onto Rotowire names through the *same*
+    merge_fpl_players_and_projections() path the ownership anti-join below uses,
+    so locked-matching is exactly as accurate as the owned-matching this page
+    already depends on. Anything that fails to match is simply not returned:
+    leaving a genuine free agent flagged as available is a far cheaper error than
+    hiding one.
+    """
+    if not element_states:
+        return set()
+
+    player_map = get_fpl_player_mapping()
+    rows = []
+    for element_id, state in element_states.items():
+        if state.get("status") != ELEMENT_STATE_LOCKED:
+            continue
+        info = player_map.get(element_id)
+        if not info:
+            continue
+        rows.append({
+            "Player": info.get("Player"),
+            "Team": info.get("Team"),
+            "Position": info.get("Position"),
+        })
+
+    if not rows:
+        return set()
+
+    locked_fpl = pd.DataFrame(rows)
+    locked_fpl["Team"] = locked_fpl["Team"].replace(TEAM_FULL_TO_SHORT)
+
+    try:
+        mapped = merge_fpl_players_and_projections(locked_fpl, proj_for_merge)
+    except Exception:
+        # Never take the page down over a badge. Unknown state -> treat as available.
+        _logger.warning("Failed to map locked players onto projections", exc_info=True)
+        return set()
+
+    return set(mapped["Player"].dropna().unique().tolist())
+
+
 def _available_from_projections(
     projections_df: pd.DataFrame,
     fpl_player_statistics_df: pd.DataFrame,
-    league_ownership: Dict[int, Dict[str, Any]]
+    league_ownership: Dict[int, Dict[str, Any]],
+    element_states: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> pd.DataFrame:
     """
     Anti-join to remove league-owned players using your fuzzy merge helper.
     If ownership is empty/unavailable (preseason, API issues), return normalized projections unchanged.
+
+    Adds a `Draft_State` column ('a' available / 'l' locked). Owned players are
+    dropped outright — they are not waiver targets at all — whereas locked players
+    are kept and flagged, so the manager can still see who is coming to the next
+    waiver round. `_compute_transfer_suggestions()` excludes the locked ones.
     """
     if projections_df is None or projections_df.empty:
         # Genuinely nothing to rank players by (Rotowire hasn't published a usable
@@ -429,12 +493,23 @@ def _available_from_projections(
     # Normalize projections to the exact schema the fuzzy merge expects
     proj_for_merge = _prepare_proj_for_merge(projections_df)
 
+    # Locked players are unclaimable right now regardless of ownership, so resolve
+    # them before the ownership branch below.
+    locked_names = _locked_rotowire_names(element_states, proj_for_merge)
+
+    def _stamp_state(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df["Draft_State"] = np.where(
+            df["Player"].isin(locked_names), ELEMENT_STATE_LOCKED, ELEMENT_STATE_AVAILABLE
+        )
+        return df
+
     # 1) Try to build owned names
     owned_names = _flatten_owned_names(league_ownership)
     if len(owned_names) == 0:
         # Nothing owned -> everyone available
         st.info("⚠️ No ownership data detected (preseason or API). Treating all players as available.")
-        return proj_for_merge
+        return _stamp_state(proj_for_merge)
 
     # 2) Enrich owned with Team/Position (for better fuzzy accuracy)
     # Use normalized names for the merge to handle accent mismatches
@@ -487,7 +562,7 @@ def _available_from_projections(
     # 4) Anti-join
     owned_rw_names = set(mapped_owned["Player"].dropna().unique().tolist())
     avail = proj_for_merge[~proj_for_merge["Player"].isin(owned_rw_names)].copy()
-    return avail
+    return _stamp_state(avail)
 
 
 # ---------------------------
@@ -1033,6 +1108,17 @@ def _compute_transfer_suggestions(
     suggestions = []
     debug_rows: List[Dict] = []
 
+    # Locked players cannot be acquired — they are on nobody's roster but only
+    # become claimable at the next waiver deadline. Filtering here rather than at
+    # the callsite means no future caller can forget: the same class of bug as the
+    # Fixtures Overview omitting ffp_df from one of two callsites.
+    locked_excluded = 0
+    if "Draft_State" in avail_df.columns:
+        _locked_mask = avail_df["Draft_State"] == ELEMENT_STATE_LOCKED
+        locked_excluded = int(_locked_mask.sum())
+        if locked_excluded:
+            avail_df = avail_df.loc[~_locked_mask].copy()
+
     # Season points for injury hold logic
     roster_season_pts = pd.to_numeric(
         roster_df.get('Season_Points', pd.Series(dtype=float)), errors='coerce'
@@ -1049,6 +1135,7 @@ def _compute_transfer_suggestions(
                 'skipped': True,
                 'reason': 'Not enough roster players or no available players',
                 'pairs': [],
+                'locked_excluded': locked_excluded,
             })
             continue
 
@@ -1172,6 +1259,7 @@ def _compute_transfer_suggestions(
             'skipped': False,
             'reason': '',
             'pairs': pos_debug_pairs,
+            'locked_excluded': locked_excluded,
         })
 
     # Sort by transaction score descending, return top N
@@ -1346,6 +1434,17 @@ def _render_transfer_debug(debug_rows: List[Dict]):
             "Adj. score = raw score × injury multiplier. "
             "🚫 = passed score threshold but vetoed by sanity check (ADD worse on raw metrics)."
         )
+
+        _locked_excluded = max(
+            (int(r.get('locked_excluded', 0) or 0) for r in debug_rows), default=0
+        )
+        if _locked_excluded:
+            st.caption(
+                f"🔒 {_locked_excluded} locked player(s) were excluded from consideration — "
+                "they were recently dropped or added and only become claimable at the "
+                "next waiver deadline."
+            )
+
         for row in debug_rows:
             pos = row['pos']
             label = pos_labels.get(pos, pos)
@@ -1634,6 +1733,86 @@ def _render_transfer_activity_chart(summary_df: pd.DataFrame):
 
 
 # ---------------------------
+# TRANSACTION WINDOW BANNER
+# ---------------------------
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _next_waiver_deadline(gw: Optional[int]) -> Optional[datetime]:
+    """Next transaction deadline in ET, or None if it can't be resolved.
+
+    Thin cached wrapper over waiver_alerts.get_next_transaction_deadline(), which
+    hits the fixtures endpoint and is not Streamlit-aware. Purely decorative — any
+    failure means the banner drops the line, never that the page breaks.
+    """
+    try:
+        from scripts.common.waiver_alerts import get_next_transaction_deadline
+        deadline_et, _kickoff_et, _gw = get_next_transaction_deadline(
+            offset_hours=config.TRANSACTION_DEADLINE_HOURS_BEFORE_KICKOFF,
+            gw=gw,
+        )
+        return deadline_et
+    except Exception:
+        _logger.warning("Could not resolve next transaction deadline", exc_info=True)
+        return None
+
+
+def _render_transaction_window(window: Dict[str, Any], locked_count: int):
+    """Render the current waiver / free-agency state as a compact card row.
+
+    Free agency and waivers are different windows with different rules: during free
+    agency an available player can be taken immediately, whereas locked players are
+    only claimable once the next waiver round processes. Which window is open
+    decides whether a suggestion is actionable today, so it belongs on the page.
+    """
+    if not window or not window.get("mode"):
+        return
+
+    mode = window.get("mode")
+    next_gw = window.get("next_event") or window.get("current_event")
+
+    if mode == TRANSACTION_MODE_FREE_AGENCY:
+        window_icon, window_label = "🟢", "Free Agency open"
+        window_note = "Available players can be added immediately"
+    else:
+        window_icon, window_label = "⏳", "Waivers pending"
+        window_note = "Requests process at the waiver deadline"
+
+    deadline = _next_waiver_deadline(next_gw)
+    if deadline is not None:
+        # %-I is glibc/BSD-only, so strip the leading zero by hand for Windows.
+        deadline_value = deadline.strftime("%a %I:%M %p ET").replace(" 0", " ", 1)
+        deadline_note = f"GW{next_gw} waiver deadline" if next_gw else "Next waiver deadline"
+    else:
+        deadline_value = "—"
+        deadline_note = "Deadline unavailable"
+
+    locked_note = (
+        f"Enter the GW{next_gw} waiver round" if next_gw else "Claimable at the next waiver"
+    )
+
+    def _card(icon: str, value: str, label: str, note: str, color: str) -> str:
+        return (
+            '<div style="flex:1;text-align:center;padding:14px 12px;color:#e0e0e0;'
+            'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);'
+            'border:1px solid #333;border-radius:10px;margin:0 6px;">'
+            f'<div style="font-size:1.3em;margin-bottom:4px;color:#e0e0e0;">{icon}</div>'
+            f'<div style="color:{color};font-size:1.05em;font-weight:bold;">{value}</div>'
+            f'<div style="color:#e0e0e0;font-size:0.85em;margin-top:4px;">{label}</div>'
+            f'<div style="color:#888;font-size:0.75em;margin-top:2px;">{note}</div>'
+            '</div>'
+        )
+
+    st.markdown(
+        '<div style="display:flex;margin-bottom:1rem;">'
+        + _card(window_icon, window_label, "Transaction window", window_note, "#4ecca3")
+        + _card("⏰", deadline_value, "Next deadline", deadline_note, "#3498db")
+        + _card("🔒", str(locked_count), "Locked players", locked_note, "#ff9800")
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------
 # PAGE
 # ---------------------------
 
@@ -1641,7 +1820,8 @@ def show_waiver_wire_page():
     st.header("🔁 Waiver Wire Assistant")
     st.caption("Blends weekly projections, recent form, fixture difficulty, and injury status to suggest transfers.")
 
-    # Placeholder for suggestion cards (rendered at top, filled later)
+    # Placeholder for the transaction banner and suggestion cards (filled later)
+    window_container = st.container()
     suggestion_container = st.container()
 
     # --- Team picker (moved up so suggestions can use it) ---
@@ -1651,6 +1831,26 @@ def show_waiver_wire_page():
     except Exception as e:
         st.error(f"Unable to load league ownership: {e}")
         ownership = {}
+
+    # Per-player transaction state (owned / available / locked). Both readers fail
+    # open: an empty result means the page behaves as it did before states existed.
+    try:
+        element_states = get_league_element_states(config.FPL_DRAFT_LEAGUE_ID)
+    except Exception:
+        _logger.warning("Unable to load Draft element states", exc_info=True)
+        element_states = {}
+    try:
+        transaction_window = get_draft_transaction_window(config.FPL_DRAFT_LEAGUE_ID)
+    except Exception:
+        _logger.warning("Unable to load Draft transaction window", exc_info=True)
+        transaction_window = {}
+
+    locked_count = sum(
+        1 for s in element_states.values() if s.get("status") == ELEMENT_STATE_LOCKED
+    )
+
+    with window_container:
+        _render_transaction_window(transaction_window, locked_count)
 
     team_options = []
     for tid, blob in ownership.items():
@@ -1685,6 +1885,14 @@ def show_waiver_wire_page():
         pos_filter = colA.multiselect("Positions", ["G", "D", "M", "F"], default=["G", "D", "M", "F"])
         lookahead = int(colB.number_input("Upcoming GWs to average FDR", min_value=1, max_value=8, value=config.UPCOMING_WEEKS_DEFAULT))
         form_weeks = int(colC.number_input("Form lookback GWs", min_value=1, max_value=5, value=config.FORM_LOOKBACK_WEEKS))
+
+        hide_locked = st.checkbox(
+            "Hide locked players",
+            value=False,
+            help="Locked players were recently dropped or added and cannot be picked up "
+                 "until the next waiver deadline. They are never suggested as transfers, "
+                 "but are shown by default so you can plan your waiver claims.",
+        )
 
         st.caption("Scores use positional percentiles (0-1) against the full FPL pool. "
                    "A score of 0.85 = top 15% at this position. Weights auto-adjust by gameweek.")
@@ -1746,7 +1954,7 @@ def show_waiver_wire_page():
 
     # AVAILABLE PLAYERS — compute on ALL positions (no filter yet) for suggestions
     try:
-        avail_all = _available_from_projections(proj, fpl_stats, ownership)
+        avail_all = _available_from_projections(proj, fpl_stats, ownership, element_states)
     except Exception as e:
         st.error(f"Failed to compute available players: {e}")
         try:
@@ -1984,6 +2192,8 @@ def show_waiver_wire_page():
     avail_display = avail_all.copy()
     if pos_filter:
         avail_display = avail_display[avail_display["Position"].isin(pos_filter)]
+    if hide_locked and "Draft_State" in avail_display.columns:
+        avail_display = avail_display[avail_display["Draft_State"] != ELEMENT_STATE_LOCKED]
     # Scores already computed above; compute if not yet done
     if "Transfer Score" not in avail_display.columns:
         avail_display = _compute_waiver_score(avail_display, fpl_stats, current_gw=current_gw)
@@ -1995,8 +2205,27 @@ def show_waiver_wire_page():
     for col in _display_avail.select_dtypes(include=[np.number]).columns:
         _display_avail[col] = _display_avail[col].round(2)
 
+    # Availability badge. Locked players stay in the table on purpose — they are
+    # the next waiver round's targets — but they are never suggested as transfers.
+    if "Draft_State" in _display_avail.columns:
+        _waiver_gw = transaction_window.get("next_event") or transaction_window.get("current_event")
+        _locked_label = f"🔒 Locked (GW{_waiver_gw} waiver)" if _waiver_gw else "🔒 Locked"
+        _display_avail["Status"] = np.where(
+            _display_avail["Draft_State"] == ELEMENT_STATE_LOCKED,
+            _locked_label,
+            "✅ Free agent",
+        )
+
     st.subheader("Available Players (ranked)")
-    display_cols_avail = ["Player", "Team", "Position", "Points", "Form", "AvgFDRNextN", "Season_Points", "1GW", "ROS", "Transfer Score"]
+    _n_locked_shown = int((_display_avail.get("Status", pd.Series(dtype=str)).str.startswith("🔒")).sum()) \
+        if "Status" in _display_avail.columns else 0
+    if _n_locked_shown:
+        st.caption(
+            f"🔒 {_n_locked_shown} of these players are locked — recently dropped or added, "
+            "so they cannot be picked up until the next waiver deadline. They are ranked "
+            "here for waiver planning but are never proposed as transfers."
+        )
+    display_cols_avail = ["Player", "Team", "Position", "Status", "Points", "Form", "AvgFDRNextN", "Season_Points", "1GW", "ROS", "Transfer Score"]
     display_cols_avail = [c for c in display_cols_avail if c in _display_avail.columns]
     render_styled_table(
         _display_avail[display_cols_avail].reset_index(drop=True),

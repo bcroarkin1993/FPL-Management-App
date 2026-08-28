@@ -983,6 +983,109 @@ def get_team_projections(player_rankings, league_id, team_id):
 # TRANSACTIONS
 # =============================================================================
 
+# --- Player transaction states -------------------------------------------------
+# The `element-status` endpoint publishes one of three states per player. These are
+# the platform's own codes; see "Draft Transaction Rules" in CLAUDE.md for the rules
+# they encode. Verified live against league 11347 (616 elements: 446 a / 150 o / 20 l).
+ELEMENT_STATE_OWNED = "o"       # already in somebody's squad
+ELEMENT_STATE_AVAILABLE = "a"   # claimable now (free agency) or at the next waiver
+ELEMENT_STATE_LOCKED = "l"      # cannot be selected yet — most often just dropped
+
+ELEMENT_STATE_LABELS = {
+    ELEMENT_STATE_OWNED: "Owned",
+    ELEMENT_STATE_AVAILABLE: "Available",
+    ELEMENT_STATE_LOCKED: "Locked",
+}
+
+#: The two values FPL uses for a league's current transaction window.
+TRANSACTION_MODE_WAIVERS = "waivers"
+TRANSACTION_MODE_FREE_AGENCY = "free-agency"
+
+
+@st.cache_data(ttl=300)
+def get_league_element_states(league_id):
+    """Fetch every player's transaction state for a Draft league.
+
+    A player dropped by another manager becomes *locked* — they are on nobody's
+    roster but cannot be picked up until the next waiver round processes. Ownership
+    data alone cannot distinguish them from a genuine free agent, which is how the
+    Waiver Wire came to suggest a player the manager could not actually acquire.
+
+    Returns:
+        {element_id (int): {"status": "o"|"a"|"l",
+                            "owner": int|None,
+                            "in_accepted_trade": bool}}
+        Empty dict if the league has not drafted yet or the API is unreachable —
+        callers must treat that as "state unknown" and fall back to prior behaviour
+        rather than hiding players.
+    """
+    url = f"https://draft.premierleague.com/api/league/{league_id}/element-status"
+    try:
+        payload = requests.get(url, timeout=30).json().get("element_status", [])
+    except Exception as e:
+        _logger.warning("Failed to fetch element states for league %s: %s", league_id, e)
+        return {}
+
+    states = {}
+    for row in payload:
+        element = row.get("element")
+        if element is None:
+            continue
+        try:
+            element = int(element)
+        except (TypeError, ValueError):
+            _logger.warning("Non-integer element id %r in league %s", element, league_id)
+            continue
+        states[element] = {
+            "status": row.get("status"),
+            "owner": row.get("owner"),
+            "in_accepted_trade": bool(row.get("in_accepted_trade", False)),
+        }
+    return states
+
+
+@st.cache_data(ttl=300)
+def get_draft_transaction_window(league_id):
+    """Describe where the league currently sits in the waiver / free-agency cycle.
+
+    Two endpoints are needed: `/api/game` carries the global cycle state, while the
+    active window is a per-league setting on `/api/league/{id}/details`.
+
+    Returns a dict with keys ``mode`` ("waivers" | "free-agency" | None),
+    ``waivers_processed``, ``current_event``, ``next_event`` and
+    ``current_event_finished``. Every value degrades to None on failure so a banner
+    built from this can simply render nothing.
+    """
+    blank = {
+        "mode": None,
+        "waivers_processed": None,
+        "current_event": None,
+        "next_event": None,
+        "current_event_finished": None,
+    }
+
+    result = dict(blank)
+
+    try:
+        game = requests.get("https://draft.premierleague.com/api/game", timeout=30).json()
+        result["waivers_processed"] = game.get("waivers_processed")
+        result["current_event"] = game.get("current_event")
+        result["next_event"] = game.get("next_event")
+        result["current_event_finished"] = game.get("current_event_finished")
+    except Exception as e:
+        _logger.warning("Failed to fetch Draft game state: %s", e)
+
+    try:
+        details = requests.get(
+            f"https://draft.premierleague.com/api/league/{league_id}/details", timeout=30
+        ).json()
+        result["mode"] = (details.get("league") or {}).get("transaction_mode")
+    except Exception as e:
+        _logger.warning("Failed to fetch transaction mode for league %s: %s", league_id, e)
+
+    return result
+
+
 def get_transaction_data(league_id):
     """
     Fetches waiver transactions from the FPL Draft API and stores them in config.TRANSACTION_DATA if not already fetched.

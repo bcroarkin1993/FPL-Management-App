@@ -14,6 +14,7 @@ from scripts.common.data_validation import (
     check_score_std,
     check_single_gw_projections,
     check_source_scale_agreement,
+    check_element_states,
     check_initial_squad,
     check_merge_match_rate,
     check_team_strength,
@@ -405,3 +406,73 @@ class TestCheckInitialSquad:
     def test_missing_optional_columns_are_tolerated(self):
         df = self._good().drop(columns=["ExpPts", "Team"])
         assert check_initial_squad(df, 100.0) == []
+
+
+class TestCheckElementStates:
+    """The Draft element-status endpoint, shaped like the real one.
+
+    The bug: the Waiver Wire suggested Oliver McBurnie, who had just been dropped
+    by another manager and was therefore *locked* — on nobody's roster, but not
+    claimable either. Ownership data alone cannot tell the two apart.
+    """
+
+    @staticmethod
+    def _states(n_teams=10, n_locked=20, n_available=446):
+        """616 elements split the way league 11347 really was: 150 owned by 10
+        teams of 15, 20 locked, the rest available."""
+        states = {}
+        element = 1
+        for team in range(n_teams):
+            for _ in range(15):
+                states[element] = {"status": "o", "owner": 56000 + team,
+                                   "in_accepted_trade": False}
+                element += 1
+        for _ in range(n_locked):
+            states[element] = {"status": "l", "owner": None, "in_accepted_trade": False}
+            element += 1
+        for _ in range(n_available):
+            states[element] = {"status": "a", "owner": None, "in_accepted_trade": False}
+            element += 1
+        return states
+
+    def test_the_real_payload_is_clean(self):
+        assert check_element_states(self._states(), expected_teams=10) == []
+
+    def test_empty_map_is_an_error(self):
+        """An empty map makes the page fall back to 'everyone is available',
+        which is exactly the state that produced the McBurnie suggestion."""
+        assert _errors(check_element_states({}))
+        assert _errors(check_element_states(None))
+
+    def test_unknown_status_code_is_an_error(self):
+        states = self._states()
+        states[1]["status"] = "x"
+        issues = _errors(check_element_states(states))
+        assert issues and "unrecognised status code" in issues[0].message
+
+    def test_owned_player_without_an_owner_is_an_error(self):
+        states = self._states()
+        states[1]["owner"] = None
+        assert _errors(check_element_states(states))
+
+    def test_unowned_player_with_an_owner_is_an_error(self):
+        states = self._states()
+        locked_id = next(k for k, v in states.items() if v["status"] == "l")
+        states[locked_id]["owner"] = 56000
+        assert _errors(check_element_states(states))
+
+    def test_owned_count_must_match_squad_arithmetic(self):
+        """Draft squads are a fixed 15, so 10 teams own exactly 150 players."""
+        states = self._states(n_teams=9)
+        assert _errors(check_element_states(states, expected_teams=10))
+
+    def test_everything_locked_is_a_warning(self):
+        """If 'l' were ever read as something broader, the waiver wire would
+        empty out. Warn rather than fail — the boundary is judgement, not law."""
+        states = self._states(n_locked=400, n_available=66)
+        issues = check_element_states(states)
+        assert issues and all(i.severity == "warning" for i in issues)
+
+    def test_no_available_players_is_an_error(self):
+        states = self._states(n_available=0)
+        assert _errors(check_element_states(states))

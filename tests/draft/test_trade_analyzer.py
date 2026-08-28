@@ -140,3 +140,111 @@ class TestComputeTradeValues:
         weights = {"w_season": 0, "w_regr": 0, "w_form": 0, "w_fdr": 0, "w_minutes": 0}
         _compute_trade_values(rosters, weights)
         assert "trade_value" in rosters[1]["players"][0]
+
+
+def _make_full_rosters():
+    """Two legal Draft squads (2 GK / 5 DEF / 5 MID / 3 FWD each) with trade values.
+
+    Team Beta is deliberately stronger everywhere, so every finder has something
+    to propose — otherwise a "no illegal trades" assertion passes vacuously.
+    """
+    shape = [("GK", 2), ("DEF", 5), ("MID", 5), ("FWD", 3)]
+    rosters = {}
+    for team_id, (name, base) in enumerate([("Team Alpha", 0.2), ("Team Beta", 0.6)], start=1):
+        players = []
+        for pos, count in shape:
+            for i in range(count):
+                players.append({
+                    "name": f"{name} {pos}{i}",
+                    "position": pos,
+                    "pos_short": pos[0],
+                    "team": "ARS",
+                    "player_id": team_id * 100 + len(players),
+                    "total_points": 50,
+                    "trade_value": base + 0.05 * i,
+                })
+        rosters[team_id] = {"team_name": name, "players": players}
+    return rosters
+
+
+def _needs_for(rosters):
+    return {tid: {"GK": 0.5, "DEF": 0.5, "MID": 0.5, "FWD": 0.5} for tid in rosters}
+
+
+def _is_balanced(proposal):
+    """Both sides move the same number of players in the same positions."""
+    from collections import Counter
+    send = Counter(p["position"] for p in proposal["send"])
+    recv = Counter(p["position"] for p in proposal["receive"])
+    return send == recv
+
+
+class TestTradeLegality:
+    """FPL requires identical position composition and count on both sides.
+
+    The bug this guards: _find_1_for_1_trades() used to search *cross-position*
+    swaps (send a MID, receive a FWD) and a _find_2_for_1_trades() finder
+    proposed unequal counts. Both rendered trades that cannot be submitted.
+    """
+
+    def test_rejects_unequal_counts(self):
+        from scripts.draft.trade_analyzer import _is_legal_trade
+
+        send = [{"position": "MID"}]
+        recv = [{"position": "MID"}, {"position": "FWD"}]
+        assert not _is_legal_trade(send, recv)
+
+    def test_rejects_cross_position_one_for_one(self):
+        from scripts.draft.trade_analyzer import _is_legal_trade
+
+        assert not _is_legal_trade([{"position": "MID"}], [{"position": "FWD"}])
+
+    def test_rejects_same_count_different_composition(self):
+        """FPL's own example: 1 MID + 2 FWD may not become 2 MID + 1 FWD."""
+        from scripts.draft.trade_analyzer import _is_legal_trade
+
+        send = [{"position": "MID"}, {"position": "FWD"}, {"position": "FWD"}]
+        recv = [{"position": "MID"}, {"position": "MID"}, {"position": "FWD"}]
+        assert not _is_legal_trade(send, recv)
+
+    def test_accepts_matching_composition(self):
+        from scripts.draft.trade_analyzer import _is_legal_trade
+
+        assert _is_legal_trade([{"position": "MID"}], [{"position": "MID"}])
+        send = [{"position": "MID"}, {"position": "FWD"}]
+        recv = [{"position": "FWD"}, {"position": "MID"}]  # order must not matter
+        assert _is_legal_trade(send, recv)
+
+    def test_score_proposal_refuses_an_illegal_shape(self):
+        """The guard sits in _score_proposal so no finder can bypass it."""
+        from scripts.draft.trade_analyzer import _score_proposal
+
+        rosters = _make_full_rosters()
+        needs = _needs_for(rosters)
+        send = [p for p in rosters[1]["players"] if p["position"] == "MID"][:1]
+        recv = [p for p in rosters[2]["players"] if p["position"] == "FWD"][:1]
+
+        assert _score_proposal(1, 2, send, recv, rosters, needs, 2) is None
+
+    def test_every_discovered_trade_is_legal(self):
+        """The real assertion: whatever the finders produce must be proposable."""
+        from scripts.draft.trade_analyzer import (
+            _find_1_for_1_trades,
+            _find_2_for_2_trades,
+        )
+
+        rosters = _make_full_rosters()
+        needs = _needs_for(rosters)
+
+        one_for_one = _find_1_for_1_trades(1, rosters, needs, num_teams=2)
+        two_for_two = _find_2_for_2_trades(1, rosters, needs, num_teams=2)
+
+        assert one_for_one, "no 1-for-1 proposals generated — assertion would be vacuous"
+        for proposal in one_for_one + two_for_two:
+            assert _is_balanced(proposal), proposal["trade_type"]
+
+    def test_two_for_one_discovery_is_gone(self):
+        """2-for-1 is an unequal shape and cannot be proposed in FPL at all."""
+        import scripts.draft.trade_analyzer as ta
+
+        assert not hasattr(ta, "_find_2_for_1_trades")

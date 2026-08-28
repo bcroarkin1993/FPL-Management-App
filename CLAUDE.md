@@ -191,6 +191,7 @@ to import from GitHub Actions.
 | `check_merge_match_rate()` | A name-based merge quietly ceasing to match (the 356/425 season-rankings regression) |
 | `check_initial_squad()` | Illegal or implausibly-priced Classic squads; a scale-free objective, whose signature is unspent budget |
 | `check_team_strength()` | Degenerate power rankings — every team scoring ~50 because position codes were `GKP/DEF/MID/FWD` instead of `G/D/M/F`, short squads, impossible injury costs |
+| `check_element_states()` | Draft player states changing shape — an unknown `status` code, `owner` disagreeing with the status, an owned count that isn't teams x 15. Every one makes locked players read as available, so the Waiver Wire suggests players who cannot be picked up |
 
 Ranges are deliberately wide — these are "this cannot be right" boundaries, not
 "this looks unusual" ones. A check that cries wolf gets muted. Note the XI floor is
@@ -456,6 +457,87 @@ dates come from parsing the FPL `news` text.
    player scoring 17.5/start will outrank Haaland unless excluded from the
    denominator. `attach_reference_pps()` handles both; do not bypass it.
 
+## Draft Transaction Rules — FPL Platform Reference
+
+The rules FPL Draft actually enforces on adds, drops and trades. Anything the app
+suggests must be something the manager can really do; two features shipped advice
+that was impossible to act on before this was written down.
+
+### Player states
+
+Every player is in exactly one state, published per-league on
+`GET /api/league/{id}/element-status` as `status`, alongside `owner` and
+`in_accepted_trade`:
+
+| Code | State | Meaning |
+|------|-------|---------|
+| `o` | **Owned** | already in a squad (`owner` is the entry id) |
+| `a` | **Available** | addable now if free agency is active, otherwise requestable at the next waiver |
+| `l` | **Locked** | *cannot be selected yet* |
+
+A player locks when they are **removed from another squad**, added to the game within
+24h of a draft/waiver deadline, or added while free agency was active. **Locked players
+become available for waiver requests at the next deadline** — they are not gone, they
+are next week's waiver targets.
+
+**Ownership data alone cannot see this.** A locked player is on nobody's roster, so an
+anti-join against rosters marks them available. That is how the Waiver Wire came to
+suggest Oliver McBurnie hours after another manager dropped him.
+`get_league_element_states()` (`fpl_draft_api.py`) reads the states;
+`_available_from_projections()` flags them; `_compute_transfer_suggestions()` excludes
+them — **inside the function, not at the callsite**, so no future caller can forget.
+
+### Waivers vs free agency
+
+Two windows alternate every gameweek, and which one is open decides whether an
+available player can be taken *today*:
+
+1. After the draft, unselected players go to waivers.
+2. Waivers process ~24h before the gameweek deadline (less when gameweeks are close
+   together). Lowest-ranked team picks first; a successful claim sends that team to the
+   back of the queue. Claims are position-locked: you propose replacing a squad player
+   with an unselected one **in the same position**. Multiple claims must be ranked.
+3. Free agency then runs until the gameweek deadline — adds process immediately.
+4. At the deadline, all unowned players return to waivers and the cycle repeats.
+
+The active window is `league.transaction_mode` on `/api/league/{id}/details`
+(`"waivers"` | `"free-agency"`); `/api/game` carries the global cycle state
+(`waivers_processed`, `current_event`, `next_event`, `current_event_finished`,
+`trades_time_for_approval`). `get_draft_transaction_window()` merges the two.
+
+### Trades
+
+**A trade swaps the same number of players with identical position composition on both
+sides.** 1 MID + 2 FWD for 1 MID + 2 FWD is legal; the same three for 2 MID + 1 FWD is
+not, and neither is any unequal shape. This is the rule the Trade Analyzer used to
+break — it searched cross-position 1-for-1 swaps and had a whole 2-for-1 finder, both
+producing trades that cannot be submitted. `_is_legal_trade()` now gates every proposal
+from inside `_score_proposal()`, so only 1-for-1 and 2-for-2 are discoverable.
+
+Offers can be made until the waiver deadline, or 24h earlier where approval is required.
+A player may appear in several offers; accepting one invalidates the rest. Accepted
+trades cannot be cancelled, and trades process *before* waivers.
+
+League setting lives at `league.trades` on `/api/league/{id}/details`. The four options
+are no trades / all trades (immediate) / administrator approval / manager approval
+(fails on 50%+ objection); where approval is required, an un-vetoed trade counts as
+approved at the waiver deadline. **Only one code is verified: `"a"` = administrator
+approval**, confirmed against a league whose admin reported the setting. Do not guess
+the others — label an unrecognised code as unknown rather than inventing a mapping.
+
+Trade states: proposed, withdrawn, rejected, accepted, invalid, vetoed, expired,
+processed.
+
+### Verified live payload
+
+League 11347, 2026-08-27 — the numbers `check_element_states()` asserts against:
+
+```
+element-status : 616 elements -> 446 'a', 150 'o' (10 teams x 15), 20 'l'
+league details : transaction_mode "free-agency", trades "a"
+game           : waivers_processed true, current_event 1, next_event 2
+```
+
 ## Environment Variables
 
 Required in `.env` (or set/locked via the in-app **🆔 League Setup** page under FPL App Home,
@@ -539,7 +621,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Task | Status | Notes |
 |------|--------|-------|
 | Mini-League Rival Tracker | Not Started | Tab on League Analysis pages. Show differential players, projected points gap, effective ownership within mini-league. Data available via get_league_player_ownership (Draft) and team picks (Classic). No transfer advice (handled elsewhere). |
-| Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2/2-for-1 trade discovery, acceptance likelihood scoring, Explore Teams comparison, Regression Watch (buy-low/sell-high) |
+| Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2 trade discovery (position-matched — see "Draft Transaction Rules"; cross-position and 2-for-1 shapes were removed as FPL forbids them), acceptance likelihood scoring, Explore Teams comparison, Regression Watch (buy-low/sell-high) |
 | Historical Data Analysis | Completed | Season History section on Classic Team Analysis (rank chart, points chart, data table); League Standing metrics on Draft Team Analysis |
 | Split utils.py | Completed | Split into 7 focused modules (`text_helpers`, `fpl_draft_api`, `fpl_classic_api`, `scraping`, `fixture_helpers`, `analytics`, `optimization`); merged matching functions into `player_matching.py`; `utils.py` is now a thin re-export shim |
 

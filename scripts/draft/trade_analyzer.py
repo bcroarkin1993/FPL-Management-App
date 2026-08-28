@@ -6,10 +6,15 @@ Identifies mutually beneficial trades by combining:
 - Trade Value model (season pts, regression, form, FDR, minutes)
 - Positional needs analysis (league percentile per position)
 - Acceptance likelihood (value fairness + opponent positional benefit)
-- Roster constraint handling (drop suggestions for uneven trades)
+
+Every proposal must be one FPL would actually accept: a trade swaps the *same
+number* of players with *identical position composition* on both sides (1 MID +
+2 FWD for 1 MID + 2 FWD, never 2 MID + 1 FWD). See "Draft Transaction Rules" in
+CLAUDE.md. Only 1-for-1 and 2-for-2 shapes are discoverable as a result.
 """
 
 import logging
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -329,66 +334,69 @@ def _get_positional_rank(
 # TRADE DISCOVERY ENGINE
 # ============================================================================
 
+def _is_legal_trade(send_players: List[Dict], recv_players: List[Dict]) -> bool:
+    """Whether FPL would let this trade be proposed at all.
+
+    FPL requires both sides to move the same number of players *and* the same
+    position composition. This rules out unequal shapes (2-for-1) and
+    cross-position swaps (send a MID, receive a FWD) outright — a proposal
+    violating either is one the manager simply cannot submit, however good the
+    value looks.
+    """
+    if len(send_players) != len(recv_players):
+        return False
+    return (
+        Counter(p.get("position") for p in send_players)
+        == Counter(p.get("position") for p in recv_players)
+    )
+
+
 def _find_1_for_1_trades(
     my_team_id: int,
     rosters: Dict,
     needs: Dict,
     num_teams: int,
 ) -> List[Dict]:
-    """Find 1-for-1 trade proposals."""
+    """Find 1-for-1 trade proposals (same position on both sides)."""
     proposals = []
     my_roster = rosters[my_team_id]["players"]
-    my_needs = needs[my_team_id]
 
     for opp_id, opp_data in rosters.items():
         if opp_id == my_team_id:
             continue
         opp_roster = opp_data["players"]
-        opp_needs = needs[opp_id]
 
-        # For each position I need improvement at
+        # Positional need is priced by _score_proposal, so scan every position.
         for pos in ["GK", "DEF", "MID", "FWD"]:
-            my_need = my_needs[pos]
-            opp_need_for_pos = opp_needs[pos]
+            # A 1-for-1 must be same-position on both sides, so I send at the very
+            # position I want to improve: my worst there for their best there.
+            # (Cross-position swaps used to be searched here; FPL forbids them.)
+            my_at_send = sorted(
+                [p for p in my_roster if p["position"] == pos],
+                key=lambda x: x.get("trade_value", 0),
+            )
+            their_at_pos = sorted(
+                [p for p in opp_roster if p["position"] == pos],
+                key=lambda x: x.get("trade_value", 0),
+                reverse=True,
+            )
 
-            # I want to receive at this position — find what I can send
-            # Look for complementary positions where I'm strong and they're weak
-            for send_pos in ["GK", "DEF", "MID", "FWD"]:
-                my_send_need = my_needs[send_pos]
-                opp_receive_need = opp_needs[send_pos]
+            if not my_at_send or not their_at_pos:
+                continue
 
-                # Skip if I need this position too (I shouldn't weaken myself)
-                if my_send_need > 0.6:
-                    continue
+            # Consider bottom 2 of mine, top 3 of theirs
+            for send_p in my_at_send[:2]:
+                for recv_p in their_at_pos[:3]:
+                    # Skip if I'd be sending a better player for a worse one
+                    if send_p["trade_value"] > recv_p["trade_value"] * 1.3:
+                        continue
 
-                # My players at send_pos sorted by trade_value (send worst)
-                my_at_send = sorted(
-                    [p for p in my_roster if p["position"] == send_pos],
-                    key=lambda x: x.get("trade_value", 0),
-                )
-                # Their players at receive_pos sorted by trade_value desc (get best)
-                their_at_pos = sorted(
-                    [p for p in opp_roster if p["position"] == pos],
-                    key=lambda x: x.get("trade_value", 0),
-                    reverse=True,
-                )
-
-                if not my_at_send or not their_at_pos:
-                    continue
-
-                # Consider bottom 2 of mine, top 3 of theirs
-                for send_p in my_at_send[:2]:
-                    for recv_p in their_at_pos[:3]:
-                        # Skip if I'd be sending a better player for a worse one
-                        if send_p["trade_value"] > recv_p["trade_value"] * 1.3:
-                            continue
-
-                        proposal = _score_proposal(
-                            my_team_id, opp_id, [send_p], [recv_p],
-                            rosters, needs, num_teams,
-                        )
-                        if proposal and proposal["trade_score"] > 0.05:
-                            proposals.append(proposal)
+                    proposal = _score_proposal(
+                        my_team_id, opp_id, [send_p], [recv_p],
+                        rosters, needs, num_teams,
+                    )
+                    if proposal and proposal["trade_score"] > 0.05:
+                        proposals.append(proposal)
 
     return proposals
 
@@ -495,142 +503,6 @@ def _find_2_for_2_trades(
     return proposals
 
 
-def _find_2_for_1_trades(
-    my_team_id: int,
-    rosters: Dict,
-    needs: Dict,
-    num_teams: int,
-) -> List[Dict]:
-    """
-    Find 2-for-1 trades where the "1" player's position is always
-    represented on the "2" side (position anchor).
-
-    Direction 1 (I send 2, receive 1 star):
-      I receive their strong FWD, I send my weaker FWD + a sweetener at
-      a position they need. They keep their FWD slot filled.
-
-    Direction 2 (I send 1 star, receive 2):
-      I send my strong FWD, I receive their decent FWD (replacement) +
-      a bonus player at a position I need. I keep my FWD slot filled.
-
-    Both players on the "2" side must be above replacement level.
-    """
-    proposals = []
-    my_roster = rosters[my_team_id]["players"]
-    my_needs = needs[my_team_id]
-    _MIN_CALIBER = 0.12  # both players on "2" side must be above this
-    # GK excluded from filler roles — positional scarcity (only 20 starters)
-    _FILLER_POSITIONS = ["DEF", "MID", "FWD"]
-
-    for opp_id, opp_data in rosters.items():
-        if opp_id == my_team_id:
-            continue
-        opp_roster = opp_data["players"]
-        opp_needs = needs[opp_id]
-
-        # Direction 1: I send 2, receive 1 star player
-        # anchor_pos = position of the star player (same pos on both sides)
-        for anchor_pos in ["GK", "DEF", "MID", "FWD"]:
-            # Their best at anchor_pos — the star I want
-            their_stars = sorted(
-                [p for p in opp_roster if p["position"] == anchor_pos],
-                key=lambda x: x.get("trade_value", 0), reverse=True,
-            )
-            # My worst at anchor_pos — position replacement I send back
-            my_at_anchor = sorted(
-                [p for p in my_roster if p["position"] == anchor_pos],
-                key=lambda x: x.get("trade_value", 0),  # worst first
-            )
-            if not their_stars or not my_at_anchor:
-                continue
-
-            for target in their_stars[:2]:
-                for my_anchor_send in my_at_anchor[:2]:
-                    # Must be an upgrade for me
-                    if target.get("trade_value", 0) <= my_anchor_send.get("trade_value", 0):
-                        continue
-
-                    # Find a sweetener from another position they need
-                    for sweet_pos in _FILLER_POSITIONS:
-                        if sweet_pos == anchor_pos:
-                            continue
-                        if opp_needs.get(sweet_pos, 0) < 0.3:
-                            continue  # they don't need this position
-
-                        my_sweeteners = sorted(
-                            [p for p in my_roster if p["position"] == sweet_pos
-                             and p["name"] != my_anchor_send["name"]],
-                            key=lambda x: x.get("trade_value", 0), reverse=True,
-                        )
-                        for sweetener in my_sweeteners[:2]:
-                            # Caliber floor
-                            if my_anchor_send.get("trade_value", 0) < _MIN_CALIBER:
-                                continue
-                            if sweetener.get("trade_value", 0) < _MIN_CALIBER:
-                                continue
-
-                            proposal = _score_proposal(
-                                my_team_id, opp_id,
-                                [my_anchor_send, sweetener], [target],
-                                rosters, needs, num_teams,
-                            )
-                            if proposal and proposal["trade_score"] > 0.03:
-                                proposals.append(proposal)
-
-        # Direction 2: I send 1 star, receive 2 (replacement + bonus)
-        for anchor_pos in ["GK", "DEF", "MID", "FWD"]:
-            if my_needs[anchor_pos] > 0.5:
-                continue  # Can't weaken a needed position
-
-            # My best at anchor_pos — the star I send
-            my_stars = sorted(
-                [p for p in my_roster if p["position"] == anchor_pos],
-                key=lambda x: x.get("trade_value", 0), reverse=True,
-            )
-            # Their best at anchor_pos — replacement I get back
-            their_at_anchor = sorted(
-                [p for p in opp_roster if p["position"] == anchor_pos],
-                key=lambda x: x.get("trade_value", 0), reverse=True,
-            )
-            if not my_stars or not their_at_anchor:
-                continue
-
-            for to_send in my_stars[:1]:
-                for replacement in their_at_anchor[:2]:
-                    # Replacement should be decent but less than what I send
-                    if replacement.get("trade_value", 0) >= to_send.get("trade_value", 0):
-                        continue
-
-                    # Find a bonus player at a position I need
-                    for bonus_pos in _FILLER_POSITIONS:
-                        if bonus_pos == anchor_pos:
-                            continue
-                        if my_needs.get(bonus_pos, 0) < 0.3:
-                            continue  # I don't need this position
-
-                        their_bonus = sorted(
-                            [p for p in opp_roster if p["position"] == bonus_pos
-                             and p["name"] != replacement["name"]],
-                            key=lambda x: x.get("trade_value", 0), reverse=True,
-                        )
-                        for bonus in their_bonus[:2]:
-                            # Caliber floor — both received must be solid
-                            if replacement.get("trade_value", 0) < _MIN_CALIBER:
-                                continue
-                            if bonus.get("trade_value", 0) < _MIN_CALIBER:
-                                continue
-
-                            proposal = _score_proposal(
-                                my_team_id, opp_id,
-                                [to_send], [replacement, bonus],
-                                rosters, needs, num_teams,
-                            )
-                            if proposal and proposal["trade_score"] > 0.03:
-                                proposals.append(proposal)
-
-    return proposals
-
-
 # ============================================================================
 # TRADE SCORING
 # ============================================================================
@@ -645,6 +517,12 @@ def _score_proposal(
     num_teams: int,
 ) -> Optional[Dict]:
     """Score a trade proposal and return structured proposal dict (or None if invalid)."""
+    # Belt and braces: whatever the finders do, an illegal shape must never reach
+    # the renderer. A proposal the manager cannot submit in FPL is worse than no
+    # proposal at all.
+    if not _is_legal_trade(send_players, recv_players):
+        return None
+
     my_needs = needs[my_team_id]
     opp_needs = needs[opp_id]
 
@@ -883,6 +761,11 @@ def _get_drop_suggestion(
     """
     If the trade creates a roster imbalance for EITHER side
     (cross-position or uneven), suggest who to drop.
+
+    Since _is_legal_trade() now gates every proposal, a trade that reaches here
+    preserves both squads' position counts and this should always return None.
+    It is kept as a second safety net — if it ever does fire, the UI warns rather
+    than silently proposing a squad-breaking trade.
     """
     my_roster = rosters[my_team_id]["players"]
     opp_roster = rosters[opp_id]["players"]
@@ -1300,9 +1183,12 @@ def show_trade_analyzer_page():
         with col_types:
             trade_types = st.multiselect(
                 "Trade Types",
-                ["1-for-1", "2-for-2", "2-for-1"],
-                default=["1-for-1", "2-for-2", "2-for-1"],
+                ["1-for-1", "2-for-2"],
+                default=["1-for-1", "2-for-2"],
                 key="ta_trade_types",
+                help="FPL requires both sides of a trade to move the same number of "
+                     "players in the same positions, so these are the only shapes "
+                     "that can actually be proposed.",
             )
         with col_fdr:
             fdr_weeks = int(st.number_input(
@@ -1350,8 +1236,6 @@ def show_trade_analyzer_page():
             proposals_by_type["1-for-1"] = _find_1_for_1_trades(my_team_id, rosters, needs, num_teams)
         if "2-for-2" in trade_types:
             proposals_by_type["2-for-2"] = _find_2_for_2_trades(my_team_id, rosters, needs, num_teams)
-        if "2-for-1" in trade_types:
-            proposals_by_type["2-for-1"] = _find_2_for_1_trades(my_team_id, rosters, needs, num_teams)
 
         # Deduplicate within each type
         for ttype in proposals_by_type:

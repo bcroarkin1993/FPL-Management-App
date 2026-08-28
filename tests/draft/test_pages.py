@@ -63,6 +63,8 @@ class TestWaiverWirePage:
         """Waiver wire with empty data will call st.stop() — we catch that."""
         with patch("scripts.draft.waiver_wire.get_current_gameweek", return_value=25), \
              patch("scripts.draft.waiver_wire.get_league_player_ownership", return_value={}), \
+             patch("scripts.draft.waiver_wire.get_league_element_states", return_value={}), \
+             patch("scripts.draft.waiver_wire.get_draft_transaction_window", return_value={}), \
              patch("scripts.draft.waiver_wire.get_league_entries", return_value={}), \
              patch("scripts.draft.waiver_wire.get_fpl_player_mapping", return_value={}), \
              patch("scripts.draft.waiver_wire.get_rotowire_player_projections", return_value=pd.DataFrame()), \
