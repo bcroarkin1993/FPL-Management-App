@@ -147,6 +147,68 @@ class TestCrossSourceAgreement:
         )
 
 
+class TestTeamNameMapping:
+    """Every current Premier League club must be in TEAM_FULL_TO_SHORT.
+
+    Promotion and relegation change three clubs a year, and a missing one fails
+    quietly: _to_short_team_code() falls back to a naive first-three-letters
+    guess. Leeds happened to guess right ("LEE") and merely spammed the log, but
+    "Sheffield Utd" guesses "SHE" against the real "SHU" -- and since player
+    matching is scoped by team, a wrong code silently drops every match for that
+    club. This test is the thing that notices in August.
+    """
+
+    @pytest.fixture(scope="class")
+    def bootstrap_teams(self):
+        from scripts.common.fpl_classic_api import get_classic_bootstrap_static
+
+        bootstrap = skip_if_unreachable(get_classic_bootstrap_static, "FPL bootstrap")
+        teams = (bootstrap or {}).get("teams", [])
+        if not teams:
+            pytest.skip("FPL bootstrap returned no teams")
+        return teams
+
+    def test_every_current_club_is_mapped(self, bootstrap_teams):
+        from scripts.common.text_helpers import TEAM_FULL_TO_SHORT
+
+        missing = {t["name"]: t["short_name"]
+                   for t in bootstrap_teams if t["name"] not in TEAM_FULL_TO_SHORT}
+        assert not missing, (
+            "TEAM_FULL_TO_SHORT is missing %d current club(s): %s. Add them to "
+            "scripts/common/text_helpers.py -- until then _to_short_team_code() "
+            "guesses the code from the first three letters."
+            % (len(missing), missing)
+        )
+
+    def test_mapped_codes_match_the_official_ones(self, bootstrap_teams):
+        """A code that is present but wrong is worse than one that is absent."""
+        from scripts.common.text_helpers import TEAM_FULL_TO_SHORT
+
+        wrong = {
+            t["name"]: (TEAM_FULL_TO_SHORT[t["name"]], t["short_name"])
+            for t in bootstrap_teams
+            if t["name"] in TEAM_FULL_TO_SHORT
+            and TEAM_FULL_TO_SHORT[t["name"]] != t["short_name"]
+        }
+        assert not wrong, (
+            "TEAM_FULL_TO_SHORT disagrees with the FPL bootstrap "
+            "(club: mapped vs official): %s" % wrong
+        )
+
+    def test_no_current_club_falls_through_to_the_guess(self, bootstrap_teams):
+        """End-to-end over the function the app actually calls."""
+        from scripts.common.text_helpers import _to_short_team_code
+
+        mismatched = {
+            t["name"]: (_to_short_team_code(t["name"]), t["short_name"])
+            for t in bootstrap_teams
+            if _to_short_team_code(t["name"]) != t["short_name"]
+        }
+        assert not mismatched, (
+            "_to_short_team_code() returns the wrong code for: %s" % mismatched
+        )
+
+
 class TestDraftWinProbabilityInputs:
     def test_score_spread_is_usable(self, draft_league_id):
         """sigma == 0 is the preseason failure that produced 85%/15% on a

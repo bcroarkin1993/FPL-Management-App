@@ -5,7 +5,9 @@ from datetime import datetime, timedelta
 import pytest
 
 from scripts.common.text_helpers import (
+    TEAM_FULL_TO_SHORT,
     TZ_ET,
+    _to_short_team_code,
     format_last_updated,
     to_display_name,
 )
@@ -84,3 +86,49 @@ class TestFormatLastUpdated:
 
     def test_age_can_be_suppressed(self):
         assert "ago" not in format_last_updated(self._ago(hours=3), include_age=False)
+
+
+class TestToShortTeamCode:
+    """Team-name -> short-code mapping.
+
+    A missing club is not loud. Newly-promoted Leeds fell through to the naive
+    3-letter guess, which was right by luck ("LEE") but logged a warning on every
+    row of every player table. A club whose guess is *wrong* (the classic case is
+    "Sheffield Utd" -> "SHE" rather than "SHU") would instead break name matching
+    silently, since matching is scoped by team.
+    """
+
+    def test_leeds_maps_without_guessing(self):
+        assert TEAM_FULL_TO_SHORT["Leeds"] == "LEE"
+        assert _to_short_team_code("Leeds") == "LEE"
+
+    def test_common_leeds_variants_map(self):
+        """Rotowire and FFP each spell club names their own way."""
+        for variant in ("Leeds", "Leeds United", "Leeds Utd"):
+            assert _to_short_team_code(variant) == "LEE", variant
+
+    def test_existing_short_codes_pass_through(self):
+        assert _to_short_team_code("LEE") == "LEE"
+        assert _to_short_team_code("MCI") == "MCI"
+
+    def test_relegated_clubs_are_retained_for_historical_pages(self):
+        """The dict is append-only across seasons; Season Wrapped reads back."""
+        for club in ("Leicester", "Southampton", "West Ham", "Wolves"):
+            assert club in TEAM_FULL_TO_SHORT, club
+
+    def test_unknown_team_warns_only_once(self, caplog):
+        """This is the reported symptom: one unmapped club, dozens of identical
+        log lines per page load, because this runs per row."""
+        import scripts.common.text_helpers as th
+
+        th._UNKNOWN_TEAMS_WARNED.discard("Wrexham")
+        with caplog.at_level("WARNING", logger="fpl_app.text_helpers"):
+            for _ in range(10):
+                _to_short_team_code("Wrexham")
+
+        warnings = [r for r in caplog.records if "Wrexham" in r.getMessage()]
+        assert len(warnings) == 1, "expected one warning, got %d" % len(warnings)
+
+    def test_every_mapped_code_is_three_letters(self):
+        bad = {k: v for k, v in TEAM_FULL_TO_SHORT.items() if len(v) != 3 or not v.isupper()}
+        assert not bad, "malformed short codes: %s" % bad

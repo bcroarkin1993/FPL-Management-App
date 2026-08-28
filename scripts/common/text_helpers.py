@@ -23,6 +23,10 @@ from zoneinfo import ZoneInfo
 
 _logger = logging.getLogger("fpl_app.text_helpers")
 
+#: Team names already warned about, so an unmapped club logs once per process
+#: rather than once per row. See _to_short_team_code().
+_UNKNOWN_TEAMS_WARNED = set()
+
 # Timezone
 TZ_ET = ZoneInfo("America/New_York")
 
@@ -31,13 +35,20 @@ TZ_ET = ZoneInfo("America/New_York")
 # League stay listed (rather than being deleted) since they may be promoted
 # back in a future season, and keeping them costs nothing — they simply won't
 # appear in current-season fixtures/rosters.
+#
+# Promoted clubs must still be *added* each season. Missing one is not loud: a
+# newly-promoted Leeds fell through to _to_short_team_code()'s naive 3-letter
+# guess, which happened to be right ("LEE") but logged a warning on every row of
+# every player table. tests/live/ now fails when a current club is absent.
 TEAM_FULL_TO_SHORT = {
     "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
     "Brentford": "BRE", "Brighton": "BHA", "Chelsea": "CHE",
     "Coventry": "COV", "Coventry City": "COV",
     "Crystal Palace": "CRY", "Everton": "EVE", "Fulham": "FUL",
     "Hull": "HUL", "Hull City": "HUL",
-    "Ipswich": "IPS", "Ipswich Town": "IPS", "Leicester": "LEI", "Liverpool": "LIV",
+    "Ipswich": "IPS", "Ipswich Town": "IPS",
+    "Leeds": "LEE", "Leeds United": "LEE", "Leeds Utd": "LEE",
+    "Leicester": "LEI", "Liverpool": "LIV",
     "Man City": "MCI", "Man Utd": "MUN", "Newcastle": "NEW",
     "Nott'm Forest": "NFO", "Southampton": "SOU", "Spurs": "TOT",
     "Sunderland": "SUN",
@@ -192,12 +203,18 @@ def _to_short_team_code(team_val, teams_df=None):
     # (e.g. "Sheffield Utd" -> "SHE", not the real "SHU") — log it so a newly
     # promoted/renamed team that's missing from TEAM_FULL_TO_SHORT is visible
     # in logs rather than silently producing a wrong team code downstream.
+    #
+    # Warn once per unknown name per process. This runs per *row* of every player
+    # table, so a single missing club used to emit the same line dozens of times
+    # per page load and drown the log it was meant to draw attention to.
     guess = re.sub(r"[^A-Za-z]", "", s).upper()[:3]
-    _logger.warning(
-        "_to_short_team_code: %r not found in TEAM_FULL_TO_SHORT, guessing %r — "
-        "add this team to TEAM_FULL_TO_SHORT if the guess is wrong.",
-        s, guess,
-    )
+    if s not in _UNKNOWN_TEAMS_WARNED:
+        _UNKNOWN_TEAMS_WARNED.add(s)
+        _logger.warning(
+            "_to_short_team_code: %r not found in TEAM_FULL_TO_SHORT, guessing %r — "
+            "add this team to TEAM_FULL_TO_SHORT if the guess is wrong.",
+            s, guess,
+        )
     return guess if len(guess) == 3 else s
 
 
