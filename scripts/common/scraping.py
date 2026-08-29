@@ -5,6 +5,7 @@ Rotowire scraping, Fantasy Football Pundit data, and The Odds API integration.
 """
 
 import os
+import hashlib
 import re
 from datetime import datetime
 
@@ -879,3 +880,64 @@ def get_odds_api_match_details(event_id: str, api_key: Optional[str] = None) -> 
     except Exception as e:
         _logger.warning("Failed to fetch match details for %s: %s", event_id, str(e))
         return None
+
+
+# --- Transfer news -----------------------------------------------------------
+# transfer_feeds.py is deliberately Streamlit-free so GitHub Actions can import
+# it. The caching lives here instead, layered the way the rest of the app does
+# it: SQLite underneath (survives restarts, so a draft-day refresh is not repeated
+# on every rerun) with @st.cache_data on top.
+
+#: One query per player is the cost model, so cache hard. Six hours still catches
+#: a deadline-day medical, and the page carries a manual refresh button.
+TRANSFER_NEWS_TTL_SECONDS = 6 * 3600
+
+
+@st.cache_data(ttl=TRANSFER_NEWS_TTL_SECONDS)
+def get_transfer_news(players, force_refresh: bool = False, cached_only: bool = False):
+    """Transfer headlines for many players, cached in SQLite and in-session.
+
+    ``players`` is a tuple of ``(name, team)`` pairs — a tuple, not a list, so
+    Streamlit can hash it.
+
+    ``cached_only`` returns whatever is already cached and never hits the network.
+    Pages default to this: one request per player means a few hundred players is a
+    minutes-long fetch, which has no business running inside a page render. The
+    fetch itself happens behind an explicit button.
+
+    Degrades to an empty frame on any failure: a news outage must leave every
+    player undiscounted rather than take the page down.
+    """
+    import pandas as _pd
+
+    from scripts.common.cache import cache_get, cache_set
+    from scripts.common.transfer_feeds import NEWS_COLUMNS, fetch_transfer_news_batch
+
+    pairs = [tuple(p) if isinstance(p, (list, tuple)) else (p, None) for p in (players or [])]
+    if not pairs:
+        return _pd.DataFrame(columns=NEWS_COLUMNS)
+
+    key = "transfer_news:v1:%s" % hashlib.sha1(
+        "|".join(sorted(str(n) for n, _t in pairs)).encode("utf-8")
+    ).hexdigest()
+
+    if not force_refresh:
+        cached = cache_get(key)
+        if cached:
+            try:
+                return _pd.DataFrame(cached, columns=NEWS_COLUMNS)
+            except (ValueError, TypeError):
+                _logger.warning("Transfer news cache payload was unreadable; refetching")
+
+    if cached_only:
+        return _pd.DataFrame(columns=NEWS_COLUMNS)
+
+    try:
+        df = fetch_transfer_news_batch(pairs)
+    except Exception as e:
+        _logger.warning("Transfer news batch failed: %s", e)
+        return _pd.DataFrame(columns=NEWS_COLUMNS)
+
+    if not df.empty:
+        cache_set(key, df.to_dict("records"), ttl=TRANSFER_NEWS_TTL_SECONDS)
+    return df

@@ -192,6 +192,56 @@ class TestDraftHelperPage:
             from scripts.draft.draft_helper import show_draft_helper_page
             show_draft_helper_page()
 
+    def test_smoke_with_rankings_and_transfer_risk(self, mock_all_utils):
+        """Exercise the transfer-risk path with a populated board.
+
+        get_transfer_news is patched explicitly: mock_streamlit's buttons are
+        unconditionally truthy, so the "Scan transfer news" branch always fires
+        and would otherwise make one real network request per player.
+        """
+        rankings = pd.DataFrame({
+            "Overall Rank": [1, 2, 3],
+            "Player": ["Erling Haaland", "Ollie Watkins", "Bukayo Saka"],
+            "Team": ["MCI", "AVL", "ARS"],
+            "Position": ["F", "F", "M"],
+            "Points": [215.3, 145.9, 180.9],
+            "PP/90": [7.1, 5.2, 6.0],
+            "Pos Rank": [1, 8, 3],
+        })
+        news = pd.DataFrame([{
+            "Player": "Ollie Watkins", "Team": "AVL",
+            "Headline": "Ollie Watkins undergoes medical at Al Hilal",
+            "URL": "http://example.com", "Source": "Sky Sports",
+            "Published": "Fri, 28 Aug 2026 18:21:08 GMT",
+        }])
+        availability = pd.DataFrame({
+            "Player": ["Erling Haaland", "Ollie Watkins", "Bukayo Saka"],
+            "Web_Name": ["Haaland", "Watkins", "Saka"],
+            "Team": ["MCI", "AVL", "ARS"],
+            "Position": ["F", "F", "M"],
+            "Status": ["a", "a", "a"],
+            "News": ["", "", ""],
+        })
+        with patch("scripts.draft.draft_helper.get_rotowire_season_rankings", return_value=rankings), \
+             patch("scripts.draft.draft_helper.get_transfer_news", return_value=news) as mock_news, \
+             patch("scripts.draft.draft_helper._load_reference_data",
+                   return_value=(availability, ["Man City", "Aston Villa", "Arsenal"])):
+            from scripts.draft.draft_helper import show_draft_helper_page
+            show_draft_helper_page()
+            assert mock_news.called
+
+    def test_page_survives_a_news_outage(self, mock_all_utils):
+        """A transfer-news failure must leave the board undiscounted, not break it."""
+        rankings = pd.DataFrame({
+            "Overall Rank": [1], "Player": ["Erling Haaland"], "Team": ["MCI"],
+            "Position": ["F"], "Points": [215.3], "PP/90": [7.1], "Pos Rank": [1],
+        })
+        with patch("scripts.draft.draft_helper.get_rotowire_season_rankings", return_value=rankings), \
+             patch("scripts.draft.draft_helper.get_transfer_news",
+                   side_effect=RuntimeError("news feed down")):
+            from scripts.draft.draft_helper import show_draft_helper_page
+            show_draft_helper_page()
+
 
 class TestCommishModePage:
     def test_smoke_no_season_configured(self, mock_all_utils):

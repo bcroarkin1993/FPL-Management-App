@@ -3,6 +3,8 @@ import pandas as pd
 import config
 from scripts.common.utils import get_rotowire_season_rankings
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.scraping import get_transfer_news
+from scripts.common.transfer_risk_app import build_transfer_risk, get_pl_team_names
 
 def _ensure_session():
     if "draft_taken_keys" not in st.session_state:
@@ -13,6 +15,134 @@ def _ensure_session():
 def _player_key(row: pd.Series) -> str:
     """Unique key for a player row to persist selection reliably."""
     return f"{row.get('Player','')}|{row.get('Team','')}|{row.get('Position','')}"
+
+#: How deep to scan for transfer news by default. One request per player, so
+#: this is a real cost — and beyond a couple of hundred names a draft board is
+#: not going to reach anybody anyway.
+_DEFAULT_SCAN_DEPTH = 150
+
+
+def _apply_transfer_risk(rankings: pd.DataFrame) -> pd.DataFrame:
+    """Discount season projections by the risk a player leaves the Premier League.
+
+    The board previously ranked purely on projected output, which is how Ollie
+    Watkins came to be a top-32 pick weeks before moving to Al-Hilal — a player
+    who cannot score you a point all season was priced as if he would play 38
+    games.
+
+    News is fetched per player, so a full scan is minutes of requests and has no
+    business running on page load. Cached results render instantly; a fresh scan
+    is an explicit button.
+    """
+    st.markdown(
+        '<div style="background:linear-gradient(135deg,#37003c,#5a0060);padding:10px 16px;'
+        'border-radius:8px;margin:0.5rem 0;color:#00ff87;font-weight:700;font-size:1.1rem;">'
+        '\U0001F6A8 Transfer Risk</div>',
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns([1.1, 1, 1.4])
+    with c1:
+        adjust = st.checkbox(
+            "Adjust for transfer risk", value=True,
+            help="Discount each player's season projection by how likely he is to "
+                 "leave the Premier League, and how much of the season that would cost.",
+        )
+    with c2:
+        depth = st.number_input(
+            "Scan depth", min_value=25, max_value=400, value=_DEFAULT_SCAN_DEPTH, step=25,
+            help="How far down the board to check for transfer news.",
+        )
+    with c3:
+        scan = st.button("\U0001F50D Scan transfer news", type="secondary")
+        st.caption("Cached for 6 hours. Re-scan before a draft or on deadline day.")
+
+    pool = rankings.head(int(depth))
+    pairs = tuple((str(r["Player"]), str(r["Team"])) for _, r in pool.iterrows())
+
+    try:
+        if scan:
+            with st.spinner("Checking transfer news for %d players..." % len(pairs)):
+                news = get_transfer_news(pairs, force_refresh=True)
+        else:
+            news = get_transfer_news(pairs, cached_only=True)
+    except Exception as e:
+        st.warning("Transfer news unavailable (%s). Rankings shown undiscounted." % e)
+        return rankings, False
+
+    if news is None or news.empty:
+        if not scan:
+            st.info(
+                "No transfer news cached yet \u2014 press **Scan transfer news** to check "
+                "the top %d players. Until then the board is Rotowire's raw ranking."
+                % int(depth)
+            )
+        else:
+            st.warning("No transfer news found. Rankings shown undiscounted.")
+        return rankings, False
+
+    # Ground truth (has he already gone?) plus the Premier League membership list
+    # that decides whether a destination costs you the player at all.
+    availability, pl_teams = _load_reference_data()
+
+    scored = build_transfer_risk(pool, availability, news, pl_teams)
+    risk_cols = ["Transfer_Risk", "Transfer_Mult", "Transfer_Destination",
+                 "Transfer_Outlets", "Transfer_Note"]
+    merged = rankings.merge(
+        scored[["Player", "Team", "Position"] + risk_cols],
+        on=["Player", "Team", "Position"], how="left",
+    )
+    merged["Transfer_Risk"] = merged["Transfer_Risk"].fillna(0.0)
+    merged["Transfer_Mult"] = merged["Transfer_Mult"].fillna(1.0)
+    for col in ("Transfer_Destination", "Transfer_Note"):
+        merged[col] = merged[col].fillna("")
+    merged["Transfer_Outlets"] = merged["Transfer_Outlets"].fillna(0).astype(int)
+
+    merged["Adj Points"] = (
+        pd.to_numeric(merged["Points"], errors="coerce") * merged["Transfer_Mult"]
+    ).round(1)
+
+    flagged = merged[merged["Transfer_Risk"] > 0.05]
+    if len(flagged):
+        biggest = flagged.nlargest(1, "Transfer_Risk").iloc[0]
+        st.warning(
+            "**%d player%s flagged.** Biggest faller: **%s** (%s) \u2014 %s, "
+            "%.0f%% risk, %.0f \u2192 %.0f projected points."
+            % (len(flagged), "" if len(flagged) == 1 else "s",
+               biggest["Player"], biggest["Team"],
+               biggest["Transfer_Destination"] or "destination unclear",
+               100 * biggest["Transfer_Risk"],
+               float(biggest["Points"]), float(biggest["Adj Points"]))
+        )
+    else:
+        st.success("No meaningful transfer risk in the top %d." % int(depth))
+
+    if adjust:
+        merged = merged.sort_values("Adj Points", ascending=False, na_position="last")
+        merged["RW Rank"] = merged["Rank"]
+        merged["Rank"] = range(1, len(merged) + 1)
+    else:
+        merged["RW Rank"] = merged["Rank"]
+
+    return merged, True
+
+
+@st.cache_data(ttl=600)
+def _load_reference_data():
+    """FPL availability (ground truth on completed moves) and the PL club list."""
+    from scripts.common.fpl_classic_api import get_classic_bootstrap_static
+    from scripts.fpl.injuries import get_fpl_availability_df
+
+    try:
+        availability = get_fpl_availability_df()
+    except Exception:
+        availability = pd.DataFrame()
+    try:
+        pl_teams = get_pl_team_names(get_classic_bootstrap_static())
+    except Exception:
+        pl_teams = []
+    return availability, pl_teams
+
 
 def show_draft_helper_page():
     """
@@ -87,6 +217,9 @@ def show_draft_helper_page():
         subset=["Player", "Team", "Position"], keep="first"
     )
 
+    # Discount the board by transfer risk before anything is ranked or displayed.
+    rankings, has_risk = _apply_transfer_risk(rankings)
+
     # Session-state flags mapped to each row via a stable key
     rankings["key"] = rankings.apply(_player_key, axis=1)
     rankings["Taken"] = rankings["key"].isin(st.session_state.draft_taken_keys)
@@ -117,8 +250,17 @@ def show_draft_helper_page():
     if show_only_available:
         df = df[~df["Taken"]]
 
-    # Display columns (keep it compact & useful)
-    display_cols = ["Rank", "Player", "Team", "Position", "Points", "PP/90", "Pos Rank", "Taken", "Mine"]
+    # Display columns (keep it compact & useful).  The risk columns only appear
+    # once a scan has actually produced data, so the board stays clean before then.
+    if has_risk:
+        display_cols = ["Rank", "RW Rank", "Player", "Team", "Position",
+                        "Points", "Adj Points", "Risk", "Transfer Note",
+                        "PP/90", "Pos Rank", "Taken", "Mine"]
+        df = df.rename(columns={"Transfer_Note": "Transfer Note"})
+        df["Risk"] = (df["Transfer_Risk"] * 100).round(0)
+    else:
+        display_cols = ["Rank", "Player", "Team", "Position", "Points", "PP/90", "Pos Rank", "Taken", "Mine"]
+    display_cols = [c for c in display_cols if c in df.columns]
 
     st.markdown(
         '<div style="background:linear-gradient(135deg,#37003c,#5a0060);padding:10px 16px;'
@@ -139,7 +281,18 @@ def show_draft_helper_page():
             "Player": st.column_config.TextColumn("Player", disabled=True),
             "Team": st.column_config.TextColumn("Team", disabled=True),
             "Position": st.column_config.TextColumn("Position", disabled=True),
-            "Points": st.column_config.NumberColumn("Points", disabled=True),
+            "Points": st.column_config.NumberColumn(
+                "Points", help="Rotowire projected season points, undiscounted", disabled=True),
+            "RW Rank": st.column_config.NumberColumn(
+                "RW Rank", help="Rotowire's original overall rank", disabled=True),
+            "Adj Points": st.column_config.NumberColumn(
+                "Adj Points", help="Season points after the transfer-risk discount", disabled=True),
+            "Risk": st.column_config.NumberColumn(
+                "Risk", format="%d%%",
+                help="Chance he leaves the Premier League, weighted by destination",
+                disabled=True),
+            "Transfer Note": st.column_config.TextColumn(
+                "Transfer Note", help="Destination and how many outlets report it", disabled=True),
             "PP/90": st.column_config.NumberColumn("PP/90", disabled=True),
             "Pos Rank": st.column_config.NumberColumn("Pos Rank", disabled=True),
             "Taken": st.column_config.CheckboxColumn("Taken"),

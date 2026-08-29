@@ -415,6 +415,122 @@ exists because every fetch degrades to an empty frame on failure: without it, a
 broken season URL renders a page identical to a working one, just with every
 Season score silently at 0.50.
 
+## Transfer Risk Model — "will he still be here?"
+
+`scripts/common/transfer_risk.py` (pure), `transfer_feeds.py` (fetch),
+`transfer_risk_app.py` (name matching). Answers the question that let Ollie
+Watkins be drafted at rank 32 weeks before moving to Al-Hilal: a player who
+cannot score a point all season was priced as if he would play 38 games.
+
+```
+transfer_multiplier = max(TRANSFER_FLOOR, 1 - risk * exposure)
+```
+
+Applied the way `injury_multiplier()` is, and returning exactly `1.0` for a
+player with no news, so it is safe to apply unconditionally.
+
+### Destination weight is the whole model
+
+**The line is Premier League membership, not geography.** These two live
+bootstrap rows cost a manager exactly the same — everything:
+
+```
+'u' Reijnders | Has joined Al Qadsiah permanently
+'u' Watson    | Has joined Leicester City on loan for the rest of the season
+```
+
+A Championship loan and a Saudi transfer both score zero. An *intra*-PL move
+scores `0.20` — in Draft you simply keep the player. Membership is read from the
+bootstrap `teams` list, never hardcoded, so promotion and relegation need no
+maintenance. An unparsed destination gets `0.60`: most rumoured exits leave the
+league, so a parse failure must not read as safety.
+
+Two traps this code exists to avoid:
+
+1. **The player's own club is not his destination.** "Al-Hilal agree deal to sign
+   *Aston Villa* striker Ollie Watkins" names two clubs. `parse_destination`
+   takes `exclude_team`, and `team_code()` resolves it whether the frame carries
+   a short code (`MCI`) or a name (`Man City`) — they disagree across sources.
+2. **Club spellings differ.** The bootstrap says `Nott'm Forest`, headlines say
+   `Nottingham Forest`. Resolve through `TEAM_FULL_TO_SHORT`, never raw strings,
+   or an intra-PL move reads as an exit — the expensive direction of error.
+
+### Sources, and why the obvious one was rejected
+
+| Source | Role |
+|---|---|
+| Google News RSS, one quoted query per player | **Predictive.** Free, no API key, timely — it carried the Watkins medical days before completion. |
+| FPL bootstrap `status='u'` + `news` | **Ground truth.** Resolves a move outright and overrides all news scoring. |
+| Bookmaker next-club odds | **Rejected.** `footballtransfers.co.uk/odds/ollie-watkins` was stale to 06 Mar 2026, listed his club as "Unknown", and priced Any Saudi Club at 15/1 (6.3%). As the primary signal it would have left him top of the board. The Odds API carries no transfer markets at all. |
+
+Speculation never outranks a completed deal, and a *completed* departure sets
+`exposure = 1.0` — there is no window left to wait on.
+
+### Scoring the news
+
+Confidence comes from breadth of agreement, not any single headline:
+
+```
+base    = strongest keyword tier seen, decayed (10-day half-life, 30-day window)
+outlets = distinct sources carrying a Tier-A or Tier-B headline
+risk    = base * (0.30 + 0.70 * min(1, outlets/4)) * destination_weight
+```
+
+Tier A (0.85) is language that commits — "medical", "agree deal", an agreed fee.
+Tier B (0.50) is "bid", "in talks", "exit". Tier C (0.25) is "linked",
+"monitoring". **Denials cap the score at Tier C**, so "Villa rule out Watkins
+sale" cannot score Tier A on the word "sale".
+
+**Ambiguous names need a corroborating signal.** A query for the mononym
+"Gabriel" returns news about every Gabriel in the league, and discounted
+Arsenal's by 71% off other players' stories. `build_ambiguous_tokens()` derives
+the ambiguous set *from the pool itself*, and those names additionally require
+the club or first name in the headline. Same lesson as the Alex/Cole Palmer
+match: a weak key needs corroboration. Mononyms also get the club added to their
+search query, since quoting a single word is not a search.
+
+### Exposure — why it switches itself off
+
+Exposure is the fraction of the remaining season a completed move would cost,
+measured in **days to season end** rather than gameweeks, because windows are
+dates:
+
+```
+exposure = days_left_after_next_window_close / days_left_now
+```
+
+**Windows are per destination region.** This is the Watkins trap precisely: the
+English window shut 1 Sep 2026 but the Saudi one ran to 12 Oct, so a player could
+be sold out of a squad five gameweeks into a season whose window had "closed".
+
+Pre-draft that is ~0.92 for a European move and ~0.84 for a Saudi one. After the
+January deadline no window remains, exposure is 0, and every multiplier returns
+to exactly 1.0 for the rest of the season — the feature turns itself off rather
+than lingering as a stale discount.
+
+**`TRANSFER_WINDOWS` is hardcoded and season-specific.** It cannot be discovered
+and must be updated each season; `check_transfer_windows()` warns once it lapses,
+and a live test fails on it, because a lapsed calendar makes the whole feature a
+silent no-op indistinguishable from "nobody is at risk".
+
+### Wiring
+
+`draft_helper.py` discounts Rotowire's season `Points` into `Adj Points` and
+re-ranks on it, behind an "Adjust for transfer risk" toggle. News is fetched
+**per player**, so a full scan is minutes of requests and never runs on page
+load: cached results (6h, SQLite) render instantly and a fresh scan is an
+explicit button.
+
+Import constraints, which are load-bearing: `transfer_risk.py` and
+`transfer_feeds.py` use plain `logging` and avoid `error_helpers`, `cache` and
+`player_matching` — all three reach Streamlit, and GitHub Actions must be able to
+import these. Cross-source name matching therefore lives in `transfer_risk_app.py`.
+
+Validation: `check_transfer_risk()` errors on an empty frame (a broken feed
+renders a page identical to a working one), on a multiplier above 1.0 (which
+would *inflate* a projection), and on more than 10% of a 50+ player pool being at
+risk — that signature means the matcher broke, not that the league is emptying.
+
 ## Team Strength Model — Draft Power Rankings
 
 `scripts/common/team_strength.py`. Answers "how good is each roster in my league?"
@@ -620,6 +736,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
+| Transfer Risk Tracking | Phase 1 complete | Google News RSS + FPL bootstrap ground truth + per-region window model, wired into the Draft Helper board. Remaining: Transfer Watch evidence page, Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model". |
 | Mini-League Rival Tracker | Not Started | Tab on League Analysis pages. Show differential players, projected points gap, effective ownership within mini-league. Data available via get_league_player_ownership (Draft) and team picks (Classic). No transfer advice (handled elsewhere). |
 | Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2 trade discovery (position-matched — see "Draft Transaction Rules"; cross-position and 2-for-1 shapes were removed as FPL forbids them), acceptance likelihood scoring, Explore Teams comparison, Regression Watch (buy-low/sell-high) |
 | Historical Data Analysis | Completed | Season History section on Classic Team Analysis (rank chart, points chart, data table); League Standing metrics on Draft Team Analysis |
