@@ -1,9 +1,15 @@
+import time
+
 import streamlit as st
 import pandas as pd
 import config
 from scripts.common.utils import get_rotowire_season_rankings
 from scripts.common.styled_tables import render_styled_table
-from scripts.common.scraping import get_transfer_news
+from scripts.common.scraping import (
+    get_transfer_news,
+    start_transfer_news_prefetch,
+    transfer_news_cache_status,
+)
 from scripts.common.transfer_risk_app import build_transfer_risk, get_pl_team_names
 
 def _ensure_session():
@@ -17,22 +23,50 @@ def _player_key(row: pd.Series) -> str:
     return f"{row.get('Player','')}|{row.get('Team','')}|{row.get('Position','')}"
 
 #: How deep to scan for transfer news by default. One request per player, so
-#: this is a real cost — and beyond a couple of hundred names a draft board is
+#: this is a real cost -- and beyond a couple of hundred names a draft board is
 #: not going to reach anybody anyway.
 _DEFAULT_SCAN_DEPTH = 150
 
+#: Measured throughput of the parallel fetcher (150 players in ~8s), rounded up
+#: a little so the estimate errs toward overpromising time rather than under.
+_SECONDS_PER_PLAYER = 0.07
 
-def _apply_transfer_risk(rankings: pd.DataFrame) -> pd.DataFrame:
+#: Where the computed risk frame is parked between reruns.
+_RISK_STATE_KEY = "draft_transfer_risk_df"
+
+
+def _risk_columns():
+    return ["Transfer_Risk", "Transfer_Mult", "Transfer_Destination",
+            "Transfer_Outlets", "Transfer_Note"]
+
+
+def _merge_risk(rankings: pd.DataFrame, scored: pd.DataFrame) -> pd.DataFrame:
+    """Left-join risk onto the full board and fill the unscanned tail neutrally."""
+    merged = rankings.merge(
+        scored[["Player", "Team", "Position"] + _risk_columns()],
+        on=["Player", "Team", "Position"], how="left",
+    )
+    merged["Transfer_Risk"] = merged["Transfer_Risk"].fillna(0.0)
+    merged["Transfer_Mult"] = merged["Transfer_Mult"].fillna(1.0)
+    for col in ("Transfer_Destination", "Transfer_Note"):
+        merged[col] = merged[col].fillna("")
+    merged["Transfer_Outlets"] = merged["Transfer_Outlets"].fillna(0).astype(int)
+    merged["Adj Points"] = (
+        pd.to_numeric(merged["Points"], errors="coerce") * merged["Transfer_Mult"]
+    ).round(1)
+    return merged
+
+
+def _apply_transfer_risk(rankings: pd.DataFrame):
     """Discount season projections by the risk a player leaves the Premier League.
 
     The board previously ranked purely on projected output, which is how Ollie
-    Watkins came to be a top-32 pick weeks before moving to Al-Hilal — a player
-    who cannot score you a point all season was priced as if he would play 38
-    games.
+    Watkins came to be a top-32 pick weeks before moving to Al-Hilal: a player who
+    cannot score a point all season was priced as if he would play 38 games.
 
-    News is fetched per player, so a full scan is minutes of requests and has no
-    business running on page load. Cached results render instantly; a fresh scan
-    is an explicit button.
+    Results are held in session state, so filtering or searching the board does
+    not discard them -- every Streamlit interaction reruns this function, and
+    recomputing from an empty cache would blank the risk columns mid-draft.
     """
     st.markdown(
         '<div style="background:linear-gradient(135deg,#37003c,#5a0060);padding:10px 16px;'
@@ -49,58 +83,77 @@ def _apply_transfer_risk(rankings: pd.DataFrame) -> pd.DataFrame:
                  "leave the Premier League, and how much of the season that would cost.",
         )
     with c2:
-        depth = st.number_input(
+        depth = int(st.number_input(
             "Scan depth", min_value=25, max_value=400, value=_DEFAULT_SCAN_DEPTH, step=25,
             help="How far down the board to check for transfer news.",
-        )
-    with c3:
-        scan = st.button("\U0001F50D Scan transfer news", type="secondary")
-        st.caption("Cached for 6 hours. Re-scan before a draft or on deadline day.")
+        ))
 
-    pool = rankings.head(int(depth))
+    pool = rankings.head(depth)
     pairs = tuple((str(r["Player"]), str(r["Team"])) for _, r in pool.iterrows())
 
     try:
+        cached_n, missing_n = transfer_news_cache_status(pairs)
+    except Exception:
+        cached_n, missing_n = 0, len(pairs)
+
+    with c3:
+        scan = st.button("\U0001F50D Scan transfer news", type="secondary")
+        if missing_n:
+            st.caption("%d of %d players cached \u00b7 scanning the rest takes about %ds."
+                       % (cached_n, len(pairs), max(1, round(missing_n * _SECONDS_PER_PLAYER))))
+        else:
+            st.caption("All %d players cached. Re-scan before a draft or on deadline day."
+                       % len(pairs))
+
+    # Start warming the cache the moment the page opens, so the work is usually
+    # already done by the time anyone presses the button.
+    if missing_n and not scan:
+        start_transfer_news_prefetch(pairs, label="draft_helper_%d" % depth)
+
+    news = None
+    try:
         if scan:
-            with st.spinner("Checking transfer news for %d players..." % len(pairs)):
-                news = get_transfer_news(pairs, force_refresh=True)
+            progress = st.progress(0.0, text="Checking transfer news...")
+            started = time.time()
+
+            def _on_progress(done, total, _player):
+                frac = done / float(total) if total else 1.0
+                if done:
+                    remaining = (time.time() - started) / done * (total - done)
+                    text = ("Checking transfer news... %d/%d \u00b7 about %ds left"
+                            % (done, total, max(1, round(remaining))))
+                else:
+                    text = "Checking transfer news... 0/%d" % total
+                progress.progress(min(1.0, frac), text=text)
+
+            news = get_transfer_news(pairs, force_refresh=True, progress=_on_progress)
+            progress.empty()
         else:
             news = get_transfer_news(pairs, cached_only=True)
     except Exception as e:
         st.warning("Transfer news unavailable (%s). Rankings shown undiscounted." % e)
-        return rankings, False
 
-    if news is None or news.empty:
-        if not scan:
+    if news is not None and not news.empty:
+        availability, pl_teams = _load_reference_data()
+        scored = build_transfer_risk(pool, availability, news, pl_teams)
+        st.session_state[_RISK_STATE_KEY] = scored[
+            ["Player", "Team", "Position"] + _risk_columns()
+        ]
+    else:
+        scored = st.session_state.get(_RISK_STATE_KEY)
+
+    if scored is None or getattr(scored, "empty", True):
+        if missing_n:
             st.info(
-                "No transfer news cached yet \u2014 press **Scan transfer news** to check "
-                "the top %d players. Until then the board is Rotowire's raw ranking."
-                % int(depth)
+                "Checking transfer news in the background \u2014 press **Scan transfer "
+                "news** to fetch now, or reload in a moment. Until then the board is "
+                "Rotowire's raw ranking."
             )
         else:
             st.warning("No transfer news found. Rankings shown undiscounted.")
         return rankings, False
 
-    # Ground truth (has he already gone?) plus the Premier League membership list
-    # that decides whether a destination costs you the player at all.
-    availability, pl_teams = _load_reference_data()
-
-    scored = build_transfer_risk(pool, availability, news, pl_teams)
-    risk_cols = ["Transfer_Risk", "Transfer_Mult", "Transfer_Destination",
-                 "Transfer_Outlets", "Transfer_Note"]
-    merged = rankings.merge(
-        scored[["Player", "Team", "Position"] + risk_cols],
-        on=["Player", "Team", "Position"], how="left",
-    )
-    merged["Transfer_Risk"] = merged["Transfer_Risk"].fillna(0.0)
-    merged["Transfer_Mult"] = merged["Transfer_Mult"].fillna(1.0)
-    for col in ("Transfer_Destination", "Transfer_Note"):
-        merged[col] = merged[col].fillna("")
-    merged["Transfer_Outlets"] = merged["Transfer_Outlets"].fillna(0).astype(int)
-
-    merged["Adj Points"] = (
-        pd.to_numeric(merged["Points"], errors="coerce") * merged["Transfer_Mult"]
-    ).round(1)
+    merged = _merge_risk(rankings, scored)
 
     flagged = merged[merged["Transfer_Risk"] > 0.05]
     if len(flagged):
@@ -115,7 +168,7 @@ def _apply_transfer_risk(rankings: pd.DataFrame) -> pd.DataFrame:
                float(biggest["Points"]), float(biggest["Adj Points"]))
         )
     else:
-        st.success("No meaningful transfer risk in the top %d." % int(depth))
+        st.success("No meaningful transfer risk found.")
 
     if adjust:
         merged = merged.sort_values("Adj Points", ascending=False, na_position="last")
@@ -253,11 +306,15 @@ def show_draft_helper_page():
     # Display columns (keep it compact & useful).  The risk columns only appear
     # once a scan has actually produced data, so the board stays clean before then.
     if has_risk:
+        # Risk sits immediately after Position: it is the reason the board is
+        # ordered the way it is, so it must be readable without scrolling past
+        # three numeric columns to find it.
         display_cols = ["Rank", "RW Rank", "Player", "Team", "Position",
-                        "Points", "Adj Points", "Risk", "Transfer Note",
+                        "Risk", "Transfer Note", "Points", "Adj Points",
                         "PP/90", "Pos Rank", "Taken", "Mine"]
         df = df.rename(columns={"Transfer_Note": "Transfer Note"})
-        df["Risk"] = (df["Transfer_Risk"] * 100).round(0)
+        df["Risk"] = (pd.to_numeric(df["Transfer_Risk"], errors="coerce")
+                      .fillna(0.0) * 100).round(0)
     else:
         display_cols = ["Rank", "Player", "Team", "Position", "Points", "PP/90", "Pos Rank", "Taken", "Mine"]
     display_cols = [c for c in display_cols if c in df.columns]

@@ -516,10 +516,31 @@ silent no-op indistinguishable from "nobody is at risk".
 ### Wiring
 
 `draft_helper.py` discounts Rotowire's season `Points` into `Adj Points` and
-re-ranks on it, behind an "Adjust for transfer risk" toggle. News is fetched
-**per player**, so a full scan is minutes of requests and never runs on page
-load: cached results (6h, SQLite) render instantly and a fresh scan is an
-explicit button.
+re-ranks on it, behind an "Adjust for transfer risk" toggle. `Risk` sits directly
+after `Position` — it explains the ordering, so it must be readable without
+scrolling.
+
+**Fetching is the slow part, and three things keep it usable:**
+
+- **Concurrency, not pacing.** The work is pure network latency, so it
+  parallelises: `ThreadPoolExecutor` over a shared `requests.Session` does 150
+  players in ~8s where a serialised loop with a sleep took ~2 minutes.
+- **The cache is keyed per player, not per batch.** Scans are therefore
+  incremental — widening the depth from 150 to 175 fetches 25 players, not 175.
+  **A player with no news caches an empty list, which is a cache *hit***; treating
+  it as a miss refetches the quiet majority of the board every single time.
+- **It starts before anyone asks.** `start_transfer_news_prefetch()` warms the
+  cache on a daemon thread at app startup (gated on a configured Draft league, so
+  Classic-only users don't pay the ~1.3s board scrape) and again on page load. The
+  worker touches only Streamlit-free code — calling `st.*` from a thread with no
+  ScriptRunContext would fail.
+
+**Do not put `@st.cache_data` on `get_transfer_news`.** It was there once and
+memoized the *empty* "nothing cached yet" result from first page load; after a
+scan, every rerun — searching, filtering, toggling — was served that stale empty
+frame and the risk columns silently vanished mid-draft. The SQLite layer is the
+cache. The computed frame is also parked in `st.session_state` as a backstop,
+since every Streamlit interaction reruns the whole page function.
 
 Import constraints, which are load-bearing: `transfer_risk.py` and
 `transfer_feeds.py` use plain `logging` and avoid `error_helpers`, `cache` and

@@ -6,6 +6,7 @@ Rotowire scraping, Fantasy Football Pundit data, and The Odds API integration.
 
 import os
 import hashlib
+import threading
 import re
 from datetime import datetime
 
@@ -884,60 +885,137 @@ def get_odds_api_match_details(event_id: str, api_key: Optional[str] = None) -> 
 
 # --- Transfer news -----------------------------------------------------------
 # transfer_feeds.py is deliberately Streamlit-free so GitHub Actions can import
-# it. The caching lives here instead, layered the way the rest of the app does
-# it: SQLite underneath (survives restarts, so a draft-day refresh is not repeated
-# on every rerun) with @st.cache_data on top.
+# it. The caching lives here instead, keyed *per player* rather than per batch:
+# scans are then incremental (raising the scan depth fetches only the new names),
+# and a background warm can fill the cache before anyone presses a button.
 
-#: One query per player is the cost model, so cache hard. Six hours still catches
-#: a deadline-day medical, and the page carries a manual refresh button.
+#: One request per player is the cost model, so cache hard. Six hours still
+#: catches a deadline-day medical, and the page carries a manual refresh.
 TRANSFER_NEWS_TTL_SECONDS = 6 * 3600
 
+_PREFETCH_STARTED = set()
+_PREFETCH_LOCK = threading.Lock()
 
-@st.cache_data(ttl=TRANSFER_NEWS_TTL_SECONDS)
-def get_transfer_news(players, force_refresh: bool = False, cached_only: bool = False):
-    """Transfer headlines for many players, cached in SQLite and in-session.
 
-    ``players`` is a tuple of ``(name, team)`` pairs — a tuple, not a list, so
-    Streamlit can hash it.
+def _news_cache_key(player) -> str:
+    digest = hashlib.sha1(str(player).strip().lower().encode("utf-8")).hexdigest()
+    return "transfer_news:v2:%s" % digest
 
-    ``cached_only`` returns whatever is already cached and never hits the network.
-    Pages default to this: one request per player means a few hundred players is a
-    minutes-long fetch, which has no business running inside a page render. The
-    fetch itself happens behind an explicit button.
+
+def _read_cached_news(pairs):
+    """Split players into cached rows and the ones still needing a fetch.
+
+    A player with genuinely no news caches an empty list, which is a *hit* — the
+    distinction from a miss (``None``) is what stops the quiet ones being
+    refetched on every single scan.
+    """
+    from scripts.common.cache import cache_get
+
+    rows, missing = [], []
+    for name, team in pairs:
+        cached = cache_get(_news_cache_key(name))
+        if cached is None:
+            missing.append((name, team))
+        else:
+            rows.extend(cached)
+    return rows, missing
+
+
+def _write_cached_news(player, records) -> None:
+    from scripts.common.cache import cache_set
+
+    try:
+        cache_set(_news_cache_key(player), records or [], ttl=TRANSFER_NEWS_TTL_SECONDS)
+    except Exception:
+        _logger.warning("Could not cache transfer news for %s", player, exc_info=True)
+
+
+def transfer_news_cache_status(players):
+    """``(cached, missing)`` counts, for telling the user what a scan will cost."""
+    pairs = [tuple(p) if isinstance(p, (list, tuple)) else (p, None) for p in (players or [])]
+    if not pairs:
+        return 0, 0
+    _rows, missing = _read_cached_news(pairs)
+    return len(pairs) - len(missing), len(missing)
+
+
+def get_transfer_news(players, force_refresh: bool = False, cached_only: bool = False,
+                      progress=None):
+    """Transfer headlines for many players, cached per player in SQLite.
+
+    ``cached_only`` never touches the network — pages default to it so a render
+    is always instant.
 
     Degrades to an empty frame on any failure: a news outage must leave every
     player undiscounted rather than take the page down.
     """
     import pandas as _pd
 
-    from scripts.common.cache import cache_get, cache_set
     from scripts.common.transfer_feeds import NEWS_COLUMNS, fetch_transfer_news_batch
 
     pairs = [tuple(p) if isinstance(p, (list, tuple)) else (p, None) for p in (players or [])]
     if not pairs:
         return _pd.DataFrame(columns=NEWS_COLUMNS)
 
-    key = "transfer_news:v1:%s" % hashlib.sha1(
-        "|".join(sorted(str(n) for n, _t in pairs)).encode("utf-8")
-    ).hexdigest()
+    if force_refresh:
+        cached_rows, missing = [], pairs
+    else:
+        cached_rows, missing = _read_cached_news(pairs)
 
-    if not force_refresh:
-        cached = cache_get(key)
-        if cached:
-            try:
-                return _pd.DataFrame(cached, columns=NEWS_COLUMNS)
-            except (ValueError, TypeError):
-                _logger.warning("Transfer news cache payload was unreadable; refetching")
-
-    if cached_only:
-        return _pd.DataFrame(columns=NEWS_COLUMNS)
+    if cached_only or not missing:
+        return _pd.DataFrame(cached_rows, columns=NEWS_COLUMNS) if cached_rows \
+            else _pd.DataFrame(columns=NEWS_COLUMNS)
 
     try:
-        df = fetch_transfer_news_batch(pairs)
+        fetched = fetch_transfer_news_batch(
+            missing, progress=progress, on_result=_write_cached_news
+        )
     except Exception as e:
         _logger.warning("Transfer news batch failed: %s", e)
-        return _pd.DataFrame(columns=NEWS_COLUMNS)
+        fetched = _pd.DataFrame(columns=NEWS_COLUMNS)
 
-    if not df.empty:
-        cache_set(key, df.to_dict("records"), ttl=TRANSFER_NEWS_TTL_SECONDS)
-    return df
+    frames = []
+    if cached_rows:
+        frames.append(_pd.DataFrame(cached_rows, columns=NEWS_COLUMNS))
+    if not fetched.empty:
+        frames.append(fetched)
+    if not frames:
+        return _pd.DataFrame(columns=NEWS_COLUMNS)
+    return _pd.concat(frames, ignore_index=True)
+
+
+def start_transfer_news_prefetch(players, label: str = "default") -> bool:
+    """Warm the transfer-news cache on a background thread.
+
+    Fetching is the slow part of the draft board, and it does not depend on
+    anything the user does — so start it as soon as the app knows who is on the
+    board, and let it finish while they read. By the time the Scan button is
+    pressed the work is usually already done.
+
+    The worker touches only Streamlit-free code (``transfer_feeds`` and the SQLite
+    cache); calling ``st.*`` from a thread with no ScriptRunContext would fail.
+    Returns True if it started a thread, False if one already ran this session.
+    """
+    pairs = [tuple(p) if isinstance(p, (list, tuple)) else (p, None) for p in (players or [])]
+    if not pairs:
+        return False
+
+    with _PREFETCH_LOCK:
+        if label in _PREFETCH_STARTED:
+            return False
+        _PREFETCH_STARTED.add(label)
+
+    def _worker():
+        try:
+            from scripts.common.transfer_feeds import fetch_transfer_news_batch
+
+            _rows, missing = _read_cached_news(pairs)
+            if not missing:
+                return
+            _logger.info("Prefetching transfer news for %d player(s)", len(missing))
+            fetch_transfer_news_batch(missing, on_result=_write_cached_news)
+        except Exception:
+            _logger.warning("Transfer news prefetch failed", exc_info=True)
+
+    threading.Thread(target=_worker, name="transfer-news-prefetch", daemon=True).start()
+    return True
