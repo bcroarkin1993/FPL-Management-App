@@ -154,6 +154,19 @@ class TestDestinationWeighting:
                                      PL_TEAMS, exclude_team="MCI")
         assert club is None
 
+    def test_destination_capture_stops_at_connectives(self):
+        """Unbounded, this swallowed the sentence: 'Tottenham amid Arsenal ...'."""
+        club, weight = parse_destination(
+            "Sandro Tonali joined Tottenham amid Arsenal interest", PL_TEAMS)
+        assert club == "Tottenham"
+        assert weight == WEIGHT_INTRA_PL
+
+    def test_free_agent_has_left_the_league(self):
+        club, weight = parse_destination(
+            "has departed the club as a free agent.", PL_TEAMS)
+        assert weight == WEIGHT_LEAVES_PL
+        assert "free agent" in club.lower()
+
     def test_bootstrap_spelling_variants_are_premier_league(self):
         for name in ("Nottingham Forest", "Nott'm Forest", "Man Utd",
                      "Manchester United", "Spurs", "Tottenham Hotspur"):
@@ -215,6 +228,81 @@ class TestScoreHeadlines:
 
     def test_no_news_is_no_risk(self):
         assert score_headlines([], "Erling Haaland", "Man City", PL_TEAMS, today=TODAY)[0] == 0.0
+
+
+# Real Google News headlines for Bruno Fernandes, 29 Aug 2026. Galatasaray made
+# an offer; United rejected it and opened contract talks. He never moved. Scored
+# 0.33 risk and cost him a third of his season projection -- from rank 2 to 39 --
+# purely because "offer" and "approach" were being read as departure evidence.
+BRUNO_HEADLINES = [
+    {"Headline": "Man Utd face Fernandes transfer challenge with 'offer prepared'",
+     "Source": "London Evening Standard", "Published": "Thu, 27 Aug 2026 10:00:00 GMT"},
+    {"Headline": "Manchester United in contract talks with Bruno Fernandes as Galatasaray make lucrative offer",
+     "Source": "The New York Times", "Published": "Wed, 26 Aug 2026 10:00:00 GMT"},
+    {"Headline": "Man United make Bruno Fernandes transfer stance clear amid 'audacious' offer",
+     "Source": "Manchester Evening News", "Published": "Wed, 26 Aug 2026 10:00:00 GMT"},
+    {"Headline": "Man Utd issue instant response to shock Bruno Fernandes transfer approach",
+     "Source": "Daily Mirror", "Published": "Wed, 26 Aug 2026 10:00:00 GMT"},
+    {"Headline": "Bruno Fernandes transfer news: Manchester United captain not for sale at any price despite Galatasaray interest",
+     "Source": "Sky Sports", "Published": "Tue, 25 Aug 2026 10:00:00 GMT"},
+    {"Headline": "Bruno Fernandes transfer news: Manchester United will reject any offer for captain amid Galatasaray interest",
+     "Source": "BBC", "Published": "Tue, 25 Aug 2026 10:00:00 GMT"},
+]
+
+
+class TestClubRefusingToSell:
+    """A bid is the selling club's problem, not evidence the player leaves."""
+
+    def test_bruno_fernandes_is_not_meaningfully_at_risk(self):
+        risk, _dest, _w, _outlets, _ev = score_headlines(
+            BRUNO_HEADLINES, "Bruno Fernandes", "Man Utd", PL_TEAMS, today=TODAY)
+        assert risk < 0.15, (
+            "A rejected offer plus contract talks must not discount a squad staple; "
+            "got %.3f" % risk
+        )
+
+    def test_bare_offer_and_bid_are_bottom_tier(self):
+        """Reported constantly, and mostly come to nothing."""
+        for headline in ("Galatasaray make lucrative offer for Fernandes",
+                         "Newcastle prepare bid for Fernandes",
+                         "Man Utd respond to transfer approach"):
+            assert classify_headline(headline) == TIER_C, headline
+
+    def test_accepted_bid_is_still_top_tier(self):
+        """Demoting 'bid' must not demote 'bid accepted'."""
+        assert classify_headline("Villa accept £50m bid for Watkins") == TIER_A
+        assert classify_headline("Al Hilal have bid accepted for Watkins") == TIER_A
+
+    def test_contract_talks_are_a_stay_signal_not_talks(self):
+        """'In contract talks' is the club tying him down — the opposite signal."""
+        assert classify_headline("Man Utd in contract talks with Bruno Fernandes") <= TIER_C
+
+    def test_refusal_across_outlets_caps_the_score(self):
+        rejections = [
+            {"Headline": "Man Utd reject Galatasaray offer for Bruno Fernandes",
+             "Source": "BBC", "Published": "Wed, 26 Aug 2026 10:00:00 GMT"},
+            {"Headline": "Bruno Fernandes not for sale at any price, say Man Utd",
+             "Source": "Sky Sports", "Published": "Wed, 26 Aug 2026 10:00:00 GMT"},
+            {"Headline": "Bruno Fernandes in talks over a move away",
+             "Source": "Daily Star", "Published": "Wed, 26 Aug 2026 10:00:00 GMT"},
+        ]
+        risk, *_ = score_headlines(rejections, "Bruno Fernandes", "Man Utd",
+                                   PL_TEAMS, today=TODAY)
+        assert risk <= 0.10
+
+    def test_a_medical_overrides_the_clubs_denials(self):
+        """The club's position last week does not survive him having a medical."""
+        mixed = [
+            {"Headline": "Villa say Watkins is not for sale at any price",
+             "Source": "BBC", "Published": "Mon, 24 Aug 2026 10:00:00 GMT"},
+            {"Headline": "Villa reject Al Hilal offer for Watkins",
+             "Source": "Sky Sports", "Published": "Mon, 24 Aug 2026 10:00:00 GMT"},
+            {"Headline": "Ollie Watkins undergoes medical at Al Hilal",
+             "Source": "The Athletic", "Published": "Fri, 28 Aug 2026 10:00:00 GMT"},
+        ]
+        risk, *_ = score_headlines(mixed, "Ollie Watkins", "Aston Villa",
+                                   PL_TEAMS, today=TODAY)
+        assert risk > 0.3
 
 
 class TestResolveFromBootstrap:

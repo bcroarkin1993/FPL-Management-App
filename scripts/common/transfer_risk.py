@@ -69,15 +69,21 @@ _TIER_A_PATTERNS = [
     # Tier A commitment even though the word "deal" never appears.
     r"\bagree(?:d|s)?\b.{0,30}\b(?:transfer|move|fee|switch)\b",
 ]
+# Tier B is reserved for *player-side* commitment — the player moving, not
+# somebody wanting him. A bid or an offer is the selling club's problem, is
+# reported constantly, and mostly comes to nothing: pricing it at Tier B
+# discounted Bruno Fernandes by a third off a Galatasaray offer that United
+# publicly rejected while extending his contract.
 _TIER_B_PATTERNS = [
-    r"\bbid\b", r"\boffer\b", r"\bin talks\b", r"\bhold(?:ing)?\s+talks\b",
-    r"\bclose to\b", r"\bnegotiat", r"\btransfer request\b", r"\bapproach(?:ed)?\b",
-    r"\bpush(?:ing)?\s+to\s+sign\b", r"\bwants?\s+to\s+(?:leave|join)\b",
-    r"\bopen\s+to\s+(?:a\s+)?(?:move|exit)\b", r"\bswoop\b",
-    # Reporting a player's "exit" presupposes the exit.
-    r"\bexit\b", r"\bdeparture\b", r"\bfarewell\b",
+    r"\bin talks\b", r"\bhold(?:ing)?\s+talks\b", r"\bclose to\b",
+    r"\bnegotiat", r"\btransfer request\b", r"\bpush(?:ing)?\s+to\s+sign\b",
+    r"\bwants?\s+to\s+(?:leave|join)\b", r"\bopen\s+to\s+(?:a\s+)?(?:move|exit)\b",
+    r"\bset\s+to\s+(?:leave|depart)\b", r"\bbound\s+for\b",
 ]
 _TIER_C_PATTERNS = [
+    # Club-side interest: real reporting, weak evidence he actually goes.
+    r"\bbid\b", r"\boffer\b", r"\bapproach(?:ed)?\b", r"\bswoop\b",
+    r"\bexit\b", r"\bdeparture\b", r"\bfarewell\b",
     r"\blink(?:ed|s)?\b", r"\binterest(?:ed)?\b", r"\bmonitor(?:ing)?\b",
     r"\beye(?:ing|d)?\b", r"\btarget(?:ing)?\b", r"\brumou?r\b", r"\bgossip\b",
     r"\bconsider(?:ing)?\b", r"\bcould\s+(?:leave|join|move)\b",
@@ -85,12 +91,21 @@ _TIER_C_PATTERNS = [
 ]
 # A denial caps the score at Tier C no matter what else the headline says.
 # "Villa rule out Watkins sale" must not score as Tier A on the word "sale".
+# A denial caps the headline at Tier C, and enough of them cap the player's whole
+# score (see _STAY_SIGNAL_RISK_CAP).  "Contract talks" belongs here: the club
+# tying a player down is the opposite of him leaving, and it was being read as
+# Tier B "talks".
 _NEGATION_PATTERNS = [
     r"\bnot for sale\b", r"\brule(?:d|s)?\s+out\b", r"\bden(?:y|ies|ied)\b",
-    r"\breject(?:ed|s)?\b", r"\bturn(?:ed|s)?\s+down\b", r"\bsigns?\s+new\s+(?:deal|contract)\b",
-    r"\bnew contract\b", r"\bstay(?:s|ing)?\s+(?:at|put)\b", r"\bwill\s+not\s+leave\b",
-    r"\bno\s+(?:plans|intention)\s+to\s+(?:sell|leave)\b", r"\bcollapse[ds]?\b",
-    r"\boff\b(?=.*\btransfer\b)", r"\bcall(?:ed|s)?\s+off\b", r"\bfails?\b",
+    r"\breject(?:ed|s)?\b", r"\bturn(?:ed|s)?\s+down\b", r"\bknock(?:ed|s)?\s+back\b",
+    r"\brebuff(?:ed|s)?\b", r"\bsnub(?:bed|s)?\b",
+    r"\bsigns?\s+new\s+(?:deal|contract)\b", r"\bnew contract\b", r"\bnew deal\b",
+    r"\bcontract talks\b", r"\bcontract extension\b", r"\bextend(?:s|ed)?\s+(?:his\s+)?(?:deal|contract|stay)\b",
+    r"\bstay(?:s|ing)?\s+(?:at|put)\b", r"\bwill\s+not\s+leave\b",
+    r"\bwon.?t\s+(?:sell|leave)\b", r"\bwill\s+(?:not|never)\s+sell\b",
+    r"\bno\s+(?:plans|intention)\s+to\s+(?:sell|leave)\b", r"\bnot\s+entertain",
+    r"\bcollapse[ds]?\b", r"\boff\b(?=.*\btransfer\b)", r"\bcall(?:ed|s)?\s+off\b",
+    r"\bfails?\b",
 ]
 
 _TIERS = ((TIER_A, _TIER_A_PATTERNS), (TIER_B, _TIER_B_PATTERNS), (TIER_C, _TIER_C_PATTERNS))
@@ -107,6 +122,12 @@ FULL_CORROBORATION_OUTLETS = 4
 # wrongly torching a good player's ranking is higher than the cost of a late
 # discount on a real move.
 CORROBORATION_FLOOR = 0.30
+# When several outlets report the club refusing to sell, or extending him, that is
+# real counter-evidence and not merely absence of evidence.  It cannot override a
+# Tier A fact — a medical happens whatever the club said last week — but it caps
+# everything weaker.
+_MIN_STAY_SIGNALS_TO_CAP = 2
+_STAY_SIGNAL_RISK_CAP = 0.10
 
 # --- Transfer windows ---------------------------------------------------------
 # Hardcoded and season-specific: THESE MUST BE UPDATED EACH SEASON.
@@ -155,9 +176,15 @@ _FOREIGN_CLUBS = [
 
 # Non-PL English clubs get no special handling by name — they simply fail the
 # "is this a Premier League club" test, which is the correct answer.
+# The captured club name is bounded on both sides: length-capped, and stopped at
+# the connectives a headline uses to keep going ("joined Tottenham *amid* Arsenal
+# interest").  Unbounded, it swallowed the rest of the sentence and rendered a
+# destination of "Tottenham amid Arsenal ...".
 _JOINED_RE = re.compile(
-    r"(?:has\s+)?(?:joined|returned to|departed(?:\s+the\s+club)?|left)\s+(?:to\s+)?(.+?)"
-    r"(?:\s+(?:permanently|on\s+loan|for\s+the\s+rest|as\s+a\s+free\s+agent)|[.,]|$)",
+    r"(?:has\s+)?(?:joined|returned to|departed(?:\s+the\s+club)?|left)\s+(?:to\s+)?"
+    r"(?!(?:as|amid|after|with|from|in|to|for|on|and|the)\b)(.{2,40}?)"
+    r"(?:\s+(?:permanently|on\s+loan|for\s+the\s+rest|as\s+a\s+free\s+agent|amid|after|"
+    r"as|despite|with|from|in|following|but|while|and|on|to|for)\b|[.,;:!?]|$)",
     re.IGNORECASE,
 )
 
@@ -287,6 +314,12 @@ def _recency_weight(published, today) -> float:
     return 0.5 ** (age_days / NEWS_HALF_LIFE_DAYS)
 
 
+def _is_stay_signal(headline) -> bool:
+    """Does this headline report the club refusing to sell, or tying him down?"""
+    h = " " + _norm(headline) + " "
+    return bool(h.strip()) and any(re.search(p, h) for p in _NEGATION_PATTERNS)
+
+
 def classify_headline(headline) -> float:
     """Strongest tier score the headline's language supports.
 
@@ -363,6 +396,10 @@ def parse_destination(text, pl_teams, exclude_team=None):
     if not n:
         return None, WEIGHT_UNKNOWN
 
+    # A free agent has no destination club yet, but he has still left the league.
+    if re.search(r"free\s+agent", raw, re.IGNORECASE):
+        return "Free agent", WEIGHT_LEAVES_PL
+
     # Explicit "has joined X" (the bootstrap's own phrasing) is the most reliable.
     joined = _JOINED_RE.search(raw)
     if joined:
@@ -421,6 +458,8 @@ def score_headlines(headlines, player_name, team=None, pl_teams=None, today=None
     pl_teams = pl_teams or []
 
     best = 0.0
+    best_tier = 0.0
+    stay_signals = 0
     outlets = set()
     evidence = []
     dest_votes = {}
@@ -436,14 +475,19 @@ def score_headlines(headlines, player_name, team=None, pl_teams=None, today=None
         if not headline_mentions_player(title, player_name, team, ambiguous):
             continue
 
+        recency = _recency_weight(published, today)
+        if recency > 0 and _is_stay_signal(title):
+            stay_signals += 1
+
         tier = classify_headline(title)
         if tier <= 0:
             continue
-        decayed = tier * _recency_weight(published, today)
+        decayed = tier * recency
         if decayed <= 0:
             continue
 
         best = max(best, decayed)
+        best_tier = max(best_tier, tier)
         if tier >= TIER_B and source:
             outlets.add(_norm(source))
 
@@ -471,6 +515,10 @@ def score_headlines(headlines, player_name, team=None, pl_teams=None, today=None
         destination, weight = None, WEIGHT_UNKNOWN
 
     risk = max(0.0, min(1.0, raw_risk * weight))
+
+    if best_tier < TIER_A and stay_signals >= _MIN_STAY_SIGNALS_TO_CAP:
+        risk = min(risk, _STAY_SIGNAL_RISK_CAP)
+
     evidence.sort(key=lambda e: e["Weight"], reverse=True)
     return risk, destination, weight, n_outlets, evidence[:10]
 
