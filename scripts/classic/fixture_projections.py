@@ -18,7 +18,9 @@ from scripts.common.error_helpers import show_api_error
 from scripts.common.player_matching import canonical_normalize
 from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections
 from scripts.common.scraping import get_ffp_projections_data
-from scripts.common.fixture_helpers import compute_key_differentials, render_key_differentials
+from scripts.common.fixture_helpers import (
+    compute_key_differentials, live_player_status, render_key_differentials,
+)
 from scripts.common.utils import (
     find_optimal_lineup,
     get_classic_bootstrap_static,
@@ -108,27 +110,38 @@ def _blend_live_with_squad(squad_df: pd.DataFrame, live_stats: dict) -> pd.DataF
 
     For each player:
     - If they have played (has_played is True): use actual live points
+    - If their match is over and they never came on: use their actual (0) points --
+      an unused sub cannot score again this week, so keeping his projection in the
+      blended total overstates the score for the rest of the gameweek
     - If they haven't played yet: use projected points
 
     Parameters:
     - squad_df: DataFrame with 'element_id' and 'Points' columns.
-    - live_stats: Dict of {element_id: {points, minutes, has_played}} from get_live_gameweek_stats().
+    - live_stats: Dict of {element_id: {points, minutes, has_played, fixture_started,
+      fixture_finished}} from get_live_gameweek_stats().
 
     Returns:
-    - DataFrame with additional columns: Live_Points, Has_Played, Blended_Points.
+    - DataFrame with additional columns: Live_Points, Has_Played, Fixture_Started,
+      Fixture_Finished, Blended_Points.
     """
     result = squad_df.copy()
     result['Live_Points'] = 0
     result['Has_Played'] = False
+    result['Fixture_Started'] = False
+    result['Fixture_Finished'] = False
     result['Blended_Points'] = pd.to_numeric(result['Points'], errors='coerce').fillna(0.0)
 
     for idx, row in result.iterrows():
         eid = row.get('element_id')
         if eid and eid in live_stats:
             stats = live_stats[eid]
+            has_played = bool(stats.get('has_played', False))
+            fixture_finished = bool(stats.get('fixture_finished', False))
             result.at[idx, 'Live_Points'] = stats.get('points', 0)
-            result.at[idx, 'Has_Played'] = stats.get('has_played', False)
-            if stats.get('has_played', False):
+            result.at[idx, 'Has_Played'] = has_played
+            result.at[idx, 'Fixture_Started'] = bool(stats.get('fixture_started', False))
+            result.at[idx, 'Fixture_Finished'] = fixture_finished
+            if has_played or fixture_finished:
                 result.at[idx, 'Blended_Points'] = stats.get('points', 0)
 
     return result
@@ -342,11 +355,12 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
             margin-bottom: 4px; border-left: 3px solid #ddd;
         }
         .player-card.played { border-left-color: #28a745; background: #f0fff4; }
+        .player-card.dnp { border-left-color: #b0b3b8; background: #f1f2f3; opacity: 0.75; }
         .player-card.upcoming { border-left-color: #6c757d; }
         .player-info { flex: 1; min-width: 0; }
-        .player-name { font-weight: 600; font-size: 13px; color: #1a1a2e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .player-team { font-size: 10px; color: #888; text-transform: uppercase; }
-        .player-matchup { font-size: 10px; color: #666; }
+        .player-name { font-weight: 600; font-size: 13px; line-height: 18px; color: #1a1a2e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .player-team { font-size: 10px; line-height: 14px; color: #888; text-transform: uppercase; }
+        .player-matchup { font-size: 10px; line-height: 14px; color: #666; }
         .player-points { text-align: right; min-width: 70px; }
         .live-pts { font-size: 18px; font-weight: 700; color: #28a745; }
         .proj-pts { font-size: 12px; color: #666; }
@@ -359,6 +373,8 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
             text-transform: uppercase; font-weight: 600; margin-left: 8px;
         }
         .status-played { background: #d4edda; color: #155724; }
+        .status-dnp { background: #e6d9d9; color: #7a1f1f; }
+        .status-live { background: #fff3cd; color: #7a5b00; }
         .status-upcoming { background: #e2e3e5; color: #383d41; }
         .captain-badge { background: #fff3cd; color: #856404; }
     </style>
@@ -389,7 +405,12 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
 
             if is_live and "Has_Played" in row.index:
                 live_pts = row.get("Live_Points", 0) or 0
-                has_played = row.get("Has_Played", False)
+                has_played = bool(row.get("Has_Played", False))
+                status = live_player_status(
+                    has_played,
+                    bool(row.get("Fixture_Finished", False)),
+                    bool(row.get("Fixture_Started", False)),
+                )
 
                 if is_captain:
                     captain_mult = 3 if active_chip == "3xc" else 2
@@ -399,7 +420,7 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
                     live_display = live_pts
                     proj_display = display_pts
 
-                if has_played:
+                if status == 'played':
                     diff = live_display - proj_display
                     diff_sign = "+" if diff > 0 else ""
                     diff_class = "perf-up" if diff > 0 else "perf-down" if diff < 0 else ""
@@ -410,13 +431,24 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
                     """
                     card_class = "player-card played"
                     status_html = '<span class="status-badge status-played">Played</span>'
+                elif status == 'dnp':
+                    # Match over, never came on - the projection can no longer arrive
+                    points_html = f"""
+                        <div class="live-pts">0</div>
+                        <div class="perf-indicator perf-down">proj: {proj_display:.1f} (-{proj_display:.1f})</div>
+                    """
+                    card_class = "player-card dnp"
+                    status_html = '<span class="status-badge status-dnp">Did not play</span>'
                 else:
                     points_html = f"""
                         <div class="proj-only">{proj_display:.1f}</div>
                         <div class="proj-pts">projected</div>
                     """
                     card_class = "player-card upcoming"
-                    status_html = '<span class="status-badge status-upcoming">Upcoming</span>'
+                    if status == 'live':
+                        status_html = '<span class="status-badge status-live">In play</span>'
+                    else:
+                        status_html = '<span class="status-badge status-upcoming">Upcoming</span>'
             else:
                 proj_display = display_pts * (3 if active_chip == "3xc" else 2) if is_captain else display_pts
                 points_html = f'<div class="proj-only">{proj_display:.1f}</div>'
@@ -440,9 +472,13 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
 
     html += "</div>"
 
+    # Height is measured from the CSS above; the iframe does not scroll, so an
+    # underestimate silently clips the last card. Cards with a matchup line are
+    # 14px taller, and the matchup div is only rendered when there is one.
     player_count = len(display_df)
     pos_groups = display_df['Position'].nunique() if 'Position' in display_df.columns else 4
-    height = 40 + (player_count * 56) + (pos_groups * 32)
+    with_matchup = sum(1 for v in display_df.get('Matchup', pd.Series(dtype=object)) if v)
+    height = 8 + (with_matchup * 66) + ((player_count - with_matchup) * 52) + (pos_groups * 44)
     components.html(html, height=height, scrolling=False)
 
 
@@ -481,12 +517,13 @@ def _render_classic_bench_section(bench_df: pd.DataFrame, is_live: bool = False,
             margin-bottom: 4px; border-left: 3px dashed #bbb;
         }
         .bench-card.played { border-left-color: #28a745; background: #f0fff4; }
+        .bench-card.dnp { border-left-color: #b0b3b8; background: #f1f2f3; opacity: 0.75; }
         .sub-label { font-size: 9px; font-weight: 700; color: #888; text-transform: uppercase;
                      min-width: 48px; }
         .bench-player-info { flex: 1; min-width: 0; }
-        .bench-player-name { font-weight: 500; font-size: 12px; color: #333;
+        .bench-player-name { font-weight: 500; font-size: 12px; line-height: 17px; color: #333;
                              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .bench-player-meta { font-size: 10px; color: #999; text-transform: uppercase; }
+        .bench-player-meta { font-size: 10px; line-height: 14px; color: #999; text-transform: uppercase; }
         .bench-pts { text-align: right; min-width: 55px; }
         .bench-live-pts { font-size: 15px; font-weight: 700; color: #28a745; }
         .bench-proj-pts { font-size: 13px; font-weight: 500; color: #777; }
@@ -507,10 +544,17 @@ def _render_classic_bench_section(bench_df: pd.DataFrame, is_live: bool = False,
 
         if is_live and 'Has_Played' in row.index:
             live_pts = row.get('Live_Points', 0) or 0
-            has_played = row.get('Has_Played', False)
-            if has_played:
+            status = live_player_status(
+                bool(row.get('Has_Played', False)),
+                bool(row.get('Fixture_Finished', False)),
+                bool(row.get('Fixture_Started', False)),
+            )
+            if status == 'played':
                 points_html = f'<div class="bench-live-pts">{live_pts:.0f}</div><div class="bench-proj-label">proj: {display_pts:.1f}</div>'
                 card_class = "bench-card played"
+            elif status == 'dnp':
+                points_html = f'<div class="bench-live-pts">0</div><div class="bench-proj-label">did not play</div>'
+                card_class = "bench-card dnp"
             else:
                 points_html = f'<div class="bench-proj-pts">{display_pts:.1f}</div><div class="bench-proj-label">projected</div>'
                 card_class = "bench-card"
@@ -530,7 +574,8 @@ def _render_classic_bench_section(bench_df: pd.DataFrame, is_live: bool = False,
         """
 
     html += "</div>"
-    height = 32 + (len(ordered) * 46) + 10
+    # 7+7 padding + 17 name + 14 meta + 4 margin = 49 per card, + header (32) + margin (8)
+    height = 40 + (len(ordered) * 49) + 8
     components.html(html, height=height, scrolling=False)
 
 

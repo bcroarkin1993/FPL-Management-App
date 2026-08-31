@@ -253,6 +253,28 @@ def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame) -> str:
     return "".join(parts)
 
 
+def live_player_status(has_played: bool, fixture_finished: bool = False,
+                       fixture_started: bool = False) -> str:
+    """Classify a player's live-gameweek state for display and scoring.
+
+    Returns one of:
+    - 'played'   -- logged minutes
+    - 'dnp'      -- his match is over and he never came on. Minutes alone cannot
+                    distinguish this from a match that has not kicked off, so an
+                    unused sub used to render as "Upcoming" and keep his full
+                    projection in the blended team score all week.
+    - 'live'     -- match under way, no minutes yet (he can still come on)
+    - 'upcoming' -- not kicked off
+    """
+    if has_played:
+        return 'played'
+    if fixture_finished:
+        return 'dnp'
+    if fixture_started:
+        return 'live'
+    return 'upcoming'
+
+
 def compute_key_differentials(
     team1_players: pd.DataFrame,
     team2_players: pd.DataFrame,

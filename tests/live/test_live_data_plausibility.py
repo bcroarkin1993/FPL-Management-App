@@ -487,3 +487,80 @@ class TestSeasonRankingsMerge:
             stats["matched"], stats["total"],
             "Rotowire season rankings (top 50)", min_rate=0.95)
         raise_on_error(issues, "top-50 season rankings merge")
+
+
+class TestLiveFixtureStatus:
+    """The state the lineup cards read to say Played / Did not play / Upcoming.
+
+    A 0-minute player whose match was over used to render as "Upcoming" for the
+    rest of the week and keep his full projection in the team total. Minutes alone
+    cannot see that, so the fixture's own state has to come through intact.
+    """
+
+    @pytest.fixture(scope="class")
+    def fixture_status(self, current_gw):
+        from scripts.common.utils import get_gw_team_fixture_status
+
+        return skip_if_unreachable(
+            lambda: get_gw_team_fixture_status(current_gw), "FPL fixtures endpoint")
+
+    @pytest.fixture(scope="class")
+    def live_stats(self, current_gw):
+        from scripts.common.utils import get_live_gameweek_stats
+
+        stats = skip_if_unreachable(
+            lambda: get_live_gameweek_stats(current_gw), "FPL live endpoint")
+        if not stats:
+            pytest.skip("No live stats published for GW %s" % current_gw)
+        return stats
+
+    def test_every_club_has_a_fixture_state(self, fixture_status):
+        """20 clubs, each either playing or not -- a blank map disables the whole
+        played/upcoming distinction silently."""
+        assert len(fixture_status) >= 18, (
+            "only %d clubs carry a fixture state; blank/near-blank means the "
+            "fixtures endpoint changed shape" % len(fixture_status)
+        )
+        for team_id, state in fixture_status.items():
+            assert set(state) == {"started", "finished"}, (
+                "team %s carries %s" % (team_id, sorted(state)))
+            if state["finished"]:
+                assert state["started"], "team %s finished without starting" % team_id
+
+    def test_live_stats_carry_the_fixture_state(self, live_stats):
+        keys_missing = [
+            eid for eid, s in live_stats.items()
+            if "fixture_started" not in s or "fixture_finished" not in s
+        ]
+        assert not keys_missing, (
+            "%d players have no fixture state; the lineup cards fall back to "
+            "minutes-only and unused subs read as Upcoming" % len(keys_missing)
+        )
+
+    def test_players_with_minutes_are_in_a_started_fixture(self, live_stats):
+        """Minutes without a started fixture means the two feeds disagree."""
+        contradictions = [
+            eid for eid, s in live_stats.items()
+            if s.get("minutes", 0) > 0 and not s.get("fixture_started")
+        ]
+        assert not contradictions, (
+            "%d players logged minutes in a fixture reported as not started "
+            "(e.g. element %s)" % (len(contradictions), contradictions[0])
+        )
+
+    def test_a_finished_fixture_produces_minutes(self, live_stats, fixture_status):
+        """Every finished match must show players who played. If a whole club's
+        squad reads 0 minutes after full time, the join broke and all of them
+        would render as unused subs."""
+        finished = {t for t, s in fixture_status.items() if s.get("finished")}
+        if not finished:
+            pytest.skip("No fixture finished yet in this gameweek")
+        played = sum(
+            1 for s in live_stats.values()
+            if s.get("fixture_finished") and s.get("minutes", 0) > 0
+        )
+        # 22 starters per finished match, before substitutes.
+        assert played >= 11 * len(finished), (
+            "only %d players logged minutes across %d finished clubs"
+            % (played, len(finished))
+        )

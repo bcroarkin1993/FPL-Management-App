@@ -551,13 +551,18 @@ def find_best_match(fpl_player, fpl_team, fpl_position, candidates, projections_
 
 
 def merge_fpl_players_and_projections(fpl_players_df, projections_df,
-                                      fuzzy_threshold=80, lower_fuzzy_threshold=60):
+                                      fuzzy_threshold=80, lower_fuzzy_threshold=60,
+                                      carry_cols=None):
     """
     Robust merge of FPL players (Player/Team/Position) with projections.
     - Normalizes projections_df to RotoWire schema inside the function.
     - Uses canonical name normalization (strips accents) for reliable matching.
     - Tries exact match on normalized names first, then falls back to fuzzy matching.
     - Returns a table with players that *did* or *did not* match; unmatched get NA fields.
+
+    carry_cols: FPL-side columns to copy onto the output rows (e.g. ['Player_ID']).
+    A matched row takes its 'Player' from the *projection* source, so anything keyed
+    on the FPL name is lost here -- carry the element id instead and join on that.
     """
 
     # -------- normalize projections to RW schema --------
@@ -830,7 +835,7 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
 
         if match:
             mrow = proj_norm.loc[proj_norm['Player'] == match].iloc[0]
-            out.append({
+            row = {
                 'Player': mrow.get('Player'),
                 'Team': mrow.get('Team'),
                 'Matchup': mrow.get('Matchup', ''),
@@ -839,10 +844,10 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
                 'TSB %': mrow.get('TSB %', np.nan),
                 'Points': mrow.get('Points'),
                 'Pos Rank': mrow.get('Pos Rank', 'NA')
-            })
+            }
         else:
             # keep the original FPL row but with NA projections
-            out.append({
+            row = {
                 'Player': fpl_player,
                 'Team': fpl_team,
                 'Matchup': 'N/A',
@@ -851,7 +856,13 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
                 'TSB %': np.nan,
                 'Points': np.nan,
                 'Pos Rank': 'NA'
-            })
+            }
+
+        for col in (carry_cols or []):
+            if col in fpl_players_df.columns:
+                row[col] = r[col]
+
+        out.append(row)
 
     merged = pd.DataFrame(out)
 
@@ -863,6 +874,7 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
 
     # final column order (don't fail if some are missing)
     order = ['Player','Team','Matchup','Position','Price','TSB %','Points','Pos Rank']
+    order += [c for c in (carry_cols or []) if c in merged.columns]
     merged = merged[[c for c in order if c in merged.columns]]
 
     # 1-based index

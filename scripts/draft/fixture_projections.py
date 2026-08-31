@@ -14,7 +14,9 @@ from scripts.common.utils import (
     get_draft_h2h_record, get_live_gameweek_stats, is_gameweek_live, get_fpl_player_mapping,
     get_team_actual_lineup, get_gw_finished_teams, get_classic_bootstrap_static,
 )
-from scripts.common.fixture_helpers import compute_key_differentials, render_key_differentials
+from scripts.common.fixture_helpers import (
+    compute_key_differentials, live_player_status, render_key_differentials,
+)
 from scripts.common.styled_tables import render_styled_table
 
 _logger = get_logger("fpl_app.draft.fixture_projections")
@@ -26,12 +28,21 @@ def _blend_live_with_projections(team_df: pd.DataFrame, live_stats: dict, player
 
     For each player:
     - If they have played (minutes > 0): use actual points
-    - If they haven't played yet: use projected points
+    - If their match is over and they never came on: use their actual (0) points --
+      an unused sub cannot score any more this week, so holding his projection in
+      the team total quietly overstates the score for the rest of the gameweek
+    - Otherwise: use projected points
+
+    Matching prefers 'Player_ID' (the FPL element id) when the frame carries it.
+    Name matching is a fallback only: this frame's names come from the projection
+    source, so "Igor Thiago" never reached the bootstrap's "Igor Thiago Nascimento
+    Rodrigues" and he showed as Upcoming through a full 90 minutes.
 
     Returns DataFrame with additional columns:
     - 'Live_Points': actual points scored (0 if not played)
     - 'Has_Played': bool indicating if player has played
-    - 'Blended_Points': live points if played, projected if not
+    - 'Fixture_Started' / 'Fixture_Finished': state of the player's own match
+    - 'Blended_Points': live points if their match is done, projected if not
     """
     from scripts.common.player_matching import canonical_normalize
 
@@ -67,7 +78,13 @@ def _blend_live_with_projections(team_df: pd.DataFrame, live_stats: dict, player
 
     result['Live_Points'] = 0
     result['Has_Played'] = False
+    result['Fixture_Started'] = False
+    result['Fixture_Finished'] = False
     result['Blended_Points'] = result['Points'].fillna(0)
+
+    id_col = 'Player_ID' if 'Player_ID' in result.columns else (
+        'element_id' if 'element_id' in result.columns else None
+    )
 
     # Get team info from DataFrame if available
     team_col = 'Team' if 'Team' in result.columns else None
@@ -79,6 +96,15 @@ def _blend_live_with_projections(team_df: pd.DataFrame, live_stats: dict, player
 
         # Try multiple matching strategies
         element_id = None
+
+        # Strategy 0: element id carried through the merge (exact, never ambiguous)
+        if id_col is not None:
+            raw_id = result.at[idx, id_col]
+            if pd.notna(raw_id):
+                try:
+                    element_id = int(raw_id)
+                except (TypeError, ValueError):
+                    element_id = None
 
         # Strategy 1: Direct match
         if player_name in name_to_id:
@@ -117,10 +143,14 @@ def _blend_live_with_projections(team_df: pd.DataFrame, live_stats: dict, player
 
         if element_id and element_id in live_stats:
             stats = live_stats[element_id]
+            has_played = bool(stats.get('has_played', False))
+            fixture_finished = bool(stats.get('fixture_finished', False))
             result.at[idx, 'Live_Points'] = stats.get('points', 0)
-            result.at[idx, 'Has_Played'] = stats.get('has_played', False)
+            result.at[idx, 'Has_Played'] = has_played
+            result.at[idx, 'Fixture_Started'] = bool(stats.get('fixture_started', False))
+            result.at[idx, 'Fixture_Finished'] = fixture_finished
 
-            if stats.get('has_played', False):
+            if has_played or fixture_finished:
                 result.at[idx, 'Blended_Points'] = stats.get('points', 0)
 
     return result
@@ -258,11 +288,12 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
             margin-bottom: 4px; border-left: 3px solid #ddd;
         }}
         .player-card.played {{ border-left-color: #28a745; background: #f0fff4; }}
+        .player-card.dnp {{ border-left-color: #b0b3b8; background: #f1f2f3; opacity: 0.75; }}
         .player-card.upcoming {{ border-left-color: #6c757d; }}
         .player-info {{ flex: 1; min-width: 0; }}
-        .player-name {{ font-weight: 600; font-size: 13px; color: #1a1a2e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-        .player-team {{ font-size: 10px; color: #888; text-transform: uppercase; }}
-        .player-matchup {{ font-size: 10px; color: #666; }}
+        .player-name {{ font-weight: 600; font-size: 13px; line-height: 18px; color: #1a1a2e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+        .player-team {{ font-size: 10px; line-height: 14px; color: #888; text-transform: uppercase; }}
+        .player-matchup {{ font-size: 10px; line-height: 14px; color: #666; }}
         .player-points {{ text-align: right; min-width: 70px; }}
         .live-pts {{ font-size: 18px; font-weight: 700; color: #28a745; }}
         .proj-pts {{ font-size: 12px; color: #666; }}
@@ -275,6 +306,8 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
             text-transform: uppercase; font-weight: 600; margin-left: 8px;
         }}
         .status-played {{ background: #d4edda; color: #155724; }}
+        .status-dnp {{ background: #e6d9d9; color: #7a1f1f; }}
+        .status-live {{ background: #fff3cd; color: #7a5b00; }}
         .status-upcoming {{ background: #e2e3e5; color: #383d41; }}
     </style>
     <div class="lineup-container">
@@ -301,15 +334,20 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
         for player_name, row in pos_players.iterrows():
             team = row.get('Team', '')
             matchup = row.get('Matchup', '')
-            proj_pts = row.get('Points', 0) or 0
-            display_pts = row.get('Proj_Blended') or proj_pts
+            proj_pts = pd.to_numeric(row.get('Points', 0), errors='coerce')
+            proj_pts = 0.0 if pd.isna(proj_pts) else float(proj_pts)
+            display_pts = pd.to_numeric(row.get('Proj_Blended'), errors='coerce')
+            display_pts = proj_pts if pd.isna(display_pts) else float(display_pts)
 
             if is_live:
                 live_pts = row.get('Live_Points', 0) or 0
-                has_played = row.get('Has_Played', False)
-                blended_pts = row.get('Blended_Points', 0) or 0
+                status = live_player_status(
+                    bool(row.get('Has_Played', False)),
+                    bool(row.get('Fixture_Finished', False)),
+                    bool(row.get('Fixture_Started', False)),
+                )
 
-                if has_played:
+                if status == 'played':
                     # Player has finished - show actual vs projected
                     diff = live_pts - display_pts
                     diff_sign = "+" if diff > 0 else ""
@@ -321,14 +359,26 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
                     """
                     card_class = "player-card played"
                     status_html = '<span class="status-badge status-played">Played</span>'
+                elif status == 'dnp':
+                    # Match over, never came on - the projection can no longer arrive
+                    points_html = f"""
+                        <div class="live-pts">0</div>
+                        <div class="perf-indicator perf-down">proj: {display_pts:.1f} (-{display_pts:.1f})</div>
+                    """
+                    card_class = "player-card dnp"
+                    status_html = '<span class="status-badge status-dnp">Did not play</span>'
                 else:
-                    # Player yet to play - show blended projection (Rotowire + FFP) when available
+                    # Yet to play - show blended projection (Rotowire + FFP) when available
                     points_html = f"""
                         <div class="proj-only">{display_pts:.1f}</div>
                         <div class="proj-pts">projected</div>
                     """
-                    card_class = "player-card upcoming"
-                    status_html = '<span class="status-badge status-upcoming">Upcoming</span>'
+                    if status == 'live':
+                        card_class = "player-card upcoming"
+                        status_html = '<span class="status-badge status-live">In play</span>'
+                    else:
+                        card_class = "player-card upcoming"
+                        status_html = '<span class="status-badge status-upcoming">Upcoming</span>'
             else:
                 # Pre-match: show blended projection (Rotowire + FFP) when available
                 points_html = f'<div class="proj-only">{display_pts:.1f}</div>'
@@ -350,11 +400,15 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
 
     html += "</div>"
 
-    # Calculate total height based on player count
+    # Calculate total height based on player count. Every term is measured from the
+    # CSS above -- the iframe does not scroll, so an underestimate silently clips the
+    # last card off the bottom of the lineup.
+    #   card    = 8+8 padding + 18 name + 14 team + 14 matchup + 4 margin = 66
+    #   heading = 6+6 padding + 14 text + 6 margin                       = 32
+    #   group   = 12 margin-bottom
     player_count = len(team_df)
-    # Count actual position groups present
     pos_groups = team_df['Position'].nunique() if 'Position' in team_df.columns else 4
-    height = 40 + (player_count * 56) + (pos_groups * 32)
+    height = 8 + (player_count * 66) + (pos_groups * 44)
     components.html(html, height=height, scrolling=False)
 
 
@@ -397,12 +451,13 @@ def _render_draft_bench_section(bench_df: pd.DataFrame, is_live: bool = False):
             margin-bottom: 4px; border-left: 3px dashed #bbb;
         }
         .bench-card.played { border-left-color: #28a745; background: #f0fff4; }
+        .bench-card.dnp { border-left-color: #b0b3b8; background: #f1f2f3; opacity: 0.75; }
         .sub-label { font-size: 9px; font-weight: 700; color: #888; text-transform: uppercase;
                      min-width: 48px; }
         .bench-player-info { flex: 1; min-width: 0; }
-        .bench-player-name { font-weight: 500; font-size: 12px; color: #333;
+        .bench-player-name { font-weight: 500; font-size: 12px; line-height: 17px; color: #333;
                              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .bench-player-meta { font-size: 10px; color: #999; text-transform: uppercase; }
+        .bench-player-meta { font-size: 10px; line-height: 14px; color: #999; text-transform: uppercase; }
         .bench-pts { text-align: right; min-width: 55px; }
         .bench-live-pts { font-size: 15px; font-weight: 700; color: #28a745; }
         .bench-proj-pts { font-size: 13px; font-weight: 500; color: #777; }
@@ -416,16 +471,25 @@ def _render_draft_bench_section(bench_df: pd.DataFrame, is_live: bool = False):
         label = labels[i] if i < len(labels) else f'{i}th Sub'
         team = row.get('Team', '')
         position = row.get('Position', '')
-        proj_pts = row.get('Points', 0) or 0
-        display_pts = row.get('Proj_Blended') or proj_pts
+        proj_pts = pd.to_numeric(row.get('Points', 0), errors='coerce')
+        proj_pts = 0.0 if pd.isna(proj_pts) else float(proj_pts)
+        display_pts = pd.to_numeric(row.get('Proj_Blended'), errors='coerce')
+        display_pts = proj_pts if pd.isna(display_pts) else float(display_pts)
         meta = f"{team} · {position}" if team and position else team or position
 
         if is_live and 'Has_Played' in row.index:
             live_pts = row.get('Live_Points', 0) or 0
-            has_played = row.get('Has_Played', False)
-            if has_played:
+            status = live_player_status(
+                bool(row.get('Has_Played', False)),
+                bool(row.get('Fixture_Finished', False)),
+                bool(row.get('Fixture_Started', False)),
+            )
+            if status == 'played':
                 points_html = f'<div class="bench-live-pts">{live_pts:.0f}</div><div class="bench-proj-label">proj: {display_pts:.1f}</div>'
                 card_class = "bench-card played"
+            elif status == 'dnp':
+                points_html = f'<div class="bench-live-pts">0</div><div class="bench-proj-label">did not play</div>'
+                card_class = "bench-card dnp"
             else:
                 points_html = f'<div class="bench-proj-pts">{display_pts:.1f}</div><div class="bench-proj-label">projected</div>'
                 card_class = "bench-card"
@@ -445,7 +509,8 @@ def _render_draft_bench_section(bench_df: pd.DataFrame, is_live: bool = False):
         """
 
     html += "</div>"
-    height = 32 + (len(ordered) * 46) + 10
+    # 7+7 padding + 17 name + 14 meta + 4 margin = 49 per card, + header (32) + margin (8)
+    height = 40 + (len(ordered) * 49) + 8
     components.html(html, height=height, scrolling=False)
 
 
@@ -569,14 +634,18 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
             team1_bench_raw = team1_actual[team1_actual['Is_Starter'] == False].copy()
             team2_bench_raw = team2_actual[team2_actual['Is_Starter'] == False].copy()
 
-        # Merge starters with projections
+        # Merge starters with projections. Carry Player_ID through: the merge takes
+        # matched names from the projection source, and live stats are keyed on the
+        # FPL element id -- without it the live lookup falls back to name matching.
         team1_df = merge_fpl_players_and_projections(
-            team1_starters[['Player', 'Team', 'Position']],
-            projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+            team1_starters[['Player', 'Team', 'Position', 'Player_ID']],
+            projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']],
+            carry_cols=['Player_ID'],
         )
         team2_df = merge_fpl_players_and_projections(
-            team2_starters[['Player', 'Team', 'Position']],
-            projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+            team2_starters[['Player', 'Team', 'Position', 'Player_ID']],
+            projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']],
+            carry_cols=['Player_ID'],
         )
 
         # Blend starters with FFP
@@ -585,16 +654,20 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
 
         # Merge bench players with projections
         if not team1_bench_raw.empty:
+            _bench1_carry = [c for c in ('squad_position', 'Player_ID') if c in team1_bench_raw.columns]
             bench1_merged = merge_fpl_players_and_projections(
-                team1_bench_raw[['Player', 'Team', 'Position'] + (['squad_position'] if 'squad_position' in team1_bench_raw.columns else [])],
-                projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+                team1_bench_raw[['Player', 'Team', 'Position'] + _bench1_carry],
+                projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']],
+                carry_cols=_bench1_carry,
             )
             bench1_merged = blend_fixture_projections(bench1_merged, ffp_df)
             bench1_df = bench1_merged.set_index('Player') if 'Player' in bench1_merged.columns else bench1_merged
         if not team2_bench_raw.empty:
+            _bench2_carry = [c for c in ('squad_position', 'Player_ID') if c in team2_bench_raw.columns]
             bench2_merged = merge_fpl_players_and_projections(
-                team2_bench_raw[['Player', 'Team', 'Position'] + (['squad_position'] if 'squad_position' in team2_bench_raw.columns else [])],
-                projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+                team2_bench_raw[['Player', 'Team', 'Position'] + _bench2_carry],
+                projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']],
+                carry_cols=_bench2_carry,
             )
             bench2_merged = blend_fixture_projections(bench2_merged, ffp_df)
             bench2_df = bench2_merged.set_index('Player') if 'Player' in bench2_merged.columns else bench2_merged
@@ -650,8 +723,9 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
         df['Position'] = pd.Categorical(df['Position'], categories=position_order, ordered=True)
         df.sort_values(by=['Position', _sort_col], ascending=[True, False], inplace=True)
 
-    # Select the final columns to use (include blend columns when present)
-    _extra = [c for c in ('Proj_Blended', '_proj_source') if c in team1_df.columns]
+    # Select the final columns to use (include blend columns when present).
+    # Player_ID rides along so the live blend can join on the element id.
+    _extra = [c for c in ('Proj_Blended', '_proj_source', 'Player_ID') if c in team1_df.columns]
     team1_df = team1_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank'] + _extra]
     team2_df = team2_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank'] + _extra]
 

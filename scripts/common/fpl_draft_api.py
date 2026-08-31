@@ -468,21 +468,39 @@ def get_live_gameweek_stats(gw: int) -> dict:
     """
     Returns live stats for all players in a gameweek.
 
+    'has_played' means the player logged minutes. That alone cannot tell an unused
+    substitute apart from someone whose match has not kicked off, so each player also
+    carries the state of his own club's fixture: a 0-minute player whose match is over
+    is finished for the week and must not be displayed (or scored) as still to come.
+
     Returns:
-        dict: {element_id: {'points': int, 'minutes': int, 'has_played': bool}}
+        dict: {element_id: {'points': int, 'minutes': int, 'has_played': bool,
+                            'fixture_started': bool, 'fixture_finished': bool}}
     """
+    from scripts.common.fpl_classic_api import (
+        get_classic_bootstrap_static, get_gw_team_fixture_status,
+    )
+
     try:
         url = f"https://fantasy.premierleague.com/api/event/{gw}/live/"
         resp = requests.get(url, timeout=30)
         data = resp.json()
+
+        team_status = get_gw_team_fixture_status(gw)
+        bootstrap = get_classic_bootstrap_static() or {}
+        element_to_team = {p["id"]: p.get("team") for p in bootstrap.get("elements", [])}
+
         result = {}
         for elem in data.get("elements", []):
             stats = elem.get("stats", {})
             minutes = stats.get("minutes", 0)
+            fixture = team_status.get(element_to_team.get(elem["id"])) or {}
             result[elem["id"]] = {
                 'points': stats.get("total_points", 0),
                 'minutes': minutes,
                 'has_played': minutes > 0,
+                'fixture_started': bool(fixture.get("started", False)),
+                'fixture_finished': bool(fixture.get("finished", False)),
                 'goals': stats.get("goals_scored", 0),
                 'assists': stats.get("assists", 0),
                 'bonus': stats.get("bonus", 0),

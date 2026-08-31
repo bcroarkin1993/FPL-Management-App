@@ -124,6 +124,36 @@ banner. FFP is a live Google Sheet with no published revision time, so it shows
 A missing timestamp is cosmetic: the scraper returns `None` on any failure and
 must never take a page down.
 
+### Live Gameweek Player Status
+
+**Minutes played cannot tell an unused substitute from a player whose match has not
+kicked off.** Both are `minutes == 0`, and reading only that rendered Senesi — named
+in the XI, 0 minutes, match long over — as "Upcoming" for the rest of the week, with
+his full projection still counted in the team total.
+
+`get_live_gameweek_stats()` therefore attaches each player's own fixture state
+(`fixture_started`, `fixture_finished`) alongside `has_played`, and
+`live_player_status()` (`fixture_helpers.py`) turns the pair into one of
+`played` / `dnp` / `live` / `upcoming`. A `dnp` player scores his actual 0 in
+`Blended_Points`: no more points can arrive for him this week.
+
+**`finished` alone is not "the match is over".** The API leaves it `False` for hours
+after full time while bonus is confirmed, publishing `finished_provisional` first —
+during that window every completed match read as unfinished, which also suppressed
+auto-subs entirely. `get_gw_team_fixture_status()` accepts either, and in a double
+gameweek a club is finished only once *every* one of its fixtures is.
+
+**Join live stats on the element id, not the name.** `merge_fpl_players_and_projections()`
+takes a matched row's `Player` from the *projection* source, so the frame the Draft
+lineup renders is keyed on Rotowire names: "Igor Thiago" never reaches the bootstrap's
+"Igor Thiago Nascimento Rodrigues", and he showed as Upcoming through a full 90
+minutes. Pass `carry_cols=['Player_ID']` so the element id survives the merge; name
+matching is the fallback, not the plan.
+
+Card heights in these lineups are computed in Python and the iframe does not scroll
+(`components.html(..., scrolling=False)`), so every line-height in the CSS is
+load-bearing — underestimate one and the last card is silently clipped.
+
 ### Player Display Names
 
 **Always render player names via `to_display_name()` (`scripts/common/text_helpers.py`).

@@ -579,19 +579,41 @@ def get_classic_team_position_data(team_id: int, max_gw: int) -> dict:
 # =============================================================================
 
 @st.cache_data(ttl=60)
-def get_gw_finished_teams(gw: int) -> set:
-    """Return set of team_ids whose match in this GW is finished."""
+def get_gw_team_fixture_status(gw: int) -> Dict[int, Dict[str, bool]]:
+    """Return {team_id: {'started': bool, 'finished': bool}} for a gameweek.
+
+    'finished' accepts `finished_provisional` as well as `finished`. The API leaves
+    `finished` False for hours after full time while bonus points are confirmed, and
+    during that window a player with 0 minutes is done for the week -- not yet to
+    play. Reading only `finished` left every completed match looking unfinished,
+    which suppressed auto-subs and rendered benched players as "Upcoming".
+
+    In a double gameweek a team counts as finished only once *every* one of its
+    fixtures is over, and as started once *any* of them has kicked off.
+    """
     try:
         url = "https://fantasy.premierleague.com/api/fixtures/"
         resp = requests.get(url, params={"event": int(gw)}, timeout=20)
         resp.raise_for_status()
         fixtures = resp.json()
-        finished_teams = set()
-        for f in fixtures:
-            if f.get("finished"):
-                finished_teams.add(f["team_h"])
-                finished_teams.add(f["team_a"])
-        return finished_teams
     except Exception:
-        _logger.warning("Failed to fetch finished teams for GW %s", gw, exc_info=True)
-        return set()
+        _logger.warning("Failed to fetch fixture status for GW %s", gw, exc_info=True)
+        return {}
+
+    status: Dict[int, Dict[str, bool]] = {}
+    for f in fixtures:
+        over = bool(f.get("finished") or f.get("finished_provisional"))
+        started = bool(f.get("started"))
+        for side in ("team_h", "team_a"):
+            team_id = f.get(side)
+            if team_id is None:
+                continue
+            cur = status.setdefault(team_id, {"started": False, "finished": True})
+            cur["started"] = cur["started"] or started
+            cur["finished"] = cur["finished"] and over
+    return status
+
+
+def get_gw_finished_teams(gw: int) -> set:
+    """Return set of team_ids whose match(es) in this GW are over."""
+    return {tid for tid, s in get_gw_team_fixture_status(gw).items() if s.get("finished")}
