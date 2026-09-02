@@ -513,6 +513,59 @@ and must be updated each season; `check_transfer_windows()` warns once it lapses
 and a live test fails on it, because a lapsed calendar makes the whole feature a
 silent no-op indistinguishable from "nobody is at risk".
 
+### Inbound — "will he still play?"
+
+The outbound model asks whether a player will still be here. `build_inbound_watchlist()`
+and `apply_minutes_competition()` ask the other half: who is *arriving*, and whose
+minutes that costs. Arrivals are worth knowing twice over — they are waiver targets
+the moment they enter the game, and they are the reason an incumbent is about to lose
+his place.
+
+Queries are per **club**, not per player, because the interesting arrivals are not in
+the FPL pool yet — there is no name to query with. That makes this path structurally
+noisier than the outbound one: a per-player query is already about that player, while
+a per-club query is about the club and the name has to be pulled out of prose.
+Everything is therefore conservative — corroboration required, discount capped at
+`MAX_MINUTES_IMPACT` (0.25), unparsed names dropped rather than guessed.
+
+**The buying club comes from the sentence, never from whose feed the headline arrived
+on.** "Nottingham Forest sign Marc Guehi from Crystal Palace" surfaces under a *Palace*
+query and describes *Forest* buying. Trusting the query would discount the selling
+club's squad — precisely backwards. `_club_before()` takes the club preceding the
+signing verb.
+
+**Arrivals need their own tier vocabulary.** `classify_headline()` is written for
+"is he leaving": its Tier A is a player departing, and the strongest inbound sentence
+there is — "Villa complete signing of Nicolas Jackson" — matches nothing in it and
+scores `0.0`. Reusing it dropped confirmed signings from the watchlist while rumours
+survived. `classify_signing()` shares the three tiers and the denial cap so both sides
+stay comparable, but nothing else.
+
+**A fee belongs to whoever is nearest it.** "Liverpool agree £123m Barcola deal as
+Gakpo decides to join Man City" names two players and one fee, and the fee is not
+Gakpo's. `parse_fee_for_player()` requires the amount to sit nearer this player's
+surname than any other player's in the pool — the same lesson as a player's own club
+not being his destination, and it matters more here because fee is the evidence for
+how big a role a signing takes. A bare "£10" is never a fee: transfer fees are always
+written with a magnitude.
+
+**The two effects are one event seen from both ends.** Nicolas Jackson arrives at Villa
+*because* Ollie Watkins is going to Al-Hilal, so a player who is himself leaving is
+exempt from minutes competition — charging Watkins for his own replacement counts one
+move twice. `Minutes_Mult` is kept separate from `Transfer_Mult` for the same reason:
+one answers "will he be here", the other "will he still play".
+
+The established first choice at a club and position absorbs only
+`INCUMBENT_TOP_SHARE` of the threat — a signing displaces the players behind him long
+before it displaces a starter.
+
+**`WEIGHT_INTRA_PL` is 0, deliberately.** A move inside the league costs a Draft
+manager nothing, and the sign is genuinely ambiguous: Gakpo leaving a crowded
+Liverpool front line for a starting role elsewhere is plausibly an upgrade. A 20%
+discount asserted a direction the evidence does not support. The move is surfaced
+through `Transfer_Status` (`At risk` / `Moving` / `Departed`) instead, so it can be
+judged by eye — and a completed intra-PL move reads "stays in EPL", not "Departed".
+
 ### Wiring
 
 `draft_helper.py` discounts Rotowire's season `Points` into `Adj Points` and
@@ -757,7 +810,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Transfer Risk Tracking | Phase 1 complete | Google News RSS + FPL bootstrap ground truth + per-region window model, wired into the Draft Helper board. Remaining: Transfer Watch evidence page, Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model". |
+| Transfer Risk Tracking | Phase 1 wired; Phase 2 model built, unwired | Outbound (Google News RSS + FPL bootstrap ground truth + per-region window model) is wired into the Draft Helper board. Inbound (`build_inbound_watchlist()`, `apply_minutes_competition()`, per-club feeds, fee attribution, `Transfer_Status`) is built and tested but **not called from any page** — it needs a UI home and a prefetch path before it does anything. Also remaining: Transfer Watch evidence page, Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model". |
 | Mini-League Rival Tracker | Not Started | Tab on League Analysis pages. Show differential players, projected points gap, effective ownership within mini-league. Data available via get_league_player_ownership (Draft) and team picks (Classic). No transfer advice (handled elsewhere). |
 | Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2 trade discovery (position-matched — see "Draft Transaction Rules"; cross-position and 2-for-1 shapes were removed as FPL forbids them), acceptance likelihood scoring, Explore Teams comparison, Regression Watch (buy-low/sell-high) |
 | Historical Data Analysis | Completed | Season History section on Classic Team Analysis (rank chart, points chart, data table); League Standing metrics on Draft Team Analysis |
