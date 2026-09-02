@@ -6,11 +6,21 @@ import config
 from scripts.common.utils import get_rotowire_season_rankings
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.scraping import (
+    club_news_cache_status,
+    get_club_transfer_news,
     get_transfer_news,
+    start_club_news_prefetch,
     start_transfer_news_prefetch,
     transfer_news_cache_status,
 )
-from scripts.common.transfer_risk_app import build_transfer_risk, get_pl_team_names
+from scripts.common.transfer_risk_app import (
+    build_inbound_competition,
+    build_transfer_risk,
+    get_pl_team_names,
+)
+from scripts.common.error_helpers import get_logger
+
+_logger = get_logger("fpl_app.draft.draft_helper")
 
 def _ensure_session():
     if "draft_taken_keys" not in st.session_state:
@@ -33,6 +43,9 @@ _SECONDS_PER_PLAYER = 0.07
 
 #: Where the computed risk frame is parked between reruns.
 _RISK_STATE_KEY = "draft_transfer_risk_df"
+#: Same, for the inbound (minutes competition) frame and the arrivals watchlist.
+_MINUTES_STATE_KEY = "draft_minutes_competition_df"
+_ARRIVALS_STATE_KEY = "draft_arrivals_df"
 
 
 def _risk_columns():
@@ -40,8 +53,21 @@ def _risk_columns():
             "Transfer_Outlets", "Transfer_Note"]
 
 
-def _merge_risk(rankings: pd.DataFrame, scored: pd.DataFrame) -> pd.DataFrame:
-    """Left-join risk onto the full board and fill the unscanned tail neutrally."""
+def _minutes_columns():
+    return ["Minutes_Mult", "Competition"]
+
+
+def _merge_risk(rankings: pd.DataFrame, scored: pd.DataFrame,
+                minutes: pd.DataFrame = None, use_risk: bool = True,
+                use_minutes: bool = True) -> pd.DataFrame:
+    """Left-join risk (and minutes competition) onto the full board.
+
+    The unscanned tail fills neutrally — a player nobody checked is not a player
+    with no news, and must not be ranked as though he were penalised.
+
+    ``Adj Points`` shows exactly the adjustments that are switched on, so the
+    column and the ordering can never disagree about what was applied.
+    """
     merged = rankings.merge(
         scored[["Player", "Team", "Position"] + _risk_columns()],
         on=["Player", "Team", "Position"], how="left",
@@ -51,8 +77,25 @@ def _merge_risk(rankings: pd.DataFrame, scored: pd.DataFrame) -> pd.DataFrame:
     for col in ("Transfer_Destination", "Transfer_Note"):
         merged[col] = merged[col].fillna("")
     merged["Transfer_Outlets"] = merged["Transfer_Outlets"].fillna(0).astype(int)
+
+    if minutes is not None and not getattr(minutes, "empty", True):
+        merged = merged.merge(
+            minutes[["Player", "Team", "Position"] + _minutes_columns()],
+            on=["Player", "Team", "Position"], how="left",
+        )
+    if "Minutes_Mult" not in merged.columns:
+        merged["Minutes_Mult"] = 1.0
+        merged["Competition"] = ""
+    merged["Minutes_Mult"] = merged["Minutes_Mult"].fillna(1.0)
+    merged["Competition"] = merged["Competition"].fillna("")
+
+    factor = pd.Series(1.0, index=merged.index)
+    if use_risk:
+        factor = factor * merged["Transfer_Mult"]
+    if use_minutes:
+        factor = factor * merged["Minutes_Mult"]
     merged["Adj Points"] = (
-        pd.to_numeric(merged["Points"], errors="coerce") * merged["Transfer_Mult"]
+        pd.to_numeric(merged["Points"], errors="coerce") * factor
     ).round(1)
     return merged
 
@@ -82,6 +125,12 @@ def _apply_transfer_risk(rankings: pd.DataFrame):
             help="Discount each player's season projection by how likely he is to "
                  "leave the Premier League, and how much of the season that would cost.",
         )
+        adjust_minutes = st.checkbox(
+            "Adjust for incoming signings", value=True,
+            help="Discount players whose club is signing someone in their position. "
+                 "Capped at 25%, so it separates similar players rather than "
+                 "overriding quality.",
+        )
     with c2:
         depth = int(st.number_input(
             "Scan depth", min_value=25, max_value=400, value=_DEFAULT_SCAN_DEPTH, step=25,
@@ -110,6 +159,17 @@ def _apply_transfer_risk(rankings: pd.DataFrame):
     if missing_n and not scan:
         start_transfer_news_prefetch(pairs, label="draft_helper_%d" % depth)
 
+    availability, pl_teams = _load_reference_data()
+
+    # Club signings are 20 requests against the player scan's 150, so they ride
+    # along with the same button rather than getting one of their own.
+    try:
+        clubs_cached, clubs_missing = club_news_cache_status(pl_teams)
+    except Exception:
+        clubs_cached, clubs_missing = 0, len(pl_teams or [])
+    if clubs_missing and not scan:
+        start_club_news_prefetch(pl_teams, label="draft_helper_clubs")
+
     news = None
     try:
         if scan:
@@ -134,13 +194,37 @@ def _apply_transfer_risk(rankings: pd.DataFrame):
         st.warning("Transfer news unavailable (%s). Rankings shown undiscounted." % e)
 
     if news is not None and not news.empty:
-        availability, pl_teams = _load_reference_data()
         scored = build_transfer_risk(pool, availability, news, pl_teams)
         st.session_state[_RISK_STATE_KEY] = scored[
             ["Player", "Team", "Position"] + _risk_columns()
         ]
     else:
         scored = st.session_state.get(_RISK_STATE_KEY)
+
+    # --- Inbound: who is arriving, and whose minutes it costs -----------------
+    club_news = None
+    try:
+        club_news = get_club_transfer_news(
+            pl_teams, force_refresh=bool(scan), cached_only=not scan)
+    except Exception as e:
+        _logger.warning("Club signings news unavailable: %s", e)
+
+    if club_news is not None and not club_news.empty:
+        # Run this over the *scored* pool when there is one: a player who is
+        # himself leaving must be exempt from competition for his own place.
+        base = scored if scored is not None and not getattr(scored, "empty", True) else pool
+        if "Transfer_Status" not in getattr(base, "columns", []):
+            base = pool
+        arrivals, discounted = build_inbound_competition(base, club_news, pl_teams)
+        st.session_state[_ARRIVALS_STATE_KEY] = arrivals
+        if not discounted.empty and "Minutes_Mult" in discounted.columns:
+            st.session_state[_MINUTES_STATE_KEY] = discounted[
+                ["Player", "Team", "Position"] + _minutes_columns()
+            ]
+
+    arrivals = st.session_state.get(_ARRIVALS_STATE_KEY)
+    minutes = st.session_state.get(_MINUTES_STATE_KEY)
+    _render_arrivals(arrivals)
 
     if scored is None or getattr(scored, "empty", True):
         if missing_n:
@@ -153,7 +237,8 @@ def _apply_transfer_risk(rankings: pd.DataFrame):
             st.warning("No transfer news found. Rankings shown undiscounted.")
         return rankings, False
 
-    merged = _merge_risk(rankings, scored)
+    merged = _merge_risk(rankings, scored, minutes,
+                         use_risk=adjust, use_minutes=adjust_minutes)
 
     flagged = merged[merged["Transfer_Risk"] > 0.05]
     if len(flagged):
@@ -170,7 +255,7 @@ def _apply_transfer_risk(rankings: pd.DataFrame):
     else:
         st.success("No meaningful transfer risk found.")
 
-    if adjust:
+    if adjust or adjust_minutes:
         merged = merged.sort_values("Adj Points", ascending=False, na_position="last")
         merged["RW Rank"] = merged["Rank"]
         merged["Rank"] = range(1, len(merged) + 1)
@@ -178,6 +263,35 @@ def _apply_transfer_risk(rankings: pd.DataFrame):
         merged["RW Rank"] = merged["Rank"]
 
     return merged, True
+
+
+def _render_arrivals(arrivals) -> None:
+    """List the signings the model believes are happening.
+
+    Shown whether or not the discount is switched on: knowing a club has just
+    bought a striker is useful in its own right, and it is also the only way to
+    see *why* an incumbent slipped down the board.
+    """
+    if arrivals is None or getattr(arrivals, "empty", True):
+        return
+
+    with st.expander("\U0001F6EC Incoming signings (%d)" % len(arrivals), expanded=False):
+        st.caption(
+            "Reported arrivals, corroborated by at least two outlets. A signing "
+            "discounts players at the same club and position by up to 25% — the "
+            "established starter least of all."
+        )
+        show = arrivals.copy()
+        show["Fee"] = show["Fee"].map(
+            lambda v: "" if pd.isna(v) else ("£%.0fm" % v if v >= 10 else "£%.1fm" % v)
+        )
+        show["Confidence"] = (pd.to_numeric(show["Confidence"], errors="coerce")
+                              .fillna(0.0) * 100).round(0).astype(int).astype(str) + "%"
+        show["Position"] = show["Position"].fillna("?")
+        render_styled_table(
+            show[["Player", "Club", "Position", "Fee", "Outlets", "Confidence", "Headline"]],
+            max_height=400,
+        )
 
 
 @st.cache_data(ttl=600)

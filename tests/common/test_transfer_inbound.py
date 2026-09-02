@@ -308,3 +308,88 @@ class TestApplyMinutesCompetition:
         bare = pd.DataFrame([{"Player": "Someone", "Points": 10.0}])
         out = apply_minutes_competition(bare, self._arrivals())
         assert (out["Minutes_Mult"] == 1.0).all()
+
+
+class TestSelfCompetition:
+    """A signing already in the ranked pool must not compete with himself."""
+
+    def _arrival(self, player="James Trafford"):
+        return pd.DataFrame([{
+            "Player": player, "Club": "Leeds", "Position": "G", "Fee": 40.0,
+            "Outlets": 3, "Confidence": 0.9,
+            "Headline": "%s completes club-record move to Leeds" % player,
+        }])
+
+    def _pool(self):
+        return pd.DataFrame([
+            {"Player": "James Trafford", "Team": "LEE", "Position": "G", "Points": 134.0},
+            {"Player": "Illan Meslier", "Team": "LEE", "Position": "G", "Points": 90.0},
+        ])
+
+    def test_the_arriving_player_is_exempt(self):
+        out = apply_minutes_competition(self._pool(), self._arrival()).set_index("Player")
+        assert out.at["James Trafford", "Minutes_Mult"] == 1.0
+
+    def test_everyone_else_at_the_club_still_competes(self):
+        out = apply_minutes_competition(self._pool(), self._arrival()).set_index("Player")
+        assert out.at["Illan Meslier", "Minutes_Mult"] < 1.0
+
+    def test_accents_do_not_defeat_the_match(self):
+        """The two sources spell him differently; he is still one person."""
+        pool = pd.DataFrame([
+            {"Player": "Emiliano Martinez", "Team": "CHE", "Position": "G", "Points": 133.0},
+        ])
+        arrivals = pd.DataFrame([{
+            "Player": "Emiliano Martínez", "Club": "Chelsea", "Position": "G",
+            "Fee": 38.0, "Outlets": 2, "Confidence": 0.7, "Headline": "x",
+        }])
+        out = apply_minutes_competition(pool, arrivals).set_index("Player")
+        assert out.at["Emiliano Martinez", "Minutes_Mult"] == 1.0
+
+    def test_surname_only_headline_still_matches_him(self):
+        """Headlines routinely print the surname alone."""
+        pool = pd.DataFrame([
+            {"Player": "Nicolas Jackson", "Team": "AVL", "Position": "F", "Points": 120.0},
+        ])
+        arrivals = pd.DataFrame([{
+            "Player": "Jackson", "Club": "Aston Villa", "Position": "F",
+            "Fee": 65.0, "Outlets": 2, "Confidence": 0.8, "Headline": "x",
+        }])
+        out = apply_minutes_competition(pool, arrivals).set_index("Player")
+        assert out.at["Nicolas Jackson", "Minutes_Mult"] == 1.0
+
+    def test_two_different_players_sharing_a_surname_still_compete(self):
+        pool = pd.DataFrame([
+            {"Player": "Damian Martinez", "Team": "CHE", "Position": "G", "Points": 100.0},
+        ])
+        arrivals = pd.DataFrame([{
+            "Player": "Emiliano Martinez", "Club": "Chelsea", "Position": "G",
+            "Fee": 38.0, "Outlets": 2, "Confidence": 0.7, "Headline": "x",
+        }])
+        out = apply_minutes_competition(pool, arrivals).set_index("Player")
+        assert out.at["Damian Martinez", "Minutes_Mult"] < 1.0
+
+
+class TestCollapsedDeals:
+    """A deal that fell through reads exactly like one that happened."""
+
+    def test_seller_pulling_out_is_not_a_signing(self):
+        headline = ("Lamine Camara: Monaco pull out of selling midfielder to "
+                    "Chelsea in £47m deal")
+        assert classify_signing(headline) <= TIER_C
+
+    def test_withdrawal_is_capped(self):
+        assert classify_signing("Arsenal withdraw from race to sign Wharton") <= TIER_C
+
+    def test_priced_out_is_capped(self):
+        assert classify_signing("Spurs priced out of £60m move for striker") <= TIER_C
+
+    def test_a_collapsed_deal_does_not_reach_the_watchlist(self):
+        news = _news([
+            ("Chelsea", "Lamine Camara: Monaco pull out of selling midfielder to "
+                        "Chelsea in £47m deal", FRESH, "BBC"),
+            ("Chelsea", "Monaco pull out of Lamine Camara sale to Chelsea", FRESH, "Sky Sports"),
+        ])
+        out = build_inbound_watchlist(news, PL_TEAMS, today=TODAY, min_outlets=2)
+        # Tier C survives as interest, but must not carry a Tier-A confidence.
+        assert out.empty or out.iloc[0]["Confidence"] < 0.3

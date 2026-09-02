@@ -559,6 +559,22 @@ The established first choice at a club and position absorbs only
 `INCUMBENT_TOP_SHARE` of the threat — a signing displaces the players behind him long
 before it displaces a starter.
 
+**A signing must not compete with himself.** Once he is in the ranked pool he
+matches his own club and position: "James Trafford completes club-record £40m move
+to Leeds" discounted Leeds' new goalkeeper *for arriving*. `_same_player()`
+excludes him — deliberately narrow, since the two sources differ in accents
+("Emiliano Martínez" vs "Emiliano Martinez") and in completeness (a headline
+routinely prints the surname alone). He remains competition for everyone else at
+the club.
+
+**A deal that fell through reads exactly like one that happened.** "Monaco pull
+out of selling midfielder to Chelsea in £47m deal" scored Tier A on "£47m deal"
+and discounted four Chelsea midfielders. Withdrawal language (`pull out`,
+`withdraw`, `priced out`, `off the table`, `ends interest`) lives in
+`_NEGATION_PATTERNS`, which caps both directions at Tier C. Both of these were
+found by running the pipeline against live feeds, not by unit tests — these are
+not shapes you invent.
+
 **`WEIGHT_INTRA_PL` is 0, deliberately.** A move inside the league costs a Draft
 manager nothing, and the sign is genuinely ambiguous: Gakpo leaving a crowded
 Liverpool front line for a starting role elsewhere is plausibly an upgrade. A 20%
@@ -572,6 +588,17 @@ judged by eye — and a completed intra-PL move reads "stays in EPL", not "Depar
 re-ranks on it, behind an "Adjust for transfer risk" toggle. `Risk` sits directly
 after `Position` — it explains the ordering, so it must be readable without
 scrolling.
+
+The inbound side rides the same page under its own "Adjust for incoming signings"
+toggle: an **Incoming signings** expander lists the arrivals, and `Minutes_Mult`
+multiplies into `Adj Points` alongside `Transfer_Mult`. **`Adj Points` shows
+exactly the adjustments that are switched on** — computing the full discount and
+then only re-sorting conditionally would let the column and the ordering disagree
+about what was applied.
+
+Club news is 20 requests against the player scan's 150 (~1.6s for ~2,000
+headlines), so it rides the same **Scan** button and the same background prefetch
+rather than getting controls of its own.
 
 **Fetching is the slow part, and three things keep it usable:**
 
@@ -810,7 +837,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Transfer Risk Tracking | Phase 1 wired; Phase 2 model built, unwired | Outbound (Google News RSS + FPL bootstrap ground truth + per-region window model) is wired into the Draft Helper board. Inbound (`build_inbound_watchlist()`, `apply_minutes_competition()`, per-club feeds, fee attribution, `Transfer_Status`) is built and tested but **not called from any page** — it needs a UI home and a prefetch path before it does anything. Also remaining: Transfer Watch evidence page, Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model". |
+| Transfer Risk Tracking | Phases 1 & 2 complete | Outbound (Google News RSS + bootstrap ground truth + per-region windows) and inbound (per-club feeds, arrivals watchlist, minutes competition, fee attribution, `Transfer_Status`) are both wired into the Draft Helper board behind separate toggles. Remaining: Transfer Watch evidence page, Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model". |
 | Mini-League Rival Tracker | Not Started | Tab on League Analysis pages. Show differential players, projected points gap, effective ownership within mini-league. Data available via get_league_player_ownership (Draft) and team picks (Classic). No transfer advice (handled elsewhere). |
 | Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2 trade discovery (position-matched — see "Draft Transaction Rules"; cross-position and 2-for-1 shapes were removed as FPL forbids them), acceptance likelihood scoring, Explore Teams comparison, Regression Watch (buy-low/sell-high) |
 | Historical Data Analysis | Completed | Season History section on Classic Team Analysis (rank chart, points chart, data table); League Standing metrics on Draft Team Analysis |

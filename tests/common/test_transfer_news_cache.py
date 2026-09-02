@@ -189,3 +189,95 @@ class TestPrefetch:
         from scripts.common.scraping import start_transfer_news_prefetch
 
         assert not start_transfer_news_prefetch([], label="unit-test-empty")
+
+
+def _club_row(club, headline="Aston Villa complete signing of striker"):
+    return {"Club": club, "Headline": headline, "URL": "http://example.com",
+            "Published": "Fri, 28 Aug 2026 10:00:00 GMT", "Source": "BBC"}
+
+
+class TestPerClubCache:
+    """Signings are queried per club, not per player: the interesting arrivals
+    are not in the FPL pool yet, so there is no name to query with."""
+
+    def test_second_call_makes_no_requests(self, sqlite_cache):
+        from scripts.common.scraping import get_club_transfer_news
+
+        clubs = ["Aston Villa", "Arsenal"]
+        with patch("scripts.common.transfer_feeds.fetch_club_transfer_news") as m:
+            m.side_effect = lambda c, timeout=15: pd.DataFrame([_club_row(c)])
+            first = get_club_transfer_news(clubs)
+            assert m.call_count == 2
+            second = get_club_transfer_news(clubs)
+            assert m.call_count == 2, "cached clubs must not be refetched"
+        assert len(second) == len(first)
+
+    def test_quiet_club_is_not_refetched(self, sqlite_cache):
+        """Same empty-list-is-a-hit rule as the player cache."""
+        from scripts.common.scraping import get_club_transfer_news
+        from scripts.common.transfer_feeds import CLUB_NEWS_COLUMNS
+
+        with patch("scripts.common.transfer_feeds.fetch_club_transfer_news") as m:
+            m.side_effect = lambda c, timeout=15: pd.DataFrame(columns=CLUB_NEWS_COLUMNS)
+            get_club_transfer_news(["Arsenal"])
+            get_club_transfer_news(["Arsenal"])
+            assert m.call_count == 1
+
+    def test_cached_only_never_hits_the_network(self, sqlite_cache):
+        from scripts.common.scraping import get_club_transfer_news
+
+        with patch("scripts.common.transfer_feeds.fetch_club_transfer_news") as m:
+            out = get_club_transfer_news(["Arsenal"], cached_only=True)
+            assert m.call_count == 0
+        assert out.empty
+
+    def test_force_refresh_ignores_the_cache(self, sqlite_cache):
+        from scripts.common.scraping import get_club_transfer_news
+
+        with patch("scripts.common.transfer_feeds.fetch_club_transfer_news") as m:
+            m.side_effect = lambda c, timeout=15: pd.DataFrame([_club_row(c)])
+            get_club_transfer_news(["Arsenal"])
+            get_club_transfer_news(["Arsenal"], force_refresh=True)
+            assert m.call_count == 2
+
+    def test_cache_status_counts_hits_and_misses(self, sqlite_cache):
+        from scripts.common.scraping import club_news_cache_status, get_club_transfer_news
+
+        with patch("scripts.common.transfer_feeds.fetch_club_transfer_news") as m:
+            m.side_effect = lambda c, timeout=15: pd.DataFrame([_club_row(c)])
+            get_club_transfer_news(["Arsenal"])
+        cached, missing = club_news_cache_status(["Arsenal", "Chelsea"])
+        assert (cached, missing) == (1, 1)
+
+    def test_empty_input_makes_no_requests(self):
+        from scripts.common.scraping import club_news_cache_status, get_club_transfer_news
+
+        with patch("scripts.common.transfer_feeds.fetch_club_transfer_news") as m:
+            assert get_club_transfer_news([]).empty
+            assert m.call_count == 0
+        assert club_news_cache_status([]) == (0, 0)
+
+    def test_prefetch_runs_once_per_label(self, sqlite_cache):
+        import scripts.common.scraping as scraping
+
+        scraping._PREFETCH_STARTED.discard("clubs:unit-test")
+        with patch("scripts.common.transfer_feeds.fetch_club_transfer_news") as m:
+            m.side_effect = lambda c, timeout=15: pd.DataFrame([_club_row(c)])
+            assert scraping.start_club_news_prefetch(["Arsenal"], label="unit-test")
+            assert not scraping.start_club_news_prefetch(["Arsenal"], label="unit-test")
+        scraping._PREFETCH_STARTED.discard("clubs:unit-test")
+
+    def test_club_and_player_prefetch_labels_do_not_collide(self, sqlite_cache):
+        """Both default to label="default"; a shared key would silently cancel one."""
+        import scripts.common.scraping as scraping
+
+        scraping._PREFETCH_STARTED.discard("collide")
+        scraping._PREFETCH_STARTED.discard("clubs:collide")
+        with patch("scripts.common.transfer_feeds.fetch_player_transfer_news") as mp, \
+             patch("scripts.common.transfer_feeds.fetch_club_transfer_news") as mc:
+            mp.side_effect = lambda n, t, timeout=15: pd.DataFrame([_news_row(n)])
+            mc.side_effect = lambda c, timeout=15: pd.DataFrame([_club_row(c)])
+            assert scraping.start_transfer_news_prefetch((("A", "X"),), label="collide")
+            assert scraping.start_club_news_prefetch(["Arsenal"], label="collide")
+        scraping._PREFETCH_STARTED.discard("collide")
+        scraping._PREFETCH_STARTED.discard("clubs:collide")

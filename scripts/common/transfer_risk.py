@@ -110,6 +110,14 @@ _NEGATION_PATTERNS = [
     r"\bno\s+(?:plans|intention)\s+to\s+(?:sell|leave)\b", r"\bnot\s+entertain",
     r"\bcollapse[ds]?\b", r"\boff\b(?=.*\btransfer\b)", r"\bcall(?:ed|s)?\s+off\b",
     r"\bfails?\b",
+    # A deal that fell through reads exactly like a deal that happened unless the
+    # withdrawal is spelled out: "Monaco pull out of selling midfielder to
+    # Chelsea in £47m deal" scored Tier A and discounted four Chelsea midfielders.
+    r"\bpull(?:s|ed)?\s+out\b", r"\bwithdraw(?:s|n|ing)?\b",
+    r"\bdeal\s+off\b", r"\boff\s+the\s+table\b",
+    r"\bcool(?:s|ed|ing)?\s+(?:their\s+)?interest\b",
+    r"\bend(?:s|ed)?\s+(?:their\s+)?(?:interest|pursuit)\b",
+    r"\bmiss(?:es|ed)\s+out\b", r"\bpriced\s+out\b",
 ]
 
 _TIERS = ((TIER_A, _TIER_A_PATTERNS), (TIER_B, _TIER_B_PATTERNS), (TIER_C, _TIER_C_PATTERNS))
@@ -1187,6 +1195,25 @@ def build_inbound_watchlist(club_news, pl_teams, today=None, min_outlets: int = 
         "Confidence", ascending=False).reset_index(drop=True)
 
 
+def _same_player(a, b) -> bool:
+    """Whether two published names refer to the same person.
+
+    Deliberately narrow. Over-matching here only costs a missed discount, but the
+    names come from different sources and differ in accents ("Emiliano Martínez"
+    vs "Emiliano Martinez") and in completeness — a headline routinely prints the
+    surname alone ("Jackson signs for Aston Villa").
+    """
+    na, nb = _norm(a), _norm(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    ta, tb = na.split(), nb.split()
+    if len(ta) == 1 or len(tb) == 1:
+        return ta[-1] == tb[-1]
+    return False
+
+
 def _arrival_threat(row) -> float:
     """How much of a squad place an arrival is likely to take, in ``[0, 1]``.
 
@@ -1232,6 +1259,8 @@ def apply_minutes_competition(player_df, arrivals, team_col: str = "Team",
     if team_col not in result.columns or position_col not in result.columns:
         return result
 
+    name_col = "Player" if "Player" in result.columns else None
+
     for arrival in arrivals.to_dict("records"):
         position = arrival.get("Position")
         club = arrival.get("Club")
@@ -1244,6 +1273,14 @@ def apply_minutes_competition(player_df, arrivals, team_col: str = "Team",
             mask &= result[team_col].map(lambda t: team_code(t) == club_code)
         else:
             mask &= result[team_col].astype(str).str.lower().eq(str(club).lower())
+
+        # A signing already in the pool would otherwise compete with himself:
+        # "James Trafford completes £40m move to Leeds" discounted Leeds' new
+        # goalkeeper for arriving. He is still competition for everyone else at
+        # the club, just not for his own place.
+        if name_col:
+            mask &= ~result[name_col].map(
+                lambda n, a=arrival.get("Player"): _same_player(n, a))
 
         if status_col in result.columns:
             leaving = result[status_col].astype(str).isin(

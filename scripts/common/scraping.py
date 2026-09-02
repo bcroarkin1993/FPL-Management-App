@@ -984,6 +984,125 @@ def get_transfer_news(players, force_refresh: bool = False, cached_only: bool = 
     return _pd.concat(frames, ignore_index=True)
 
 
+#: Club news is 20 requests, not 150, so it can be refreshed far more eagerly
+#: than the per-player scan.
+CLUB_NEWS_TTL_SECONDS = 3 * 3600
+
+
+def _club_news_cache_key(club) -> str:
+    digest = hashlib.sha1(str(club).strip().lower().encode("utf-8")).hexdigest()
+    return "club_transfer_news:v1:%s" % digest
+
+
+def _read_cached_club_news(clubs):
+    """Split clubs into cached rows and the ones still needing a fetch.
+
+    Same empty-list-is-a-hit rule as the player cache: a quiet club must not be
+    refetched on every render.
+    """
+    from scripts.common.cache import cache_get
+
+    rows, missing = [], []
+    for club in clubs:
+        cached = cache_get(_club_news_cache_key(club))
+        if cached is None:
+            missing.append(club)
+        else:
+            rows.extend(cached)
+    return rows, missing
+
+
+def _write_cached_club_news(club, records) -> None:
+    from scripts.common.cache import cache_set
+
+    try:
+        cache_set(_club_news_cache_key(club), records or [], ttl=CLUB_NEWS_TTL_SECONDS)
+    except Exception:
+        _logger.warning("Could not cache club transfer news for %s", club, exc_info=True)
+
+
+def club_news_cache_status(clubs):
+    """``(cached, missing)`` counts for the club-level signings scan."""
+    names = [str(c) for c in (clubs or []) if str(c).strip()]
+    if not names:
+        return 0, 0
+    _rows, missing = _read_cached_club_news(names)
+    return len(names) - len(missing), len(missing)
+
+
+def get_club_transfer_news(clubs, force_refresh: bool = False,
+                           cached_only: bool = False, progress=None):
+    """Signing headlines per club, cached in SQLite exactly like player news.
+
+    Degrades to an empty frame on any failure: without it every incumbent simply
+    keeps a neutral multiplier, which is the pre-existing behaviour.
+    """
+    import pandas as _pd
+
+    from scripts.common.transfer_feeds import (
+        CLUB_NEWS_COLUMNS, fetch_club_transfer_news_batch,
+    )
+
+    names = [str(c) for c in (clubs or []) if str(c).strip()]
+    if not names:
+        return _pd.DataFrame(columns=CLUB_NEWS_COLUMNS)
+
+    if force_refresh:
+        cached_rows, missing = [], names
+    else:
+        cached_rows, missing = _read_cached_club_news(names)
+
+    if cached_only or not missing:
+        return _pd.DataFrame(cached_rows, columns=CLUB_NEWS_COLUMNS) if cached_rows \
+            else _pd.DataFrame(columns=CLUB_NEWS_COLUMNS)
+
+    try:
+        fetched = fetch_club_transfer_news_batch(
+            missing, progress=progress, on_result=_write_cached_club_news
+        )
+    except Exception as e:
+        _logger.warning("Club transfer news batch failed: %s", e)
+        fetched = _pd.DataFrame(columns=CLUB_NEWS_COLUMNS)
+
+    frames = []
+    if cached_rows:
+        frames.append(_pd.DataFrame(cached_rows, columns=CLUB_NEWS_COLUMNS))
+    if not fetched.empty:
+        frames.append(fetched)
+    if not frames:
+        return _pd.DataFrame(columns=CLUB_NEWS_COLUMNS)
+    return _pd.concat(frames, ignore_index=True)
+
+
+def start_club_news_prefetch(clubs, label: str = "default") -> bool:
+    """Warm the club-signings cache on a background thread. See the player
+    version for why this runs before anyone asks for it."""
+    names = [str(c) for c in (clubs or []) if str(c).strip()]
+    if not names:
+        return False
+
+    key = "clubs:%s" % label
+    with _PREFETCH_LOCK:
+        if key in _PREFETCH_STARTED:
+            return False
+        _PREFETCH_STARTED.add(key)
+
+    def _worker():
+        try:
+            from scripts.common.transfer_feeds import fetch_club_transfer_news_batch
+
+            _rows, missing = _read_cached_club_news(names)
+            if not missing:
+                return
+            _logger.info("Prefetching signings news for %d club(s)", len(missing))
+            fetch_club_transfer_news_batch(missing, on_result=_write_cached_club_news)
+        except Exception:
+            _logger.warning("Club news prefetch failed", exc_info=True)
+
+    threading.Thread(target=_worker, name="club-news-prefetch", daemon=True).start()
+    return True
+
+
 def start_transfer_news_prefetch(players, label: str = "default") -> bool:
     """Warm the transfer-news cache on a background thread.
 

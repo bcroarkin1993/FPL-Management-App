@@ -11,7 +11,12 @@ import pandas as pd
 
 from scripts.common.error_helpers import get_logger
 from scripts.common.player_matching import ReferenceMatcher
-from scripts.common.transfer_risk import RISK_COLUMNS, attach_transfer_risk
+from scripts.common.transfer_risk import (
+    RISK_COLUMNS,
+    apply_minutes_competition,
+    attach_transfer_risk,
+    build_inbound_watchlist,
+)
 
 _logger = get_logger("fpl_app.transfer_risk_app")
 
@@ -101,3 +106,40 @@ def build_transfer_risk(rankings_df: pd.DataFrame,
         fallback["Transfer_Outlets"] = 0
         fallback["Transfer_Note"] = ""
         return fallback
+
+
+def build_inbound_competition(pool_df: pd.DataFrame,
+                              club_news_df: pd.DataFrame,
+                              pl_teams,
+                              today=None,
+                              min_outlets: int = 2):
+    """Arrivals watchlist plus the minutes discount it implies.
+
+    Returns ``(watchlist, discounted_pool)``. Never raises: on any failure every
+    player keeps ``Minutes_Mult`` 1.0, which is the behaviour before this existed
+    — a noisy club feed must not move a draft board by accident.
+
+    ``pool_df`` doubles as the known-player reference, so an intra-PL mover gets
+    his real position rather than one inferred from a headline's prose.
+    """
+    neutral = pool_df.copy()
+    neutral["Minutes_Mult"] = 1.0
+    neutral["Minutes_Note"] = ""
+    neutral["Competition"] = ""
+    empty = pd.DataFrame(
+        columns=["Player", "Club", "Position", "Fee", "Outlets", "Confidence", "Headline"])
+
+    if club_news_df is None or getattr(club_news_df, "empty", True):
+        return empty, neutral
+
+    try:
+        watchlist = build_inbound_watchlist(
+            club_news_df, pl_teams, today=today, min_outlets=min_outlets,
+            known_players=pool_df,
+        )
+        if watchlist.empty:
+            return watchlist, neutral
+        return watchlist, apply_minutes_competition(pool_df, watchlist)
+    except Exception as e:
+        _logger.warning("Inbound competition pipeline failed: %s", e, exc_info=True)
+        return empty, neutral
