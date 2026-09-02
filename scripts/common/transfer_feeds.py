@@ -66,6 +66,7 @@ def _session() -> requests.Session:
     return _SESSION
 
 NEWS_COLUMNS = ["Player", "Team", "Headline", "URL", "Published", "Source"]
+CLUB_NEWS_COLUMNS = ["Club", "Headline", "URL", "Published", "Source"]
 
 
 def build_query_url(player: str, team=None) -> str:
@@ -226,3 +227,90 @@ def fetch_transfer_news_batch(players, workers: int = DEFAULT_WORKERS,
     if not frames:
         return pd.DataFrame(columns=NEWS_COLUMNS)
     return pd.concat(frames, ignore_index=True)
+
+
+# --- Inbound: who is arriving at each club -----------------------------------
+
+def build_club_query_url(club: str) -> str:
+    """Signings query for one club.
+
+    Keyed by club rather than by player, because the interesting arrivals are
+    players who are not in the FPL pool yet — there is no name to query with.
+    """
+    name = (club or "").strip()
+    return "%s?q=%s&hl=en-GB&gl=GB&ceid=GB:en" % (
+        GOOGLE_NEWS_RSS, quote_plus('"%s" sign transfer' % name)
+    )
+
+
+def fetch_club_transfer_news(club: str, timeout: int = 15) -> pd.DataFrame:
+    """Recent signing headlines for one club. Empty frame on any failure."""
+    empty = pd.DataFrame(columns=CLUB_NEWS_COLUMNS)
+    if not club or not str(club).strip():
+        return empty
+
+    try:
+        resp = _session().get(build_club_query_url(club), headers=_HEADERS, timeout=timeout)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+    except (requests.RequestException, ET.ParseError, ValueError) as e:
+        _logger.warning("Club transfer news fetch failed for %s: %s", club, e)
+        return empty
+
+    rows = []
+    for item in root.findall(".//item"):
+        raw_title = (item.findtext("title") or "").strip()
+        if not raw_title:
+            continue
+        title, suffix = _clean_title(raw_title)
+        rows.append({
+            "Club": club,
+            "Headline": title,
+            "URL": (item.findtext("link") or "").strip(),
+            "Published": (item.findtext("pubDate") or "").strip(),
+            "Source": _item_source(item, suffix),
+        })
+
+    return pd.DataFrame(rows, columns=CLUB_NEWS_COLUMNS) if rows else empty
+
+
+def fetch_club_transfer_news_batch(clubs, workers: int = DEFAULT_WORKERS,
+                                   timeout: int = 15, progress=None,
+                                   on_result=None) -> pd.DataFrame:
+    """Signing headlines for many clubs, concurrently. 20 clubs, so ~2s."""
+    names, seen = [], set()
+    for club in clubs or []:
+        key = str(club).strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            names.append(str(club).strip())
+
+    if not names:
+        return pd.DataFrame(columns=CLUB_NEWS_COLUMNS)
+
+    frames, done, total = [], 0, len(names)
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+        futures = {pool.submit(fetch_club_transfer_news, c, timeout): c for c in names}
+        for future in as_completed(futures):
+            club = futures[future]
+            try:
+                df = future.result()
+            except Exception as e:
+                _logger.warning("Club news task failed for %s: %s", club, e)
+                df = pd.DataFrame(columns=CLUB_NEWS_COLUMNS)
+            if not df.empty:
+                frames.append(df)
+            if on_result is not None:
+                try:
+                    on_result(club, df.to_dict("records"))
+                except Exception:
+                    _logger.warning("Club news on_result failed for %s", club, exc_info=True)
+            done += 1
+            if progress is not None:
+                try:
+                    progress(done, total, club)
+                except Exception:
+                    pass
+
+    return pd.concat(frames, ignore_index=True) if frames \
+        else pd.DataFrame(columns=CLUB_NEWS_COLUMNS)

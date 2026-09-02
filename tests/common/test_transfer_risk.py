@@ -12,6 +12,8 @@ import pandas as pd
 import pytest
 
 from scripts.common.transfer_risk import (
+    STATUS_DEPARTED,
+    STATUS_MOVING_PL,
     TIER_A,
     TIER_C,
     TRANSFER_FLOOR,
@@ -183,7 +185,7 @@ class TestDestinationWeighting:
 
 class TestScoreHeadlines:
     def test_watkins_scores_high(self):
-        risk, dest, weight, outlets, evidence = score_headlines(
+        risk, dest, weight, outlets, evidence, _fee = score_headlines(
             WATKINS_HEADLINES, "Ollie Watkins", "Aston Villa", PL_TEAMS, today=TODAY)
         assert risk >= 0.7, "the case this module exists for must score high"
         assert weight == WEIGHT_LEAVES_PL
@@ -191,13 +193,13 @@ class TestScoreHeadlines:
         assert evidence
 
     def test_unrelated_item_is_not_counted_as_an_outlet(self):
-        _r, _d, _w, outlets, evidence = score_headlines(
+        _r, _d, _w, outlets, evidence, _fee = score_headlines(
             WATKINS_HEADLINES, "Ollie Watkins", "Aston Villa", PL_TEAMS, today=TODAY)
         assert not any("Devon Live" in e["Source"] for e in evidence)
         assert outlets <= 5
 
     def test_single_outlet_rumour_stays_low(self):
-        risk, _d, _w, _o, _e = score_headlines(
+        risk, _d, _w, _o, _e, _fee = score_headlines(
             [{"Headline": "Arsenal linked with move for Morgan Rogers",
               "Source": "Daily Star", "Published": "Fri, 28 Aug 2026 10:00:00 GMT"}],
             "Morgan Rogers", "Aston Villa", PL_TEAMS, today=TODAY)
@@ -212,7 +214,7 @@ class TestScoreHeadlines:
         assert r_many > r_one
 
     def test_denial_produces_no_meaningful_risk(self):
-        risk, _d, _w, _o, _e = score_headlines(
+        risk, _d, _w, _o, _e, _fee = score_headlines(
             [{"Headline": "Villa rule out Rogers sale, he is not for sale",
               "Source": "BBC", "Published": "Fri, 28 Aug 2026 10:00:00 GMT"}],
             "Morgan Rogers", "Aston Villa", PL_TEAMS, today=TODAY)
@@ -220,7 +222,7 @@ class TestScoreHeadlines:
 
     def test_stale_news_is_ignored(self):
         """A six-month-old rumour is what made the betting source useless."""
-        risk, _d, _w, _o, _e = score_headlines(
+        risk, _d, _w, _o, _e, _fee = score_headlines(
             [{"Headline": "Rogers undergoes medical at Real Madrid", "Source": "AS",
               "Published": "Mon, 02 Mar 2026 10:00:00 GMT"}],
             "Morgan Rogers", "Aston Villa", PL_TEAMS, today=TODAY)
@@ -254,7 +256,7 @@ class TestClubRefusingToSell:
     """A bid is the selling club's problem, not evidence the player leaves."""
 
     def test_bruno_fernandes_is_not_meaningfully_at_risk(self):
-        risk, _dest, _w, _outlets, _ev = score_headlines(
+        risk, _dest, _w, _outlets, _ev, _fee = score_headlines(
             BRUNO_HEADLINES, "Bruno Fernandes", "Man Utd", PL_TEAMS, today=TODAY)
         assert risk < 0.15, (
             "A rejected offer plus contract talks must not discount a squad staple; "
@@ -413,9 +415,16 @@ class TestAttachTransferRisk:
         row = out[out["Player"] == "Ben Watson"].iloc[0]
         assert row["Transfer_Exposure"] == 1.0
         assert row["Transfer_Mult"] == pytest.approx(TRANSFER_FLOOR)
+        assert row["Transfer_Status"] == STATUS_DEPARTED
+        assert "Departed" in row["Transfer_Note"]
 
     def test_bootstrap_ground_truth_overrides_news(self):
-        """Speculation must never outrank a deal that already happened."""
+        """Speculation must never outrank a deal that already happened.
+
+        Watkins carries Tier-A Al-Hilal headlines in the news frame. Once the
+        bootstrap says he has joined Nott'm Forest, that is where he is: the
+        destination is the completed one and the Saudi risk is gone.
+        """
         players = self._players()
         players.loc[players["Player"] == "Ollie Watkins", "status"] = "u"
         players.loc[players["Player"] == "Ollie Watkins", "news"] = \
@@ -423,7 +432,24 @@ class TestAttachTransferRisk:
         out = attach_transfer_risk(players, self._news(), PL_TEAMS, today=TODAY)
         row = out[out["Player"] == "Ollie Watkins"].iloc[0]
         assert row["Transfer_Risk"] == WEIGHT_INTRA_PL
-        assert "Departed" in row["Transfer_Note"]
+        assert "Forest" in row["Transfer_Destination"]
+
+    def test_completed_intra_pl_move_is_flagged_not_discounted(self):
+        """He is still in the game, so in Draft you simply keep him.
+
+        The note is the whole signal here — no multiplier attaches — so it must
+        say where he went and must not read as a departure.
+        """
+        players = self._players()
+        players.loc[players["Player"] == "Ollie Watkins", "status"] = "u"
+        players.loc[players["Player"] == "Ollie Watkins", "news"] = \
+            "Has joined Nott'm Forest permanently"
+        out = attach_transfer_risk(players, self._news(), PL_TEAMS, today=TODAY)
+        row = out[out["Player"] == "Ollie Watkins"].iloc[0]
+        assert row["Transfer_Status"] == STATUS_MOVING_PL
+        assert row["Transfer_Mult"] == 1.0
+        assert "Departed" not in row["Transfer_Note"]
+        assert "Forest" in row["Transfer_Note"]
 
     def test_no_news_frame_is_safe(self):
         out = attach_transfer_risk(self._players(), None, PL_TEAMS, today=TODAY)

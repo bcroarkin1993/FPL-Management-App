@@ -43,9 +43,13 @@ TRANSFER_FLOOR = 0.10
 #   'u' Watson | Has joined Leicester City on loan for the rest of the season
 #   'u' Reijnders | Has joined Al Qadsiah permanently
 WEIGHT_LEAVES_PL = 1.00
-# Still in the game.  In Draft you simply keep him.  The residual cost is
-# settling in, a new fixture run and rotation risk.
-WEIGHT_INTRA_PL = 0.20
+# Still in the game: in Draft you simply keep him, so this costs you nothing.
+# It is deliberately *neutral* rather than a small discount, because the sign is
+# genuinely ambiguous — Cody Gakpo leaving a Liverpool front line for a starting
+# role at Spurs is plausibly an upgrade, and a 20% discount asserted a direction
+# the evidence does not support.  The move is still surfaced as a flag so it can
+# be judged by eye.
+WEIGHT_INTRA_PL = 0.0
 # Destination named but unparsed.  Most rumoured exits leave the league, so a
 # parse failure must not read as safety.
 WEIGHT_UNKNOWN = 0.60
@@ -109,6 +113,44 @@ _NEGATION_PATTERNS = [
 ]
 
 _TIERS = ((TIER_A, _TIER_A_PATTERNS), (TIER_B, _TIER_B_PATTERNS), (TIER_C, _TIER_C_PATTERNS))
+
+# The arrival side of the same three tiers.  Written separately because the
+# vocabulary genuinely differs: "completes the signing of" is the strongest
+# possible inbound evidence and does not appear in the exit list at all, while
+# "exit", "departure" and "sold to" are meaningless here.
+_SIGNING_TIER_A_PATTERNS = [
+    r"\bcomplete[sd]?\s+(?:the\s+)?(?:signing|move|deal|transfer)\b",
+    r"\b(?:has|have)\s+signed\b", r"\bofficially\s+sign(?:ed|s)?\b",
+    r"\bannounce[sd]?\s+(?:the\s+)?(?:signing|capture|arrival)\b",
+    r"\bconfirm(?:s|ed)?\s+(?:the\s+)?(?:signing|capture|arrival)\b",
+    r"\bunveil(?:ed|s)?\b", r"\bmedical\b", r"\bhere we go\b",
+    r"\bsigns?\s+for\b", r"\bjoins?\b", r"\barriv(?:es|ed|al)\b",
+    r"\bseal(?:s|ed)?\s+(?:a\s+)?(?:move|deal|transfer|switch|signing)\b",
+    r"\bagree(?:d|s)?\s+(?:a\s+)?deal\b", r"\bdeal\s+(?:is\s+)?(?:agreed|done)\b",
+    r"\bagree(?:d|s)?\s+(?:to\s+)?(?:personal\s+)?terms\b",
+    r"\bfee\s+agreed\b", r"\bbid\s+accepted\b",
+    r"\bset\s+to\s+(?:sign|join|complete)\b",
+    r"\bagree(?:d|s)?\b.{0,30}\b(?:transfer|move|fee|switch)\b",
+]
+_SIGNING_TIER_B_PATTERNS = [
+    r"\bin\s+talks\b", r"\bhold(?:ing)?\s+talks\b", r"\badvanced\s+talks\b",
+    r"\bclose\s+to\b", r"\bnegotiat", r"\bfinali[sz](?:e|es|ing)\b",
+    r"\bpush(?:ing)?\s+to\s+sign\b", r"\bconfident\s+of\s+(?:signing|landing)\b",
+    r"\bsubmit(?:s|ted)?\s+(?:a\s+)?(?:bid|offer)\b", r"\bbid\s+(?:of|worth)\b",
+    r"\bpersonal\s+terms\b",
+]
+_SIGNING_TIER_C_PATTERNS = [
+    r"\blink(?:ed|s)?\b", r"\binterest(?:ed)?\b", r"\bmonitor(?:ing)?\b",
+    r"\btarget(?:ing)?\b", r"\beye(?:ing|d)?\b", r"\bswoop\b", r"\bchase\b",
+    r"\bbid\b", r"\boffer\b", r"\bapproach(?:ed)?\b", r"\brumou?r\b",
+    r"\bgossip\b", r"\bconsider(?:ing)?\b", r"\bwant(?:s|ed)?\s+to\s+sign\b",
+    r"\bmove\s+for\b", r"\bspeculation\b", r"\bshortlist(?:ed)?\b",
+]
+_SIGNING_TIERS = (
+    (TIER_A, _SIGNING_TIER_A_PATTERNS),
+    (TIER_B, _SIGNING_TIER_B_PATTERNS),
+    (TIER_C, _SIGNING_TIER_C_PATTERNS),
+)
 
 # Headline evidence older than this is ignored outright.
 NEWS_WINDOW_DAYS = 30
@@ -210,6 +252,102 @@ def team_code(value):
     if 2 <= len(v) <= 4 and v.isupper():
         return v
     return None
+
+
+#: A fee at or above this (GBP millions) means the buying club intends to play
+#: him. Useful in both directions: it is the strongest available evidence that an
+#: incoming signing takes minutes off an incumbent.
+BIG_FEE_GBP_M = 40.0
+
+_FEE_RE = re.compile(
+    r"(?:£|\$|€|eur|gbp|usd)\s?(\d+(?:\.\d+)?)\s*(m|million|bn|billion|k)?",
+    re.IGNORECASE,
+)
+
+
+#: How near a player's name a fee must sit to be read as *his* fee, in characters.
+_FEE_ATTRIBUTION_WINDOW = 45
+
+
+def _fee_match_value(match):
+    """Fee in millions from a regex match, or None if it is not a transfer fee."""
+    try:
+        value = float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    unit = (match.group(2) or "").lower()
+    if unit in ("bn", "billion"):
+        value *= 1000.0
+    elif unit not in ("m", "million"):
+        # Transfer fees are always written with a magnitude ("£51m"). A bare
+        # amount is something else — "£10 boots", a ticket price, a wage.
+        return None
+    if value <= 0 or value > 1000:
+        return None
+    return value
+
+
+def parse_fee(text):
+    """Largest transfer fee named in the text, in millions, or ``None``.
+
+    Currencies are not converted — at this precision the distinction between a
+    £50m and a €50m signing does not change any decision the model makes.
+    """
+    raw = "" if text is None else str(text)
+    best = None
+    for match in _FEE_RE.finditer(raw):
+        value = _fee_match_value(match)
+        if value is not None and (best is None or value > best):
+            best = value
+    return best
+
+
+def parse_fee_for_player(text, player_name, other_surnames=None):
+    """Fee attributable to *this* player, in millions, or ``None``.
+
+    A transfer headline routinely prices somebody else: "Liverpool agree £123m
+    Barcola deal as Gakpo decides to join Man City" names two players and one
+    fee, and the fee is not Gakpo's. Attribution therefore requires the fee to be
+    nearer this player's surname than to any other player in the pool.
+
+    Same failure mode as reading a player's own club as his destination, and it
+    matters more here — fee is the evidence for how big a role a signing takes.
+    """
+    raw = "" if text is None else str(text)
+    if not raw:
+        return None
+
+    lowered = raw.lower()
+    tokens = [t for t in _norm(player_name).split() if len(t) > 1]
+    if not tokens:
+        return None
+    surname = tokens[-1]
+    name_at = lowered.find(surname)
+    if name_at < 0:
+        return None
+
+    rival_positions = []
+    for other in other_surnames or ():
+        if not other or other == surname:
+            continue
+        idx = lowered.find(other)
+        if idx >= 0:
+            rival_positions.append(idx)
+
+    best = None
+    for match in _FEE_RE.finditer(raw):
+        value = _fee_match_value(match)
+        if value is None:
+            continue
+        fee_at = match.start()
+        own_distance = abs(fee_at - name_at)
+        if own_distance > _FEE_ATTRIBUTION_WINDOW:
+            continue
+        if any(abs(fee_at - other_at) < own_distance for other_at in rival_positions):
+            continue  # somebody else is closer to this number
+        if best is None or value > best:
+            best = value
+    return best
 
 
 def _norm(text) -> str:
@@ -320,8 +458,8 @@ def _is_stay_signal(headline) -> bool:
     return bool(h.strip()) and any(re.search(p, h) for p in _NEGATION_PATTERNS)
 
 
-def classify_headline(headline) -> float:
-    """Strongest tier score the headline's language supports.
+def _classify(headline, tiers) -> float:
+    """Strongest tier in ``tiers`` the headline's language supports.
 
     A denial caps the result at Tier C: the story is real, the move is not.
     """
@@ -330,13 +468,33 @@ def classify_headline(headline) -> float:
         return 0.0
     negated = any(re.search(p, h) for p in _NEGATION_PATTERNS)
     score = 0.0
-    for tier_score, patterns in _TIERS:
+    for tier_score, patterns in tiers:
         if any(re.search(p, h) for p in patterns):
             score = tier_score
             break
     if negated:
         score = min(score, TIER_C)
     return score
+
+
+def classify_headline(headline) -> float:
+    """Strongest tier score an *exit* headline's language supports."""
+    return _classify(headline, _TIERS)
+
+
+def classify_signing(headline) -> float:
+    """Strongest tier score an *arrival* headline's language supports.
+
+    A separate vocabulary from ``classify_headline()``, which is written for the
+    question "is he leaving": its Tier A is about a player departing, and the
+    single strongest inbound sentence there is -- "Villa complete signing of
+    Nicolas Jackson" -- matches nothing in it and scored 0.0, so a confirmed
+    arrival was dropped from the watchlist while a rumour survived.
+
+    Calibrated to the same three tiers so the two sides stay comparable: A is
+    language that commits, B is an active pursuit, C is interest.
+    """
+    return _classify(headline, _SIGNING_TIERS)
 
 
 def pl_aliases(pl_teams):
@@ -436,7 +594,7 @@ def parse_destination(text, pl_teams, exclude_team=None):
 
 
 def score_headlines(headlines, player_name, team=None, pl_teams=None, today=None,
-                    ambiguous=None):
+                    ambiguous=None, other_surnames=None):
     """Score a player's news into a risk in ``[0, 1]``.
 
     ``headlines`` is an iterable of mappings with ``Headline``, ``Source`` and
@@ -452,13 +610,16 @@ def score_headlines(headlines, player_name, team=None, pl_teams=None, today=None
     lands near 0.85.  That corroboration gate is the main defence against a single
     speculative story wrecking a good player's ranking.
 
-    Returns ``(risk, destination, weight, n_outlets, evidence)``.
+    Returns ``(risk, destination, weight, n_outlets, evidence, fee)``. ``risk``
+    is zero for a move that keeps the player in the Premier League — the
+    destination and fee are still reported so the caller can flag it.
     """
     today = today or date.today()
     pl_teams = pl_teams or []
 
     best = 0.0
     best_tier = 0.0
+    best_fee = None
     stay_signals = 0
     outlets = set()
     evidence = []
@@ -496,13 +657,17 @@ def score_headlines(headlines, player_name, team=None, pl_teams=None, today=None
             key = (club, weight)
             dest_votes[key] = dest_votes.get(key, 0.0) + decayed
 
+        fee = parse_fee_for_player(title, player_name, other_surnames)
+        if fee is not None and (best_fee is None or fee > best_fee):
+            best_fee = fee
+
         evidence.append({
             "Headline": title, "Source": source, "Published": published,
-            "Tier": tier, "Weight": round(decayed, 3),
+            "Tier": tier, "Weight": round(decayed, 3), "Fee": fee,
         })
 
     if best <= 0:
-        return 0.0, None, WEIGHT_UNKNOWN, 0, []
+        return 0.0, None, WEIGHT_UNKNOWN, 0, [], None
 
     n_outlets = len(outlets)
     corroboration = (CORROBORATION_FLOOR + (1.0 - CORROBORATION_FLOOR)
@@ -520,7 +685,7 @@ def score_headlines(headlines, player_name, team=None, pl_teams=None, today=None
         risk = min(risk, _STAY_SIGNAL_RISK_CAP)
 
     evidence.sort(key=lambda e: e["Weight"], reverse=True)
-    return risk, destination, weight, n_outlets, evidence[:10]
+    return risk, destination, weight, n_outlets, evidence[:10], best_fee
 
 
 def resolve_from_bootstrap(status, news, pl_teams):
@@ -614,20 +779,43 @@ def transfer_multiplier(risk, exposure, floor: float = TRANSFER_FLOOR) -> float:
 RISK_COLUMNS = [
     "Transfer_Risk", "Transfer_Exposure", "Transfer_Mult",
     "Transfer_Destination", "Transfer_Outlets", "Transfer_Note",
+    "Transfer_Status", "Transfer_Fee",
 ]
 
+#: Transfer_Status values. An intra-PL move is "Moving" rather than "At risk":
+#: it carries no discount, but it is still something to know before drafting.
+STATUS_NONE = ""
+STATUS_AT_RISK = "At risk"
+STATUS_MOVING_PL = "Moving"
+STATUS_DEPARTED = "Departed"
 
-def _format_note(risk, destination, outlets, resolved) -> str:
-    if risk <= 0:
+
+def _format_fee(fee) -> str:
+    if fee is None or (isinstance(fee, float) and pd.isna(fee)):
         return ""
+    try:
+        value = float(fee)
+    except (TypeError, ValueError):
+        return ""
+    return "£%.0fm" % value if value >= 10 else "£%.1fm" % value
+
+
+def _format_note(risk, destination, outlets, resolved, status, fee=None) -> str:
     where = destination or "destination unclear"
-    if resolved:
-        return "Departed — %s" % where
-    if not outlets:
-        # Only Tier-C language matched, so no outlet was counted. Say so rather
-        # than printing "(0 outlets)", which reads as a bug.
-        return "%s (unconfirmed)" % where
-    return "%s (%d outlet%s)" % (where, outlets, "" if outlets == 1 else "s")
+    fee_text = _format_fee(fee)
+    suffix = ", %s" % fee_text if fee_text else ""
+
+    if status == STATUS_DEPARTED:
+        return "Departed — %s%s" % (where, suffix)
+    if status == STATUS_MOVING_PL:
+        # No discount attaches to this, so the note is the whole signal.
+        return "→ %s%s (stays in EPL)" % (where, suffix)
+    if status == STATUS_AT_RISK:
+        if not outlets:
+            return "%s%s (unconfirmed)" % (where, suffix)
+        return "%s%s (%d outlet%s)" % (where, suffix, outlets,
+                                       "" if outlets == 1 else "s")
+    return ""
 
 
 def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
@@ -663,11 +851,17 @@ def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
             by_player[_norm(player)] = group.to_dict("records")
 
     ambiguous = build_ambiguous_tokens(result[name_col].tolist())
+    all_surnames = set()
+    for other in result[name_col].tolist():
+        parts = [t for t in _norm(other).split() if len(t) > 1]
+        if parts:
+            all_surnames.add(parts[-1])
 
     has_status = "status" in result.columns
     has_news = "news" in result.columns
 
-    risks, exposures, mults, dests, outlets_col, notes = [], [], [], [], [], []
+    risks, exposures, mults, dests = [], [], [], []
+    outlets_col, notes, statuses, fees = [], [], [], []
 
     for _, row in result.iterrows():
         name = row.get(name_col)
@@ -679,18 +873,28 @@ def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
                 row.get("status"), row.get("news") if has_news else None, pl_teams
             )
 
+        fee = None
         if resolved is not None:
             risk, destination = resolved
             n_outlets = 0
-            club, _ = parse_destination(
-                row.get("news") if has_news else "", pl_teams
-            )
+            news_text = row.get("news") if has_news else ""
+            club, _ = parse_destination(news_text, pl_teams)
             destination = club or destination
+            fee = parse_fee(news_text)
+            # A completed intra-PL move is still a move, not a loss.
+            status = STATUS_DEPARTED if risk > 0 else STATUS_MOVING_PL
         else:
             headlines = by_player.get(_norm(name), [])
-            risk, destination, _w, n_outlets, _ev = score_headlines(
-                headlines, name, team, pl_teams, today=today, ambiguous=ambiguous
+            risk, destination, weight, n_outlets, _ev, fee = score_headlines(
+                headlines, name, team, pl_teams, today=today, ambiguous=ambiguous,
+                other_surnames=all_surnames,
             )
+            if risk > 0:
+                status = STATUS_AT_RISK
+            elif destination and weight == WEIGHT_INTRA_PL:
+                status = STATUS_MOVING_PL
+            else:
+                status = STATUS_NONE
 
         if resolved is not None:
             # He has already gone.  There is no window to wait on — the loss
@@ -707,7 +911,10 @@ def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
         mults.append(round(float(mult), 4))
         dests.append(destination or "")
         outlets_col.append(int(n_outlets))
-        notes.append(_format_note(risk, destination, n_outlets, resolved is not None))
+        statuses.append(status)
+        fees.append(float(fee) if fee is not None else float("nan"))
+        notes.append(_format_note(risk, destination, n_outlets,
+                                  resolved is not None, status, fee))
 
     result["Transfer_Risk"] = risks
     result["Transfer_Exposure"] = exposures
@@ -715,4 +922,359 @@ def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
     result["Transfer_Destination"] = dests
     result["Transfer_Outlets"] = outlets_col
     result["Transfer_Note"] = notes
+    result["Transfer_Status"] = statuses
+    result["Transfer_Fee"] = fees
+    return result
+
+
+# --- Inbound transfers: who is arriving, and whose minutes it costs ----------
+#
+# The outbound model asks "will he still be here?". This asks the two questions
+# an arrival raises: is the incoming player worth targeting once he is added to
+# the game, and whose minutes does he eat when he lands.
+#
+# This path is inherently noisier than the outbound one. A per-player query is
+# already about that player; a per-club query is about the club, and the arriving
+# player's name has to be pulled out of prose. Everything below is therefore
+# deliberately conservative: corroboration is required, the discount is small and
+# capped, and an unparsed name is dropped rather than guessed at.
+
+#: FPL position implied by how reporters describe a player.  "Winger" maps to
+#: midfield because that is how FPL classifies the overwhelming majority of them.
+_POSITION_KEYWORDS = (
+    ("G", ("goalkeeper", "keeper", "shot stopper", "shotstopper")),
+    ("D", ("defender", "centre back", "center back", "centreback", "full back",
+           "fullback", "left back", "right back", "wing back", "wingback")),
+    ("F", ("striker", "centre forward", "center forward", "forward", "attacker",
+           "number 9", "no 9", "marksman", "frontman")),
+    ("M", ("midfielder", "midfield", "playmaker", "winger", "wide man",
+           "attacking midfielder", "defensive midfielder")),
+)
+
+# The buying club is whichever club precedes the signing verb — never the club
+# whose feed the headline arrived on. "Nottingham Forest attempt double Crystal
+# Palace raid" surfaces under a Crystal Palace query and describes Forest buying;
+# trusting the query would discount the selling club's squad, which is backwards.
+_SIGNING_VERBS = (
+    r"sign(?:s|ed|ing)?(?:\s+of)?", r"complete[sd]?\s+(?:the\s+)?(?:signing\s+of|move\s+for|deal\s+for)",
+    r"agree(?:d|s)?\s+(?:a\s+)?deal\s+(?:to\s+sign|for)", r"agree(?:d|s)?\s+(?:to\s+sign|terms\s+with)",
+    r"swoop\s+for", r"capture\s+of", r"move\s+for", r"land(?:s|ed)?", r"snap(?:s|ped)?\s+up",
+    r"in\s+talks\s+to\s+sign", r"finali[sz]ing\s+deal\s+for", r"confident\s+of\s+signing",
+)
+_VERB_RE = re.compile(r"\b(?:%s)\b" % "|".join(_SIGNING_VERBS), re.IGNORECASE)
+
+_NAME_RUN = r"(?:[A-Z][\w'\u00C0-\u024F\-]+)(?:\s+[A-Z][\w'\u00C0-\u024F\-]+){0,2}"
+#: Google headlines very often lead with the subject: "Anan Khalaili transfer
+#: news: Crystal Palace sign winger from Union Saint-Gilloise". That prefix is
+#: the most reliable name in the sentence.
+_PREFIX_NAME_RE = re.compile(r"^(%s)\s*(?::|\s+transfer\s+news\b)" % _NAME_RUN)
+_AFTER_VERB_RE = re.compile(r"(%s)" % _NAME_RUN)
+#: "Crystal Palace transfer news: Axel Disasi signs on loan from Chelsea" — the
+#: player sits between the club's own headline prefix and the verb.
+_BEFORE_VERB_RE = re.compile(r"(%s)\s*$" % _NAME_RUN)
+_JOINS_RE = re.compile(
+    r"(%s)\s+(?:joins?|set\s+to\s+join|agrees?\s+(?:to\s+join|move\s+to)|"
+    r"completes?\s+move\s+to|signs?\s+for)\s+(%s)" % (_NAME_RUN, _NAME_RUN)
+)
+
+#: Words that look like a name but are not one. Without this the extractor
+#: happily reports signing "Transfer News", "Premier League" and "England".
+_NAME_STOPWORDS = frozenset("""
+transfer transfers news latest live update updates deal deals move moves target
+targets star striker forward winger midfielder defender goalkeeper keeper player
+premier league championship efl summer window january deadline day report reports
+paper talk gossip rumour rumours rumors boss manager captain ace kid teen wonderkid
+new signing signings source exclusive done here we go official confirmed
+england scotland wales ireland france spain germany italy portugal brazil
+argentina netherlands belgium usmnt prospect loan contract medical
+""".split())
+
+#: How much of a player's value a same-position arrival can take, at most. A new
+#: signing rarely removes a starter outright, and the depth chart is unknown, so
+#: this stays small: it is a tiebreak between similar players, not a verdict.
+MAX_MINUTES_IMPACT = 0.25
+MINUTES_FLOOR = 1.0 - MAX_MINUTES_IMPACT
+#: The established first choice at a position is markedly less threatened than
+#: the players behind him.
+INCUMBENT_TOP_SHARE = 0.4
+
+
+def position_from_text(text):
+    """FPL position code implied by a headline's description, or ``None``.
+
+    Checked longest-keyword-first so "attacking midfielder" is not read as a
+    forward on the word "attack".
+    """
+    n = _norm(text)
+    if not n:
+        return None
+    best = None
+    best_len = 0
+    for code, keywords in _POSITION_KEYWORDS:
+        for kw in keywords:
+            if kw in n and len(kw) > best_len:
+                best, best_len = code, len(kw)
+    return best
+
+
+def _looks_like_name(candidate, pl_teams) -> bool:
+    """Reject club names, stopwords and other non-names from the extractor."""
+    words = [w for w in _norm(candidate).split() if w]
+    if not words or len(words) > 3:
+        return False
+    if any(w in _NAME_STOPWORDS for w in words):
+        return False
+    if is_premier_league_club(candidate, pl_teams):
+        return False
+    if any(_norm(c) == _norm(candidate) for c in _FOREIGN_CLUBS):
+        return False
+    if any(re.search(p, _norm(candidate)) for p in _SAUDI_PATTERNS):
+        return False
+    return all(len(w) > 1 for w in words)
+
+
+def _club_before(text, index, pl_teams):
+    """Nearest Premier League club named before ``index`` — the buying club."""
+    head = _norm(text[:index])
+    if not head:
+        return None
+    names, _codes = pl_aliases(pl_teams)
+    best, best_at = None, -1
+    for alias in names:
+        if not alias:
+            continue
+        at = head.rfind(alias)
+        if at > best_at:
+            best, best_at = alias, at
+    return best.title() if best else None
+
+
+def extract_signing(headline, pl_teams, queried_club=None):
+    """Who is arriving where, from a signing headline.
+
+    Returns ``(player, buying_club, position, fee)`` or ``None``.
+
+    The buying club is derived from the sentence, never from whose feed the
+    headline arrived on — see the note on ``_SIGNING_VERBS``.
+    """
+    raw = "" if headline is None else str(headline)
+    if not raw or _is_stay_signal(raw):
+        return None
+
+    position = position_from_text(raw)
+    fee = parse_fee(raw)
+
+    # "<Player> joins/signs for <Club>" states both ends explicitly.
+    joins = _JOINS_RE.search(raw)
+    if joins:
+        player, club = joins.group(1).strip(), joins.group(2).strip()
+        if _looks_like_name(player, pl_teams) and is_premier_league_club(club, pl_teams):
+            return player, club, position, fee
+
+    verb = _VERB_RE.search(raw)
+    if not verb:
+        return None
+
+    buyer = _club_before(raw, verb.start(), pl_teams)
+    if not buyer:
+        return None
+
+    # Prefer the headline's leading subject; fall back to the name after the verb.
+    player = None
+    prefix = _PREFIX_NAME_RE.match(raw)
+    if prefix and _looks_like_name(prefix.group(1), pl_teams):
+        player = prefix.group(1).strip()
+
+    if not player:
+        before = _BEFORE_VERB_RE.search(raw[:verb.start()])
+        if before and _looks_like_name(before.group(1), pl_teams):
+            player = before.group(1).strip()
+
+    if not player:
+        tail = raw[verb.end():]
+        for match in _AFTER_VERB_RE.finditer(tail):
+            candidate = match.group(1).strip()
+            if _looks_like_name(candidate, pl_teams):
+                player = candidate
+                break
+
+    if not player:
+        return None
+    return player, buyer, position, fee
+
+
+def build_inbound_watchlist(club_news, pl_teams, today=None, min_outlets: int = 2,
+                            known_players=None):
+    """Players reportedly arriving at Premier League clubs.
+
+    Two uses: they are waiver targets the moment they are added to the game, and
+    they are the reason an incumbent at the same club and position is about to
+    lose minutes.
+
+    Corroboration is required (``min_outlets``) for the same reason it is on the
+    outbound side — one paper's speculation is not a signing.
+
+    Returns a frame of ``Player, Club, Position, Fee, Outlets, Confidence,
+    Headline``.
+    """
+    today = today or date.today()
+    columns = ["Player", "Club", "Position", "Fee", "Outlets", "Confidence", "Headline"]
+    if club_news is None or getattr(club_news, "empty", True):
+        return pd.DataFrame(columns=columns)
+
+    known_positions = {}
+    if known_players is not None and not getattr(known_players, "empty", True):
+        if "Player" in known_players.columns and "Position" in known_players.columns:
+            for rec in known_players.to_dict("records"):
+                known_positions[_norm(rec.get("Player"))] = rec.get("Position")
+
+    found = {}
+    for record in club_news.to_dict("records"):
+        club = record.get("Club") or ""
+        headline = record.get("Headline") or ""
+        source = (record.get("Source") or "").strip()
+        recency = _recency_weight(record.get("Published"), today)
+        if recency <= 0:
+            continue
+
+        parsed = extract_signing(headline, pl_teams, queried_club=club)
+        if not parsed:
+            continue
+        name, club, position, fee = parsed
+        if position is None:
+            # An intra-PL mover is already in the game, so his position is known
+            # exactly — far better than inferring it from prose.
+            position = known_positions.get(_norm(name))
+
+        tier = classify_signing(headline)
+        if tier <= 0:
+            continue
+
+        key = (_norm(name), _norm(club))
+        entry = found.setdefault(key, {
+            "Player": name, "Club": club, "Position": position, "Fee": fee,
+            "_outlets": set(), "_best": 0.0, "Headline": headline,
+        })
+        if source:
+            entry["_outlets"].add(_norm(source))
+        score = tier * recency
+        if score > entry["_best"]:
+            entry["_best"] = score
+            entry["Headline"] = headline
+        if position and not entry["Position"]:
+            entry["Position"] = position
+        if fee is not None and (entry["Fee"] is None or fee > entry["Fee"]):
+            entry["Fee"] = fee
+
+    rows = []
+    for entry in found.values():
+        n_outlets = len(entry["_outlets"])
+        if n_outlets < min_outlets:
+            continue
+        corroboration = (CORROBORATION_FLOOR + (1.0 - CORROBORATION_FLOOR)
+                         * min(1.0, n_outlets / float(FULL_CORROBORATION_OUTLETS)))
+        rows.append({
+            "Player": entry["Player"], "Club": entry["Club"],
+            "Position": entry["Position"], "Fee": entry["Fee"],
+            "Outlets": n_outlets,
+            "Confidence": round(min(1.0, entry["_best"] * corroboration), 4),
+            "Headline": entry["Headline"],
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns).sort_values(
+        "Confidence", ascending=False).reset_index(drop=True)
+
+
+def _arrival_threat(row) -> float:
+    """How much of a squad place an arrival is likely to take, in ``[0, 1]``.
+
+    Fee is the sharpest available evidence: a club that pays a large fee intends
+    to play the player. Absent a fee, confidence in the reporting carries it.
+    """
+    confidence = float(row.get("Confidence") or 0.0)
+    fee = row.get("Fee")
+    if fee is None or (isinstance(fee, float) and pd.isna(fee)):
+        fee_factor = 0.6
+    else:
+        fee_factor = 0.5 + 0.5 * min(1.0, float(fee) / BIG_FEE_GBP_M)
+    return max(0.0, min(1.0, confidence * fee_factor))
+
+
+def apply_minutes_competition(player_df, arrivals, team_col: str = "Team",
+                              position_col: str = "Position",
+                              value_col: str = "Points",
+                              status_col: str = "Transfer_Status"):
+    """Discount incumbents whose minutes an incoming signing threatens.
+
+    Adds ``Minutes_Mult``, ``Minutes_Note`` and ``Competition`` — kept separate
+    from ``Transfer_Mult`` because they answer different questions: one is "will
+    he be here", this is "will he still play".
+
+    The established first choice at a club and position is much safer than the
+    players behind him, so he absorbs only ``INCUMBENT_TOP_SHARE`` of the threat.
+    Ranking uses ``value_col`` (season projection), which is the best available
+    proxy for who currently starts.
+
+    A player who is himself leaving is exempt. The two effects are usually the
+    same event seen from both ends — Nicolas Jackson arrives at Villa *because*
+    Ollie Watkins is going to Al-Hilal — and charging Watkins for his own
+    replacement double-counts a single move.
+    """
+    result = player_df.copy()
+    result["Minutes_Mult"] = 1.0
+    result["Minutes_Note"] = ""
+    result["Competition"] = ""
+
+    if arrivals is None or getattr(arrivals, "empty", True) or result.empty:
+        return result
+    if team_col not in result.columns or position_col not in result.columns:
+        return result
+
+    for arrival in arrivals.to_dict("records"):
+        position = arrival.get("Position")
+        club = arrival.get("Club")
+        if not position or not club:
+            continue  # cannot attribute competition without both
+
+        club_code = team_code(club)
+        mask = result[position_col].astype(str).eq(str(position))
+        if club_code:
+            mask &= result[team_col].map(lambda t: team_code(t) == club_code)
+        else:
+            mask &= result[team_col].astype(str).str.lower().eq(str(club).lower())
+
+        if status_col in result.columns:
+            leaving = result[status_col].astype(str).isin(
+                (STATUS_AT_RISK, STATUS_DEPARTED, STATUS_MOVING_PL))
+            mask &= ~leaving
+
+        incumbents = result[mask]
+        if incumbents.empty:
+            continue
+
+        threat = _arrival_threat(arrival)
+        if threat <= 0:
+            continue
+
+        if value_col in incumbents.columns:
+            order = pd.to_numeric(incumbents[value_col], errors="coerce").fillna(0)
+            first_choice = order.idxmax()
+        else:
+            first_choice = None
+
+        fee_text = _format_fee(arrival.get("Fee"))
+        label = "%s%s" % (arrival.get("Player") or "new signing",
+                          " (%s)" % fee_text if fee_text else "")
+
+        for idx in incumbents.index:
+            share = INCUMBENT_TOP_SHARE if idx == first_choice else 1.0
+            impact = threat * share * MAX_MINUTES_IMPACT
+            new_mult = max(MINUTES_FLOOR, 1.0 - impact)
+            if new_mult < result.at[idx, "Minutes_Mult"]:
+                result.at[idx, "Minutes_Mult"] = round(new_mult, 4)
+                result.at[idx, "Competition"] = label
+                result.at[idx, "Minutes_Note"] = "%s arriving at %s" % (label, club)
+
     return result
