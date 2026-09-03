@@ -230,6 +230,25 @@ legitimately projects in the high teens, because **absence from Rotowire's weekl
 table is itself the "not starting" signal** (it lists 20 teams x 11 = 220 projected
 starters, so an unlisted player scoring 0 is correct, not a matching failure).
 
+### `DataFrame.get()` is not a safe accessor
+
+`df.get("Missing")` returns **None** and `df.get("Missing", 0)` returns the scalar
+`0` — neither is a Series. So the natural-looking
+
+```python
+pd.to_numeric(df.get(col), errors="coerce").fillna(0)   # WRONG
+```
+
+raises `AttributeError: 'numpy.float64' object has no attribute 'fillna'` the
+moment the column is absent, which is the exact case the `.fillna()` was written
+for. Use `numeric_col(df, col, default)` (`analytics.py`) instead — it returns a
+Series aligned to the frame's index either way.
+
+This is a *latent* crash: the column is normally present, so it only fires on a
+degraded upstream or an early-season frame — precisely when the page can least
+afford it. It took down Draft Power Rankings, and the live suite filed it as
+"Draft league strength **unreachable**".
+
 ### Test layers
 
 | Layer | Location | Runs | Catches |
@@ -241,6 +260,13 @@ starters, so an unlisted player scoring 0 is correct, not a matching failure).
 `tests/live/conftest.py` clears the `FPL_CURRENT_GAMEWEEK` / `ROTOWIRE_URL` pins that
 the root conftest sets, so live tests resolve real config. Everything there is
 auto-marked `live`.
+
+**Only transport failures skip.** `skip_if_unreachable()` used to catch bare
+`Exception`, so the `AttributeError` above was reported as an outage and four
+Power Rankings checks stood down while the page was broken. It now inspects the
+exception chain — a wrapped `requests` error is still an outage, anything else
+fails with "this is a bug in our code". A test that skips itself when the code is
+wrong is worse than no test: it is a green tick over a failure.
 
 **When adding a data source or a derived metric, add a plausibility check for it.**
 The question to answer is not "is this value correct" (untestable against live data)

@@ -7,14 +7,23 @@ entirely about upstream data changing shape.
 Contract for everything in this directory:
   * unreachable upstream  -> SKIP (a Rotowire outage must not block a push)
   * reachable but implausible -> FAIL (that is the whole point)
+  * a bug in our own code -> FAIL, never SKIP
+
+That last line is not decoration. ``skip_if_unreachable`` once caught bare
+``Exception``, so an ``AttributeError`` inside ``compute_player_scores`` was
+reported as "Draft league strength unreachable" and four Power Rankings checks
+stood down for days while the page was broken. Only transport failures skip.
 
 Set FPL_SKIP_LIVE_TESTS=1 to opt out entirely (e.g. on a plane).
 """
 
+import json
 import os
 import pathlib
+import xml.etree.ElementTree as ET
 
 import pytest
+import requests
 
 import config
 
@@ -56,12 +65,50 @@ def _unpin_offline_env():
         config._RW_URL_CACHE = None
 
 
+#: Failures that mean "the network or the far end let us down". Everything else
+#: is our own code and must fail loudly. requests.RequestException covers
+#: connection/timeout/HTTP-status; OSError covers socket-level failures; the JSON
+#: and XML decoders signal a truncated or non-JSON response.
+_TRANSPORT_ERRORS = (
+    requests.RequestException,
+    OSError,            # includes socket.timeout, ConnectionError
+    json.JSONDecodeError,
+    ET.ParseError,
+)
+
+
+def _is_transport_failure(exc) -> bool:
+    """True if this exception, or anything that caused it, is a transport failure.
+
+    The chain matters: app code routinely catches a request error and re-raises
+    something of its own, and that is still an outage, not a bug.
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, _TRANSPORT_ERRORS):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
 def skip_if_unreachable(fn, what):
-    """Call fn(); skip (never fail) if the upstream source can't be reached."""
+    """Call fn(); skip only if the upstream source could not be reached.
+
+    A bug in our own code is *not* an outage and must not be filed as one — see
+    the contract at the top of this file.
+    """
     try:
         result = fn()
-    except Exception as exc:  # noqa: BLE001 - any transport failure means "skip"
-        pytest.skip("%s unreachable: %s" % (what, exc))
+    except Exception as exc:  # noqa: BLE001 - re-raised below unless transport
+        if _is_transport_failure(exc):
+            pytest.skip("%s unreachable: %s" % (what, exc))
+        raise AssertionError(
+            "%s failed with %s: %s\n"
+            "This is a bug in our code, not an upstream outage -- the live suite "
+            "fails rather than skipping so it cannot hide."
+            % (what, type(exc).__name__, exc)
+        ) from exc
     if result is None:
         pytest.skip("%s returned nothing" % what)
     return result

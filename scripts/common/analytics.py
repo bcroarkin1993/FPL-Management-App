@@ -26,6 +26,25 @@ _logger = get_logger("fpl_app.analytics")
 _POS_LABELS = {"G": "GK", "D": "DEF", "M": "MID", "F": "FWD"}
 
 
+def numeric_col(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
+    """A numeric Series for ``col``, or ``default`` for every row if it is absent.
+
+    ``DataFrame.get(col)`` returns **None** for a missing column, and
+    ``DataFrame.get(col, 0)`` returns the scalar ``0`` — neither is a Series, so
+    the ``pd.to_numeric(...).fillna(...)`` idiom this replaces raised
+    ``AttributeError: 'numpy.float64' object has no attribute 'fillna'`` the
+    moment a caller passed a frame without that column. The defaults were written
+    precisely for that case and never once ran.
+
+    It is a latent crash rather than an obvious one: the column is usually present,
+    so it only fires on a degraded upstream or an early-season frame — exactly when
+    the page is least able to afford an exception.
+    """
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce").fillna(default)
+    return pd.Series(default, index=df.index, dtype="float64")
+
+
 # =============================================================================
 # SEASON PROGRESS — TIME-DECAY BLEND
 # =============================================================================
@@ -310,10 +329,10 @@ def compute_player_scores(
     fdr_col = "AvgFDRNextN" if "AvgFDRNextN" in result.columns else "AvgFDR"
 
     # Coerce numerics
-    result[proj_col] = pd.to_numeric(result.get(proj_col), errors="coerce").fillna(0)
-    result[season_col] = pd.to_numeric(result.get(season_col), errors="coerce").fillna(0)
-    result[form_col] = pd.to_numeric(result.get(form_col), errors="coerce").fillna(0)
-    result[fdr_col] = pd.to_numeric(result.get(fdr_col), errors="coerce").fillna(3)
+    result[proj_col] = numeric_col(result, proj_col, 0)
+    result[season_col] = numeric_col(result, season_col, 0)
+    result[form_col] = numeric_col(result, form_col, 0)
+    result[fdr_col] = numeric_col(result, fdr_col, 3)
 
     # Resolve reference column names in all_players_df
     ref_form_col = "form" if (all_players_df is not None and "form" in all_players_df.columns) else form_col
@@ -330,7 +349,7 @@ def compute_player_scores(
     # charged the start probability twice, running the FFP term ~44% low at a
     # median start rate of 60%. Use the conditional column, and fall back to
     # un-discounting `Predicted` when FFP hasn't published it.
-    rotowire_proj = pd.to_numeric(result.get(proj_col), errors="coerce").fillna(0)
+    rotowire_proj = numeric_col(result, proj_col, 0)
     ffp_start_raw = (pd.to_numeric(result.get("FFP_Start"), errors="coerce")
                      if "FFP_Start" in result.columns else pd.Series(np.nan, index=result.index))
     if "FFP_Starting_Predicted" in result.columns:
@@ -841,7 +860,7 @@ def blend_multi_gw_projections(
     # Fallback: single_gw * min(3, remaining_gws).
     # Cap at remaining_gws so we don't project 3× a single-GW value when only 1 GW is left.
     fallback_mult = min(3, max(1, remaining_gws))
-    single_vals = pd.to_numeric(result.get(single_gw_col, 0), errors="coerce").fillna(0)
+    single_vals = numeric_col(result, single_gw_col, 0)
     result[output_col] = single_vals * fallback_mult
     # Second fallback: players with 0 single-GW proj (e.g. name merge failed) but valid ppg
     if "points_per_game" in result.columns:
@@ -1145,7 +1164,7 @@ def blend_fixture_projections(
     """
     result = players_df.copy()
 
-    rw = pd.to_numeric(result.get(rotowire_col), errors="coerce").fillna(0)
+    rw = numeric_col(result, rotowire_col, 0)
 
     if ffp_df is None or ffp_df.empty:
         result["Proj_Blended"] = rw
@@ -1155,8 +1174,10 @@ def blend_fixture_projections(
     # Merge FFP_Predicted and FFP_Start onto this DataFrame
     result = merge_ffp_single_gw_data(result, ffp_df)
 
-    ffp_pred = pd.to_numeric(result.get("FFP_Predicted"), errors="coerce").fillna(0)
-    ffp_start = pd.to_numeric(result.get("FFP_Start"), errors="coerce")
+    ffp_pred = numeric_col(result, "FFP_Predicted", 0)
+    ffp_start = (pd.to_numeric(result["FFP_Start"], errors="coerce")
+                 if "FFP_Start" in result.columns
+                 else pd.Series(np.nan, index=result.index))
 
     # Blend (60/40) — fall back to whichever source is available
     both_mask = rw.gt(0) & ffp_pred.gt(0)

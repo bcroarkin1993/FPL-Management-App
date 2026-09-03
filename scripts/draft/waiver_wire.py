@@ -52,6 +52,7 @@ from scripts.common.analytics import (
     merge_season_projections,
     merge_ffp_single_gw_data,
     enrich_reference_with_projections,
+    numeric_col,
 )
 from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
 
@@ -1984,8 +1985,8 @@ def show_waiver_wire_page():
     elif 'Player_ID' in avail_all.columns and 'starts' not in avail_all.columns and 'starts' in fpl_stats.columns:
         starts_data = fpl_stats[['Player_ID', 'starts']].drop_duplicates(subset=['Player_ID'])
         avail_all = avail_all.merge(starts_data, on='Player_ID', how='left')
-    avail_all['Season_Points'] = pd.to_numeric(avail_all.get('Season_Points'), errors='coerce').fillna(0)
-    avail_all['starts'] = pd.to_numeric(avail_all.get('starts', 0), errors='coerce').fillna(0)
+    avail_all['Season_Points'] = numeric_col(avail_all, 'Season_Points', 0)
+    avail_all['starts'] = numeric_col(avail_all, 'starts', 0)
 
     # --- Build MY ROSTER ---
     my_players = []

@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from typing import Optional
-from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections
+from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections, numeric_col
 from scripts.common.error_helpers import get_logger
 from scripts.common.scraping import get_ffp_projections_data
 from scripts.common.utils import (
@@ -421,8 +421,8 @@ def _render_draft_bench_section(bench_df: pd.DataFrame, is_live: bool = False):
         return
 
     bench_df = bench_df.copy()
-    bench_df['Points'] = pd.to_numeric(bench_df.get('Points', 0), errors='coerce').fillna(0.0)
-    bench_df['Proj_Blended'] = pd.to_numeric(bench_df.get('Proj_Blended'), errors='coerce').fillna(bench_df['Points'])
+    bench_df['Points'] = numeric_col(bench_df, 'Points', 0.0)
+    bench_df['Proj_Blended'] = numeric_col(bench_df, 'Proj_Blended', float('nan')).fillna(bench_df['Points'])
 
     sort_col = 'Proj_Blended' if bench_df['Proj_Blended'].gt(0).any() else 'Points'
 
