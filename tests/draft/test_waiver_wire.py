@@ -208,3 +208,117 @@ class TestSuggestionBreadth:
         not turn it into a wall of hundreds of rows."""
         _, debug = _exhaustive(_avail(DEEP_AVAIL), _roster(DEEP_ROSTER))
         assert all(len(d["pairs"]) <= 40 for d in debug)
+
+
+# ---------------------------------------------------------------------------
+# Display names. The cards used to print whatever name the source published —
+# "Savio Moreira de Oliveira (TOT)" for a player everyone calls Savio.
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch
+
+BOOTSTRAP = {
+    "elements": [
+        {"id": 403, "first_name": "Sávio", "second_name": "Moreira de Oliveira",
+         "web_name": "Sávio"},
+        {"id": 10, "first_name": "Bruno", "second_name": "Borges Fernandes",
+         "web_name": "B.Fernandes"},
+        # Two players sharing a surname: the name-only fallback must refuse both
+        # rather than print one player's name on the other's card.
+        {"id": 20, "first_name": "Cole", "second_name": "Palmer", "web_name": "Palmer"},
+        {"id": 21, "first_name": "Alex", "second_name": "Palmer", "web_name": "Palmer"},
+    ]
+}
+
+
+def _with_bootstrap(fn, *args, **kwargs):
+    """Run `fn` against a stubbed bootstrap.
+
+    `_display_name_maps()` is `st.cache_data`-wrapped in the app; the test
+    conftest replaces that with a pass-through, but clear the cache anyway if it
+    is real so a memoized map from another test can't leak in.
+    """
+    from scripts.draft import waiver_wire as ww
+
+    clear = getattr(ww._display_name_maps, "clear", None)
+    if clear:
+        clear()
+    try:
+        with patch.object(ww, "_load_bootstrap", return_value=BOOTSTRAP):
+            return fn(*args, **kwargs)
+    finally:
+        if clear:
+            clear()
+
+
+class TestDisplayNames:
+    def test_legal_name_renders_as_the_common_name(self):
+        from scripts.draft.waiver_wire import _attach_display_names
+
+        df = pd.DataFrame([
+            {"Player": "Sávio Moreira de Oliveira", "Player_ID": 403, "Team": "TOT"},
+        ])
+        out = _with_bootstrap(_attach_display_names, df)
+
+        assert out.loc[0, "Display_Name"] == "Sávio"
+        # Player is what every merge on this page keys on — it must not change.
+        assert out.loc[0, "Player"] == "Sávio Moreira de Oliveira"
+
+    def test_resolves_by_name_when_the_element_id_is_missing(self):
+        from scripts.draft.waiver_wire import _attach_display_names
+
+        df = pd.DataFrame([{"Player": "Bruno Borges Fernandes", "Team": "MUN"}])
+        out = _with_bootstrap(_attach_display_names, df)
+        assert out.loc[0, "Display_Name"] == "Bruno Fernandes"
+
+    def test_ambiguous_surname_does_not_borrow_another_players_name(self):
+        """The display-side Alex/Cole Palmer trap: a shared key must resolve to
+        nothing, not to whichever player was seen first."""
+        from scripts.draft.waiver_wire import _attach_display_names
+
+        df = pd.DataFrame([{"Player": "Palmer", "Team": "CHE"}])
+        out = _with_bootstrap(_attach_display_names, df)
+        assert out.loc[0, "Display_Name"] == "Palmer"
+
+    def test_unknown_player_falls_back_to_the_source_name(self):
+        from scripts.draft.waiver_wire import _attach_display_names
+
+        df = pd.DataFrame([{"Player": "Rotowire Only Guy", "Team": "XXX"}])
+        out = _with_bootstrap(_attach_display_names, df)
+        assert out.loc[0, "Display_Name"] == "Rotowire Only Guy"
+
+    def test_suggestion_cards_use_the_display_name(self):
+        """The end-to-end point of all of the above."""
+        roster = _roster([
+            {"Player": "Sávio Moreira de Oliveira", "Team": "TOT", "Position": "M",
+             "Points": 1.0, "Keep Score": 0.10, "Season_Points": 5, "Display_Name": "Sávio"},
+            {"Player": "Solid Mid", "Team": "ARS", "Position": "M", "Points": 6.0,
+             "Keep Score": 0.80, "Season_Points": 90, "Display_Name": "Solid Mid"},
+        ])
+        avail = _avail([
+            {"Player": "Bruno Borges Fernandes", "Team": "MUN", "Position": "M",
+             "Points": 6.0, "Transfer Score": 0.80, "Draft_State": "a",
+             "Display_Name": "Bruno Fernandes"},
+        ])
+
+        suggestions, debug = _compute_transfer_suggestions(avail, roster, top_n=3)
+
+        assert suggestions[0]["drop_player"] == "Savio"
+        assert suggestions[0]["add_player"] == "Bruno Fernandes"
+        assert debug[2]["pairs"][0]["drop"] == "Savio"
+
+    def test_display_name_survives_scoring(self):
+        """compute_player_scores() rebuilds the frame; if it stopped carrying
+        Display_Name the cards would silently revert to legal names."""
+        from scripts.common.analytics import compute_player_scores
+
+        df = _avail([
+            {"Player": "P%d" % i, "Team": "ARS", "Position": "M", "Points": 3.0 + i * 0.1,
+             "Display_Name": "Nick %d" % i}
+            for i in range(12)
+        ])
+        df["starts"] = 5
+        df["AvgFDRNextN"] = 3.0
+
+        scored = compute_player_scores(df, df, current_gw=5, format_context="draft")
+        assert "Display_Name" in scored.columns

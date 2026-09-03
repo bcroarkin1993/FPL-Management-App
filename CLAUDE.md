@@ -388,6 +388,20 @@ available the conditional value is recovered by dividing the start rate back
 out. `tests/live/` pins the relationship so a change at FFP surfaces as a
 failure rather than a quiet re-scaling.
 
+### Waiver Wire names come from the bootstrap, not the frame
+
+Every frame on that page carries whichever name its source publishes — the Draft
+roster and FPL stats use the full legal name ("Sávio Moreira de Oliveira"),
+projections use Rotowire's — and the cards used to render it raw.
+`_attach_display_names()` resolves a `Display_Name` per row through
+`to_display_name()`, by element id first and normalized name second, and every
+rendered name (cards, roster table, available table) goes through `_display_of()`.
+`Player` is untouched: it is what the merges on that page key on.
+
+The name-only fallback keeps a key **only when it resolves to exactly one
+player**. A shared surname would otherwise print Cole Palmer's name on Alex
+Palmer's card — the display-side version of the match bug in "Player Matching".
+
 ### Suggestion breadth — Draft Waiver Wire
 
 `_compute_transfer_suggestions()` searches a *window*, not the board: by default

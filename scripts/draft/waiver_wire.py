@@ -38,7 +38,7 @@ from scripts.common.fpl_draft_api import (
     TRANSACTION_MODE_FREE_AGENCY,
 )
 from scripts.common.player_matching import canonical_normalize, get_player_registry
-from scripts.common.text_helpers import _strip_accents
+from scripts.common.text_helpers import _strip_accents, to_display_name
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.analytics import (
     compute_player_scores,
@@ -93,6 +93,96 @@ def _team_id_by_short(short_name: str) -> Optional[int]:
     """Reverse lookup: short_name -> team id."""
     m = {v: k for k, v in _teams_map_short().items()}
     return m.get(short_name)
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _display_name_maps() -> Tuple[Dict[int, str], Dict[str, str]]:
+    """Bootstrap element id -> display name, plus a normalized-name fallback map.
+
+    The frames on this page carry whichever name their source publishes: the
+    Draft roster and FPL stats use the full legal name ("Savio Moreira de
+    Oliveira"), projections use Rotowire's. Neither is what a manager calls the
+    player, so every rendered name resolves through `to_display_name()`.
+
+    The name map only keeps keys that resolve to exactly one player. A colliding
+    surname would otherwise print somebody else's name onto this player's card —
+    the display-side version of the Alex/Cole Palmer match.
+    """
+    by_id: Dict[int, str] = {}
+    seen: Dict[str, set] = {}
+    try:
+        elements = _load_bootstrap().get("elements", [])
+    except Exception:
+        _logger.warning("Could not load bootstrap for display names", exc_info=True)
+        return {}, {}
+
+    for el in elements:
+        display = to_display_name(
+            el.get("first_name"), el.get("second_name"), el.get("web_name")
+        )
+        if not display:
+            continue
+        try:
+            by_id[int(el["id"])] = display
+        except (KeyError, TypeError, ValueError):
+            pass
+        full = " ".join(
+            str(el.get(k) or "") for k in ("first_name", "second_name")
+        ).strip()
+        for raw in (full, el.get("web_name"), display):
+            key = canonical_normalize(str(raw or ""))
+            if key:
+                seen.setdefault(key, set()).add(display)
+
+    by_name = {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
+    return by_id, by_name
+
+
+def _attach_display_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a `Display_Name` column — the name to render — keeping `Player` intact.
+
+    `Player` is what every downstream merge matches on, so it must not change;
+    see "Player Display Names" in CLAUDE.md. Resolution is by element id first
+    and normalized name second, falling back to the accent-stripped source name
+    so a player the bootstrap can't resolve still renders something sane.
+    """
+    if df is None or df.empty or "Player" not in df.columns:
+        return df
+
+    by_id, by_name = _display_name_maps()
+    out = df.copy()
+
+    names = out["Player"].astype(str).tolist()
+    if "Player_ID" in out.columns:
+        ids = pd.to_numeric(out["Player_ID"], errors="coerce").tolist()
+    else:
+        ids = [None] * len(names)
+
+    resolved = []
+    for raw, pid in zip(names, ids):
+        hit = by_id.get(int(pid)) if pid is not None and pd.notna(pid) else None
+        if not hit:
+            hit = by_name.get(canonical_normalize(raw))
+        resolved.append(hit or _strip_accents(raw))
+
+    out["Display_Name"] = resolved
+    return out
+
+
+def _display_of(row) -> str:
+    """Render one row's player name: `Display_Name` when present, else `Player`."""
+    name = row.get("Display_Name")
+    if name is None or (isinstance(name, float) and pd.isna(name)) or not str(name).strip():
+        name = row.get("Player", "")
+    return _strip_accents(str(name))
+
+
+def _display_names(df: pd.DataFrame) -> pd.Series:
+    """Render-ready name column for `df`. Empty-frame safe: `DataFrame.apply` over
+    an empty frame returns a *DataFrame*, which cannot be assigned to a column."""
+    if df.empty:
+        return pd.Series(dtype=str, index=df.index)
+    return df.apply(_display_of, axis=1)
+
 
 @st.cache_data(show_spinner=False)
 def _load_future_fixtures() -> pd.DataFrame:
@@ -1231,10 +1321,10 @@ def _compute_transfer_suggestions(
                 txn_score = best_avail['_adj_value'] - worst_roster['_adj_value']
 
                 pair_info = {
-                    'drop': _strip_accents(str(worst_roster.get('Player', ''))),
+                    'drop': _display_of(worst_roster),
                     'drop_keep': round(float(worst_roster.get('Keep Score', 0)), 3),
                     'drop_adj': round(float(worst_roster.get('_adj_value', 0)), 3),
-                    'add': _strip_accents(str(best_avail.get('Player', ''))),
+                    'add': _display_of(best_avail),
                     'add_transfer': round(float(best_avail.get('Transfer Score', 0)), 3),
                     'add_adj': round(float(best_avail.get('_adj_value', 0)), 3),
                     'add_chance': best_avail.get('chance_of_playing_next_round'),
@@ -1262,7 +1352,7 @@ def _compute_transfer_suggestions(
                     rationale = _build_rationale(worst_roster, best_avail)
                     urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
                     suggestions.append({
-                        'drop_player': _strip_accents(str(worst_roster.get('Player', ''))),
+                        'drop_player': _display_of(worst_roster),
                         'drop_team': str(worst_roster.get('Team', '')),
                         'drop_position': pos,
                         'drop_value': round(float(worst_roster.get('Keep Score', 0)), 3),
@@ -1276,7 +1366,7 @@ def _compute_transfer_suggestions(
                             worst_roster.get('status'),
                             worst_roster.get('news')
                         ),
-                        'add_player': _strip_accents(str(best_avail.get('Player', ''))),
+                        'add_player': _display_of(best_avail),
                         'add_team': str(best_avail.get('Team', '')),
                         'add_position': pos,
                         'add_value': round(float(best_avail.get('Transfer Score', 0)), 3),
@@ -2092,6 +2182,10 @@ def show_waiver_wire_page():
     avail_all['Season_Points'] = numeric_col(avail_all, 'Season_Points', 0)
     avail_all['starts'] = numeric_col(avail_all, 'starts', 0)
 
+    # Resolve the name to render once, here, so the cards and the tables below all
+    # show the same thing. Player_ID is set by _add_fdr_and_form() above.
+    avail_all = _attach_display_names(avail_all)
+
     # --- Build MY ROSTER ---
     my_players = []
     for pos, names in my_team.get("players", {}).items():
@@ -2180,6 +2274,8 @@ def show_waiver_wire_page():
 
         # Backfill Player_IDs and recompute form/FDR
         my_roster = _backfill_player_ids(my_roster, fpl_stats)
+        # After the backfill, so ids resolve before names are looked up.
+        my_roster = _attach_display_names(my_roster)
         my_roster = _add_fdr_and_form(my_roster, fpl_stats, current_gw, lookahead)
         my_roster = _add_injury_data(my_roster, fpl_stats)
 
@@ -2284,8 +2380,9 @@ def show_waiver_wire_page():
             _render_depth_card(depth_map)
 
         _display_roster = my_roster.copy()
-        # Strip accents for clean display names (e.g. "Daniel Muñoz Mejía" → "Daniel Munoz Mejia")
-        _display_roster["Player"] = _display_roster["Player"].apply(_strip_accents)
+        # Render the common name, not the roster feed's legal one -- see
+        # _attach_display_names(). ("Daniel Munoz Mejia" -> "Daniel Munoz")
+        _display_roster["Player"] = _display_names(_display_roster)
         _display_roster["Pos_Rank"] = positional_rank(
             _display_roster, fpl_stats, "Season_Points", ref_value_col="Season_Points"
         )
@@ -2323,8 +2420,9 @@ def show_waiver_wire_page():
     avail_display = avail_display.sort_values("Transfer Score", ascending=False).reset_index(drop=True)
 
     _display_avail = avail_display.copy()
-    # Strip accents for clean display names
-    _display_avail["Player"] = _display_avail["Player"].apply(_strip_accents)
+    # Render the common name ("Savio"), not the source's legal one
+    # ("Savio Moreira de Oliveira") -- see _attach_display_names().
+    _display_avail["Player"] = _display_names(_display_avail)
     for col in _display_avail.select_dtypes(include=[np.number]).columns:
         _display_avail[col] = _display_avail[col].round(2)
 
