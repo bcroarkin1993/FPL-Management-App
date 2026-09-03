@@ -239,3 +239,64 @@ class TestReferenceMatcher:
         m.match("David Raya Martin", "ARS", "G")
         assert m.tier_counts["exact_name"] == 1
         assert m.tier_counts["token_subset"] == 1
+
+
+class TestCrossTeamExactTier:
+    """Tier 6: the same player, filed under a club he has already left.
+
+    Sources disagree about a club for weeks after a transfer -- FPL had Nicolas
+    Jackson at Aston Villa on 2026-09-03 while FFP still listed him at Chelsea --
+    so every team-scoped tier misses him. The tier is opt-in and demands the
+    whole name plus position, which is what separates it from the surname-only
+    fallback it replaced.
+    """
+
+    REFERENCE = pd.DataFrame([
+        ("Nicolas Jackson", "CHE", "F"),
+        ("Cole Palmer",     "CHE", "M"),
+        ("Dillon Phillips", "HUL", "G"),
+    ], columns=["Player", "Team", "Position"])
+
+    def _matcher(self, **kwargs):
+        return ReferenceMatcher(self.REFERENCE, web_name_col=None, **kwargs)
+
+    def test_off_by_default(self):
+        assert self._matcher().match("Nicolas Jackson", "AVL", "F") is None
+
+    def test_matches_a_transferred_player(self):
+        idx = self._matcher(allow_cross_team_exact=True).match("Nicolas Jackson", "AVL", "F")
+        assert idx is not None
+        assert self.REFERENCE.at[idx, "Player"] == "Nicolas Jackson"
+
+    def test_still_requires_the_whole_name(self):
+        """Alex Palmer must not inherit Cole Palmer's stats through this tier."""
+        m = self._matcher(allow_cross_team_exact=True)
+        assert m.match("Alex Palmer", "IPS", "G") is None
+
+    def test_still_requires_position(self):
+        """Kalvin Phillips (MID) against Dillon Phillips (GK) -- a shared surname
+        and nothing else, which is how a goalkeeper's start rate reached a
+        midfielder in the live data this tier was written for."""
+        m = self._matcher(allow_cross_team_exact=True)
+        assert m.match("Kalvin Phillips", "MCI", "M") is None
+        assert m.match("Dillon Phillips", "MCI", "M") is None
+
+    def test_ambiguity_resolves_to_no_match(self):
+        ref = pd.DataFrame([
+            ("Danny Ings", "AVL", "F"),
+            ("Danny Ings", "WHU", "F"),
+        ], columns=["Player", "Team", "Position"])
+        m = ReferenceMatcher(ref, web_name_col=None, allow_cross_team_exact=True)
+        assert m.match("Danny Ings", "BRE", "F") is None
+
+    def test_a_short_display_name_may_not_cross_clubs(self):
+        """Callers retry on web_name when the full name misses, and a one-word
+        display name is too weak a key to also drop the team -- "Savio" matched
+        a Man City row while playing for Spurs on nothing but the word itself."""
+        m = self._matcher(allow_cross_team_exact=True)
+        assert m.match_with_tier("Nicolas Jackson", "AVL", "F", cross_team=False) == (None, None)
+
+    def test_reports_its_tier_rank(self):
+        m = self._matcher(allow_cross_team_exact=True)
+        assert m.match_with_tier("Nicolas Jackson", "AVL", "F")[1] == 6
+        assert m.match_with_tier("Nicolas Jackson", "CHE", "F")[1] == 1

@@ -93,19 +93,38 @@ default, and the #2 asset in the game renders as exactly average.
 
 Tiers, loosest last: (1) exact `(name, team)`, (2) exact `(web_name, team)`,
 (3) last word, (4) token subset either direction — token sets are unordered so
-this also covers reversed names like "Mitoma Kaoru", (5) difflib ≥ 0.78.
+this also covers reversed names like "Mitoma Kaoru", (5) difflib ≥ 0.78,
+(6) exact full name + position with **team ignored**, opt-in per caller.
 
-Two rules exist because breaking them caused real bugs:
-- **Every tier below the first two is scoped to Team *and* Position.** There is
-  no team-agnostic tier — a surname-only match once gave Alex Palmer (backup GK)
-  Cole Palmer's (elite MID) stats and ranked him top 10.
+Three rules exist because breaking them caused real bugs:
+- **Every tier below the first two is scoped to Position, and every tier below
+  the first two except tier 6 is scoped to Team as well.** A surname-only,
+  team-agnostic match once gave Alex Palmer (backup GK) Cole Palmer's (elite MID)
+  stats and ranked him top 10.
 - **The fuzzy tier requires a shared complete token.** Character similarity
   alone matched "Harrison" to team-mate "Harry Wilson" at 0.79.
+- **Tier 6 demands the *whole* name, and only from the full-name query.** It
+  exists because two sources disagree about a club for weeks after a transfer —
+  FPL had Nicolas Jackson at Villa while FFP still had him at Chelsea — and every
+  team-scoped tier misses him. Retrying it on a short `Web_Name` gives the tier
+  a one-word key with the team dropped too, which matched Spurs' "Sávio" to a Man
+  City row on nothing but the word; pass `cross_team=False` on that retry.
 
 Ambiguity (>1 candidate at a tier) resolves to *no match*. `match_with_tier()`
 returns the tier rank so callers can resolve two players contending for one
 reference row in favour of the stronger tier — without that, a fuzzy guess can
-steal a row an exact match already earned.
+steal a row an exact match already earned. Two players tying at tier 6 for one
+row cancel out rather than one winning a coin flip.
+
+`_claim_reference_rows()` (`analytics.py`) is that whole protocol in one place —
+build the matcher, query on `Player` then `Web_Name`, resolve contention by tier
+— and all three projection merges go through it.
+
+**Team labels are part of matching.** Every source spells clubs its own way, and
+an unmapped label is not cosmetic: matching is scoped by team, so FFP's "Notts
+Forest" (absent from `TEAM_FULL_TO_SHORT` until 2026-09-03) sent all 28 Forest
+rows past the exact tiers into the loose ones. `tests/live/` now fails on an FFP
+label that does not resolve, as well as on a missing current club.
 
 ### Source Freshness
 
@@ -218,7 +237,7 @@ to import from GitHub Actions.
 | `check_win_probability()` | Near-ties reported as near-certainties; extreme calls on small gaps; probability that contradicts the scoreline |
 | `check_projected_team_total()` | Inflated XI totals; illegal lineup sizes |
 | `check_source_scale_agreement()` | Two sources denominated in different units (the original bug's signature) |
-| `check_merge_match_rate()` | A name-based merge quietly ceasing to match (the 356/425 season-rankings regression) |
+| `check_merge_match_rate()` | A name-based merge quietly ceasing to match (the 356/425 season-rankings regression). Pass `input_rows`: the check **abstains** when the merged frame is smaller than the reference, since a subset can never claim every reference row — judged against the reference alone it logged an ERROR on every Waiver Wire load while matching 100% of its input |
 | `check_initial_squad()` | Illegal or implausibly-priced Classic squads; a scale-free objective, whose signature is unspent budget |
 | `check_team_strength()` | Degenerate power rankings — every team scoring ~50 because position codes were `GKP/DEF/MID/FWD` instead of `G/D/M/F`, short squads, impossible injury costs |
 | `check_element_states()` | Draft player states changing shape — an unknown `status` code, `owner` disagreeing with the status, an owned count that isn't teams x 15. Every one makes locked players read as available, so the Waiver Wire suggests players who cannot be picked up |
@@ -390,7 +409,23 @@ failure rather than a quiet re-scaling.
 
 **`_effective_proj` column**: `compute_player_scores()` retains `_effective_proj` (blended_proj × start_likelihood) in its output. Consumers (Waiver Wire suggestion engine, card rendering) rely on it for GW projection display and sanity checking. Do not drop it from the result.
 
-**FFP name matching — 4-level fallback**: Both `merge_ffp_single_gw_data()` and `blend_multi_gw_projections()` use a 4-step lookup to handle name mismatches between FFP short names ("Eze") and FPL full names ("Eberechi Eze"), as well as FFP team name variants: (1) exact `(norm_name, team_short)`, (2) `(last_word, team_short)`, (3) `norm_name` only, (4) `last_word` only.
+**FFP name matching goes through `ReferenceMatcher`.** `merge_ffp_single_gw_data()`,
+`blend_multi_gw_projections()` and `merge_season_projections()` all call
+`_claim_reference_rows()` — see "Player Matching" for the tiers.
+
+They used to carry a hand-rolled 4-step ladder each, whose last two tiers were
+team-agnostic **and position-free**. Measured live on 2026-09-03, 53 of 652 pool
+rows resolved on a shared surname alone: Kalvin Phillips (MID) held Dillon
+Phillips' goalkeeper start rate, Abu Kamara held Boubacar Kamara's 90%, and João
+Pedro's `Next3GWs` was Gabriel Jesus's. Since `FFP_Start`/`FFP_Starting_Predicted`
+drive **1GW** and `MultiGW_Proj` is **40% of ROS**, that scored real players on
+other players' data across the Waiver Wire, Classic Transfers, Initial Squad and
+both fixture pages — silently, because every value involved was plausible.
+
+Positions are normalized on both sides (`POS_MAP_TO_RW`, accepting `Position`,
+`position_abbrv` or `element_type`); FFP publishes `GK/DEF/MID/FWD` and the app
+uses `G/D/M/F`. A frame with no position column still merges but gets exact
+`(name, team)` only, which costs matches rather than inventing wrong ones.
 
 
 ## Initial Squad Model — Classic FPL

@@ -18,7 +18,7 @@ import config
 from scripts.common.error_helpers import get_logger
 from scripts.common.data_validation import check_merge_match_rate, format_issues
 from scripts.common.player_matching import ReferenceMatcher, canonical_normalize
-from scripts.common.text_helpers import TEAM_FULL_TO_SHORT
+from scripts.common.text_helpers import POS_MAP_TO_RW
 
 _logger = get_logger("fpl_app.analytics")
 
@@ -828,17 +828,130 @@ def compute_transfer_urgency(position: str, depth_map: Dict[str, PositionalDepth
     return ""
 
 
+#: POS_MAP_TO_RW keyed case-insensitively -- frames spell positions "GK", "Gk"
+#: and "Goalkeeper" depending on which source filled them in.
+_POS_UPPER = {k.upper(): v for k, v in POS_MAP_TO_RW.items()}
+
+#: Frames warned about once per process for having no position column at all.
+_NO_POSITION_WARNED = set()
+
+
+def _position_letters(df: pd.DataFrame) -> Optional[pd.Series]:
+    """G/D/M/F for every row, or ``None`` if the frame carries no position.
+
+    Every loose matching tier is scoped to position, and the app's frames spell
+    it four different ways: ``Position`` in either alphabet, ``position_abbrv``
+    from the bootstrap pull, and the raw ``element_type``. A frame with none of
+    them still merges -- it just gets exact (name, team) matching and nothing
+    looser, which costs matches rather than inventing wrong ones.
+    """
+    for col in ("Position", "position_abbrv", "Pos"):
+        if col in df.columns:
+            mapped = df[col].astype(str).str.strip().str.upper().map(_POS_UPPER)
+            if mapped.notna().any():
+                return mapped.fillna("")
+    if "element_type" in df.columns:
+        mapped = pd.to_numeric(df["element_type"], errors="coerce").map(
+            {1: "G", 2: "D", 3: "M", 4: "F"})
+        if mapped.notna().any():
+            return mapped.fillna("")
+    return None
+
+
+def _claim_reference_rows(
+    player_df: pd.DataFrame,
+    ref_df: pd.DataFrame,
+    name_col: str,
+    ref_name_col: str,
+    ref_team_col: Optional[str] = "Team",
+    ref_web_col: Optional[str] = None,
+    allow_cross_team_exact: bool = False,
+    source_name: str = "",
+    stats: Optional[dict] = None,
+) -> Dict:
+    """Map player rows onto reference rows via :class:`ReferenceMatcher`.
+
+    Returns ``{player_index: reference_index}``. One reference row is never
+    shared by two players: contention is resolved in favour of the stronger
+    tier, so a loose guess cannot steal the row an exact match already earned,
+    and two players tying on the loosest (cross-team) tier cancel each other
+    out rather than one winning a coin flip.
+
+    This replaces three near-identical hand-rolled tier ladders whose last two
+    tiers were team-agnostic *and* position-free -- the shape that gave Kalvin
+    Phillips (MID) a goalkeeper's start percentage off a shared surname.
+    """
+    ref = ref_df.copy()
+    ref_pos = _position_letters(ref)
+    if ref_pos is not None:
+        ref["__pos_letter"] = ref_pos
+
+    matcher = ReferenceMatcher(
+        ref,
+        name_col=ref_name_col,
+        web_name_col=ref_web_col if ref_web_col and ref_web_col in ref.columns else None,
+        team_col=ref_team_col if ref_team_col and ref_team_col in ref.columns else None,
+        position_col="__pos_letter" if ref_pos is not None else None,
+        allow_cross_team_exact=allow_cross_team_exact,
+    )
+
+    player_pos = _position_letters(player_df)
+    if (player_pos is None or ref_pos is None) and source_name not in _NO_POSITION_WARNED:
+        _NO_POSITION_WARNED.add(source_name)
+        _logger.warning(
+            "%s: no position column on %s frame — matching falls back to exact "
+            "name+team only, which will miss legitimate name variants.",
+            source_name or "merge",
+            "player" if player_pos is None else "reference",
+        )
+
+    team_col = "Team" if "Team" in player_df.columns else None
+    web_col = "Web_Name" if "Web_Name" in player_df.columns else None
+
+    claims: Dict = {}          # reference index -> (player index, tier)
+    contested = set()
+    for idx in player_df.index:
+        team = player_df.at[idx, team_col] if team_col else None
+        pos = player_pos.at[idx] if player_pos is not None else None
+        if not pos:
+            pos = None
+        ref_idx, tier = matcher.match_with_tier(player_df.at[idx, name_col], team, pos)
+        # Mononyms ("Gabriel", "Alisson") live in a frame's Web_Name, not its
+        # full-name column, so retry on that before giving up.
+        if ref_idx is None and web_col:
+            ref_idx, tier = matcher.match_with_tier(
+                player_df.at[idx, web_col], team, pos, cross_team=False)
+        if ref_idx is None:
+            continue
+        prev = claims.get(ref_idx)
+        if prev is None or tier < prev[1]:
+            claims[ref_idx] = (idx, tier)
+        elif tier == prev[1] and tier >= 6:
+            contested.add(ref_idx)
+
+    resolved = {player_idx: ref_idx
+                for ref_idx, (player_idx, _tier) in claims.items()
+                if ref_idx not in contested}
+
+    if stats is not None:
+        stats.update(matched=len(resolved), total=len(ref_df),
+                     rate=len(resolved) / len(ref_df) if len(ref_df) else 0.0,
+                     tiers=dict(matcher.tier_counts))
+    return resolved
+
+
 def blend_multi_gw_projections(
     player_df: pd.DataFrame,
     ffp_df: Optional[pd.DataFrame],
     single_gw_col: str = "Points",
     output_col: str = "MultiGW_Proj",
     remaining_gws: int = 3,
+    stats: Optional[dict] = None,
 ) -> pd.DataFrame:
     """
     Blend FFP multi-GW (Next3GWs) projections into a player DataFrame.
 
-    Matches FFP players by normalized name + team short code.
+    Matches through :class:`ReferenceMatcher` (see ``_claim_reference_rows``).
     Unmatched players or missing FFP data falls back to single_gw_col * min(3, remaining_gws).
 
     Args:
@@ -848,6 +961,7 @@ def blend_multi_gw_projections(
         output_col: Column name for the blended multi-GW value.
         remaining_gws: GWs left in season (caps fallback multiplier to avoid inflated projections
             near season end).
+        stats: Optional dict, populated with matched/total/rate for the merge.
 
     Returns:
         player_df with output_col added.
@@ -880,63 +994,28 @@ def blend_multi_gw_projections(
         _logger.info("FFP Next3GWs not ready (all zero) — using fallback projections")
         return result
 
-    # Build lookup from FFP data: (normalized_name, team_short) -> Next3GWs
-    ffp = ffp_df[["Name", "Team", "Next3GWs"]].dropna(subset=["Next3GWs"]).copy()
-    ffp["__norm"] = ffp["Name"].apply(canonical_normalize)
-    ffp["__team_short"] = ffp["Team"].replace(TEAM_FULL_TO_SHORT)
+    ffp = ffp_df.dropna(subset=["Next3GWs"]).copy()
     ffp["Next3GWs"] = pd.to_numeric(ffp["Next3GWs"], errors="coerce")
-
-    # Build lookup dicts (individual zeros still skipped as defense-in-depth)
-    lookup = {}          # (norm_name, team_short) -> Next3GWs  [primary]
-    lookup_short = {}    # (last_word_of_norm, team_short)       [secondary]
-    lookup_name = {}     # norm_name only                        [tertiary — team-agnostic]
-    lookup_lastword = {} # last_word only                        [quaternary — last resort]
-    for _, row in ffp.iterrows():
-        key = (row["__norm"], str(row["__team_short"]))
-        val = row["Next3GWs"]
-        if pd.notna(val) and val > 0:
-            lookup[key] = val
-            last_word = row["__norm"].split()[-1] if row["__norm"] else ""
-            if last_word:
-                short_key = (last_word, str(row["__team_short"]))
-                if short_key not in lookup_short:
-                    lookup_short[short_key] = val
-            if row["__norm"] and row["__norm"] not in lookup_name:
-                lookup_name[row["__norm"]] = val
-            # Also store reversed token order to catch "family given" → "given family" variants
-            # (e.g. FFP "Tanaka Ao" ↔ FPL "Ao Tanaka" for Japanese players).
-            norm_tokens = row["__norm"].split()
-            if len(norm_tokens) > 1:
-                norm_reversed = " ".join(reversed(norm_tokens))
-                if norm_reversed not in lookup_name:
-                    lookup_name[norm_reversed] = val
-            if last_word and last_word not in lookup_lastword:
-                lookup_lastword[last_word] = val
-
-    if not lookup:
+    ffp = ffp[ffp["Next3GWs"].notna() & ffp["Next3GWs"].gt(0)]
+    if ffp.empty:
         return result
 
-    # Match players
-    result["__norm"] = result[name_col].apply(canonical_normalize)
-    team_col = "Team" if "Team" in result.columns else None
+    claims = _claim_reference_rows(
+        result, ffp,
+        name_col=name_col,
+        ref_name_col="Name",
+        ref_team_col="Team" if "Team" in ffp.columns else None,
+        allow_cross_team_exact=True,
+        source_name="FFP Next3GWs",
+        stats=stats,
+    )
+    for idx, ref_idx in claims.items():
+        result.at[idx, output_col] = ffp.at[ref_idx, "Next3GWs"]
 
-    for idx in result.index:
-        norm_name = result.at[idx, "__norm"]
-        team_short = str(result.at[idx, team_col]) if team_col else ""
-        team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
-        last_word = norm_name.split()[-1] if norm_name else ""
-
-        key = (norm_name, team_short)
-        if key in lookup:
-            result.at[idx, output_col] = lookup[key]
-        elif last_word and (last_word, team_short) in lookup_short:
-            result.at[idx, output_col] = lookup_short[(last_word, team_short)]
-        elif norm_name and norm_name in lookup_name:
-            result.at[idx, output_col] = lookup_name[norm_name]
-        elif last_word and last_word in lookup_lastword:
-            result.at[idx, output_col] = lookup_lastword[last_word]
-
-    result.drop(columns=["__norm"], inplace=True, errors="ignore")
+    issues = check_merge_match_rate(len(claims), len(ffp), "FFP Next3GWs -> %s" % output_col,
+                                    input_rows=len(result))
+    if issues:
+        _logger.warning(format_issues(issues))
     return result
 
 
@@ -955,6 +1034,7 @@ def merge_season_projections(
         player_df: DataFrame with player names and Team column.
         season_rankings_df: Rotowire season rankings with Player, Team, Points.
         output_col: Column name for the merged season projection.
+        stats: Optional dict, populated with matched/total/rate/tiers.
 
     Returns:
         player_df with output_col added.
@@ -982,47 +1062,21 @@ def merge_season_projections(
     if sr.empty:
         return result
 
-    matcher = ReferenceMatcher(
-        sr,
-        name_col="Player",
-        web_name_col="Web_Name" if "Web_Name" in sr.columns else None,
-        team_col="Team" if "Team" in sr.columns else None,
-        position_col="Position" if "Position" in sr.columns else None,
+    claims = _claim_reference_rows(
+        result, sr,
+        name_col=name_col,
+        ref_name_col="Player",
+        ref_team_col="Team" if "Team" in sr.columns else None,
+        ref_web_col="Web_Name" if "Web_Name" in sr.columns else None,
+        source_name="season projections",
+        stats=stats,
     )
-
-    team_col = "Team" if "Team" in result.columns else None
-    pos_col = "Position" if "Position" in result.columns else None
-    web_col = "Web_Name" if "Web_Name" in result.columns else None
-
-    # Two players must never share one reference row. Collect every candidate
-    # with the tier that produced it, then let the strongest tier win -- so a
-    # fuzzy guess can't steal the row an exact match already earned.
-    claims = {}
-    for idx in result.index:
-        team = result.at[idx, team_col] if team_col else None
-        pos = result.at[idx, pos_col] if pos_col else None
-        ref_idx, tier = matcher.match_with_tier(result.at[idx, name_col], team, pos)
-        # Mononyms ("Gabriel", "Alisson") live in the pool's Web_Name, not its
-        # full-name column, so retry on that before giving up.
-        if ref_idx is None and web_col:
-            ref_idx, tier = matcher.match_with_tier(result.at[idx, web_col], team, pos)
-        if ref_idx is None:
-            continue
-        prev = claims.get(ref_idx)
-        if prev is None or tier < prev[1]:
-            claims[ref_idx] = (idx, tier)
-
-    matched = 0
-    for ref_idx, (idx, _tier) in claims.items():
+    for idx, ref_idx in claims.items():
         result.at[idx, output_col] = sr.at[ref_idx, "Points"]
-        matched += 1
+    matched = len(claims)
 
-    if stats is not None:
-        stats.update(matched=matched, total=len(sr),
-                     rate=matched / len(sr) if len(sr) else 0.0,
-                     tiers=dict(matcher.tier_counts))
-
-    issues = check_merge_match_rate(matched, len(sr), "season projections -> %s" % output_col)
+    issues = check_merge_match_rate(matched, len(sr), "season projections -> %s" % output_col,
+                                    input_rows=len(result))
     if issues:
         _logger.warning(format_issues(issues))
     return result
@@ -1031,11 +1085,12 @@ def merge_season_projections(
 def merge_ffp_single_gw_data(
     player_df: pd.DataFrame,
     ffp_df: Optional[pd.DataFrame],
+    stats: Optional[dict] = None,
 ) -> pd.DataFrame:
     """Merge FFP single-GW data onto a player DataFrame.
 
-    Matches by normalized name + team short code, following the same pattern as
-    blend_multi_gw_projections().
+    Matches through :class:`ReferenceMatcher` (see ``_claim_reference_rows``),
+    the same path as blend_multi_gw_projections().
 
     Note the two prediction columns are on different bases, verified against
     live data at r=0.9998: ``Predicted`` == ``StartingPredicted`` * ``Start``/100.
@@ -1049,6 +1104,7 @@ def merge_ffp_single_gw_data(
         player_df: DataFrame with player names and Team column.
         ffp_df: FFP projections with Name, Team, Predicted, StartingPredicted,
             Start, LongStart.
+        stats: Optional dict, populated with matched/total/rate for the merge.
 
     Returns:
         player_df with FFP_Predicted, FFP_Starting_Predicted, FFP_Start and
@@ -1081,62 +1137,36 @@ def merge_ffp_single_gw_data(
     if not ffp_cols:
         return result
 
-    # Build lookup: (normalized_name, team_short) -> {Predicted, Start, LongStart}
-    ffp = ffp_df[["Name", "Team"] + ffp_cols].copy()
-    ffp["__norm"] = ffp["Name"].apply(canonical_normalize)
-    ffp["__team_short"] = ffp["Team"].replace(TEAM_FULL_TO_SHORT)
+    ffp = ffp_df.copy()
     for col in ffp_cols:
         ffp[col] = pd.to_numeric(ffp[col], errors="coerce")
 
-    lookup = {}          # (norm_name, team_short) -> data dict  [primary]
-    lookup_short = {}    # (last_word_of_norm, team_short)        [secondary]
-    lookup_name = {}     # norm_name only                         [tertiary — team-agnostic]
-    lookup_lastword = {} # last_word only                         [quaternary — last resort]
-    for _, row in ffp.iterrows():
-        key = (row["__norm"], str(row["__team_short"]))
-        data = {col: row[col] for col in ffp_cols if pd.notna(row[col])}
-        lookup[key] = data
-        last_word = row["__norm"].split()[-1] if row["__norm"] else ""
-        if last_word:
-            short_key = (last_word, str(row["__team_short"]))
-            if short_key not in lookup_short:
-                lookup_short[short_key] = data
-        if row["__norm"] and row["__norm"] not in lookup_name:
-            lookup_name[row["__norm"]] = data
-        if last_word and last_word not in lookup_lastword:
-            lookup_lastword[last_word] = data
-
-    if not lookup:
-        return result
-
-    # Match players
-    result["__norm"] = result[name_col].apply(canonical_normalize)
-    team_col = "Team" if "Team" in result.columns else None
+    claims = _claim_reference_rows(
+        result, ffp,
+        name_col=name_col,
+        ref_name_col="Name",
+        ref_team_col="Team" if "Team" in ffp.columns else None,
+        allow_cross_team_exact=True,
+        source_name="FFP single-GW",
+        stats=stats,
+    )
 
     col_map = {"Predicted": "FFP_Predicted",
                "StartingPredicted": "FFP_Starting_Predicted",
                "Start": "FFP_Start", "LongStart": "FFP_LongStart"}
 
-    for idx in result.index:
-        norm_name = result.at[idx, "__norm"]
-        team_short = str(result.at[idx, team_col]) if team_col else ""
-        team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
-        last_word = norm_name.split()[-1] if norm_name else ""
+    for idx, ref_idx in claims.items():
+        for src_col, dst_col in col_map.items():
+            if src_col not in ffp_cols:
+                continue
+            val = ffp.at[ref_idx, src_col]
+            if pd.notna(val):
+                result.at[idx, dst_col] = val
 
-        key = (norm_name, team_short)
-        data = lookup.get(key)
-        if data is None and last_word:
-            data = lookup_short.get((last_word, team_short))
-        if data is None and norm_name:
-            data = lookup_name.get(norm_name)
-        if data is None and last_word:
-            data = lookup_lastword.get(last_word)
-        if data:
-            for src_col, dst_col in col_map.items():
-                if src_col in data:
-                    result.at[idx, dst_col] = data[src_col]
-
-    result.drop(columns=["__norm"], inplace=True, errors="ignore")
+    issues = check_merge_match_rate(len(claims), len(ffp), "FFP single-GW data",
+                                    input_rows=len(result))
+    if issues:
+        _logger.warning(format_issues(issues))
     return result
 
 

@@ -57,6 +57,9 @@ TEAM_FULL_TO_SHORT = {
     "Manchester City": "MCI", "Manchester United": "MUN",
     "Manchester Utd": "MUN", "Nottingham Forest": "NFO",
     "Tottenham": "TOT", "Tottenham Hotspur": "TOT",
+    # Fantasy Football Pundit's spelling. Missing it sent all 28 Forest rows
+    # past the (name, team) tiers and into the loose fallbacks.
+    "Notts Forest": "NFO",
 }
 
 # Position mappings (various formats -> G/D/M/F)

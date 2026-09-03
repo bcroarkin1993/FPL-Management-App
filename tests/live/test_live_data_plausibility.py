@@ -148,6 +148,82 @@ class TestCrossSourceAgreement:
         )
 
 
+class TestFfpMerge:
+    """The FFP merge against the real player pool.
+
+    FFP's Predicted/Start/LongStart feed the 1GW score and Next3GWs is 40% of
+    ROS, so a match that lands on the wrong player is a scoring error nobody can
+    see. On 2026-09-03 the merge ended in two team-agnostic, position-free tiers
+    and 53 of 652 pool rows resolved on a shared surname alone -- Kalvin Phillips
+    (MID) was carrying Dillon Phillips' goalkeeper start rate.
+    """
+
+    @pytest.fixture(scope="class")
+    def claims(self, classic_player_pool, ffp_projections):
+        from scripts.common.analytics import _claim_reference_rows
+
+        if ffp_projections.empty:
+            pytest.skip("FFP sheet returned no rows")
+        return _claim_reference_rows(
+            classic_player_pool, ffp_projections,
+            name_col="Player", ref_name_col="Name", ref_team_col="Team",
+            allow_cross_team_exact=True, source_name="FFP live check",
+        )
+
+    def test_no_match_crosses_position(self, claims, classic_player_pool, ffp_projections):
+        from scripts.common.analytics import _position_letters
+
+        pool_pos = _position_letters(classic_player_pool)
+        ffp_pos = _position_letters(ffp_projections)
+        assert pool_pos is not None and ffp_pos is not None, (
+            "one side lost its position column -- every loose matching tier is "
+            "scoped to position, so without it the merge is surname roulette."
+        )
+        crossed = {
+            classic_player_pool.at[i, "Player"]: (
+                pool_pos.at[i], ffp_projections.at[j, "Name"], ffp_pos.at[j])
+            for i, j in claims.items() if pool_pos.at[i] != ffp_pos.at[j]
+        }
+        assert not crossed, (
+            "%d FFP match(es) cross position, i.e. one player is being scored on "
+            "another's projection: %s" % (len(crossed), crossed)
+        )
+
+    def test_cross_club_matches_agree_on_the_whole_name(self, claims, classic_player_pool,
+                                                        ffp_projections):
+        """Two sources disagree on a club for weeks after a transfer, which is why
+        a cross-club tier exists at all. It is safe only while it demands the
+        entire name: the surname-only version gave Abu Kamara (HUL) Boubacar
+        Kamara's (AVL) 90% start rate."""
+        from scripts.common.player_matching import canonical_normalize
+        from scripts.common.text_helpers import _to_short_team_code
+
+        loose = {}
+        for i, j in claims.items():
+            pool_team = _to_short_team_code(classic_player_pool.at[i, "Team"])
+            ffp_team = _to_short_team_code(ffp_projections.at[j, "Team"])
+            if pool_team == ffp_team:
+                continue
+            pool_name = canonical_normalize(classic_player_pool.at[i, "Player"])
+            ffp_name = canonical_normalize(ffp_projections.at[j, "Name"])
+            if pool_name != ffp_name:
+                loose[classic_player_pool.at[i, "Player"]] = ffp_projections.at[j, "Name"]
+        assert not loose, (
+            "%d match(es) crossed clubs on a partial name: %s" % (len(loose), loose)
+        )
+
+    def test_match_rate_holds_over_the_full_pool(self, claims, classic_player_pool,
+                                                 ffp_projections):
+        """FFP lists a subset of the pool, so the reference is what is matchable."""
+        raise_on_error(
+            check_merge_match_rate(
+                len(claims), len(ffp_projections), "FFP -> player pool",
+                min_rate=0.80, input_rows=len(classic_player_pool),
+            ),
+            context="FFP merge",
+        )
+
+
 class TestTeamNameMapping:
     """Every current Premier League club must be in TEAM_FULL_TO_SHORT.
 
@@ -194,6 +270,24 @@ class TestTeamNameMapping:
         assert not wrong, (
             "TEAM_FULL_TO_SHORT disagrees with the FPL bootstrap "
             "(club: mapped vs official): %s" % wrong
+        )
+
+    def test_every_ffp_club_label_resolves(self, bootstrap_teams, ffp_projections):
+        """FFP spells clubs its own way -- "Notts Forest", not "Nott'm Forest".
+
+        An unmapped label is not cosmetic: matching is scoped by team, so all 28
+        Forest rows missed the exact tiers and fell through to the loose ones.
+        """
+        from scripts.common.text_helpers import _to_short_team_code
+
+        official = {t["short_name"] for t in bootstrap_teams}
+        labels = {str(t).strip() for t in ffp_projections["Team"].dropna().unique()}
+        unresolved = {label: _to_short_team_code(label)
+                      for label in labels
+                      if _to_short_team_code(label) not in official}
+        assert not unresolved, (
+            "FFP club label(s) do not resolve to a current club (label: guess): "
+            "%s. Add them to TEAM_FULL_TO_SHORT." % unresolved
         )
 
     def test_no_current_club_falls_through_to_the_guess(self, bootstrap_teams):
