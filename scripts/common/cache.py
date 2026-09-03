@@ -8,8 +8,10 @@ a GW finishes, so we cache it permanently in SQLite to survive app restarts.
 Zero external dependencies — uses Python stdlib sqlite3.
 """
 
+import functools
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -20,6 +22,30 @@ _logger = get_logger("fpl_app.cache")
 
 # Singleton connection — lazy-initialised by get_cache_db()
 _connection: Optional[sqlite3.Connection] = None
+
+#: One connection is shared by every caller, and not every caller is on the main
+#: thread: start_transfer_news_prefetch() runs a whole fetch-and-write batch on a
+#: daemon thread while Streamlit keeps reading on the main one. The connection is
+#: opened with check_same_thread=False, which permits that rather than making it
+#: safe -- two threads inside one sqlite3 connection is a C-level data race, and
+#: it showed up as "Fatal Python error: Bus error" killing the test suite outright
+#: about one run in three. Reentrant because these functions nest (cache_set falls
+#: back to _reset_default_connection, which calls get_cache_db).
+_LOCK = threading.RLock()
+
+
+def _synchronized(fn):
+    """Serialise one cache operation against every other.
+
+    Deliberately not applied to cached_api_call(): it calls the caller's fetch
+    function, and holding the lock across a network round-trip would stall every
+    other reader for the length of the request.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
 
 _CREATE_TABLE_SQL = """CREATE TABLE IF NOT EXISTS cache (
     key TEXT PRIMARY KEY,
@@ -48,6 +74,7 @@ def _init_connection(path: str) -> sqlite3.Connection:
     return conn
 
 
+@_synchronized
 def _reset_default_connection() -> sqlite3.Connection:
     """Delete the corrupt DB file and create a fresh connection."""
     global _connection
@@ -76,6 +103,7 @@ def _reset_default_connection() -> sqlite3.Connection:
     return _connection
 
 
+@_synchronized
 def get_cache_db(db_path: Optional[str] = None) -> sqlite3.Connection:
     """
     Lazy-init singleton connection to .fpl_cache.db at project root.
@@ -104,6 +132,7 @@ def get_cache_db(db_path: Optional[str] = None) -> sqlite3.Connection:
     return _connection
 
 
+@_synchronized
 def cache_get(key: str, conn: Optional[sqlite3.Connection] = None) -> Optional[Any]:
     """
     Get value by key. Returns None if missing or expired.
@@ -150,6 +179,7 @@ def cache_get(key: str, conn: Optional[sqlite3.Connection] = None) -> Optional[A
         return None
 
 
+@_synchronized
 def cache_set(
     key: str,
     value: Any,
@@ -222,6 +252,7 @@ def cached_api_call(
     return result
 
 
+@_synchronized
 def clear_cache(conn: Optional[sqlite3.Connection] = None) -> int:
     """
     Delete all entries from the cache. Returns number of rows deleted.

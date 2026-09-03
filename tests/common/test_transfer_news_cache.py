@@ -6,6 +6,7 @@ player with no news is not refetched forever, and a cached read never goes to th
 network.
 """
 
+import threading
 from unittest.mock import patch
 
 import pandas as pd
@@ -29,8 +30,24 @@ def sqlite_cache(tmp_path):
     original = cache_mod._connection
     cache_mod._connection = conn
     yield conn
+    # start_transfer_news_prefetch() starts a real daemon thread that writes to
+    # this very connection. Closing it while that thread is mid-write is a
+    # use-after-close inside SQLite's C layer: the suite died with "Fatal Python
+    # error: Bus error" / "Segmentation fault" roughly one run in three, in
+    # whichever test happened to be running when the thread came back. Join it
+    # first -- and here rather than in the one test that starts it, so any future
+    # test that triggers a prefetch is covered too.
+    _join_prefetch_threads()
     cache_mod._connection = original
     conn.close()
+
+
+def _join_prefetch_threads(timeout: float = 10.0):
+    for thread in threading.enumerate():
+        if thread.name == "transfer-news-prefetch":
+            thread.join(timeout=timeout)
+            assert not thread.is_alive(), (
+                "transfer-news prefetch thread outlived its cache connection")
 
 
 class TestBatchFetching:
