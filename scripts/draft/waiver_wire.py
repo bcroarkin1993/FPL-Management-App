@@ -57,6 +57,24 @@ from scripts.common.analytics import (
 from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
 
 # ---------------------------
+# SUGGESTION VIEW
+# ---------------------------
+
+POSITION_LABEL_TO_CODE = {"GK": "G", "DEF": "D", "MID": "M", "FWD": "F"}
+
+# "Best per position" is the compact default: the single strongest move at each
+# position, which is the shape the page shipped with. The rest scan the whole
+# roster against the whole available pool.
+SUGGESTION_VIEW_BEST_PER_POS = "Best per position"
+SUGGESTION_VIEW_OPTIONS = [
+    SUGGESTION_VIEW_BEST_PER_POS,
+    "Top 5",
+    "Top 10",
+    "All improvements",
+]
+SUGGESTION_VIEW_LIMITS = {"Top 5": 5, "Top 10": 10}
+
+# ---------------------------
 # FPL API READS
 # ---------------------------
 
@@ -1080,8 +1098,12 @@ def _sanity_check_suggestion(drop_row: pd.Series, add_row: pd.Series) -> Tuple[b
 def _compute_transfer_suggestions(
     avail_df: pd.DataFrame,
     roster_df: pd.DataFrame,
-    top_n: int = 3,
+    top_n: Optional[int] = 3,
     depth_map: Optional[Dict] = None,
+    positions: Optional[List[str]] = None,
+    roster_candidates: Optional[int] = 2,
+    avail_candidates: Optional[int] = 5,
+    one_per_position: bool = True,
 ) -> Tuple[List[Dict], List[Dict]]:
     """Core suggestion logic: position-locked swaps using pre-computed Transfer/Keep Scores.
 
@@ -1089,14 +1111,26 @@ def _compute_transfer_suggestions(
     compute_player_scores() with dynamic alpha blending. Injury adjustments are
     applied on top of these pre-computed scores.
 
+    Args:
+        top_n: cap on the returned list; ``None`` returns every move found.
+        positions: restrict the search to these position codes (``G/D/M/F``).
+        roster_candidates: how many of the *weakest* roster players to consider
+            per position. ``None`` scans the whole roster.
+        avail_candidates: how many of the *best* available players to consider
+            per position. ``None`` scans the whole pool.
+        one_per_position: stop at the first move found per position. The default
+            (2 x 5 window, one move per position) is the compact view; passing
+            ``None`` for both candidate limits with this off enumerates every
+            upgrade on the board — at most one per droppable roster player.
+
     Returns:
         (suggestions, debug_rows) — suggestions is the ranked list of transfers;
         debug_rows is a per-position breakdown for the transparency expander.
     """
-    # How many roster/available candidates to evaluate per position before giving up.
-    # Prevents a single injured top-available from blocking the whole position.
-    AVAIL_CANDIDATES = 5
-    ROSTER_CANDIDATES = 2
+    # Debug pairs are for eyeballing near-misses, not an audit log. An exhaustive
+    # scan can pit 15 roster players against 150 available ones; capping keeps the
+    # transparency expander readable (and the page from rendering a wall of rows).
+    DEBUG_PAIR_CAP = 40
 
     def _ef(val) -> float:
         """Float conversion that collapses NaN/None to 0."""
@@ -1125,7 +1159,7 @@ def _compute_transfer_suggestions(
         roster_df.get('Season_Points', pd.Series(dtype=float)), errors='coerce'
     ).dropna()
 
-    for pos in ['G', 'D', 'M', 'F']:
+    for pos in (positions if positions is not None else ['G', 'D', 'M', 'F']):
         roster_pos = roster_df[roster_df['Position'] == pos].copy()
         avail_pos = avail_df[avail_df['Position'] == pos].copy()
 
@@ -1172,10 +1206,17 @@ def _compute_transfer_suggestions(
         pos_debug_pairs = []
         pos_suggestion_found = False
 
-        # Evaluate bottom-ROSTER_CANDIDATES roster players × top-AVAIL_CANDIDATES available players.
-        # This prevents a single injured/overrated player from blocking the whole position.
-        for _, worst_roster in roster_sorted.head(ROSTER_CANDIDATES).iterrows():
-            if pos_suggestion_found:
+        # Evaluate the weakest roster players against the strongest available ones.
+        # Limiting both sides prevents a single injured/overrated player from
+        # blocking the whole position; lifting the limits (both None) enumerates
+        # every upgrade instead of just the headline one.
+        roster_iter = (roster_sorted if roster_candidates is None
+                       else roster_sorted.head(roster_candidates))
+        avail_iter = (avail_sorted if avail_candidates is None
+                      else avail_sorted.head(avail_candidates))
+
+        for _, worst_roster in roster_iter.iterrows():
+            if one_per_position and pos_suggestion_found:
                 break
 
             keep_val = float(worst_roster.get('Keep Score', 0.5) or 0.5)
@@ -1186,7 +1227,7 @@ def _compute_transfer_suggestions(
             else:
                 min_threshold = 0.05   # weak: 5% — raised from 2% to cut noise
 
-            for _, best_avail in avail_sorted.head(AVAIL_CANDIDATES).iterrows():
+            for _, best_avail in avail_iter.iterrows():
                 txn_score = best_avail['_adj_value'] - worst_roster['_adj_value']
 
                 pair_info = {
@@ -1202,7 +1243,8 @@ def _compute_transfer_suggestions(
                     'passed': txn_score > min_threshold,
                     'sanity': 'n/a',
                 }
-                pos_debug_pairs.append(pair_info)
+                if len(pos_debug_pairs) < DEBUG_PAIR_CAP:
+                    pos_debug_pairs.append(pair_info)
 
                 if txn_score > min_threshold:
                     sanity_ok, sanity_reason = _sanity_check_suggestion(worst_roster, best_avail)
@@ -1254,6 +1296,11 @@ def _compute_transfer_suggestions(
                     })
                     pos_suggestion_found = True
                     break  # found a suggestion for this roster candidate; move on
+                elif avail_candidates is None:
+                    # Available players are sorted by value descending, so once one
+                    # misses this drop's threshold no lower-ranked player can clear
+                    # it either. Only worth short-circuiting on a full-pool scan.
+                    break
 
         debug_rows.append({
             'pos': pos,
@@ -1263,9 +1310,9 @@ def _compute_transfer_suggestions(
             'locked_excluded': locked_excluded,
         })
 
-    # Sort by transaction score descending, return top N
+    # Sort by transaction score descending, return top N (all of them if top_n is None)
     suggestions.sort(key=lambda x: x['transaction_score'], reverse=True)
-    return suggestions[:top_n], debug_rows
+    return (suggestions if top_n is None else suggestions[:top_n]), debug_rows
 
 
 def _render_depth_card(depth_map: Dict):
@@ -1321,13 +1368,39 @@ def _render_depth_card(depth_map: Dict):
         st.markdown(card, unsafe_allow_html=True)
 
 
-def _render_transfer_suggestions(suggestions: List[Dict], current_gw: int = 0):
-    """Render suggestion cards using styled HTML."""
+def _render_transfer_suggestions(
+    suggestions: List[Dict],
+    current_gw: int = 0,
+    total_found: Optional[int] = None,
+):
+    """Render suggestion cards using styled HTML.
+
+    The subheader and view controls are rendered by the caller (they have to
+    exist before the suggestions are computed), so this draws cards only.
+
+    Args:
+        total_found: how many moves the search turned up before the view limit
+            was applied — surfaced so a truncated list says so.
+    """
     if not suggestions:
         st.info("No beneficial transfers found. Your roster looks strong at all positions.")
         return
 
-    st.subheader("Transfer Suggestions")
+    shown = len(suggestions)
+    if total_found is not None and total_found > shown:
+        note = (f"Showing the top {shown} of {total_found} improving moves — "
+                f"switch **Show** to *All improvements* to see the rest.")
+    else:
+        note = f"{shown} improving move{'s' if shown != 1 else ''} found."
+    # Each card is the best available upgrade for *that* roster player, so one
+    # standout target can legitimately head up several cards. Say so rather than
+    # letting it read as a repeated suggestion.
+    _adds = [s.get('add_player') for s in suggestions]
+    if len(set(_adds)) < len(_adds):
+        note += (" Each card is the best upgrade for that specific player, so the "
+                 "same target can appear more than once.")
+    st.caption(note)
+
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
     mgw_window = min(3, max(1, 38 - current_gw)) if current_gw > 0 else 3
     mgw_label = "Next GW" if mgw_window == 1 else f"Next {mgw_window} GW"
@@ -1853,6 +1926,34 @@ def show_waiver_wire_page():
     with window_container:
         _render_transaction_window(transaction_window, locked_count)
 
+    # Suggestion view controls. They render inside the suggestion container at the
+    # top of the page, but have to be *created* here — before the search runs —
+    # because they are what the search is parameterised on.
+    with suggestion_container:
+        st.subheader("Transfer Suggestions")
+        _ctl_view, _ctl_pos = st.columns([1, 2])
+        with _ctl_view:
+            sugg_view = st.selectbox(
+                "Show",
+                options=SUGGESTION_VIEW_OPTIONS,
+                index=0,
+                help="'Best per position' shows the single strongest move at each "
+                     "position. The other views search your whole roster against "
+                     "the entire available pool and list every swap that clears "
+                     "the improvement threshold for its position.",
+            )
+        with _ctl_pos:
+            sugg_pos_labels = st.multiselect(
+                "Suggest for positions",
+                options=list(POSITION_LABEL_TO_CODE.keys()),
+                default=list(POSITION_LABEL_TO_CODE.keys()),
+                help="Limit suggestions to the positions you actually want to change.",
+            )
+    sugg_positions = [
+        POSITION_LABEL_TO_CODE[lbl] for lbl in (sugg_pos_labels or [])
+        if lbl in POSITION_LABEL_TO_CODE
+    ]
+
     team_options = []
     for tid, blob in ownership.items():
         tname = blob.get("team_name", f"Team {tid}")
@@ -1883,7 +1984,10 @@ def show_waiver_wire_page():
     # Controls
     with st.expander("Filters", expanded=False):
         colA, colB, colC = st.columns(3)
-        pos_filter = colA.multiselect("Positions", ["G", "D", "M", "F"], default=["G", "D", "M", "F"])
+        # Distinct from the "Suggest for positions" control by the suggestion cards:
+        # this one filters the available-players table further down the page.
+        pos_filter = colA.multiselect("Positions (available players table)",
+                                      ["G", "D", "M", "F"], default=["G", "D", "M", "F"])
         lookahead = int(colB.number_input("Upcoming GWs to average FDR", min_value=1, max_value=8, value=config.UPCOMING_WEEKS_DEFAULT))
         form_weeks = int(colC.number_input("Form lookback GWs", min_value=1, max_value=5, value=config.FORM_LOOKBACK_WEEKS))
 
@@ -2128,20 +2232,38 @@ def show_waiver_wire_page():
     # Pre-compute scores on both pools so _compute_transfer_suggestions can use them
     suggestions = []
     debug_rows: List[Dict] = []
-    if not my_roster.empty and not avail_all.empty:
+    total_found = 0
+    if not my_roster.empty and not avail_all.empty and sugg_positions:
         try:
             avail_all = _compute_waiver_score(avail_all, fpl_stats, current_gw=current_gw)
             my_roster = _compute_keep_score(my_roster, fpl_stats, current_gw=current_gw, depth_map=depth_map)
+            # "Best per position" keeps the narrow 2x5 candidate window; every other
+            # view scans the full roster against the full pool so the list really is
+            # every move that would improve the team.
+            _compact = sugg_view == SUGGESTION_VIEW_BEST_PER_POS
             suggestions, debug_rows = _compute_transfer_suggestions(
                 avail_all, my_roster,
-                top_n=3, depth_map=depth_map,
+                top_n=None, depth_map=depth_map,
+                positions=sugg_positions,
+                roster_candidates=2 if _compact else None,
+                avail_candidates=5 if _compact else None,
+                one_per_position=_compact,
             )
+            total_found = len(suggestions)
+            _limit = SUGGESTION_VIEW_LIMITS.get(sugg_view)
+            if _limit is not None:
+                suggestions = suggestions[:_limit]
         except Exception as e:
             st.warning(f"Could not compute transfer suggestions: {e}")
 
     # --- RENDER: Suggestion cards at top ---
     with suggestion_container:
-        _render_transfer_suggestions(suggestions, current_gw=current_gw)
+        if not sugg_positions:
+            st.info("Select at least one position above to see transfer suggestions.")
+        else:
+            _render_transfer_suggestions(
+                suggestions, current_gw=current_gw, total_found=total_found
+            )
         _render_transfer_debug(debug_rows)
 
     st.markdown("---")

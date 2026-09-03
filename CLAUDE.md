@@ -388,6 +388,27 @@ available the conditional value is recovered by dividing the start rate back
 out. `tests/live/` pins the relationship so a change at FFP surfaces as a
 failure rather than a quiet re-scaling.
 
+### Suggestion breadth — Draft Waiver Wire
+
+`_compute_transfer_suggestions()` searches a *window*, not the board: by default
+the two weakest roster players at a position against the five strongest available
+ones, stopping at the first move it finds per position. That window is the
+compact "Best per position" view and is deliberately narrow — a wide search
+surfaces the same standout target against every mediocre player you own.
+
+The window is parameterised (`roster_candidates`, `avail_candidates`,
+`one_per_position`, `positions`), and the page's **Show** control lifts it: with
+both limits `None` the search runs the whole roster against the whole available
+pool and returns **at most one move per droppable roster player** — the best add
+that clears that player's threshold. So one target can head several cards; the
+caption says so rather than letting it read as a repeat.
+
+Two things make the full scan cheap. Available players are sorted by adjusted
+value descending, so once one misses a drop's threshold no lower-ranked player
+can clear it and the inner loop breaks. And `DEBUG_PAIR_CAP` bounds the
+transparency expander, which otherwise renders every evaluated pair — 15 roster
+players against 150 available ones is a wall of rows, not transparency.
+
 **`_effective_proj` column**: `compute_player_scores()` retains `_effective_proj` (blended_proj × start_likelihood) in its output. Consumers (Waiver Wire suggestion engine, card rendering) rely on it for GW projection display and sanity checking. Do not drop it from the result.
 
 **FFP name matching — 4-level fallback**: Both `merge_ffp_single_gw_data()` and `blend_multi_gw_projections()` use a 4-step lookup to handle name mismatches between FFP short names ("Eze") and FPL full names ("Eberechi Eze"), as well as FFP team name variants: (1) exact `(norm_name, team_short)`, (2) `(last_word, team_short)`, (3) `norm_name` only, (4) `last_word` only.

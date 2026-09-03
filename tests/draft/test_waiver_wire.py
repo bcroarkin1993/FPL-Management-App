@@ -120,3 +120,91 @@ class TestDraftStateSurvivesScoring:
 
         assert "Draft_State" in scored.columns
         assert (scored["Draft_State"] == "l").sum() == 1
+
+
+# ---------------------------------------------------------------------------
+# Suggestion breadth: the page used to hard-code a 2-roster x 5-available window
+# and one move per position, so it could never show more than three cards no
+# matter how many upgrades were on the board.
+# ---------------------------------------------------------------------------
+
+DEEP_ROSTER = [
+    {"Player": f"Weak {pos}{i}", "Team": "ARS", "Position": pos, "Points": 1.0 + i,
+     "Keep Score": 0.10 + 0.10 * i, "Season_Points": 10 + i}
+    for pos in ("G", "D", "M", "F")
+    for i in range(3)
+]
+
+DEEP_AVAIL = [
+    {"Player": f"Star {pos}{i}", "Team": "NEW", "Position": pos, "Points": 7.0 - 0.2 * i,
+     "Transfer Score": 0.90 - 0.05 * i, "Draft_State": "a"}
+    for pos in ("G", "D", "M", "F")
+    for i in range(6)
+]
+
+
+def _exhaustive(avail, roster, **kw):
+    """The 'All improvements' view: no candidate window, no one-per-position cap."""
+    return _compute_transfer_suggestions(
+        avail, roster, top_n=None,
+        roster_candidates=None, avail_candidates=None, one_per_position=False,
+        **kw
+    )
+
+
+class TestSuggestionBreadth:
+    def test_default_view_is_still_one_move_per_position(self):
+        """The compact view is what the page shipped with — widening the search
+        must not change it."""
+        suggestions, _ = _compute_transfer_suggestions(
+            _avail(DEEP_AVAIL), _roster(DEEP_ROSTER), top_n=None
+        )
+        positions = [s["drop_position"] for s in suggestions]
+        assert sorted(positions) == ["D", "F", "G", "M"]
+
+    def test_exhaustive_view_surfaces_every_upgradeable_player(self):
+        """Nine weak players with a clear upgrade available must all be listed,
+        not just the best one at each position."""
+        suggestions, _ = _exhaustive(_avail(DEEP_AVAIL), _roster(DEEP_ROSTER))
+
+        assert len(suggestions) == len(DEEP_ROSTER)
+        assert len({s["drop_player"] for s in suggestions}) == len(DEEP_ROSTER)
+
+    def test_results_stay_ranked_by_transaction_score(self):
+        suggestions, _ = _exhaustive(_avail(DEEP_AVAIL), _roster(DEEP_ROSTER))
+        scores = [s["transaction_score"] for s in suggestions]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_position_filter_restricts_the_search(self):
+        suggestions, debug = _exhaustive(
+            _avail(DEEP_AVAIL), _roster(DEEP_ROSTER), positions=["M"]
+        )
+        assert {s["drop_position"] for s in suggestions} == {"M"}
+        assert {d["pos"] for d in debug} == {"M"}
+
+    def test_locked_players_are_still_excluded_when_scanning_the_whole_pool(self):
+        """Widening the search must not widen it to unclaimable players."""
+        avail = _avail([
+            {"Player": "Locked Star", "Team": "HUL", "Position": "M", "Points": 9.0,
+             "Transfer Score": 0.99, "Draft_State": "l"},
+            {"Player": "Free Agent", "Team": "NEW", "Position": "M", "Points": 6.0,
+             "Transfer Score": 0.80, "Draft_State": "a"},
+        ])
+        suggestions, _ = _exhaustive(avail, _roster(ROSTER))
+        assert "Locked Star" not in {s["add_player"] for s in suggestions}
+
+    def test_top_n_caps_the_list_and_none_does_not(self):
+        """The 'Top 5' / 'Top 10' views cap the same full search that 'All' shows."""
+        everything, _ = _exhaustive(_avail(DEEP_AVAIL), _roster(DEEP_ROSTER))
+        capped, _ = _compute_transfer_suggestions(
+            _avail(DEEP_AVAIL), _roster(DEEP_ROSTER), top_n=5,
+            roster_candidates=None, avail_candidates=None, one_per_position=False,
+        )
+        assert len(everything) > 5
+        assert capped == everything[:5]
+
+    def test_debug_pairs_are_capped_on_a_full_pool_scan(self):
+        """The transparency expander renders every pair; an exhaustive scan must
+        not turn it into a wall of hundreds of rows."""
+        _, debug = _exhaustive(_avail(DEEP_AVAIL), _roster(DEEP_ROSTER))
+        assert all(len(d["pairs"]) <= 40 for d in debug)
