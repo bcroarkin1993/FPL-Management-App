@@ -188,7 +188,103 @@ class TestTradeAnalyzerPage:
 
 class TestDraftHelperPage:
     def test_smoke(self, mock_all_utils):
-        with patch("scripts.draft.draft_helper.get_rotowire_season_rankings", return_value=pd.DataFrame()):
+        with patch("scripts.draft.draft_helper.get_rotowire_season_rankings", return_value=pd.DataFrame()), \
+             patch("scripts.draft.draft_helper.get_club_transfer_news",
+                   return_value=pd.DataFrame()):
+            from scripts.draft.draft_helper import show_draft_helper_page
+            show_draft_helper_page()
+
+    def test_smoke_with_rankings_and_transfer_risk(self, mock_all_utils):
+        """Exercise the transfer-risk path with a populated board.
+
+        get_transfer_news is patched explicitly: mock_streamlit's buttons are
+        unconditionally truthy, so the "Scan transfer news" branch always fires
+        and would otherwise make one real network request per player.
+        """
+        rankings = pd.DataFrame({
+            "Overall Rank": [1, 2, 3],
+            "Player": ["Erling Haaland", "Ollie Watkins", "Bukayo Saka"],
+            "Team": ["MCI", "AVL", "ARS"],
+            "Position": ["F", "F", "M"],
+            "Points": [215.3, 145.9, 180.9],
+            "PP/90": [7.1, 5.2, 6.0],
+            "Pos Rank": [1, 8, 3],
+        })
+        news = pd.DataFrame([{
+            "Player": "Ollie Watkins", "Team": "AVL",
+            "Headline": "Ollie Watkins undergoes medical at Al Hilal",
+            "URL": "http://example.com", "Source": "Sky Sports",
+            "Published": "Fri, 28 Aug 2026 18:21:08 GMT",
+        }])
+        availability = pd.DataFrame({
+            "Player": ["Erling Haaland", "Ollie Watkins", "Bukayo Saka"],
+            "Web_Name": ["Haaland", "Watkins", "Saka"],
+            "Team": ["MCI", "AVL", "ARS"],
+            "Position": ["F", "F", "M"],
+            "Status": ["a", "a", "a"],
+            "News": ["", "", ""],
+        })
+        with patch("scripts.draft.draft_helper.get_rotowire_season_rankings", return_value=rankings), \
+             patch("scripts.draft.draft_helper.get_transfer_news", return_value=news) as mock_news, \
+             patch("scripts.draft.draft_helper.get_club_transfer_news",
+                   return_value=pd.DataFrame()) as mock_clubs, \
+             patch("scripts.draft.draft_helper._load_reference_data",
+                   return_value=(availability, ["Man City", "Aston Villa", "Arsenal"])):
+            from scripts.draft.draft_helper import show_draft_helper_page
+            show_draft_helper_page()
+            assert mock_news.called
+            assert mock_clubs.called
+
+    def test_smoke_with_incoming_signings(self, mock_all_utils):
+        """An arrival discounts the incumbents at that club and position.
+
+        Patched the same way as the news scan: mock_streamlit's buttons are
+        unconditionally truthy, so every fetch branch fires on every page render.
+        """
+        rankings = pd.DataFrame({
+            "Overall Rank": [1, 2, 3],
+            "Player": ["Ollie Watkins", "Jhon Duran", "Bukayo Saka"],
+            "Team": ["AVL", "AVL", "ARS"],
+            "Position": ["F", "F", "M"],
+            "Points": [145.9, 90.0, 180.9],
+            "PP/90": [5.2, 4.0, 6.0],
+            "Pos Rank": [8, 20, 3],
+        })
+        club_news = pd.DataFrame([
+            {"Club": "Aston Villa", "Headline": "Aston Villa complete signing of "
+             "striker Nicolas Jackson for £51m", "URL": "", "Source": "BBC",
+             "Published": "Fri, 28 Aug 2026 18:21:08 GMT"},
+            {"Club": "Aston Villa", "Headline": "Aston Villa agree deal to sign "
+             "striker Nicolas Jackson", "URL": "", "Source": "Sky Sports",
+             "Published": "Fri, 28 Aug 2026 18:21:08 GMT"},
+        ])
+        availability = pd.DataFrame({
+            "Player": ["Ollie Watkins", "Jhon Duran", "Bukayo Saka"],
+            "Web_Name": ["Watkins", "Duran", "Saka"],
+            "Team": ["AVL", "AVL", "ARS"],
+            "Position": ["F", "F", "M"],
+            "Status": ["a", "a", "a"],
+            "News": ["", "", ""],
+        })
+        with patch("scripts.draft.draft_helper.get_rotowire_season_rankings", return_value=rankings), \
+             patch("scripts.draft.draft_helper.get_transfer_news", return_value=pd.DataFrame()), \
+             patch("scripts.draft.draft_helper.get_club_transfer_news", return_value=club_news), \
+             patch("scripts.draft.draft_helper._load_reference_data",
+                   return_value=(availability, ["Aston Villa", "Arsenal"])):
+            from scripts.draft.draft_helper import show_draft_helper_page
+            show_draft_helper_page()
+
+    def test_page_survives_a_news_outage(self, mock_all_utils):
+        """A transfer-news failure must leave the board undiscounted, not break it."""
+        rankings = pd.DataFrame({
+            "Overall Rank": [1], "Player": ["Erling Haaland"], "Team": ["MCI"],
+            "Position": ["F"], "Points": [215.3], "PP/90": [7.1], "Pos Rank": [1],
+        })
+        with patch("scripts.draft.draft_helper.get_rotowire_season_rankings", return_value=rankings), \
+             patch("scripts.draft.draft_helper.get_transfer_news",
+                   side_effect=RuntimeError("news feed down")), \
+             patch("scripts.draft.draft_helper.get_club_transfer_news",
+                   side_effect=RuntimeError("club feed down")):
             from scripts.draft.draft_helper import show_draft_helper_page
             show_draft_helper_page()
 

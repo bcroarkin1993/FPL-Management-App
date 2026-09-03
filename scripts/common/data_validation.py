@@ -35,6 +35,8 @@ __all__ = [
     "check_merge_match_rate",
     "check_initial_squad",
     "check_element_states",
+    "check_transfer_risk",
+    "check_transfer_windows",
     "format_issues",
     "raise_on_error",
 ]
@@ -749,6 +751,136 @@ def check_element_states(states: Optional[dict],
         ))
 
     return issues
+
+
+#: A transfer window empties a handful of squads, not the league. Above this
+#: fraction of the pool carrying real risk, the likelier explanation is that
+#: keyword tiering or destination parsing broke — the Watkins fix turning into a
+#: blanket discount that quietly flattens every ranking.
+MAX_PLAUSIBLE_AT_RISK_FRACTION = 0.10
+
+#: Below this many players the at-risk *fraction* carries no signal.
+MIN_POOL_FOR_FRACTION_CHECK = 50
+
+#: Risk this high off a single outlet means the corroboration gate is leaking.
+#: One newspaper reporting a medical is a scoop or an error; four is a fact.
+SINGLE_OUTLET_RISK_CEILING = 0.60
+
+
+def check_transfer_risk(risk_df: Optional[pd.DataFrame],
+                        today=None,
+                        floor: float = 0.10) -> List[Issue]:
+    """Assert transfer-risk discounts could plausibly be what they say.
+
+    Every failure mode here is silent by construction. A broken feed returns an
+    empty frame and renders a page identical to a working one, just with every
+    player undiscounted — which is precisely the state that let Watkins be drafted
+    in the first place. A broken *matcher* fails the other way, discounting the
+    whole pool by a similar amount, which changes no rankings while looking busy.
+    """
+    check = "transfer_risk"
+
+    if risk_df is None or not hasattr(risk_df, "columns") or risk_df.empty:
+        return [Issue(
+            check, "error", "transfer risk frame is empty",
+            "The news feed returned nothing, so every player is undiscounted and "
+            "the page looks exactly like a working one. Check "
+            "transfer_feeds.fetch_transfer_news_batch and its network access.",
+        )]
+
+    issues = []
+    required = {"Transfer_Risk", "Transfer_Mult"}
+    missing = required - set(risk_df.columns)
+    if missing:
+        return [Issue(
+            check, "error", "missing column(s) %s" % sorted(missing),
+            "attach_transfer_risk() guarantees these columns. A caller has dropped "
+            "them, so the multiplier silently defaults to 1.0 everywhere.",
+        )]
+
+    risk = pd.to_numeric(risk_df["Transfer_Risk"], errors="coerce")
+    mult = pd.to_numeric(risk_df["Transfer_Mult"], errors="coerce")
+
+    bad_risk = risk.dropna()[(risk.dropna() < 0) | (risk.dropna() > 1)]
+    if len(bad_risk):
+        issues.append(Issue(
+            check, "error",
+            "%d player(s) with Transfer_Risk outside [0, 1] (e.g. %.3f)"
+            % (len(bad_risk), bad_risk.iloc[0]),
+            "Risk is a probability. score_headlines() clamps it, so an out-of-range "
+            "value means something wrote the column directly.",
+        ))
+
+    bad_mult = mult.dropna()[(mult.dropna() < floor - 1e-9) | (mult.dropna() > 1.0 + 1e-9)]
+    if len(bad_mult):
+        issues.append(Issue(
+            check, "error",
+            "%d player(s) with Transfer_Mult outside [%.2f, 1.0] (e.g. %.3f)"
+            % (len(bad_mult), floor, bad_mult.iloc[0]),
+            "transfer_multiplier() floors at TRANSFER_FLOOR and never exceeds 1.0. "
+            "A value above 1.0 would *inflate* a player's season projection.",
+        ))
+
+    total = len(risk_df)
+    at_risk = int((risk > 0.5).sum())
+    # Only meaningful over a real pool. On a handful of rows a single genuinely
+    # at-risk player is 25% of the frame, and a check that cries wolf gets muted.
+    if total >= MIN_POOL_FOR_FRACTION_CHECK and at_risk / float(total) > MAX_PLAUSIBLE_AT_RISK_FRACTION:
+        issues.append(Issue(
+            check, "error",
+            "%d of %d players (%.0f%%) score above 0.5 transfer risk"
+            % (at_risk, total, 100.0 * at_risk / total),
+            "A window moves a handful of players, not a tenth of the league. Suspect "
+            "keyword tiering matching too broadly, or headline_mentions_player() "
+            "attaching one player's news to everybody.",
+        ))
+
+    if "Transfer_Outlets" in risk_df.columns:
+        outlets = pd.to_numeric(risk_df["Transfer_Outlets"], errors="coerce").fillna(0)
+        # Resolved departures legitimately carry zero outlets — the bootstrap said so.
+        note = risk_df["Transfer_Note"] if "Transfer_Note" in risk_df.columns else pd.Series("", index=risk_df.index)
+        speculative = ~note.astype(str).str.startswith("Departed")
+        leaky = int(((risk > SINGLE_OUTLET_RISK_CEILING) & (outlets <= 1) & speculative).sum())
+        if leaky:
+            issues.append(Issue(
+                check, "warning",
+                "%d player(s) above %.2f risk on a single outlet"
+                % (leaky, SINGLE_OUTLET_RISK_CEILING),
+                "The corroboration gate should hold these near 0.5x. Check that "
+                "Source is being populated from the feed.",
+            ))
+
+    return issues
+
+
+def check_transfer_windows(windows: Optional[dict], today=None) -> List[Issue]:
+    """Warn when the hardcoded transfer-window calendar has gone stale.
+
+    The dates in TRANSFER_WINDOWS are season-specific and cannot be discovered.
+    Once they are all in the past, exposure is permanently 0 and the entire
+    feature silently becomes a no-op — indistinguishable from "nobody is at risk".
+    """
+    check = "transfer_windows"
+    if not windows:
+        return [Issue(check, "error", "transfer window calendar is empty",
+                      "TRANSFER_WINDOWS drives exposure. With no windows every "
+                      "multiplier is 1.0 and the feature is off.")]
+
+    import datetime as _dt
+    ref = today or _dt.date.today()
+    closes = [close for spans in windows.values() for _open, close in spans]
+    if not closes:
+        return [Issue(check, "error", "no window close dates found", "")]
+
+    latest = max(closes)
+    if latest < ref:
+        return [Issue(
+            check, "warning",
+            "latest transfer window closed %s, before today (%s)" % (latest, ref),
+            "TRANSFER_WINDOWS in transfer_risk.py is season-specific and needs "
+            "updating. Until then every transfer discount is silently 1.0.",
+        )]
+    return []
 
 
 def format_issues(issues: Sequence[Issue]) -> str:

@@ -348,3 +348,65 @@ def format_last_updated(when, include_age: bool = True) -> str:
         days = int(minutes // (60 * 24))
         age = "1 day ago" if days == 1 else "%d days ago" % days
     return "%s (%s)" % (stamp, age)
+
+
+def canonical_normalize(name: str) -> str:
+    """
+    Single source of truth for name normalization.
+
+    Converts player names to a canonical form for matching:
+    - Manual substitution for special characters (ø, æ, ð, etc.)
+    - NFKD unicode normalize (decomposes accented characters)
+    - ASCII encode (strips accents)
+    - Lowercase
+    - Remove non-alphanumeric characters
+    - Collapse whitespace
+
+    Examples:
+        "Raúl Jiménez" -> "raul jimenez"
+        "Bruno Fernandes" -> "bruno fernandes"
+        "Heung-Min Son" -> "heungmin son"
+        "N'Golo Kanté" -> "ngolo kante"
+        "Rasmus Højlund" -> "rasmus hojlund"
+
+    Args:
+        name: Player name to normalize
+
+    Returns:
+        Canonical normalized name string
+    """
+    if pd.isna(name) or name is None:
+        return ""
+
+    s = str(name).strip()
+
+    # Manual substitution for special characters that don't decompose cleanly
+    special_chars = {
+        'ø': 'o', 'Ø': 'O',
+        'æ': 'ae', 'Æ': 'AE',
+        'œ': 'oe', 'Œ': 'OE',
+        'ð': 'd', 'Ð': 'D',
+        'þ': 'th', 'Þ': 'Th',
+        'ł': 'l', 'Ł': 'L',
+        'đ': 'd', 'Đ': 'D',
+        'ß': 'ss',
+    }
+    for char, replacement in special_chars.items():
+        s = s.replace(char, replacement)
+
+    # NFKD decomposition separates accents from base characters
+    s = unicodedata.normalize("NFKD", s)
+
+    # Encode to ASCII (drops accent characters) then decode back
+    s = s.encode("ascii", "ignore").decode("ascii")
+
+    # Lowercase
+    s = s.lower()
+
+    # Remove non-alphanumeric except spaces
+    s = re.sub(r"[^a-z0-9 ]", "", s)
+
+    # Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+
+    return s

@@ -12,6 +12,7 @@ Set FPL_SKIP_LIVE_TESTS=1 to opt out entirely (e.g. on a plane).
 """
 
 import os
+import pathlib
 
 import pytest
 
@@ -23,9 +24,17 @@ _PINNED_FOR_OFFLINE_TESTS = ("FPL_CURRENT_GAMEWEEK", "ROTOWIRE_URL")
 
 
 def pytest_collection_modifyitems(items):
-    """Tag everything here with the `live` marker so `-m "not live"` works."""
+    """Tag everything in *this directory* with the `live` marker.
+
+    The hook is handed every collected item in the run, not just this package's,
+    so it must filter by path. Without that it marked the whole suite live and
+    `-m "not live"` deselected all 844 tests instead of skipping the ~35 that
+    touch the network.
+    """
+    here = str(pathlib.Path(__file__).parent.resolve())
     for item in items:
-        item.add_marker(pytest.mark.live)
+        if str(pathlib.Path(str(item.fspath)).resolve()).startswith(here):
+            item.add_marker(pytest.mark.live)
 
 
 @pytest.fixture(scope="session", autouse=True)

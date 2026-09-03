@@ -826,6 +826,11 @@ SECTIONS = {
 # ------------------------------------------------------------
 # Startup Preload - warm caches for faster page navigation
 # ------------------------------------------------------------
+#: How deep to warm transfer news at startup. Matches the Draft Helper's
+#: default scan depth so opening that page usually finds the work already done.
+TRANSFER_NEWS_PREFETCH_DEPTH = 150
+
+
 @st.cache_resource(show_spinner="Loading app data...")
 def preload_app_data():
     """
@@ -864,6 +869,30 @@ def preload_app_data():
             data['rotowire_projections'] = get_rotowire_player_projections(rotowire_url)
     except Exception:
         pass  # Rotowire URL discovery may fail, that's ok
+
+    # Warm the transfer-news cache in the background. One request per player
+    # makes this the slowest thing the Draft Helper does, and it depends on
+    # nothing the user does — so start it at launch and let it finish while they
+    # navigate, rather than making them wait on a button. Daemon thread, writes
+    # only to the SQLite cache, and any failure is silent by design.
+    # Gated on a configured Draft league: resolving the board costs a ~1.3s
+    # season-rankings scrape, and only the Draft Helper consumes this. A
+    # Classic-only user should not pay for it at launch.
+    try:
+        from scripts.common.scraping import start_transfer_news_prefetch
+        from scripts.common.utils import get_rotowire_season_rankings
+
+        season_url = getattr(config, 'ROTOWIRE_SEASON_RANKINGS_URL', None)
+        if season_url and draft_league_id:
+            board = get_rotowire_season_rankings(season_url, limit=400)
+            if board is not None and not board.empty:
+                top = board.head(TRANSFER_NEWS_PREFETCH_DEPTH)
+                start_transfer_news_prefetch(
+                    [(str(r['Player']), str(r['Team'])) for _, r in top.iterrows()],
+                    label='startup',
+                )
+    except Exception:
+        pass  # Prefetch is an optimisation; never let it break startup
 
     return data
 

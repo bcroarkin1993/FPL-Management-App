@@ -9,6 +9,8 @@ import pandas as pd
 import pytest
 
 from scripts.common.data_validation import (
+    check_transfer_risk,
+    check_transfer_windows,
     Issue,
     check_projected_team_total,
     check_score_std,
@@ -476,3 +478,95 @@ class TestCheckElementStates:
     def test_no_available_players_is_an_error(self):
         states = self._states(n_available=0)
         assert _errors(check_element_states(states))
+
+
+class TestCheckTransferRisk:
+    """Every failure mode here is silent: a broken feed renders a page identical
+    to a working one, just with nobody discounted — which is the state that let
+    Watkins be drafted at rank 32 in the first place."""
+
+    @staticmethod
+    def _frame(n_clean=60, **overrides):
+        data = {
+            "Transfer_Risk": [0.0] * n_clean,
+            "Transfer_Mult": [1.0] * n_clean,
+            "Transfer_Outlets": [0] * n_clean,
+            "Transfer_Note": [""] * n_clean,
+        }
+        data.update(overrides)
+        return pd.DataFrame(data)
+
+    def test_healthy_frame_passes(self):
+        df = self._frame()
+        df.loc[0, ["Transfer_Risk", "Transfer_Mult", "Transfer_Outlets"]] = [0.79, 0.34, 5]
+        assert not _errors(check_transfer_risk(df))
+
+    def test_empty_frame_is_an_error(self):
+        assert _errors(check_transfer_risk(pd.DataFrame()))
+        assert _errors(check_transfer_risk(None))
+
+    def test_missing_columns_is_an_error(self):
+        assert _errors(check_transfer_risk(pd.DataFrame({"Player": ["x"]})))
+
+    def test_risk_outside_probability_range_is_an_error(self):
+        assert _errors(check_transfer_risk(
+            pd.DataFrame({"Transfer_Risk": [1.4], "Transfer_Mult": [0.5]})))
+
+    def test_multiplier_above_one_is_an_error(self):
+        """Above 1.0 would *inflate* a player's season projection."""
+        assert _errors(check_transfer_risk(
+            pd.DataFrame({"Transfer_Risk": [0.3], "Transfer_Mult": [1.6]})))
+
+    def test_multiplier_below_the_floor_is_an_error(self):
+        assert _errors(check_transfer_risk(
+            pd.DataFrame({"Transfer_Risk": [0.3], "Transfer_Mult": [0.01]})))
+
+    def test_whole_league_at_risk_is_an_error(self):
+        """A window moves a handful of players. A third of the league means the
+        matcher broke and attached one player's news to everybody."""
+        df = self._frame(n_clean=0, **{
+            "Transfer_Risk": [0.8] * 30 + [0.0] * 70,
+            "Transfer_Mult": [0.3] * 30 + [1.0] * 70,
+            "Transfer_Outlets": [5] * 100,
+            "Transfer_Note": ["x"] * 100,
+        })
+        assert _errors(check_transfer_risk(df))
+
+    def test_fraction_check_ignores_tiny_frames(self):
+        """One genuinely at-risk player is 25% of a four-row frame. A check that
+        cries wolf gets muted."""
+        df = pd.DataFrame({"Transfer_Risk": [0.8, 0.0, 0.0, 0.0],
+                           "Transfer_Mult": [0.3, 1.0, 1.0, 1.0]})
+        assert not _errors(check_transfer_risk(df))
+
+    def test_single_outlet_high_risk_warns(self):
+        df = self._frame()
+        df.loc[0, ["Transfer_Risk", "Transfer_Mult", "Transfer_Outlets"]] = [0.9, 0.3, 1]
+        issues = check_transfer_risk(df)
+        assert issues and all(i.severity == "warning" for i in issues)
+
+    def test_resolved_departure_does_not_trip_the_outlet_warning(self):
+        """The bootstrap said so; it needs no corroborating newspapers."""
+        df = self._frame()
+        df.loc[0, ["Transfer_Risk", "Transfer_Mult", "Transfer_Outlets"]] = [1.0, 0.1, 0]
+        df.loc[0, "Transfer_Note"] = "Departed — Al Qadsiah"
+        assert not check_transfer_risk(df)
+
+
+class TestCheckTransferWindows:
+    """The window calendar is hardcoded and cannot be discovered. Once it lapses,
+    exposure is permanently 0 and the whole feature is a silent no-op."""
+
+    def test_current_windows_pass(self):
+        from datetime import date
+        from scripts.common.transfer_risk import TRANSFER_WINDOWS
+        assert not check_transfer_windows(TRANSFER_WINDOWS, today=date(2026, 8, 29))
+
+    def test_lapsed_calendar_warns(self):
+        from datetime import date
+        from scripts.common.transfer_risk import TRANSFER_WINDOWS
+        issues = check_transfer_windows(TRANSFER_WINDOWS, today=date(2029, 1, 1))
+        assert issues and all(i.severity == "warning" for i in issues)
+
+    def test_empty_calendar_is_an_error(self):
+        assert _errors(check_transfer_windows({}))
