@@ -1219,3 +1219,123 @@ class TestNew1GWScore:
 
         # FFP override (95%) should give higher score than FPL-only (25%)
         assert result_ffp["1GW"].iloc[0] > result_fpl["1GW"].iloc[0]
+
+
+# =============================================================================
+# TestFFPMatchingGuards
+# =============================================================================
+
+class TestFFPMatchingGuards:
+    """Regressions taken from live FFP + FPL data on 2026-09-03.
+
+    Both FFP merges used to end in two team-agnostic, position-free tiers, so 53
+    of 652 pool rows resolved on a shared surname alone and real players carried
+    other players' numbers: Kalvin Phillips (MID) held Dillon Phillips'
+    goalkeeper start rate, Abu Kamara held Boubacar Kamara's 90%. These columns
+    feed the 1GW score and 40% of ROS, so the damage was silent and app-wide.
+
+    Every name pair below is one the live data actually produced.
+    """
+
+    FFP = pd.DataFrame([
+        # name,               team,           position, predicted, start, next3
+        ("Dillon Phillips",   "Hull City",    "GK",     3.1,  0,   9.3),
+        ("Boubacar Kamara",   "Aston Villa",  "MID",    2.7,  90,  8.1),
+        ("Jacob Murphy",      "Newcastle",    "MID",    3.4,  70, 10.2),
+        ("Nicolas Jackson",   "Chelsea",      "FWD",    1.9,  50,  5.7),
+        ("Chris Wood",        "Notts Forest", "FWD",    3.6,  10, 10.8),
+    ], columns=["Name", "Team", "Position", "Predicted", "Start", "Next3GWs"])
+
+    def _pool(self, rows):
+        return pd.DataFrame(rows, columns=["Player", "Team", "Position", "Points"])
+
+    def test_surname_alone_never_crosses_team_and_position(self):
+        """Kalvin Phillips (MCI, MID) must not inherit Dillon Phillips' (HUL, GK) data."""
+        pool = self._pool([("Kalvin Phillips", "MCI", "M", 2.0)])
+        result = merge_ffp_single_gw_data(pool, self.FFP)
+        assert pd.isna(result.loc[0, "FFP_Predicted"])
+        assert pd.isna(result.loc[0, "FFP_Start"])
+
+    def test_surname_alone_never_crosses_team_within_a_position(self):
+        """Abu Kamara (HUL) must not inherit Boubacar Kamara's (AVL) 90% start rate."""
+        pool = self._pool([("Abu Kamara", "HUL", "M", 1.5)])
+        result = merge_ffp_single_gw_data(pool, self.FFP)
+        assert pd.isna(result.loc[0, "FFP_Start"])
+
+    def test_surname_alone_never_crosses_position_within_a_team(self):
+        """Alex Murphy (NEW, DEF) and Jacob Murphy (NEW, MID) are team-mates."""
+        pool = self._pool([("Alex Murphy", "NEW", "D", 1.0)])
+        result = merge_ffp_single_gw_data(pool, self.FFP)
+        assert pd.isna(result.loc[0, "FFP_Predicted"])
+
+    def test_matches_a_player_the_source_still_files_at_his_old_club(self):
+        """FPL had Jackson at Villa while FFP still had him at Chelsea."""
+        pool = self._pool([("Nicolas Jackson", "AVL", "F", 3.0)])
+        result = merge_ffp_single_gw_data(pool, self.FFP)
+        assert result.loc[0, "FFP_Predicted"] == 1.9
+
+    def test_ffps_spelling_of_forest_resolves(self):
+        """"Notts Forest" was absent from TEAM_FULL_TO_SHORT, which pushed all 28
+        Forest rows past the exact tiers and into the loose ones."""
+        pool = self._pool([("Chris Wood", "NFO", "F", 4.0)])
+        result = merge_ffp_single_gw_data(pool, self.FFP)
+        assert result.loc[0, "FFP_Predicted"] == 3.6
+
+    def test_exact_match_wins_a_contested_reference_row(self):
+        """A cross-team guess must not steal the row an exact match earned."""
+        pool = self._pool([
+            ("Nicolas Jackson", "NFO", "F", 2.0),   # cross-team claim
+            ("Nicolas Jackson", "CHE", "F", 3.0),   # exact claim
+        ])
+        result = merge_ffp_single_gw_data(pool, self.FFP)
+        assert pd.isna(result.loc[0, "FFP_Predicted"])
+        assert result.loc[1, "FFP_Predicted"] == 1.9
+
+    def test_two_cross_team_claimants_cancel_out(self):
+        """Ambiguity resolves to no match rather than an arbitrary winner."""
+        pool = self._pool([
+            ("Nicolas Jackson", "AVL", "F", 2.0),
+            ("Nicolas Jackson", "NFO", "F", 3.0),
+        ])
+        result = merge_ffp_single_gw_data(pool, self.FFP)
+        assert result["FFP_Predicted"].isna().all()
+
+    def test_position_is_read_from_whichever_column_the_frame_carries(self):
+        """Frames arrive with Position, position_abbrv or element_type."""
+        pool = pd.DataFrame({
+            "Player": ["Kalvin Phillips", "Nicolas Jackson"],
+            "Team": ["MCI", "AVL"],
+            "position_abbrv": ["MID", "FWD"],
+        })
+        result = merge_ffp_single_gw_data(pool, self.FFP)
+        assert pd.isna(result.loc[0, "FFP_Predicted"])
+        assert result.loc[1, "FFP_Predicted"] == 1.9
+
+        pool = pd.DataFrame({
+            "Player": ["Kalvin Phillips", "Nicolas Jackson"],
+            "Team": ["MCI", "AVL"],
+            "element_type": [3, 4],
+        })
+        result = merge_ffp_single_gw_data(pool, self.FFP)
+        assert pd.isna(result.loc[0, "FFP_Predicted"])
+        assert result.loc[1, "FFP_Predicted"] == 1.9
+
+    def test_multi_gw_merge_has_the_same_guards(self):
+        """MultiGW_Proj is 40% of ROS, so it carried the same bug."""
+        pool = self._pool([
+            ("Kalvin Phillips", "MCI", "M", 2.0),
+            ("Nicolas Jackson", "AVL", "F", 3.0),
+        ])
+        result = blend_multi_gw_projections(pool, self.FFP)
+        assert result.loc[0, "MultiGW_Proj"] == 6.0    # fallback 2.0 x 3, not 9.3
+        assert result.loc[1, "MultiGW_Proj"] == 5.7    # matched across the transfer
+
+    def test_reports_match_stats(self):
+        pool = self._pool([
+            ("Chris Wood", "NFO", "F", 4.0),
+            ("Kalvin Phillips", "MCI", "M", 2.0),
+        ])
+        stats = {}
+        merge_ffp_single_gw_data(pool, self.FFP, stats=stats)
+        assert stats["matched"] == 1
+        assert stats["total"] == len(self.FFP)

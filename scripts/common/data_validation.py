@@ -494,7 +494,8 @@ def check_team_strength(team_df: Optional[pd.DataFrame],
 
 
 def check_merge_match_rate(matched: int, total: int, source_name: str,
-                           min_rate: float = 0.90) -> List[Issue]:
+                           min_rate: float = 0.90,
+                           input_rows: Optional[int] = None) -> List[Issue]:
     """Assert a name-based merge actually matched most of its reference rows.
 
     This is the tripwire for the quietest failure mode in the app. Projection
@@ -506,6 +507,21 @@ def check_merge_match_rate(matched: int, total: int, source_name: str,
 
     A real miss rate is small and consists of genuinely unlisted players, so the
     floor is set well below any healthy run rather than at a target.
+
+    ``input_rows`` is the size of the frame being merged *into*, and the check
+    **abstains** when that frame is smaller than the reference table. The claim
+    being tested is "the reference was mostly claimed", which only means anything
+    when the caller could have claimed all of it. The Waiver Wire merges ~105
+    available players against a 424-row reference, so it can never claim more
+    than a quarter of them: it logged an ERROR at 24.8% on every page load while
+    matching 100% of what it was given. Nor is the smaller frame a fair
+    denominator -- a subset of the pool holds backups and unranked players that
+    no projection source lists, and expecting them to match is the same false
+    alarm wearing a different number. A check that cries wolf gets muted, which
+    costs the tripwire its whole purpose.
+
+    Full-pool callers still run it, and every page that merges a subset also
+    enriches the full reference pool on the same load, so the tripwire is armed.
     """
     check = "merge_match_rate"
     issues: List[Issue] = []
@@ -516,6 +532,9 @@ def check_merge_match_rate(matched: int, total: int, source_name: str,
             "%s: reference table was empty, nothing to match" % source_name,
             "Check the source URL and that the scrape returned rows.",
         )]
+
+    if input_rows is not None and input_rows < total:
+        return issues
 
     rate = matched / float(total)
     if rate < min_rate:

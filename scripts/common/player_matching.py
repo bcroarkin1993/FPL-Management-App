@@ -1024,6 +1024,15 @@ class ReferenceMatcher:
          -- token sets are unordered, so this also covers reversed name order
             ("Kaoru Mitoma" vs "Mitoma Kaoru")
       5. difflib ratio >= fuzzy_threshold, scoped to (team, position)
+      6. exact name + position, team ignored -- opt-in only
+
+    Tier 6 exists because two sources disagree about a club for weeks after a
+    transfer: FPL lists Nicolas Jackson at Aston Villa while FFP still has him
+    at Chelsea, and every team-scoped tier misses him. It is off by default,
+    and safe only because it demands the *whole* name plus position: the
+    surname-only version of this idea once gave Alex Palmer (backup GK) Cole
+    Palmer's stats. Enable it for reference tables that lag on transfers, not
+    for one-shot rankings where a club disagreement means the wrong player.
 
     Args:
         reference_df: Frame to match against.
@@ -1031,9 +1040,10 @@ class ReferenceMatcher:
         web_name_col: Optional short/display name column. Tier skipped if absent.
         team_col: Team column. Required -- without it only ambiguity-free
             global name matches are possible, so all tiers degrade to tier 1.
-        position_col: Position column. Tiers 3-5 are skipped if absent, since
+        position_col: Position column. Tiers 3-6 are skipped if absent, since
             they rely on it as the corroborating signal.
         fuzzy_threshold: Minimum difflib ratio for tier 5.
+        allow_cross_team_exact: Enable tier 6.
     """
 
     def __init__(
@@ -1044,11 +1054,14 @@ class ReferenceMatcher:
         team_col: Optional[str] = "Team",
         position_col: Optional[str] = "Position",
         fuzzy_threshold: float = 0.78,
+        allow_cross_team_exact: bool = False,
     ):
         self.fuzzy_threshold = fuzzy_threshold
+        self.allow_cross_team_exact = allow_cross_team_exact
         self._exact: Dict[tuple, list] = {}
         self._exact_web: Dict[tuple, list] = {}
         self._groups: Dict[tuple, list] = {}
+        self._cross_team: Dict[tuple, list] = {}
         self.tier_counts: Dict[str, int] = {}
 
         if reference_df is None or reference_df.empty or name_col not in reference_df.columns:
@@ -1078,6 +1091,8 @@ class ReferenceMatcher:
                     (idx, norm, web_norm, _name_tokens(row[name_col]),
                      _name_tokens(row[web_name_col]) if has_web else frozenset())
                 )
+                if allow_cross_team_exact and norm:
+                    self._cross_team.setdefault((norm, pos), []).append(idx)
 
     @staticmethod
     def _sole(hits) -> Optional[object]:
@@ -1094,12 +1109,18 @@ class ReferenceMatcher:
         """
         return self.match_with_tier(name, team, position)[0]
 
-    def match_with_tier(self, name, team=None, position=None):
+    def match_with_tier(self, name, team=None, position=None, cross_team=True):
         """Like :meth:`match`, but returns ``(index, tier_rank)``.
 
-        tier_rank is 1 (strongest) to 5 (weakest), or None when unmatched.
+        tier_rank is 1 (strongest) to 6 (weakest), or None when unmatched.
         Callers resolving contention for the same reference row should prefer
         the lower rank.
+
+        Set ``cross_team=False`` to suppress tier 6 for this query alone. Callers
+        retry with a short display name when the full name misses, and a short
+        name is too weak a key to also drop the team: "Savio" is one word that
+        several players could answer to, so matching it at a club he does not
+        play for rests on nothing but the word itself.
         """
         norm = _hyphen_split_normalize(name)
         if not norm:
@@ -1119,12 +1140,12 @@ class ReferenceMatcher:
         # Tiers 3-5 require position as a corroborating signal.
         if not getattr(self, "_has_pos", False) or position is None:
             return None, None
-        group = self._groups.get((team_code, str(position)))
-        if not group:
-            return None, None
-
         tokens = _name_tokens(name)
         last_word = norm.split()[-1]
+
+        # A transferred player's new club may have no reference rows at all, so
+        # an empty group must fall through to tier 6 rather than end the search.
+        group = self._groups.get((team_code, str(position))) or []
 
         hits = [g[0] for g in group if g[1] and g[1].split()[-1] == last_word]
         hit = self._sole(hits)
@@ -1164,4 +1185,13 @@ class ReferenceMatcher:
         if best_score >= self.fuzzy_threshold and best_score > runner_up:
             self.tier_counts["fuzzy"] = self.tier_counts.get("fuzzy", 0) + 1
             return best_idx, 5
+
+        # Tier 6: the same player, filed under a club he has already left.
+        if not cross_team:
+            return None, None
+        hit = self._sole(self._cross_team.get((norm, str(position))))
+        if hit is not None:
+            self.tier_counts["cross_team_exact"] = (
+                self.tier_counts.get("cross_team_exact", 0) + 1)
+            return hit, 6
         return None, None

@@ -317,6 +317,29 @@ class TestCheckMergeMatchRate:
         issues = check_merge_match_rate(0, 0, "season rankings")
         assert issues and issues[0].severity == "warning"
 
+    def test_a_frame_smaller_than_the_reference_is_not_judged(self):
+        """The Waiver Wire merges ~105 available players against a 424-row
+        reference, so it can never claim more than a quarter of them. It logged
+        an ERROR at "24.8%" on every page load while matching 100% of its input,
+        and a check that cries wolf is a check nobody reads."""
+        assert check_merge_match_rate(105, 424, "season rankings", input_rows=105) == []
+        assert check_merge_match_rate(60, 424, "season rankings", input_rows=105) == []
+
+    def test_full_pool_regression_still_fires_with_input_rows(self):
+        """622 pool rows against 425 reference rows: the reference is the binding
+        constraint, so the original 356/425 regression must still be caught."""
+        issues = check_merge_match_rate(356, 425, "season rankings", input_rows=622)
+        assert issues and "356/425" in issues[0].message
+
+    def test_empty_input_frame_is_not_a_failure(self):
+        assert check_merge_match_rate(0, 425, "season rankings", input_rows=0) == []
+
+    def test_a_full_pool_caller_is_still_judged(self):
+        """622 pool rows against 425 reference rows: the caller could have
+        claimed every reference row, so the floor still applies."""
+        assert check_merge_match_rate(420, 425, "season rankings", input_rows=622) == []
+        assert _errors(check_merge_match_rate(100, 425, "season rankings", input_rows=622))
+
 
 class TestCheckInitialSquad:
     """A legal, sensibly-priced 15-man Classic squad."""
