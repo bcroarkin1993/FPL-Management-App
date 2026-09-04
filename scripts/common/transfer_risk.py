@@ -24,10 +24,13 @@ imported by GitHub Actions (``waiver_alerts.py``), so it must not reach for
 import logging
 import re
 from datetime import date, datetime
+from typing import NamedTuple
 
 import pandas as pd
 
 from scripts.common.text_helpers import TEAM_FULL_TO_SHORT, canonical_normalize
+from scripts.common.transfer_odds import (ODDS_COLUMNS, blend_odds_risk,
+                                          odds_age_days, odds_age_weight)
 
 _logger = logging.getLogger(__name__)
 
@@ -601,6 +604,23 @@ def parse_destination(text, pl_teams, exclude_team=None):
     return None, WEIGHT_UNKNOWN
 
 
+class HeadlineScore(NamedTuple):
+    """What the news says about one player.
+
+    Seven positional values is too many to track by eye, hence the names.
+    ``destinations`` is the full decayed vote per club, not just the winner:
+    rendering it beside the bookmaker's ladder is the point of having two
+    sources, and taking only the argmax threw that away.
+    """
+    risk: float
+    destination: object
+    weight: float
+    outlets: int
+    evidence: list
+    fee: object
+    destinations: list
+
+
 def score_headlines(headlines, player_name, team=None, pl_teams=None, today=None,
                     ambiguous=None, other_surnames=None):
     """Score a player's news into a risk in ``[0, 1]``.
@@ -618,9 +638,9 @@ def score_headlines(headlines, player_name, team=None, pl_teams=None, today=None
     lands near 0.85.  That corroboration gate is the main defence against a single
     speculative story wrecking a good player's ranking.
 
-    Returns ``(risk, destination, weight, n_outlets, evidence, fee)``. ``risk``
-    is zero for a move that keeps the player in the Premier League — the
-    destination and fee are still reported so the caller can flag it.
+    Returns a :class:`HeadlineScore`. ``risk`` is zero for a move that keeps the
+    player in the Premier League — the destination and fee are still reported so
+    the caller can flag it.
     """
     today = today or date.today()
     pl_teams = pl_teams or []
@@ -675,7 +695,7 @@ def score_headlines(headlines, player_name, team=None, pl_teams=None, today=None
         })
 
     if best <= 0:
-        return 0.0, None, WEIGHT_UNKNOWN, 0, [], None
+        return HeadlineScore(0.0, None, WEIGHT_UNKNOWN, 0, [], None, [])
 
     n_outlets = len(outlets)
     corroboration = (CORROBORATION_FLOOR + (1.0 - CORROBORATION_FLOOR)
@@ -693,7 +713,18 @@ def score_headlines(headlines, player_name, team=None, pl_teams=None, today=None
         risk = min(risk, _STAY_SIGNAL_RISK_CAP)
 
     evidence.sort(key=lambda e: e["Weight"], reverse=True)
-    return risk, destination, weight, n_outlets, evidence[:10], best_fee
+
+    total_votes = sum(dest_votes.values()) or 1.0
+    destinations = [
+        {"Destination": club,
+         "Votes": round(votes, 3),
+         "Share": round(votes / total_votes, 4),
+         "Intra_PL": dest_weight == WEIGHT_INTRA_PL}
+        for (club, dest_weight), votes in
+        sorted(dest_votes.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+    return HeadlineScore(risk, destination, weight, n_outlets, evidence[:10],
+                         best_fee, destinations)
 
 
 def resolve_from_bootstrap(status, news, pl_teams):
@@ -724,6 +755,63 @@ def window_for_destination(destination) -> str:
     if n and any(re.search(p, n) for p in _SAUDI_PATTERNS):
         return "saudi"
     return "default"
+
+
+#: Human labels for the window calendar's region keys.
+WINDOW_LABELS = {
+    "premier_league": "English",
+    "default": "European",
+    "saudi": "Saudi Pro League",
+}
+
+
+def window_status(today=None):
+    """State of every transfer window, for display and for page emphasis.
+
+    Transfers matter to a squad only while some window is open, and injuries
+    matter most when none is.  Nothing in the app could previously tell the
+    difference: ``transfer_exposure`` silently returns 0 once the calendar is
+    spent, which renders identically to "nobody is at risk".
+
+    Returns ``{region: {label, open, opens, closes, days_remaining, days_until}}``.
+    ``days_remaining`` counts down an open window; ``days_until`` counts up to
+    the next one.  Both are ``None`` when there is no window left this season.
+    """
+    today = today or date.today()
+    status = {}
+    for region, spans in (TRANSFER_WINDOWS or {}).items():
+        current = next((s for s in spans if s[0] <= today <= s[1]), None)
+        upcoming = sorted([s for s in spans if s[0] > today and s[0] < SEASON_END])
+        if current:
+            status[region] = {
+                "label": WINDOW_LABELS.get(region, region.replace("_", " ").title()),
+                "open": True, "opens": current[0], "closes": current[1],
+                "days_remaining": (current[1] - today).days, "days_until": None,
+            }
+        elif upcoming:
+            nxt = upcoming[0]
+            status[region] = {
+                "label": WINDOW_LABELS.get(region, region.replace("_", " ").title()),
+                "open": False, "opens": nxt[0], "closes": nxt[1],
+                "days_remaining": None, "days_until": (nxt[0] - today).days,
+            }
+        else:
+            status[region] = {
+                "label": WINDOW_LABELS.get(region, region.replace("_", " ").title()),
+                "open": False, "opens": None, "closes": None,
+                "days_remaining": None, "days_until": None,
+            }
+    return status
+
+
+def any_window_open(today=None) -> bool:
+    """True while a move can still complete somewhere.
+
+    Drives which tab leads on the Availability page.  Note this stays true after
+    the English deadline while the Saudi window runs — the exact gap that let
+    Ollie Watkins leave five gameweeks into a season whose window had "closed".
+    """
+    return any(s["open"] for s in window_status(today).values())
 
 
 def next_window_close(destination, today=None):
@@ -826,8 +914,29 @@ def _format_note(risk, destination, outlets, resolved, status, fee=None) -> str:
     return ""
 
 
+def _read_odds_row(odds_row, today=None):
+    """``(odds_risk, age_days, age_weight)`` from a matched odds row.
+
+    Returns ``(0.0, nan, 0.0)`` when there is no usable quote, which makes
+    ``blend_odds_risk`` a no-op — so the caller never has to branch.
+    """
+    if odds_row is None:
+        return 0.0, float("nan"), 0.0
+    try:
+        exit_p = odds_row.get("Odds_Exit")
+        exit_p = float(exit_p) if exit_p is not None else 0.0
+    except (TypeError, ValueError):
+        exit_p = 0.0
+    if not (exit_p > 0) or pd.isna(exit_p):
+        return 0.0, float("nan"), 0.0
+    updated = odds_row.get("Odds_Updated")
+    age = odds_age_days(updated, today)
+    return max(0.0, min(1.0, exit_p)), age, odds_age_weight(updated, today)
+
+
 def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
-                         name_col: str = "Player", team_col: str = "Team"):
+                         name_col: str = "Player", team_col: str = "Team",
+                         odds_df=None):
     """Attach transfer-risk columns to a player frame.
 
     ``player_df`` needs a name column and, ideally, a team column.  If it also
@@ -841,6 +950,17 @@ def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
     headline set already belongs to a known player.  That is why this module can
     stay free of ``player_matching`` (which imports Streamlit).
 
+    ``odds_df`` is optional bookmaker next-club odds, already matched to this
+    frame's ``name_col`` by ``transfer_risk_app.attach_odds`` (name matching needs
+    ``ReferenceMatcher``, which reaches Streamlit, so it cannot happen here).  It
+    needs ``Player`` plus any of ``Odds_Exit``, ``Odds_Destination``,
+    ``Odds_Fractional``, ``Odds_Bookmaker``, ``Odds_Updated``.
+
+    Odds are consulted **only** where the bootstrap has not already resolved the
+    move.  A completed deal is ground truth and a price is speculation; letting a
+    stale quote reopen a settled question is precisely how a betting feed came to
+    price Ollie Watkins at 6% months after he had gone.
+
     A player with no news gets risk 0.0 and multiplier exactly 1.0, so callers can
     apply the multiplier unconditionally.
     """
@@ -848,6 +968,10 @@ def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
     if result.empty:
         for col in RISK_COLUMNS:
             result[col] = pd.Series(dtype="object" if "Note" in col or "Destination" in col else "float")
+        for col in ODDS_COLUMNS:
+            result[col] = pd.Series(dtype="object" if col in
+                                    ("Odds_Destination", "Odds_Fractional",
+                                     "Odds_Bookmaker", "Odds_Updated") else "float")
         return result
 
     today = today or date.today()
@@ -868,8 +992,17 @@ def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
     has_status = "status" in result.columns
     has_news = "news" in result.columns
 
+    by_odds = {}
+    if odds_df is not None and not getattr(odds_df, "empty", True):
+        for _, orow in odds_df.iterrows():
+            key = _norm(orow.get("Player"))
+            if key:
+                by_odds[key] = orow
+
     risks, exposures, mults, dests = [], [], [], []
     outlets_col, notes, statuses, fees = [], [], [], []
+    odds_risks, odds_dests, odds_fracs = [], [], []
+    odds_books, odds_updates, odds_ages, odds_weights = [], [], [], []
 
     for _, row in result.iterrows():
         name = row.get(name_col)
@@ -880,6 +1013,11 @@ def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
             resolved = resolve_from_bootstrap(
                 row.get("status"), row.get("news") if has_news else None, pl_teams
             )
+
+        # Reported for every row so the page can show what the market said even
+        # where it was not allowed to move the score.
+        odds_row = by_odds.get(_norm(name))
+        odds_risk, odds_age, odds_weight = _read_odds_row(odds_row, today)
 
         fee = None
         if resolved is not None:
@@ -893,10 +1031,19 @@ def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
             status = STATUS_DEPARTED if risk > 0 else STATUS_MOVING_PL
         else:
             headlines = by_player.get(_norm(name), [])
-            risk, destination, weight, n_outlets, _ev, fee = score_headlines(
+            scored = score_headlines(
                 headlines, name, team, pl_teams, today=today, ambiguous=ambiguous,
                 other_surnames=all_surnames,
             )
+            risk, destination, weight = scored.risk, scored.destination, scored.weight
+            n_outlets, fee = scored.outlets, scored.fee
+
+            if odds_risk > 0:
+                risk = blend_odds_risk(risk, odds_risk, odds_weight)
+                if not destination and odds_row is not None and odds_row.get("Odds_Destination"):
+                    destination = str(odds_row.get("Odds_Destination"))
+                    weight = WEIGHT_UNKNOWN
+
             if risk > 0:
                 status = STATUS_AT_RISK
             elif destination and weight == WEIGHT_INTRA_PL:
@@ -924,6 +1071,14 @@ def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
         notes.append(_format_note(risk, destination, n_outlets,
                                   resolved is not None, status, fee))
 
+        odds_risks.append(round(float(odds_risk), 4))
+        odds_ages.append(round(float(odds_age), 1) if odds_age is not None else float("nan"))
+        odds_weights.append(round(float(odds_weight), 4))
+        odds_dests.append(str(odds_row.get("Odds_Destination") or "") if odds_row is not None else "")
+        odds_fracs.append(str(odds_row.get("Odds_Fractional") or "") if odds_row is not None else "")
+        odds_books.append(str(odds_row.get("Odds_Bookmaker") or "") if odds_row is not None else "")
+        odds_updates.append(str(odds_row.get("Odds_Updated") or "") if odds_row is not None else "")
+
     result["Transfer_Risk"] = risks
     result["Transfer_Exposure"] = exposures
     result["Transfer_Mult"] = mults
@@ -932,6 +1087,14 @@ def attach_transfer_risk(player_df, news_df=None, pl_teams=None, today=None,
     result["Transfer_Note"] = notes
     result["Transfer_Status"] = statuses
     result["Transfer_Fee"] = fees
+
+    result["Odds_Risk"] = odds_risks
+    result["Odds_Destination"] = odds_dests
+    result["Odds_Fractional"] = odds_fracs
+    result["Odds_Bookmaker"] = odds_books
+    result["Odds_Updated"] = odds_updates
+    result["Odds_Age_Days"] = odds_ages
+    result["Odds_Weight"] = odds_weights
     return result
 
 

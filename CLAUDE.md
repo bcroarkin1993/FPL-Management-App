@@ -63,7 +63,7 @@ The Odds API ────────────┘
 **Page scripts** - Organized by section, each implements a `show_*_page()` function:
 - `scripts/draft/` - home.py, waiver_wire.py, fixture_projections.py, team_analysis.py, league_analysis.py, draft_helper.py
 - `scripts/classic/` - home.py, team_analysis.py, fixture_projections.py, transfers.py, free_hit.py, league_analysis.py
-- `scripts/fpl/` - fixtures.py, player_statistics.py, projected_lineups.py, injuries.py
+- `scripts/fpl/` - fixtures.py, player_statistics.py, projected_lineups.py, availability.py (transfer news + odds + injuries), injuries.py
 
 ### External Data Sources
 
@@ -758,6 +758,125 @@ renders a page identical to a working one), on a multiplier above 1.0 (which
 would *inflate* a projection), and on more than 10% of a 50+ player pool being at
 risk — that signature means the matcher broke, not that the league is emptying.
 
+## Transfer Odds Model — the market as a third opinion
+
+`scripts/common/transfer_odds.py` (pure), `odds_feeds.py` (fetch),
+`transfer_risk_app.attach_odds()` (name matching). Surfaced on the Availability
+page. News tells you a story is being written; a price tells you what somebody is
+willing to be wrong about, and a market can exist for a player no headline names.
+
+**Bookmaker odds were rejected once and that verdict was half right.** The
+rejection judged `footballtransfers.co.uk/odds/<slug>` — a page that still shows
+the player's club as "Unknown" behind JavaScript loading spinners. What it missed
+is that the *numbers* on that page are server-rendered in a plain HTML table, and
+that `/odds` carries a live index of ~57 markets in a React payload. A stale price
+is usable the moment it is **labelled** stale, which is the whole design here.
+`oddschecker.com` returns 403 to automated fetches; `bettingodds.com` publishes
+prices inside prose and its FAQ still says the window shuts in February 2024.
+
+### A ladder is not a probability distribution
+
+The single most important thing in the module. A live ladder:
+
+```
+Any Saudi club   8/11   57.9%     <- contains Al Ittihad and Al Hilal
+Al Ittihad        7/4   36.4%
+Any MLS Team      5/2   28.6%
+Al Hilal          7/1   12.5%
+Any French club   8/1   11.1%
+Any Italian club  8/1   11.1%
+                        157.6%
+```
+
+That excess is mostly **overlap**, not margin. Normalising it whole reports Saudi
+at 37% where the market says 58%, understating every row by counting one outcome
+three times. `disjoint_ladder()` keeps each outcome once — the aggregate wins,
+being the broader market — which takes Salah from 1.58 to 1.09. `group_ladder()`
+then re-attaches the member clubs for display *without* summing them, because the
+specific clubs are the interesting part.
+
+A club whose region cannot be resolved is **kept**, not dropped: unknown
+vocabulary must cost a visible overround, never a silent lost destination.
+
+**Do not read the excess as margin or back a P(leaves) out of it.** These are
+independent binary bets ("Barcola to Liverpool"), each carrying its own margin,
+not one coupled book over a partition — the Mateta ladder totals 1.75 across six
+clubs that do not overlap at all.
+
+### What the two numbers mean
+
+No bookmaker prices "stays at Liverpool", so normalising cannot yield P(leaves) —
+it would force it to 1.0 by construction. Hence two different questions:
+
+| Output | Question |
+|---|---|
+| `normalise_ladder()` | *Given that he moves*, where to. Sums to 1.0. |
+| `exit_probability()` | The shortest quoted price on a departure. A floor on leaving at all. |
+
+### Staleness is measured, never assumed
+
+```
+odds_weight = 0.5 ** (age_days / 45)      # vs 10-day half-life for news
+```
+
+Prices move slower than headlines, hence the longer half-life. The live Salah
+quote is stamped `semanticOddsUpdatedAt = 2026-03-25` — 163 days old, weight
+0.08. It renders, banded 🔴 archival, and barely moves the score. **A missing
+timestamp is treated as 30 days old, not fresh**: a parse failure must not read
+as confidence, the same reasoning as `WEIGHT_UNKNOWN`.
+
+### Blending
+
+```
+blended = (news*W_NEWS + odds*odds_weight*W_ODDS) / (W_NEWS + odds_weight*W_ODDS)
+```
+
+Returns `news_risk` exactly when there is no usable quote, so it applies
+unconditionally. Note a zero `news_risk` is an *observation* — the model looked
+and found nothing — so a live 58% market with no headlines blends to ~0.25, not
+0.58. Damping that way is deliberate: the opposite error prices a name-matching
+failure as a transfer saga.
+
+**Odds are consulted only where the bootstrap has not resolved the move.** A
+completed deal is ground truth and a price is speculation; letting a stale quote
+reopen a settled question is exactly how Watkins came to be priced at 6% months
+after he had gone.
+
+### Two traps found by running it against live data
+
+1. **A market whose destination is the player's own club has already settled.**
+   The feed still quotes "Bradley Barcola to Liverpool" after Liverpool signed
+   him; scored as exit risk that says a new arrival is 25% likely to leave. Four
+   of 25 matched markets were in this state. `attach_odds` drops them, resolving
+   club names through `team_code()`/`TEAM_FULL_TO_SHORT` — never raw strings.
+   This is the inverse of `parse_destination`'s `exclude_team` trap.
+2. **Uniqueness inside the pool is not enough for a name-only key.** The odds
+   feed quotes players who have *left* the league. With Darwin Núñez gone from
+   the FPL pool, the surname "nunez" resolved uniquely — to Marcelino Núñez, who
+   was handed Darwin's market. The fallback is therefore a **token subset** in
+   either direction (`"bruno fernandes" ⊂ "bruno borges fernandes"`), never a
+   bare surname, and ambiguity still resolves to no match. Same lesson as
+   Alex/Cole Palmer, one step further out.
+
+`attach_odds` cannot use `ReferenceMatcher`: the feed publishes a bare name and
+the club the player is going *to*, with no position, and every tier of the shared
+matcher below the first is scoped to team or position.
+
+### Validation
+
+`check_transfer_odds()` errors on an empty ladder, an implied probability outside
+`(0, 1]`, a disjoint total below 1.0 (a bookmaker does not offer an arbitrage, so
+a row is missing — usually the favourite), and normalised shares not summing to
+1.0. The precise overlap detector is a **comparison against `ladder_overround()`
+itself**, because a threshold cannot separate 1.58 from 1.09 — both are inside
+any honest band. A high total and an old quote are warnings, not errors.
+
+`check_transfer_risk()` now excludes bootstrap-resolved departures from its
+at-risk *fraction* check. Confirmed departures score 1.0 by construction, and the
+Availability tracker deliberately lists them — judged against the whole frame it
+failed at 82% while working perfectly.
+
+
 ## Team Strength Model — Draft Power Rankings
 
 `scripts/common/team_strength.py`. Answers "how good is each roster in my league?"
@@ -963,7 +1082,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Transfer Risk Tracking | Phases 1 & 2 complete | Outbound (Google News RSS + bootstrap ground truth + per-region windows) and inbound (per-club feeds, arrivals watchlist, minutes competition, fee attribution, `Transfer_Status`) are both wired into the Draft Helper board behind separate toggles. Remaining: Transfer Watch evidence page, Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model". |
+| Transfer Risk Tracking | Phases 1-3 complete | Outbound (Google News RSS + bootstrap ground truth + per-region windows), inbound (per-club feeds, arrivals watchlist, minutes competition, fee attribution, `Transfer_Status`) and bookmaker odds are wired into the Draft Helper board and the Availability page. Remaining: Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model" and "Transfer Odds Model". |
 | Mini-League Rival Tracker | Not Started | Tab on League Analysis pages. Show differential players, projected points gap, effective ownership within mini-league. Data available via get_league_player_ownership (Draft) and team picks (Classic). No transfer advice (handled elsewhere). |
 | Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2 trade discovery (position-matched — see "Draft Transaction Rules"; cross-position and 2-for-1 shapes were removed as FPL forbids them), acceptance likelihood scoring, Explore Teams comparison, Regression Watch (buy-low/sell-high) |
 | Historical Data Analysis | Completed | Season History section on Classic Team Analysis (rank chart, points chart, data table); League Standing metrics on Draft Team Analysis |

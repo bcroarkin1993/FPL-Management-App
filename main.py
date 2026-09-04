@@ -38,7 +38,7 @@ from scripts.fpl.fixtures import show_club_fixtures_section
 from scripts.fpl.player_statistics import show_player_stats_page
 from scripts.fpl.player_projections import show_player_projections_page
 from scripts.fpl.projected_lineups import show_projected_lineups
-from scripts.fpl.injuries import show_injuries_page
+from scripts.fpl.availability import show_availability_page
 from scripts.fpl.price_changes import show_price_changes_page
 from scripts.fpl.gameweek_review import show_gw_review_page
 from scripts.fpl.settings import show_settings_page
@@ -789,7 +789,7 @@ FPL_PAGES = {
     "📊  Projections Hub": show_player_projections_page,
     "📈  Player Statistics": show_player_stats_page,
     "💰  Price Changes": show_price_changes_page,
-    "🏥  Player Injuries": show_injuries_page,
+    "🚦  Availability": show_availability_page,
     "⚙️  Alert Settings": show_settings_page,
     "🆔  League Setup": show_league_setup_page,
 }

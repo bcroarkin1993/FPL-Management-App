@@ -11,6 +11,7 @@ import pandas as pd
 
 from scripts.common.error_helpers import get_logger
 from scripts.common.player_matching import ReferenceMatcher
+from scripts.common.transfer_odds import ODDS_COLUMNS
 from scripts.common.transfer_risk import (
     RISK_COLUMNS,
     apply_minutes_competition,
@@ -86,8 +87,13 @@ def build_transfer_risk(rankings_df: pd.DataFrame,
                         availability_df: pd.DataFrame,
                         news_df: pd.DataFrame,
                         pl_teams,
-                        today=None) -> pd.DataFrame:
-    """Full pipeline: ground truth + news -> risk columns on the rankings frame.
+                        today=None,
+                        odds_df: pd.DataFrame = None) -> pd.DataFrame:
+    """Full pipeline: ground truth + news (+ odds) -> risk columns.
+
+    ``odds_df`` is the raw odds index; it is matched to the pool here and passed
+    down.  Odds only ever soften or sharpen a *speculative* score — a completed
+    move found in the bootstrap still overrides everything downstream.
 
     Never raises. Any failure degrades to a neutral multiplier of 1.0 for every
     player, which is the pre-existing behaviour — a broken news feed must not
@@ -95,16 +101,33 @@ def build_transfer_risk(rankings_df: pd.DataFrame,
     """
     try:
         enriched = attach_bootstrap_availability(rankings_df, availability_df)
-        return attach_transfer_risk(enriched, news_df, pl_teams, today=today)
+        matched_odds = None
+        if odds_df is not None and not odds_df.empty:
+            matched_odds = attach_odds(enriched, odds_df)
+        return attach_transfer_risk(enriched, news_df, pl_teams, today=today,
+                                    odds_df=matched_odds)
     except Exception as e:
         _logger.warning("Transfer risk pipeline failed: %s", e, exc_info=True)
         fallback = rankings_df.copy()
-        fallback["Transfer_Risk"] = 0.0
-        fallback["Transfer_Exposure"] = 0.0
-        fallback["Transfer_Mult"] = 1.0
-        fallback["Transfer_Destination"] = ""
-        fallback["Transfer_Outlets"] = 0
-        fallback["Transfer_Note"] = ""
+        # Every declared column, or a caller that reads one unconditionally
+        # crashes on the degraded path instead of just losing the feature.
+        for col in RISK_COLUMNS:
+            if col in ("Transfer_Mult",):
+                fallback[col] = 1.0
+            elif col in ("Transfer_Destination", "Transfer_Note", "Transfer_Status"):
+                fallback[col] = ""
+            elif col == "Transfer_Fee":
+                fallback[col] = float("nan")
+            else:
+                fallback[col] = 0.0
+        for col in ODDS_COLUMNS:
+            if col in ("Odds_Destination", "Odds_Fractional", "Odds_Bookmaker",
+                       "Odds_Updated"):
+                fallback[col] = ""
+            elif col == "Odds_Age_Days":
+                fallback[col] = float("nan")
+            else:
+                fallback[col] = 0.0
         return fallback
 
 
@@ -143,3 +166,118 @@ def build_inbound_competition(pool_df: pd.DataFrame,
     except Exception as e:
         _logger.warning("Inbound competition pipeline failed: %s", e, exc_info=True)
         return empty, neutral
+
+
+def attach_odds(pool_df: pd.DataFrame, odds_index_df: pd.DataFrame) -> pd.DataFrame:
+    """Match bookmaker odds onto a player pool by name.
+
+    Returns a small frame keyed on the pool's own ``Player`` values with
+    ``Odds_Exit``, ``Odds_Destination``, ``Odds_Fractional``, ``Odds_Bookmaker``
+    and ``Odds_Updated`` — the contract ``attach_transfer_risk(odds_df=...)``
+    reads.  Players with no market are simply absent.
+
+    Why not ``ReferenceMatcher``: the odds feed publishes a bare name and the
+    club the player is *going to*, never the club he is at, and no position.
+    Every tier of the shared matcher below the first is scoped to team or
+    position, so it has nothing to work with and would degrade to an exact
+    ``(name, team)`` key that never fires.
+
+    A name-only key is the weak kind that attached Cole Palmer's stats to Alex
+    Palmer, so two rules apply together:
+
+    1. **A key is kept only when it resolves to exactly one player** — the same
+       rule the Waiver Wire's display names use.
+    2. **The fallback is a token subset, never a bare surname.**  Uniqueness
+       inside the pool is not enough on its own, because the odds feed quotes
+       players who have *left* the league: with Darwin Núñez gone from the FPL
+       pool, the surname "nunez" resolved uniquely to Marcelino Núñez and handed
+       him Darwin's market.  Requiring one name's tokens to contain the other's
+       ("bruno fernandes" ⊂ "bruno borges fernandes") keeps the legal-name case
+       that matters and rejects two different people who merely share a surname.
+
+    Losing a match costs one odds quote; a wrong match prices a real player on
+    someone else's market.
+    """
+    from scripts.common.text_helpers import canonical_normalize
+    from scripts.common.transfer_odds import implied_probability
+    from scripts.common.transfer_risk import team_code
+
+    columns = ["Player", "Odds_Exit", "Odds_Destination", "Odds_Fractional",
+               "Odds_Bookmaker", "Odds_Updated", "Odds_Slug"]
+    if (pool_df is None or pool_df.empty
+            or odds_index_df is None or odds_index_df.empty
+            or "Player" not in pool_df.columns):
+        return pd.DataFrame(columns=columns)
+
+    full_index = {}
+    token_index = []
+    for name in pool_df["Player"].dropna().astype(str):
+        key = canonical_normalize(name)
+        if not key:
+            continue
+        full_index.setdefault(key, set()).add(name)
+        tokens = {t for t in key.split() if len(t) > 1}
+        if tokens:
+            token_index.append((tokens, name))
+
+    team_of = {}
+    if "Team" in pool_df.columns:
+        team_of = {str(r["Player"]): team_code(r["Team"])
+                   for _, r in pool_df[["Player", "Team"]].dropna().iterrows()}
+
+    rows, ambiguous, settled = [], 0, 0
+    for _, odds_row in odds_index_df.iterrows():
+        raw = odds_row.get("Player")
+        key = canonical_normalize(str(raw)) if raw else ""
+        if not key:
+            continue
+
+        candidates = full_index.get(key)
+        if not candidates:
+            query = {t for t in key.split() if len(t) > 1}
+            if query:
+                candidates = {name for tokens, name in token_index
+                              if query <= tokens or tokens <= query}
+        if not candidates:
+            continue
+        if len(candidates) > 1:
+            # Ambiguous resolves to no match, exactly as ReferenceMatcher does.
+            ambiguous += 1
+            continue
+
+        player = next(iter(candidates))
+
+        # A market whose destination is the player's *current* club has already
+        # settled: he signed, and the quote is left over from before he did.
+        # Reading it as exit risk says a player who has just arrived is 40%
+        # likely to leave — the inverse of the exclude_team trap in
+        # parse_destination, and just as expensive. Resolve through
+        # TEAM_FULL_TO_SHORT (team_code), never by comparing raw strings.
+        destination_code = team_code(odds_row.get("Next_Club"))
+        if destination_code and destination_code == team_of.get(player):
+            settled += 1
+            continue
+
+        decimal = odds_row.get("Decimal")
+        implied = odds_row.get("Implied")
+        if implied is None or (isinstance(implied, float) and pd.isna(implied)):
+            implied = implied_probability(decimal)
+        if not implied:
+            continue
+
+        rows.append({
+            "Player": player,
+            "Odds_Exit": float(implied),
+            "Odds_Destination": odds_row.get("Next_Club") or "",
+            "Odds_Fractional": odds_row.get("Fractional") or "",
+            "Odds_Bookmaker": odds_row.get("Bookmaker") or "",
+            "Odds_Updated": odds_row.get("Updated") or "",
+            # The site's own slug, so a ladder request never has to guess a URL
+            # from an FPL legal name ("gabriel-martinelli-silva" is not a page).
+            "Odds_Slug": odds_row.get("Slug") or "",
+        })
+
+    _logger.info("Transfer odds: matched %d/%d markets to the player pool "
+                 "(%d ambiguous, %d already settled)",
+                 len(rows), len(odds_index_df), ambiguous, settled)
+    return pd.DataFrame(rows, columns=columns)

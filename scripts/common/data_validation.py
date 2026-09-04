@@ -37,6 +37,7 @@ __all__ = [
     "check_element_states",
     "check_transfer_risk",
     "check_transfer_windows",
+    "check_transfer_odds",
     "format_issues",
     "raise_on_error",
 ]
@@ -820,6 +821,33 @@ def check_transfer_risk(risk_df: Optional[pd.DataFrame],
     risk = pd.to_numeric(risk_df["Transfer_Risk"], errors="coerce")
     mult = pd.to_numeric(risk_df["Transfer_Mult"], errors="coerce")
 
+    # Blending the market in must not push risk out of range, and a decayed
+    # weight above 1.0 would let a stale quote outweigh a fresh one.
+    if "Odds_Weight" in risk_df.columns:
+        weight = pd.to_numeric(risk_df["Odds_Weight"], errors="coerce").dropna()
+        bad_weight = weight[(weight < 0) | (weight > 1.0 + 1e-9)]
+        if len(bad_weight):
+            issues.append(Issue(
+                check, "error",
+                "%d odds weight(s) outside [0, 1] (e.g. %.3f)"
+                % (len(bad_weight), bad_weight.iloc[0]),
+                "transfer_odds.odds_age_weight is an exponential decay and cannot "
+                "leave [0, 1]. A value above 1.0 means a stale quote is being "
+                "amplified rather than discounted.",
+            ))
+
+    if "Odds_Risk" in risk_df.columns:
+        odds_risk = pd.to_numeric(risk_df["Odds_Risk"], errors="coerce").dropna()
+        bad_odds = odds_risk[(odds_risk < 0) | (odds_risk > 1.0 + 1e-9)]
+        if len(bad_odds):
+            issues.append(Issue(
+                check, "error",
+                "%d Odds_Risk value(s) outside [0, 1] (e.g. %.3f)"
+                % (len(bad_odds), bad_odds.iloc[0]),
+                "Odds_Risk is an implied probability. Out of range means "
+                "transfer_odds.parse_fractional misread the price format.",
+            ))
+
     bad_risk = risk.dropna()[(risk.dropna() < 0) | (risk.dropna() > 1)]
     if len(bad_risk):
         issues.append(Issue(
@@ -840,15 +868,27 @@ def check_transfer_risk(risk_df: Optional[pd.DataFrame],
             "A value above 1.0 would *inflate* a player's season projection.",
         ))
 
-    total = len(risk_df)
-    at_risk = int((risk > 0.5).sum())
+    # The fraction check is about *speculation* running away with itself, so it
+    # counts only speculative rows. A completed departure is ground truth from the
+    # bootstrap, scores 1.0 by construction, and says nothing about the matcher —
+    # judged against the whole frame, a page that deliberately lists departed
+    # players (the Availability tracker does) fails at 82% while working perfectly.
+    status = (risk_df["Transfer_Status"] if "Transfer_Status" in risk_df.columns
+              else pd.Series("", index=risk_df.index))
+    resolved = status.astype(str).eq("Departed")
+    if "Transfer_Note" in risk_df.columns:
+        resolved = resolved | risk_df["Transfer_Note"].astype(str).str.startswith("Departed")
+
+    speculative_risk = risk[~resolved]
+    total = int(len(speculative_risk))
+    at_risk = int((speculative_risk > 0.5).sum())
     # Only meaningful over a real pool. On a handful of rows a single genuinely
     # at-risk player is 25% of the frame, and a check that cries wolf gets muted.
     if total >= MIN_POOL_FOR_FRACTION_CHECK and at_risk / float(total) > MAX_PLAUSIBLE_AT_RISK_FRACTION:
         issues.append(Issue(
             check, "error",
-            "%d of %d players (%.0f%%) score above 0.5 transfer risk"
-            % (at_risk, total, 100.0 * at_risk / total),
+            "%d of %d speculatively-scored players (%.0f%%) score above 0.5 "
+            "transfer risk" % (at_risk, total, 100.0 * at_risk / total),
             "A window moves a handful of players, not a tenth of the league. Suspect "
             "keyword tiering matching too broadly, or headline_mentions_player() "
             "attaching one player's news to everybody.",
@@ -919,3 +959,150 @@ def raise_on_error(issues: Sequence[Issue], context: str = "") -> None:
     if errors:
         header = "Implausible data%s:" % (" in %s" % context if context else "")
         raise AssertionError("%s\n%s" % (header, format_issues(errors)))
+
+
+# --- Transfer odds ------------------------------------------------------------
+#
+# A next-club ladder fails in two directions and both look plausible on screen.
+# Too low a total means a row failed to parse, and the missing row is usually the
+# favourite. Too high means overlapping outcomes were counted separately -- "Any
+# Saudi club" alongside "Al Ittihad" and "Al Hilal" -- which understates every
+# destination by dividing one outcome three ways.
+
+#: No real book prices a market at or below evens across all outcomes: that is an
+#: arbitrage. Below 1.0 means a row is missing or misparsed.
+MIN_LADDER_OVERROUND = 1.0
+
+#: Next-club prices are offered as *independent* binary bets, not as one coupled
+#: book, so their sum has no principled ceiling: the live Mateta ladder totals
+#: 1.75 across six clubs with no overlap at all. This is therefore only an outer
+#: "look at this" bound -- the precise overlap detector is the disjoint-total
+#: comparison below, and a wide honest market must not be failed for being wide.
+MAX_LADDER_OVERROUND = 3.0
+
+#: Below this many priced rows a "ladder" is a single quote, not a market.
+MIN_LADDER_ROWS = 2
+
+#: A feed that has stopped updating without erroring. The live source was already
+#: five months stale when it was re-evaluated, so this is a warning, not an error.
+MAX_PLAUSIBLE_QUOTE_AGE_DAYS = 120
+
+
+def check_transfer_odds(ladder_rows: Optional[Sequence[dict]],
+                        normalised: Optional[Sequence[dict]] = None,
+                        overround: Optional[float] = None,
+                        age_days: Optional[float] = None) -> List[Issue]:
+    """Assert a next-club odds ladder could plausibly be what it says.
+
+    ``ladder_rows`` are raw rows carrying ``Implied`` (or ``Decimal``);
+    ``normalised`` is ``transfer_odds.normalise_ladder`` output; ``overround`` is
+    ``transfer_odds.ladder_overround``. Anything omitted is simply not checked.
+    """
+    check = "transfer_odds"
+    issues: List[Issue] = []
+
+    if not ladder_rows:
+        return [Issue(check, "error", "odds ladder is empty",
+                      "odds_feeds.fetch_player_odds_ladder returns an empty frame on "
+                      "any failure, so a broken scrape renders a page identical to a "
+                      "working one. Check the page shape at footballtransfers.co.uk.")]
+
+    priced = 0
+    for row in ladder_rows:
+        implied = row.get("Implied") if isinstance(row, dict) else None
+        if implied is None:
+            continue
+        try:
+            value = float(implied)
+        except (TypeError, ValueError):
+            issues.append(Issue(check, "error",
+                                "non-numeric implied probability %r" % (implied,),
+                                "transfer_odds.parse_fractional returned something "
+                                "unexpected for this row's price."))
+            continue
+        priced += 1
+        if not (0.0 < value <= 1.0):
+            issues.append(Issue(check, "error",
+                                "implied probability %.3f outside (0, 1]" % value,
+                                "Fractional odds parsed wrong. '8/11' is decimal "
+                                "1.727 (57.9%), and a bare '2' means 2/1, not "
+                                "decimal 2 -- see transfer_odds.parse_fractional."))
+
+    if priced < MIN_LADDER_ROWS:
+        issues.append(Issue(check, "warning",
+                            "only %d priced row(s) -- not a market" % priced,
+                            "A one-row ladder gives no destination distribution; "
+                            "the page should say so rather than draw a 100% bar."))
+
+    if overround is not None:
+        try:
+            total = float(overround)
+        except (TypeError, ValueError):
+            total = None
+
+        # The overlap bug does not announce itself in the total. The live Salah
+        # ladder sums to 1.58 uncollapsed and 1.09 collapsed -- both inside any
+        # honest "cannot be right" band, so a threshold cannot separate them.
+        # What does separate them is whether the caller collapsed at all, which
+        # is exactly comparable against the reference implementation.
+        if total is not None:
+            try:
+                from scripts.common.transfer_odds import ladder_overround
+                expected = ladder_overround(ladder_rows)
+            except Exception:
+                expected = None
+            if expected is not None and abs(total - expected) > 0.01:
+                issues.append(Issue(check, "error",
+                    "overround %.3f does not match the disjoint total %.3f"
+                    % (total, expected),
+                    "Overlapping outcomes were summed. 'Any Saudi club' already "
+                    "contains 'Al Ittihad' and 'Al Hilal'; counting all three "
+                    "divides one outcome three ways and understates every "
+                    "destination. Sum transfer_odds.disjoint_ladder, not the raw "
+                    "rows."))
+
+        if total is not None:
+            if total < MIN_LADDER_OVERROUND:
+                issues.append(Issue(check, "error",
+                    "disjoint ladder sums to %.3f, below 1.0" % total,
+                    "A bookmaker does not offer an arbitrage, so a row is missing "
+                    "or misparsed -- and the missing row is usually the favourite."))
+            elif total > MAX_LADDER_OVERROUND:
+                issues.append(Issue(check, "warning",
+                    "disjoint ladder sums to %.3f, unusually high" % total,
+                    "Overlapping outcomes were not collapsed. transfer_odds."
+                    "disjoint_ladder must drop clubs already covered by a quoted "
+                    "aggregate; an unresolved club region leaves them both in."))
+
+    if normalised:
+        total = 0.0
+        for entry in normalised:
+            try:
+                total += float(entry.get("Probability") or 0.0)
+            except (TypeError, ValueError):
+                pass
+        if abs(total - 1.0) > 0.01:
+            issues.append(Issue(check, "error",
+                "normalised destination shares sum to %.4f, not 1.0" % total,
+                "transfer_odds.normalise_ladder divides by the disjoint total, so "
+                "this can only drift if rows were added or dropped afterwards."))
+
+    if age_days is not None:
+        try:
+            age = float(age_days)
+        except (TypeError, ValueError):
+            age = None
+        if age is not None:
+            if age < 0:
+                issues.append(Issue(check, "error",
+                    "quote is dated %.0f days in the future" % -age,
+                    "A negative age means the timestamp was parsed in the wrong "
+                    "timezone or the wrong field was read."))
+            elif age > MAX_PLAUSIBLE_QUOTE_AGE_DAYS:
+                issues.append(Issue(check, "warning",
+                    "quote is %.0f days old" % age,
+                    "The feed may have stopped updating. This is survivable -- "
+                    "odds_age_weight decays it to near nothing -- but the page "
+                    "must show the age, never present it as current."))
+
+    return issues

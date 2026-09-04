@@ -593,3 +593,44 @@ class TestCheckTransferWindows:
 
     def test_empty_calendar_is_an_error(self):
         assert _errors(check_transfer_windows({}))
+
+
+class TestTransferRiskGroundTruthExclusion:
+    """A frame of confirmed departures is not a broken matcher.
+
+    The Availability tracker deliberately lists departed players, so 80%+ of its
+    rows legitimately score 1.0. Counting those against the at-risk fraction made
+    the check fire on a page that was working perfectly — and a check that cries
+    wolf gets muted.
+    """
+
+    @staticmethod
+    def _rows(n, **kw):
+        base = {"Transfer_Risk": 0.0, "Transfer_Mult": 1.0,
+                "Transfer_Status": "", "Transfer_Note": ""}
+        base.update(kw)
+        return [dict(base) for _ in range(n)]
+
+    def test_confirmed_departures_do_not_trip_the_fraction_check(self):
+        df = pd.DataFrame(
+            self._rows(60, Transfer_Risk=1.0, Transfer_Mult=0.1,
+                       Transfer_Status="Departed", Transfer_Note="Departed — Al Hilal")
+            + self._rows(40))
+        assert not [i for i in check_transfer_risk(df) if i.severity == "error"]
+
+    def test_a_broken_matcher_still_errors(self):
+        """The signature the check exists for must survive the exclusion."""
+        df = pd.DataFrame(self._rows(
+            60, Transfer_Risk=0.8, Transfer_Mult=0.3, Transfer_Status="At risk",
+            Transfer_Note="Real Madrid (2 outlets)"))
+        assert [i for i in check_transfer_risk(df) if i.severity == "error"]
+
+    def test_odds_weight_must_be_a_decay_factor(self):
+        df = pd.DataFrame(self._rows(3, Odds_Weight=1.4))
+        assert any("odds weight" in i.message for i in check_transfer_risk(df)
+                   if i.severity == "error")
+
+    def test_odds_risk_must_be_a_probability(self):
+        df = pd.DataFrame(self._rows(3, Odds_Risk=1.8))
+        assert any("Odds_Risk" in i.message for i in check_transfer_risk(df)
+                   if i.severity == "error")

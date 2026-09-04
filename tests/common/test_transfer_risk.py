@@ -185,24 +185,24 @@ class TestDestinationWeighting:
 
 class TestScoreHeadlines:
     def test_watkins_scores_high(self):
-        risk, dest, weight, outlets, evidence, _fee = score_headlines(
+        scored = score_headlines(
             WATKINS_HEADLINES, "Ollie Watkins", "Aston Villa", PL_TEAMS, today=TODAY)
-        assert risk >= 0.7, "the case this module exists for must score high"
-        assert weight == WEIGHT_LEAVES_PL
-        assert outlets >= 4
-        assert evidence
+        assert scored.risk >= 0.7, "the case this module exists for must score high"
+        assert scored.weight == WEIGHT_LEAVES_PL
+        assert scored.outlets >= 4
+        assert scored.evidence
 
     def test_unrelated_item_is_not_counted_as_an_outlet(self):
-        _r, _d, _w, outlets, evidence, _fee = score_headlines(
+        scored = score_headlines(
             WATKINS_HEADLINES, "Ollie Watkins", "Aston Villa", PL_TEAMS, today=TODAY)
-        assert not any("Devon Live" in e["Source"] for e in evidence)
-        assert outlets <= 5
+        assert not any("Devon Live" in e["Source"] for e in scored.evidence)
+        assert scored.outlets <= 5
 
     def test_single_outlet_rumour_stays_low(self):
-        risk, _d, _w, _o, _e, _fee = score_headlines(
+        risk = score_headlines(
             [{"Headline": "Arsenal linked with move for Morgan Rogers",
               "Source": "Daily Star", "Published": "Fri, 28 Aug 2026 10:00:00 GMT"}],
-            "Morgan Rogers", "Aston Villa", PL_TEAMS, today=TODAY)
+            "Morgan Rogers", "Aston Villa", PL_TEAMS, today=TODAY).risk
         assert risk < 0.10
 
     def test_corroboration_increases_risk(self):
@@ -214,18 +214,18 @@ class TestScoreHeadlines:
         assert r_many > r_one
 
     def test_denial_produces_no_meaningful_risk(self):
-        risk, _d, _w, _o, _e, _fee = score_headlines(
+        risk = score_headlines(
             [{"Headline": "Villa rule out Rogers sale, he is not for sale",
               "Source": "BBC", "Published": "Fri, 28 Aug 2026 10:00:00 GMT"}],
-            "Morgan Rogers", "Aston Villa", PL_TEAMS, today=TODAY)
+            "Morgan Rogers", "Aston Villa", PL_TEAMS, today=TODAY).risk
         assert risk < 0.10
 
     def test_stale_news_is_ignored(self):
         """A six-month-old rumour is what made the betting source useless."""
-        risk, _d, _w, _o, _e, _fee = score_headlines(
+        risk = score_headlines(
             [{"Headline": "Rogers undergoes medical at Real Madrid", "Source": "AS",
               "Published": "Mon, 02 Mar 2026 10:00:00 GMT"}],
-            "Morgan Rogers", "Aston Villa", PL_TEAMS, today=TODAY)
+            "Morgan Rogers", "Aston Villa", PL_TEAMS, today=TODAY).risk
         assert risk == 0.0
 
     def test_no_news_is_no_risk(self):
@@ -256,8 +256,8 @@ class TestClubRefusingToSell:
     """A bid is the selling club's problem, not evidence the player leaves."""
 
     def test_bruno_fernandes_is_not_meaningfully_at_risk(self):
-        risk, _dest, _w, _outlets, _ev, _fee = score_headlines(
-            BRUNO_HEADLINES, "Bruno Fernandes", "Man Utd", PL_TEAMS, today=TODAY)
+        risk = score_headlines(
+            BRUNO_HEADLINES, "Bruno Fernandes", "Man Utd", PL_TEAMS, today=TODAY).risk
         assert risk < 0.15, (
             "A rejected offer plus contract talks must not discount a squad staple; "
             "got %.3f" % risk

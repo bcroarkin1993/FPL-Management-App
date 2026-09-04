@@ -44,13 +44,74 @@ class TestPlayerStatisticsPage:
                 pass  # May stop on empty data
 
 
+_AVAIL_COLS = ["Player_ID", "Player", "Web_Name", "Team", "Position",
+               "Status", "PlayPct", "StatusBucket", "News", "News_Added"]
+
+
 class TestInjuriesPage:
     def test_smoke(self, mock_all_utils):
-        empty_avail = pd.DataFrame(columns=["Player_ID", "Player", "Web_Name", "Team", "Position",
-                                             "Status", "PlayPct", "StatusBucket", "News", "News_Added"])
+        empty_avail = pd.DataFrame(columns=_AVAIL_COLS)
         with patch("scripts.fpl.injuries.get_fpl_availability_df", return_value=empty_avail):
             from scripts.fpl.injuries import show_injuries_page
             show_injuries_page()
+
+
+class TestAvailabilityPage:
+    """The merged page: transfer news, odds and injuries.
+
+    Every network-touching source is patched empty, because the page must render
+    when the odds feed is down -- that degraded path is otherwise indistinguishable
+    from a working one.
+    """
+
+    def test_smoke_with_every_source_empty(self, mock_all_utils):
+        from scripts.common.transfer_odds import ODDS_INDEX_COLUMNS
+        empty_avail = pd.DataFrame(columns=_AVAIL_COLS)
+        with patch("scripts.fpl.availability.get_fpl_availability_df", return_value=empty_avail), \
+             patch("scripts.fpl.availability.get_transfer_odds_index",
+                   return_value=pd.DataFrame(columns=ODDS_INDEX_COLUMNS)), \
+             patch("scripts.fpl.availability.get_transfer_news", return_value=pd.DataFrame()), \
+             patch("scripts.fpl.availability.transfer_news_cache_status", return_value=(0, 0)), \
+             patch("scripts.fpl.availability.render_injuries_tab"):
+            from scripts.fpl.availability import show_availability_page
+            show_availability_page()
+
+    def test_smoke_with_live_shaped_data(self, mock_all_utils):
+        """A player who is departed, one with a market, and one with neither."""
+        from scripts.common.transfer_odds import ODDS_INDEX_COLUMNS
+        avail = pd.DataFrame([
+            {"Player_ID": 1, "Player": "Mohamed Salah", "Web_Name": "M.Salah",
+             "Team": "LIV", "Position": "M", "Status": "a", "PlayPct": 100.0,
+             "StatusBucket": "Available", "News": "", "News_Added": ""},
+            {"Player_ID": 2, "Player": "Ollie Watkins", "Web_Name": "Watkins",
+             "Team": "AVL", "Position": "F", "Status": "u", "PlayPct": 0.0,
+             "StatusBucket": "Out", "News": "Has joined Al-Hilal permanently",
+             "News_Added": ""},
+            {"Player_ID": 3, "Player": "Quiet Player", "Web_Name": "Quiet",
+             "Team": "ARS", "Position": "D", "Status": "a", "PlayPct": 100.0,
+             "StatusBucket": "Available", "News": "", "News_Added": ""},
+        ])
+        odds = pd.DataFrame([{
+            "Player": "Mohamed Salah", "Slug": "mohamed-salah",
+            "Next_Club": "Any Saudi club", "Fractional": "8/11", "Decimal": 1.727,
+            "Implied": 0.579, "Bookmaker": "William Hill", "Trending": "neutral",
+            "Updated": None,
+        }], columns=ODDS_INDEX_COLUMNS)
+        news = pd.DataFrame([{
+            "Player": "Mohamed Salah", "Team": "LIV",
+            "Headline": "Salah in talks over Saudi Pro League exit",
+            "URL": "https://example.com/a", "Published": "Tue, 02 Sep 2026 10:00:00 GMT",
+            "Source": "BBC",
+        }])
+        with patch("scripts.fpl.availability.get_fpl_availability_df", return_value=avail), \
+             patch("scripts.fpl.availability.get_transfer_odds_index", return_value=odds), \
+             patch("scripts.fpl.availability.get_transfer_news", return_value=news), \
+             patch("scripts.fpl.availability.transfer_news_cache_status", return_value=(3, 0)), \
+             patch("scripts.fpl.availability.get_player_odds_ladder",
+                   return_value=pd.DataFrame()), \
+             patch("scripts.fpl.availability.render_injuries_tab"):
+            from scripts.fpl.availability import show_availability_page
+            show_availability_page()
 
 
 class TestPlayerProjectionsPage:

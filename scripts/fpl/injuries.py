@@ -68,8 +68,14 @@ def get_fpl_availability_df() -> pd.DataFrame:
     df["Position"] = df["Position"].astype("string")
     return df
 
-def show_injuries_page():
-    st.header("🩹 Player Availability (Official FPL)")
+def render_injuries_tab(key_prefix: str = "inj"):
+    """The availability table: filters plus one styled table.
+
+    Split out of ``show_injuries_page`` so the Availability page can render it as
+    a tab beside transfer news. ``key_prefix`` namespaces the widget keys —
+    without it a second set of filters on the same page collides on Streamlit's
+    auto-generated keys.
+    """
     df = get_fpl_availability_df()
     if df.empty:
         st.warning("No data from FPL. Try again in a bit.")
@@ -79,9 +85,9 @@ def show_injuries_page():
     c1, c2, c3 = st.columns(3)
     teams = sorted(df["Team"].dropna().unique().tolist())
     poss  = ["G","D","M","F"]
-    team_sel = c1.multiselect("Teams", teams, default=None)
-    pos_sel  = c2.multiselect("Positions", poss, default=poss)
-    min_play = c3.slider("Min Play %", 0, 100, 0, 5)
+    team_sel = c1.multiselect("Teams", teams, default=None, key="%s_teams" % key_prefix)
+    pos_sel  = c2.multiselect("Positions", poss, default=poss, key="%s_pos" % key_prefix)
+    min_play = c3.slider("Min Play %", 0, 100, 0, 5, key="%s_minplay" % key_prefix)
 
     show = df.copy()
     if team_sel:
@@ -99,3 +105,8 @@ def show_injuries_page():
         positive_color_cols=["PlayPct"],
         max_height=500,
     )
+
+
+def show_injuries_page():
+    st.header("\U0001FA79 Player Availability (Official FPL)")
+    render_injuries_tab()

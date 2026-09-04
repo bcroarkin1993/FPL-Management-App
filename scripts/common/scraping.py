@@ -1138,3 +1138,95 @@ def start_transfer_news_prefetch(players, label: str = "default") -> bool:
 
     threading.Thread(target=_worker, name="transfer-news-prefetch", daemon=True).start()
     return True
+
+
+# --- Transfer odds -----------------------------------------------------------
+# Same split as the news feeds above: odds_feeds.py stays Streamlit-free for
+# GitHub Actions, and the SQLite caching lives here. Ladders are cached per
+# player so expanding a row twice costs one request, and the index is cached
+# whole because it is a single page.
+
+#: The index is one cheap request and prices do move within a day.
+ODDS_INDEX_TTL_SECONDS = 3 * 3600
+
+#: Ladders move slower than the index, and the live feed's own stamps are often
+#: months old — refetching hourly would not make a five-month-old quote fresher.
+ODDS_LADDER_TTL_SECONDS = 12 * 3600
+
+_ODDS_INDEX_CACHE_KEY = "transfer_odds_index:v1"
+
+
+def _odds_ladder_cache_key(slug) -> str:
+    digest = hashlib.sha1(str(slug).strip().lower().encode("utf-8")).hexdigest()
+    return "transfer_odds_ladder:v1:%s" % digest
+
+
+def get_transfer_odds_index(force_refresh: bool = False, cached_only: bool = False):
+    """Every player with a live next-club market, cached in SQLite.
+
+    Degrades to an empty frame on any failure — a dead odds feed must leave the
+    page standing, just with no odds column.
+    """
+    from scripts.common.cache import cache_get, cache_set
+    from scripts.common.odds_feeds import fetch_odds_index
+    from scripts.common.transfer_odds import ODDS_INDEX_COLUMNS
+
+    if not force_refresh:
+        cached = cache_get(_ODDS_INDEX_CACHE_KEY)
+        if cached is not None:
+            return pd.DataFrame(cached, columns=ODDS_INDEX_COLUMNS)
+    if cached_only:
+        return pd.DataFrame(columns=ODDS_INDEX_COLUMNS)
+
+    try:
+        df = fetch_odds_index()
+    except Exception:
+        _logger.warning("Transfer odds index fetch failed", exc_info=True)
+        return pd.DataFrame(columns=ODDS_INDEX_COLUMNS)
+
+    if df is None or df.empty:
+        return pd.DataFrame(columns=ODDS_INDEX_COLUMNS)
+    try:
+        cache_set(_ODDS_INDEX_CACHE_KEY, df.to_dict("records"),
+                  ttl=ODDS_INDEX_TTL_SECONDS)
+    except Exception:
+        _logger.warning("Could not cache transfer odds index", exc_info=True)
+    return df
+
+
+def get_player_odds_ladder(player, slug=None, force_refresh: bool = False,
+                           cached_only: bool = False):
+    """One player's destination ladder, cached per player.
+
+    An empty ladder caches as an empty list, which is a *hit* — most players
+    have no market at all, and treating that as a miss would refetch the quiet
+    majority on every expand.
+    """
+    from scripts.common.cache import cache_get, cache_set
+    from scripts.common.odds_feeds import fetch_player_odds_ladder, player_slug
+    from scripts.common.transfer_odds import ODDS_LADDER_COLUMNS
+
+    resolved = slug or player_slug(player)
+    if not resolved:
+        return pd.DataFrame(columns=ODDS_LADDER_COLUMNS)
+
+    key = _odds_ladder_cache_key(resolved)
+    if not force_refresh:
+        cached = cache_get(key)
+        if cached is not None:
+            return pd.DataFrame(cached, columns=ODDS_LADDER_COLUMNS)
+    if cached_only:
+        return pd.DataFrame(columns=ODDS_LADDER_COLUMNS)
+
+    try:
+        df = fetch_player_odds_ladder(resolved, player=player)
+    except Exception:
+        _logger.warning("Odds ladder fetch failed for %s", resolved, exc_info=True)
+        return pd.DataFrame(columns=ODDS_LADDER_COLUMNS)
+
+    records = [] if df is None or df.empty else df.to_dict("records")
+    try:
+        cache_set(key, records, ttl=ODDS_LADDER_TTL_SECONDS)
+    except Exception:
+        _logger.warning("Could not cache odds ladder for %s", resolved, exc_info=True)
+    return pd.DataFrame(records, columns=ODDS_LADDER_COLUMNS)
