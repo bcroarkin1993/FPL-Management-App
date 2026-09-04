@@ -31,6 +31,8 @@ def captured_analysis_calls(mock_streamlit):
         return None  # every fixture "fails to resolve" -- we only want the call
 
     ffp_sentinel = pd.DataFrame({"Name": ["A"], "Team": ["ARS"], "Predicted": [4.0]})
+    from scripts.common.scraping import FFPFeed
+    ffp_feed_sentinel = FFPFeed(ffp_sentinel, 1, None, "site")
     rotowire_sentinel = pd.DataFrame({
         "Player": ["A"], "Team": ["ARS"], "Position": ["M"], "Points": [4.0],
         "Matchup": ["ARS v CHE"], "Pos Rank": [1],
@@ -38,7 +40,7 @@ def captured_analysis_calls(mock_streamlit):
 
     with patch.object(fx, "analyze_fixture_projections", side_effect=_record), \
          patch.object(fx, "get_rotowire_player_projections", return_value=rotowire_sentinel), \
-         patch.object(fx, "get_ffp_projections_data", return_value=ffp_sentinel), \
+         patch.object(fx, "get_ffp_feed", return_value=ffp_feed_sentinel), \
          patch.object(fx, "get_gameweek_fixtures", return_value=["Team A vs Team B"]), \
          patch.object(fx, "get_current_gameweek", return_value=1), \
          patch.object(fx, "is_gameweek_live", return_value=False), \
@@ -47,6 +49,7 @@ def captured_analysis_calls(mock_streamlit):
          patch.object(fx, "get_fpl_player_mapping", return_value={}), \
          patch.object(fx, "compute_key_differentials", return_value=pd.DataFrame()), \
          patch.object(fx, "render_key_differentials", MagicMock()), \
+         patch.object(fx, "render_ffp_status", MagicMock()), \
          patch.object(fx, "components", MagicMock()):
         fx.show_fixtures_page()
 

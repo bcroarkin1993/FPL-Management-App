@@ -6,7 +6,7 @@ import streamlit.components.v1 as components
 from typing import Optional
 from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections, numeric_col
 from scripts.common.error_helpers import get_logger
-from scripts.common.scraping import get_ffp_projections_data
+from scripts.common.scraping import get_ffp_feed, render_ffp_status
 from scripts.common.utils import (
     find_optimal_lineup, format_team_name, get_current_gameweek, get_gameweek_fixtures,
     get_team_id_by_name, get_rotowire_player_projections, get_team_composition_for_gameweek,
@@ -1068,7 +1068,9 @@ def show_fixtures_page():
 
     # Pull FPL player projections from Rotowire and FFP (cached, zero extra cost)
     fpl_player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL)
-    ffp_df = get_ffp_projections_data()
+    ffp_feed_result = get_ffp_feed()
+    ffp_df = ffp_feed_result.df
+    render_ffp_status(ffp_feed_result, config.CURRENT_GAMEWEEK)
 
     if fpl_player_projections is None or fpl_player_projections.empty:
         st.warning("Rotowire projections unavailable.")

@@ -11,6 +11,7 @@ Nothing here asserts an exact value; upstream numbers change every week. They
 assert that the numbers are *possible*.
 """
 
+import config
 import pandas as pd
 import pytest
 
@@ -19,6 +20,7 @@ from tests.live.conftest import skip_if_unreachable
 from scripts.common.analytics import merge_season_projections
 from scripts.common.data_validation import (
     check_element_states,
+    check_ffp_feed,
     check_merge_match_rate,
     check_projected_team_total,
     check_score_std,
@@ -63,12 +65,91 @@ class TestRotowireSource:
 
 
 class TestFfpSource:
-    def test_sheet_has_the_columns_the_app_consumes(self, ffp_projections):
-        required = {"Name", "Team", "Position", "Predicted", "Start", "LongStart", "Next3GWs"}
+    def test_feed_has_the_columns_the_app_consumes(self, ffp_projections):
+        # LongStart is deliberately absent from the site payload: it publishes a
+        # single start rate per player, identical across all six forecast weeks,
+        # so there is no independent long-run figure to carry. Start consistency
+        # falls back to the FPL `starts` count.
+        required = {"Name", "Team", "Position", "Predicted", "StartingPredicted",
+                    "Start", "Next3GWs"}
         missing = required - set(ffp_projections.columns)
         assert not missing, (
-            "FFP sheet lost column(s) %s -- the published sheet changed. "
+            "FFP feed lost column(s) %s -- the upstream shape changed. "
             "Present: %s" % (sorted(missing), sorted(ffp_projections.columns))
+        )
+
+    def test_feed_states_the_gameweek_it_is_for(self, ffp_feed):
+        """The whole reason this module exists.
+
+        FFP rolls its numbers forward on its own clock. Without a stated
+        gameweek the app blended Rotowire GW3 with FFP GW2 and applied GW2 start
+        probabilities -- invisible, because every value was individually
+        plausible. A feed that cannot say which week it describes is unusable.
+        """
+        assert ffp_feed.gameweek is not None, (
+            "FFP feed carries no gameweek (provenance=%s). Either their payload "
+            "changed shape or the spreadsheet fallback's fixtures no longer "
+            "resolve to a gameweek." % ffp_feed.provenance
+        )
+
+    def test_feed_is_for_the_current_gameweek(self, ffp_feed):
+        current = config.CURRENT_GAMEWEEK
+        assert int(ffp_feed.gameweek) == int(current), (
+            "FFP is published for GW%s but the app is scoring GW%s. Every FFP "
+            "contribution is gated off in this state, so the app is running "
+            "Rotowire-only." % (ffp_feed.gameweek, current)
+        )
+
+    def test_fixtures_match_the_real_gameweek(self, ffp_feed):
+        """The gameweek claim has to survive contact with the fixture list.
+
+        A stated `gw` is only as good as the rows under it -- this catches a
+        payload that keeps last week's fixtures under this week's label.
+        """
+        from scripts.common.ffp_feed import resolve_ffp_gameweek
+
+        derived = resolve_ffp_gameweek(
+            ffp_feed.df.drop(columns=["FFP_GW"], errors="ignore"))
+        if derived is None:
+            pytest.skip("FFP fixtures did not resolve to any gameweek")
+        assert derived == int(ffp_feed.gameweek), (
+            "FFP says GW%s but its fixtures are GW%s's."
+            % (ffp_feed.gameweek, derived)
+        )
+
+    def test_player_codes_resolve_to_the_fpl_pool(self, ffp_feed):
+        """The id join that takes FFP out of name matching entirely.
+
+        FFP publishes the FPL `code`; the app keys on the per-season element id.
+        If that stops resolving, the merge falls back to names -- the path that
+        gave Kalvin Phillips a goalkeeper's start rate.
+        """
+        df = ffp_feed.df
+        if "Player_Code" not in df.columns:
+            pytest.skip("spreadsheet fallback carries no player codes")
+        from scripts.common.ffp_feed import bootstrap_code_to_id
+
+        code_to_id = bootstrap_code_to_id()
+        if not code_to_id:
+            pytest.skip("FPL bootstrap unreachable")
+        codes = pd.to_numeric(df["Player_Code"], errors="coerce").dropna().astype(int)
+        unresolved = sorted(set(codes) - set(code_to_id))
+        assert not unresolved, (
+            "%d FFP player code(s) are not in the FPL bootstrap: %s"
+            % (len(unresolved), unresolved[:10])
+        )
+
+    def test_the_feed_is_plausible(self, ffp_feed):
+        """The whole predicate at once, against the live feed."""
+        from datetime import datetime, timezone
+
+        age = None
+        if ffp_feed.updated is not None:
+            age = (datetime.now(timezone.utc) - ffp_feed.updated).total_seconds() / 86400.0
+        raise_on_error(
+            check_ffp_feed(ffp_feed.df, gameweek=ffp_feed.gameweek,
+                           expected_gw=config.CURRENT_GAMEWEEK, age_days=age),
+            context="FFP feed",
         )
 
     def test_start_percentages_are_percentages(self, ffp_projections):
@@ -78,6 +159,27 @@ class TestFfpSource:
         assert start.between(0, 100).all(), (
             "FFP Start%% outside 0-100 (min %.1f, max %.1f) -- the app divides this "
             "by 100 to scale projections." % (start.min(), start.max())
+        )
+
+    def test_cumulative_windows_include_the_current_gameweek(self, ffp_projections):
+        """`Next2GWsStart == StartingPredicted + GW2`, not `GW2 + GW3`.
+
+        `GW2..GW6` are *relative offsets* -- the 2nd..6th week of the window --
+        so the cumulative columns start from this week, not from the next one.
+        Reading them the other way shifts ROS by a full gameweek. Verified live
+        at MAE 0.03 for the correct reading against 0.45 for the wrong one.
+        """
+        needed = {"StartingPredicted", "GW2", "Next2GWsStart"}
+        if not needed.issubset(ffp_projections.columns):
+            pytest.skip("FFP feed is missing %s" % ", ".join(sorted(needed - set(ffp_projections.columns))))
+        df = ffp_projections[list(needed)].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(df) < 25:
+            pytest.skip("too few FFP rows with a forward gameweek to judge")
+        this_week = (df["Next2GWsStart"] - (df["StartingPredicted"] + df["GW2"])).abs().mean()
+        next_week = (df["Next2GWsStart"] - (df["GW2"] + df["GW2"])).abs().mean()
+        assert this_week < 0.25 and this_week < next_week, (
+            "FFP's cumulative window no longer starts at the current gameweek "
+            "(error %.3f). ROS would be blended off by one week." % this_week
         )
 
     def test_predicted_points_are_single_gameweek_scale(self, ffp_projections):

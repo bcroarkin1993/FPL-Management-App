@@ -72,7 +72,7 @@ The Odds API ────────────┘
 | `draft.premierleague.com/api/` | League data, rosters, transactions |
 | `fantasy.premierleague.com/api/` | Player stats, fixtures, FDR |
 | `rotowire.com/soccer/` | Player projections, EPL lineups, article publish times |
-| `fantasyfootballpundit.com` | Points predictions, goal/assist odds, clean sheet odds (via Google Sheets) |
+| `fantasyfootballpundit.com` | Points predictions, goal/assist odds, clean sheet odds (site payload; see "Fantasy Football Pundit feed") |
 | `api.the-odds-api.com` | Match betting odds (h2h, BTTS, totals) |
 
 ### Player Matching
@@ -126,6 +126,95 @@ Forest" (absent from `TEAM_FULL_TO_SHORT` until 2026-09-03) sent all 28 Forest
 rows past the exact tiers into the loose ones. `tests/live/` now fails on an FFP
 label that does not resolve, as well as on a missing current club.
 
+### Fantasy Football Pundit feed
+
+`scripts/common/ffp_feed.py` (pure, Streamlit-free), `scraping.get_ffp_feed()`
+(cached, provenance) and `analytics.ffp_gameweek_matches()` (the gate).
+
+**FFP publishes the same numbers twice and the two disagree.** The published
+Google Sheet the app read for a year has stopped keeping pace: measured
+2026-09-04 with the app and Rotowire both on GW3, the sheet's `Fixture` column
+still described **GW2** — and not consistently, since Aston Villa and Man City
+each carried a leftover GW1 fixture string alongside the GW2 one. The site said
+"Updated for GW3 · 4 September at 16:18". The app was blending Rotowire GW3 at
+60% with FFP GW2 at 40% and applying GW2 start probabilities, silently, because
+every individual value was plausible.
+
+The site is a Next.js app that server-embeds its tables in the RSC flight
+payload (`self.__next_f.push([1,"…"])`). Concatenating those chunks,
+JSON-unescaping each and `raw_decode`-ing from `"rows":[` yields records that
+beat the sheet in four ways: an explicit `gw` on every row; `player_code`, which
+is the FPL bootstrap `code` (368/368 resolved live, so **FFP joins on an integer
+id and never on a name**); `fixture_count`, so doubles and blanks are
+representable; and six gameweeks of forecasts instead of five relative-offset
+columns.
+
+**The two point columns are named the opposite way round from the sheet.**
+Verified over all 2208 live rows: `predicted_points_start == predicted_points *
+start_pct/100` at MAE 0.0003, against 2.31 for the reverse. So the site's
+`predicted_points` is the *conditional* value (the sheet's `StartingPredicted`)
+and `predicted_points_start` is the *unconditional* one (the sheet's
+`Predicted`). Mapping these by name rather than by basis re-creates the
+double-discount bug under "FFP has two prediction bases"; `check_ffp_feed()`
+errors on it, since an inversion makes `Predicted` exceed `StartingPredicted`,
+which the relation forbids.
+
+`to_sheet_schema()` is the compatibility seam — it emits the legacy sheet column
+names, so all seven page callsites and every merge in `analytics.py` are
+unchanged. Sheet semantics it reproduces, pinned live: `GW2…GW6` are **relative
+offsets** (the 2nd…6th gameweek of the window, conditional basis), `GW2s…GW6s`
+are those start-discounted, and the cumulative columns **include** the current
+gameweek — `Next2GWsStart == StartingPredicted + GW2` (MAE 0.03) rather than
+`GW2 + GW3` (MAE 0.45). So `Next3GWs` as a 3-gameweek start-adjusted total is
+correct as the app already used it.
+
+**`LongStart` has no site equivalent** and is deliberately not emitted: the site
+publishes one `start_pct` per player, identical across all six forecast weeks
+(`nunique() == 1` for all 368). `compute_player_scores()` already falls back to
+the FPL `starts` count for `_start_consistency`; a copy of `Start` would instead
+spend 10% of ROS on a signal 1GW already carries.
+
+**A set of team names cannot identify a gameweek.** All 20 clubs play every
+week, so the 50%-overlap check this replaced scored 18/19 for GW2, GW3 *and*
+GW4, never fired, and had `is_ffp_available_for_gw(3)` announcing "FFP GW3
+projections are now available" against a GW2 table — burning the once-per-GW
+alert guard so the real publication went unannounced. `resolve_ffp_gameweek()`
+votes **ordered `(home, away)` pairs** against the real fixture list instead: on
+the live stale sheet that scores GW2 at 0.83 and GW3 at exactly 0.0. Club labels
+resolve through `TEAM_FULL_TO_SHORT`, never raw strings. It requires a unique
+winner at ≥0.60 and otherwise returns `None` — "unknown" must never be reported
+as a gameweek.
+
+**The gate lives inside the merges and defaults itself.** `expected_gw` on
+`merge_ffp_single_gw_data()`, `blend_multi_gw_projections()` and
+`blend_fixture_projections()` defaults to `config.CURRENT_GAMEWEEK`, so no
+future caller can forget it — the same reasoning as locked-player filtering
+living inside `_compute_transfer_suggestions()`. A mismatch leaves the FFP
+columns NaN, which is already the "unmatched" contract, so every consumer
+degrades to Rotowire-only unchanged. An *unknown* gameweek is not a wrong one
+and does not gate: refusing to blend on "we could not tell" would remove FFP
+from every page whenever the fallback's vote is inconclusive.
+
+**A failure is never cached as a success.** `get_ffp_feed()` is
+`@st.cache_data(ttl=300)`, and returning a bare `None` from it pinned a
+transient timeout for five minutes — which is how FFP came to read "temporarily
+unavailable" in the app while the website plainly worked. On failure it returns
+`provenance="none"` with the reason in `note`. Fetches retry three times with
+backoff at `timeout=20`; a real sheet read was observed to exceed the old 15s.
+
+`blend_fixture_projections()` also blended `FFP_Predicted` and then multiplied
+by start likelihood again — the double discount `compute_player_scores()` was
+fixed for. It now blends `FFP_Starting_Predicted` with the same un-discount
+recovery. Measured across 163 affected players this raised `Proj_Blended` by
+7.2% on average, never lowered it, and moved low-start players most (Matheus
+Nunes at 40% start: 3.25 → 4.20).
+
+Risk accepted: the parser depends on FFP's frontend, which they have just
+rebuilt. The sheet stays as an automatic fallback, a parse failure degrades to
+Rotowire-only rather than taking a page down, and `tests/live/` fails on a
+payload that changes shape, states no gameweek, states the wrong one, or whose
+fixtures contradict its own gameweek claim.
+
 ### Source Freshness
 
 `get_rotowire_article_updated()` (`scripts/common/scraping.py`) scrapes an
@@ -137,8 +226,9 @@ Show this wherever projections are displayed. A weekly rankings table written
 before the last team-news cycle is materially less reliable than one written
 after it, and nothing else on the page distinguishes them. Currently surfaced in
 the Initial Squad Optimizer's Data Sources panel and the Projections Hub source
-banner. FFP is a live Google Sheet with no published revision time, so it shows
-"—" rather than a fabricated one.
+banner. FFP now carries one too — its site stamps "Updated for GW3 · 4 September
+at 16:18", read by `ffp_feed.parse_updated()`. Only the spreadsheet fallback
+lacks a revision time, and shows "—" rather than a fabricated one.
 
 A missing timestamp is cosmetic: the scraper returns `None` on any failure and
 must never take a page down.

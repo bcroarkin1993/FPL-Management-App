@@ -38,7 +38,7 @@ from scripts.common.analytics import (
     merge_season_projections,
     merge_ffp_single_gw_data,
 )
-from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
+from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings, render_ffp_status
 from scripts.common.player_matching import canonical_normalize
 
 
@@ -1715,6 +1715,7 @@ def show_classic_transfers_page():
                    "A score of 0.85 = top 15% at this position. Weights auto-adjust by gameweek.")
 
     # Build DataFrames
+    ffp_feed_result = None
     with st.spinner("Analyzing players..."):
         # Build all players DataFrame
         all_players = _build_all_players_df(bootstrap, current_gw, fdr_weeks)
@@ -1792,9 +1793,10 @@ def show_classic_transfers_page():
 
         # Load FFP multi-GW projections
         try:
-            ffp_df = get_ffp_projections_data()
+            ffp_feed_result = get_ffp_feed()
+            ffp_df = ffp_feed_result.df
         except Exception:
-            ffp_df = None
+            ffp_feed_result, ffp_df = None, None
 
         # Add multi-GW projections (cap fallback multiplier to remaining GWs)
         _remaining_gws = max(1, 38 - current_gw)
@@ -1816,6 +1818,8 @@ def show_classic_transfers_page():
         # FFP Single-GW Data (Predicted, Start, LongStart)
         squad_df = merge_ffp_single_gw_data(squad_df, ffp_df)
         all_players = merge_ffp_single_gw_data(all_players, ffp_df)
+
+    render_ffp_status(ffp_feed_result, current_gw)
 
     # Positional depth
     depth_map = {}

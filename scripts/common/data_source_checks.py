@@ -5,47 +5,18 @@
 
 import logging
 import re
-from io import StringIO
-from urllib.parse import urljoin
 
-import pandas as pd
 import requests
+
+from scripts.common.ffp_feed import (
+    fetch_points_predictor,
+    fetch_sheet,
+    resolve_ffp_gameweek,
+)
 
 _logger = logging.getLogger(__name__)
 
 ARTICLES_INDEX = "https://www.rotowire.com/soccer/column/fantasy-premier-league-rankings-188"
-FFP_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRaiTmUKjtQ7MxiGibN2GAZ8m9NHF3IA2U-yE0PhBpCOXHewhs57PrjZO7GQzZvrEGGBW7HFEE43yX0/pub?output=csv"
-BOOTSTRAP_URL = "https://fantasy.premierleague.com/api/bootstrap-static/"
-FIXTURES_URL = "https://fantasy.premierleague.com/api/fixtures/"
-
-
-def get_current_gw_team_short_names(gw: int) -> set:
-    """Fetch team first-word names playing in the given gameweek.
-
-    Returns the first word of each team name (uppercased) to match
-    FFP fixture format like "Brighton (a)", "Man Utd (H)".
-    """
-    try:
-        bootstrap = requests.get(BOOTSTRAP_URL, timeout=15).json()
-        team_id_to_first_word = {}
-        for t in bootstrap.get("teams", []):
-            full_name = t.get("name", "")
-            first_word = full_name.split()[0].upper() if full_name else ""
-            team_id_to_first_word[t["id"]] = first_word
-
-        fixtures = requests.get(FIXTURES_URL, params={"event": gw}, timeout=15).json()
-        teams = set()
-        for fx in fixtures:
-            h, a = fx.get("team_h"), fx.get("team_a")
-            if h:
-                teams.add(team_id_to_first_word.get(h, ""))
-            if a:
-                teams.add(team_id_to_first_word.get(a, ""))
-        teams.discard("")
-        return teams
-    except Exception as e:
-        _logger.warning("Failed to get GW %d team names: %s", gw, e)
-        return set()
 
 
 def is_rotowire_available_for_gw(gw: int) -> bool:
@@ -92,30 +63,32 @@ def is_rotowire_available_for_gw(gw: int) -> bool:
 
 
 def is_ffp_available_for_gw(gw: int) -> bool:
-    """Check if FFP Google Sheet has data for the given gameweek."""
+    """Has FFP published projections for this gameweek?
+
+    Answered from FFP's own stated gameweek, falling back to reconstructing it
+    from the spreadsheet's fixtures.
+
+    The check this replaces compared the *set* of teams in FFP's fixtures
+    against the set playing this gameweek and passed at 50% overlap. Every club
+    plays every gameweek, so that set never changes: it returned True for GW2,
+    GW3 and GW4 alike, and announced "FFP GW3 projections are now available"
+    against a table that was still on GW2 — burning the once-per-gameweek alert
+    guard so the real publication went unannounced.
+    """
     try:
-        resp = requests.get(FFP_SHEET_URL, timeout=15)
-        resp.raise_for_status()
-        df = pd.read_csv(StringIO(resp.text))
+        rows, feed_gw, _updated = fetch_points_predictor()
+        if rows and feed_gw is not None:
+            return int(feed_gw) == int(gw)
     except Exception as e:
-        _logger.warning("FFP check failed: %s", e)
+        _logger.warning("FFP site check failed: %s", e)
+
+    try:
+        sheet = fetch_sheet()
+    except Exception as e:
+        _logger.warning("FFP sheet check failed: %s", e)
+        return False
+    if sheet is None or sheet.empty:
         return False
 
-    if df is None or df.empty or "Fixture" not in df.columns:
-        return False
-
-    current_teams = get_current_gw_team_short_names(gw)
-    if not current_teams:
-        return False
-
-    ffp_teams = set()
-    for fixture in df["Fixture"].dropna().unique():
-        parts = str(fixture).split()
-        if parts:
-            ffp_teams.add(parts[0].upper())
-
-    if not ffp_teams:
-        return False
-
-    overlap = len(ffp_teams & current_teams)
-    return overlap >= len(ffp_teams) * 0.5
+    sheet_gw = resolve_ffp_gameweek(sheet)
+    return sheet_gw is not None and int(sheet_gw) == int(gw)

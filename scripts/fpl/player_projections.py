@@ -13,106 +13,74 @@ Each data source is displayed in its own tab with clear attribution.
 
 import config
 import pandas as pd
-import requests
 import streamlit as st
 from scripts.common.text_helpers import format_last_updated
 from scripts.common.scraping import (
+    FFP_CLEAN_SHEET_URL,
+    FFP_GOAL_ASSIST_URL,
     FFP_POINTS_PREDICTOR_URL,
+    get_ffp_feed,
     get_rotowire_article_updated,
 )
 from scripts.common.utils import (
     get_rotowire_player_projections,
     get_rotowire_rankings_url,
-    get_ffp_projections_data,
     get_ffp_goalscorer_odds,
     get_ffp_clean_sheet_odds,
     get_odds_api_match_odds,
-    get_classic_bootstrap_static,
 )
 from scripts.common.styled_tables import render_styled_table
 
 
 # =============================================================================
-# Data Freshness Detection
+# Data Freshness
 # =============================================================================
 
-@st.cache_data(ttl=300)
-def _get_current_gw_teams() -> set:
-    """Get set of team names playing in the current gameweek.
+def _ffp_gate(feed):
+    """Report FFP's own gameweek, and say plainly when it is not ours.
 
-    Returns both full names and first-word variants (uppercased) so they
-    can be matched against FFP fixture strings like "Brighton (a)".
+    What this replaces was a set-overlap test between FFP's fixture teams and
+    the current gameweek's teams. All 20 clubs play every gameweek, so that set
+    is the same every week: it scored 18/19 for GW2, GW3 and GW4 alike and could
+    never fail. FFP's feed now states its gameweek outright.
+
+    Returns True when the tab should render its table.
     """
-    try:
-        # Get bootstrap data for team names
-        bootstrap = get_classic_bootstrap_static()
-        if not bootstrap:
-            return set()
-
-        team_id_to_names = {}
-        for t in bootstrap.get('teams', []):
-            tid = t['id']
-            # Store first word of full name uppercased (matches FFP format)
-            full_name = t.get('name', '')
-            first_word = full_name.split()[0].upper() if full_name else ''
-            team_id_to_names[tid] = first_word
-
-        # Get current GW fixtures
-        gw = config.CURRENT_GAMEWEEK
-        url = f"https://fantasy.premierleague.com/api/fixtures/?event={gw}"
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        fixtures = resp.json()
-
-        teams = set()
-        for fx in fixtures:
-            h, a = fx.get('team_h'), fx.get('team_a')
-            if h:
-                teams.add(team_id_to_names.get(h, ''))
-            if a:
-                teams.add(team_id_to_names.get(a, ''))
-        teams.discard('')
-
-        return teams
-    except Exception:
-        return set()
-
-
-def _is_ffp_data_current(ffp_df: pd.DataFrame) -> bool:
-    """
-    Check if FFP data is for the current gameweek by comparing fixtures.
-
-    FFP fixtures use format like "Brighton (a)", "Man Utd (H)".
-    We extract the first word and compare against FPL team first words.
-
-    Returns True if the FFP fixture data matches current GW teams.
-    """
-    if ffp_df is None or ffp_df.empty:
+    if not feed.ok:
+        st.warning(
+            "Could not load Fantasy Football Pundit data. "
+            + (feed.note or "Neither their site nor their published spreadsheet responded.")
+            + " This usually clears on its own — reload in a moment."
+        )
         return False
 
-    if 'Fixture' not in ffp_df.columns:
-        return False
-
-    current_teams = _get_current_gw_teams()
-    if not current_teams:
-        # Can't determine, assume current
+    if feed.gameweek is None:
+        st.info(
+            "Fantasy Football Pundit data loaded, but which gameweek it covers could "
+            "not be determined. Check the Fixture column before relying on it."
+        )
         return True
 
-    # Extract first word from FFP fixtures (e.g., "Brighton (a)" -> "BRIGHTON")
-    ffp_teams = set()
-    for fixture in ffp_df['Fixture'].dropna().unique():
-        parts = str(fixture).split()
-        if parts:
-            team_code = parts[0].upper()
-            ffp_teams.add(team_code)
+    current_gw = config.CURRENT_GAMEWEEK
+    if feed.is_stale(current_gw):
+        st.warning(
+            f"Fantasy Football Pundit has published **GW{feed.gameweek}**, but the "
+            f"current gameweek is **GW{current_gw}**. The numbers below are for "
+            f"GW{feed.gameweek} and are excluded from scoring elsewhere in the app."
+        )
+    return True
 
-    # Check overlap - if FFP teams mostly match current GW teams, data is current
-    if not ffp_teams:
-        return False
 
-    overlap = len(ffp_teams & current_teams)
-    # If at least 50% of FFP teams are in current GW, consider it current
-    return overlap >= len(ffp_teams) * 0.5
+def _ffp_caption(feed):
+    """One line naming the gameweek, the publish time and which source answered."""
+    bits = []
+    if feed.gameweek is not None:
+        bits.append(f"Gameweek {feed.gameweek}")
+    if feed.updated is not None:
+        bits.append(f"published {format_last_updated(feed.updated)}")
+    if feed.provenance == "sheet":
+        bits.append("read from FFP's published spreadsheet (their site was unreachable)")
+    return " · ".join(bits)
 
 
 def _render_source_banner(source: str, description: str, bg_color: str, border_color: str,
@@ -311,25 +279,18 @@ def render_rotowire_projections():
 
 def render_ffp_data():
     """Render the FFP data tab."""
+    feed = get_ffp_feed()
     _render_source_banner(
         "Fantasy Football Pundit",
         "Player data with start probability, ownership, and betting-derived probabilities.",
         "#fef3c7", "#f59e0b",
-        FFP_POINTS_PREDICTOR_URL
+        FFP_POINTS_PREDICTOR_URL,
+        updated=feed.updated,
     )
 
-    raw_df = get_ffp_projections_data()
-
-    if raw_df is None or raw_df.empty:
-        st.warning("Could not load FFP data. The data source may be temporarily unavailable.")
+    if not _ffp_gate(feed):
         return
-
-    current_gw = config.CURRENT_GAMEWEEK
-
-    # Check if data is for current gameweek
-    if not _is_ffp_data_current(raw_df):
-        st.info(f"GW{current_gw} data is not yet available from Fantasy Football Pundit. Check back closer to the gameweek deadline.")
-        return
+    raw_df = feed.df
 
     # Check which columns actually have data (non-zero values)
     prediction_cols = ['Predicted', 'StartingPredicted', 'Next2GWs', 'Next3GWs', 'Next6GWs']
@@ -428,7 +389,7 @@ def render_ffp_data():
             display_df[col] = pd.to_numeric(display_df[col], errors='coerce')
 
     # Display with styled table
-    st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Player Data")
+    st.markdown(f"#### GW{feed.gameweek or config.CURRENT_GAMEWEEK} Player Data")
 
     # Determine color columns based on available data
     positive_cols = [c for c in gradient_cols.keys() if gradient_cols.get(c, True) and c in display_df.columns]
@@ -448,7 +409,8 @@ def render_ffp_data():
         positive_color_cols=positive_cols,
         max_height=600,
     )
-    st.caption(f"Showing {len(result)} of {len(df)} players. Data from Fantasy Football Pundit.")
+    st.caption(f"Showing {len(result)} of {len(df)} players. Data from Fantasy Football Pundit"
+               + (f" · {_ffp_caption(feed)}." if _ffp_caption(feed) else "."))
 
 
 # =============================================================================
@@ -457,24 +419,22 @@ def render_ffp_data():
 
 def render_goalscorer_odds():
     """Render the goal scorer and assist odds tab."""
+    feed = get_ffp_feed()
     _render_source_banner(
         "Fantasy Football Pundit (Betting Odds)",
         "Anytime goalscorer and assist probabilities converted from bookmaker odds.",
         "#fefce8", "#eab308",
-        "https://www.fantasyfootballpundit.com/premier-league-goalscorer-assist-odds/"
+        FFP_GOAL_ASSIST_URL,
+        updated=feed.updated,
     )
 
-    # First check if FFP data is current using the base projections data
-    raw_df = get_ffp_projections_data()
-    if raw_df is not None and not _is_ffp_data_current(raw_df):
-        current_gw = config.CURRENT_GAMEWEEK
-        st.info(f"GW{current_gw} data is not yet available from Fantasy Football Pundit. Check back closer to the gameweek deadline.")
+    if not _ffp_gate(feed):
         return
 
     df = get_ffp_goalscorer_odds()
 
     if df is None or df.empty:
-        st.warning("Could not load goalscorer odds data. The data source may be temporarily unavailable.")
+        st.warning("Goalscorer odds are not in the current Fantasy Football Pundit feed.")
         return
 
     # Filters
@@ -515,7 +475,7 @@ def render_goalscorer_odds():
             display_df[col] = pd.to_numeric(display_df[col], errors='coerce')
 
     # Display with styled table
-    st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Goalscorer & Assist Probabilities")
+    st.markdown(f"#### GW{feed.gameweek or config.CURRENT_GAMEWEEK} Goalscorer & Assist Probabilities")
 
     positive_cols = [c for c in ['Goal %', 'Assist %', 'Return %', 'Start %'] if c in display_df.columns]
     col_fmts = {col: '{:.0f}%' for col in positive_cols}
@@ -526,7 +486,8 @@ def render_goalscorer_odds():
         positive_color_cols=positive_cols,
         max_height=600,
     )
-    st.caption(f"Showing {len(result)} of {len(df)} players. Betting odds converted to probabilities.")
+    st.caption(f"Showing {len(result)} of {len(df)} players. Betting odds converted to probabilities"
+               + (f" · {_ffp_caption(feed)}." if _ffp_caption(feed) else "."))
 
 
 # =============================================================================
@@ -535,27 +496,25 @@ def render_goalscorer_odds():
 
 def render_clean_sheet_odds():
     """Render the clean sheet odds tab with horizontal bar visualization."""
+    feed = get_ffp_feed()
     _render_source_banner(
         "Fantasy Football Pundit (Clean Sheet Odds)",
         "Team clean sheet probabilities from betting markets.",
         "#f0fdf4", "#22c55e",
-        "https://www.fantasyfootballpundit.com/premier-league-clean-sheet-odds/"
+        FFP_CLEAN_SHEET_URL,
+        updated=feed.updated,
     )
 
-    # First check if FFP data is current using the base projections data
-    raw_df = get_ffp_projections_data()
-    if raw_df is not None and not _is_ffp_data_current(raw_df):
-        current_gw = config.CURRENT_GAMEWEEK
-        st.info(f"GW{current_gw} data is not yet available from Fantasy Football Pundit. Check back closer to the gameweek deadline.")
+    if not _ffp_gate(feed):
         return
 
     df = get_ffp_clean_sheet_odds()
 
     if df is None or df.empty:
-        st.warning("Could not load clean sheet odds data. The data source may be temporarily unavailable.")
+        st.warning("Clean sheet odds are not in the current Fantasy Football Pundit feed.")
         return
 
-    st.markdown(f"#### GW{config.CURRENT_GAMEWEEK} Clean Sheet Probabilities")
+    st.markdown(f"#### GW{feed.gameweek or config.CURRENT_GAMEWEEK} Clean Sheet Probabilities")
 
     # Create horizontal bar chart visualization using native Streamlit
     if 'CS Prob %' in df.columns and 'Team' in df.columns:
@@ -584,7 +543,8 @@ def render_clean_sheet_odds():
             with col3:
                 st.caption(fixture)
 
-        st.caption(f"Showing {len(df)} teams. Betting odds converted to probabilities.")
+        st.caption(f"Showing {len(df)} teams. Betting odds converted to probabilities"
+                   + (f" · {_ffp_caption(feed)}." if _ffp_caption(feed) else "."))
     else:
         st.warning("Data format not as expected.")
 

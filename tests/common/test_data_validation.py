@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from scripts.common.data_validation import (
+    check_ffp_feed,
     check_transfer_risk,
     check_transfer_windows,
     Issue,
@@ -634,3 +635,71 @@ class TestTransferRiskGroundTruthExclusion:
         df = pd.DataFrame(self._rows(3, Odds_Risk=1.8))
         assert any("Odds_Risk" in i.message for i in check_transfer_risk(df)
                    if i.severity == "error")
+
+
+class TestCheckFfpFeed:
+    """Every fixture here is a shape the live feed actually produced."""
+
+    @staticmethod
+    def _feed(n=300, start=90.0, cond=5.0, invert=False):
+        conditional = [cond] * n
+        unconditional = [round(c * start / 100.0, 3) for c in conditional]
+        if invert:
+            conditional, unconditional = unconditional, conditional
+        return pd.DataFrame({
+            "Name": ["Player %d" % i for i in range(n)],
+            "Team": ["Arsenal"] * n,
+            "Position": ["MID"] * n,
+            "Start": [start] * n,
+            "StartingPredicted": conditional,
+            "Predicted": unconditional,
+        })
+
+    def test_a_current_feed_is_clean(self):
+        assert not check_ffp_feed(self._feed(), gameweek=3, expected_gw=3, age_days=0.2)
+
+    def test_an_empty_feed_is_an_error(self):
+        issues = check_ffp_feed(pd.DataFrame(), gameweek=3, expected_gw=3)
+        assert [i for i in issues if i.severity == "error"]
+
+    def test_the_wrong_gameweek_is_an_error(self):
+        """The live bug: 561 plausible rows, one gameweek behind."""
+        issues = check_ffp_feed(self._feed(n=561), gameweek=2, expected_gw=3)
+        errors = [i for i in issues if i.severity == "error"]
+        assert errors and "GW2" in errors[0].message and "GW3" in errors[0].message
+
+    def test_an_unknown_gameweek_warns_rather_than_errors(self):
+        issues = check_ffp_feed(self._feed(), gameweek=None, expected_gw=3)
+        assert issues and all(i.severity == "warning" for i in issues)
+
+    def test_the_two_prediction_bases_being_swapped_is_an_error(self):
+        """FFP's site names these the opposite way round from its spreadsheet.
+
+        Mapped across by name instead of by basis, `Predicted` comes out larger
+        than `StartingPredicted` -- and the start discount is then applied to
+        the wrong one.
+        """
+        issues = check_ffp_feed(self._feed(invert=True), gameweek=3, expected_gw=3)
+        assert any("Predicted exceeds StartingPredicted" in i.message
+                   for i in issues if i.severity == "error")
+
+    def test_start_percentages_must_be_percentages(self):
+        df = self._feed()
+        df["Start"] = 0.9              # a fraction where a percentage belongs
+        issues = check_ffp_feed(df, gameweek=3, expected_gw=3)
+        assert not [i for i in issues if "Start%" in i.message]   # 0.9 is in range
+        df["Start"] = 900.0
+        assert [i for i in check_ffp_feed(df, gameweek=3, expected_gw=3)
+                if i.severity == "error" and "Start%" in i.message]
+
+    def test_a_truncated_table_warns(self):
+        issues = check_ffp_feed(self._feed(n=12), gameweek=3, expected_gw=3)
+        assert any("only 12 FFP rows" in i.message for i in issues)
+
+    def test_a_feed_that_stopped_moving_warns(self):
+        issues = check_ffp_feed(self._feed(), gameweek=3, expected_gw=3, age_days=40)
+        assert any(i.severity == "warning" and "40 days ago" in i.message for i in issues)
+
+    def test_a_future_stamp_is_an_error(self):
+        issues = check_ffp_feed(self._feed(), gameweek=3, expected_gw=3, age_days=-2)
+        assert [i for i in issues if i.severity == "error" and "future" in i.message]

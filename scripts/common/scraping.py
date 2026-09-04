@@ -9,6 +9,7 @@ import hashlib
 import threading
 import re
 from datetime import datetime
+from typing import NamedTuple
 
 from bs4 import BeautifulSoup
 import numpy as np
@@ -20,7 +21,8 @@ from urllib.parse import urljoin
 
 import config
 from scripts.common.error_helpers import get_logger
-from scripts.common.text_helpers import TZ_ET
+from scripts.common.text_helpers import TZ_ET, format_last_updated
+from scripts.common import ffp_feed
 
 _logger = get_logger("fpl_app.scraping")
 
@@ -607,101 +609,111 @@ def get_rotowire_season_rankings(url: str, limit: Optional[int] = None) -> pd.Da
 # FANTASY FOOTBALL PUNDIT DATA
 # =============================================================================
 
-# FFP Google Sheets URL (public CSV export)
-FFP_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRaiTmUKjtQ7MxiGibN2GAZ8m9NHF3IA2U-yE0PhBpCOXHewhs57PrjZO7GQzZvrEGGBW7HFEE43yX0/pub?output=csv"
+#: Every FFP address now lives in ``ffp_feed`` -- re-exported here so the
+#: existing importers keep working.
+FFP_SHEET_URL = ffp_feed.FFP_SHEET_URL
 
-#: The human-readable page behind FFP_SHEET_URL. The sheet is the data feed; this
-#: is where a person goes to read it, so it is what the UI should link to.
-FFP_POINTS_PREDICTOR_URL = "https://www.fantasyfootballpundit.com/fpl-points-predictor/"
+#: The human-readable page behind the feed. The site payload is the data source;
+#: this is where a person goes to read it, so it is what the UI should link to.
+FFP_POINTS_PREDICTOR_URL = ffp_feed.FFP_POINTS_PREDICTOR_URL
+FFP_GOAL_ASSIST_URL = ffp_feed.FFP_GOAL_ASSIST_URL
+FFP_CLEAN_SHEET_URL = ffp_feed.FFP_CLEAN_SHEET_URL
 
 
-@st.cache_data(ttl=300)
-def get_ffp_projections_data() -> Optional[pd.DataFrame]:
+class FFPFeed(NamedTuple):
+    """An FFP table plus everything needed to judge whether to trust it.
+
+    ``gameweek`` and ``provenance`` are the point, not a nicety. The failure
+    this exists to prevent is a table that is wrong but looks right: FFP rolls
+    its numbers forward on its own clock, and consuming last week's -- or next
+    week's -- projections under this week's heading is invisible, because every
+    individual value is plausible. Same reasoning as ``resolve_classic_squad()``.
     """
-    Fetch Fantasy Football Pundit projections data from their public Google Sheet.
 
-    Returns DataFrame with columns:
-    - Name, Team, Position, Fixture, Ownership, Start %, Price
-    - CS (Clean Sheet odds), AnytimeGoal, AnytimeAssist, AnytimeReturn
-    - Predicted, StartingPredicted (points predictions)
-    - GW2-GW6, Next2GWs-Next6GWs (multi-GW forecasts)
+    df: Optional[pd.DataFrame]
+    gameweek: Optional[int]
+    updated: Optional[datetime]
+    provenance: str                     # "site" | "sheet" | "none"
+    note: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.df is not None and not self.df.empty
+
+    def is_stale(self, expected_gw: Optional[int]) -> bool:
+        """True when the feed describes a gameweek other than the one asked for.
+
+        An unknown gameweek is *not* stale -- it is unknown. Refusing to blend on
+        "we could not tell" would take FFP off every page whenever the fixture
+        vote is inconclusive.
+        """
+        if expected_gw is None or self.gameweek is None:
+            return False
+        return int(self.gameweek) != int(expected_gw)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_ffp_feed() -> FFPFeed:
+    """Fetch FFP, site first, published Google Sheet second.
+
+    The sheet was the app's only source until FFP stopped keeping it in step
+    with their own site -- measured a full gameweek behind, and internally
+    inconsistent within a single download. It stays as a fallback so a change to
+    FFP's frontend degrades the feed rather than removing it.
+
+    **A failure is never cached as a success.** Returning a bare ``None`` from a
+    ``cache_data`` function pinned a transient timeout for five minutes, which is
+    how FFP came to read "temporarily unavailable" in the app while the website
+    was plainly working. On failure this returns ``provenance="none"`` with the
+    reason in ``note``, and ``ok`` is False, so a caller can say what went wrong.
     """
     try:
-        from io import StringIO
-        resp = requests.get(FFP_SHEET_URL, timeout=15)
-        resp.raise_for_status()
-        df = pd.read_csv(StringIO(resp.text))
-
-        if df.empty:
-            _logger.warning("FFP data fetch returned empty DataFrame")
-            return None
-
-        # Clean up percentage columns (remove % sign, convert to float)
-        pct_cols = ['Ownership', 'Start', 'LongStart', 'CS', 'AnytimeAssist', 'AnytimeGoal', 'AnytimeReturn']
-        for col in pct_cols:
-            if col in df.columns:
-                df[col] = df[col].astype(str).str.replace('%', '').str.strip()
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        # Clean up price column (remove £ and m)
-        if 'Price' in df.columns:
-            df['Price'] = df['Price'].astype(str).str.replace('£', '').str.replace('m', '').str.strip()
-            df['Price'] = pd.to_numeric(df['Price'], errors='coerce')
-
-        # Ensure numeric columns are properly typed
-        numeric_cols = ['Predicted', 'StartingPredicted', 'GW2', 'GW3', 'GW4', 'GW5', 'GW6',
-                        'Next2GWs', 'Next3GWs', 'Next4GWs', 'Next5GWs', 'Next6GWs',
-                        'Next2GWsStart', 'Next3GWsStart', 'Next4GWsStart', 'Next5GWsStart', 'Next6GWsStart']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        _logger.debug("FFP data fetched successfully: %d players", len(df))
-        return df
-
+        rows, gw, updated = ffp_feed.fetch_points_predictor()
+        if rows:
+            code_to_id = ffp_feed.bootstrap_code_to_id()
+            df = ffp_feed.to_sheet_schema(rows, gw, code_to_id)
+            if df is not None and not df.empty:
+                goal_rows, _, _ = ffp_feed.fetch_goal_assist()
+                cs_rows, _, _ = ffp_feed.fetch_clean_sheet()
+                df = ffp_feed.attach_odds_columns(df, goal_rows, cs_rows, gw)
+                return FFPFeed(df, gw, updated, "site")
     except Exception as e:
-        _logger.warning("Failed to fetch FFP projections data: %s", str(e))
-        return None
+        _logger.warning("FFP site feed failed, falling back to the sheet: %s", e)
+
+    try:
+        sheet = ffp_feed.fetch_sheet()
+    except Exception as e:
+        _logger.warning("FFP sheet fetch failed: %s", e)
+        sheet = None
+
+    if sheet is None or sheet.empty:
+        return FFPFeed(None, None, None, "none",
+                       "Neither the Fantasy Football Pundit site nor its published "
+                       "spreadsheet could be read.")
+
+    sheet_gw = ffp_feed.resolve_ffp_gameweek(sheet)
+    if sheet_gw is not None:
+        sheet = sheet.copy()
+        sheet["FFP_GW"] = sheet_gw
+    return FFPFeed(sheet, sheet_gw, None, "sheet",
+                   "Read from FFP's published spreadsheet; their site payload was "
+                   "unavailable.")
 
 
-def get_ffp_points_predictor() -> Optional[pd.DataFrame]:
+def get_ffp_projections_data() -> Optional[pd.DataFrame]:
+    """Fetch Fantasy Football Pundit projections.
+
+    Returns a DataFrame in the long-standing sheet schema -- Name, Team,
+    Position, Fixture, Ownership, Start, Price, CS, AnytimeGoal/Assist/Return,
+    Predicted, StartingPredicted, GW2-GW6 and Next2GWs-Next6GWs -- plus
+    ``FFP_GW``, ``Player_Code`` and ``Player_ID`` when the site payload was
+    reachable. None if no source could be read.
+
+    Prefer :func:`get_ffp_feed` in new code: this returns the table without the
+    gameweek it belongs to, and that gameweek is the thing that made the numbers
+    wrong.
     """
-    Get FFP points predictor data formatted for display.
-
-    Returns DataFrame with key columns for points predictions.
-    """
-    df = get_ffp_projections_data()
-    if df is None:
-        return None
-
-    # Select and rename columns for display
-    cols = {
-        'Name': 'Player',
-        'Team': 'Team',
-        'Position': 'Position',
-        'Fixture': 'Fixture',
-        'Price': 'Price',
-        'Ownership': 'Ownership %',
-        'Start': 'Start %',
-        'Predicted': 'Predicted Pts',
-        'StartingPredicted': 'Pts (if starts)',
-        'Next2GWs': 'Next 2 GWs',
-        'Next3GWs': 'Next 3 GWs',
-        'Next6GWs': 'Next 6 GWs',
-    }
-
-    available = {k: v for k, v in cols.items() if k in df.columns}
-    result = df[list(available.keys())].rename(columns=available)
-
-    # Filter to players with >0% start chance for meaningful data
-    if 'Start %' in result.columns:
-        result = result[result['Start %'] > 0].copy()
-
-    # Sort by predicted points
-    if 'Predicted Pts' in result.columns:
-        result = result.sort_values('Predicted Pts', ascending=False)
-
-    return result.reset_index(drop=True)
+    return get_ffp_feed().df
 
 
 def get_ffp_goalscorer_odds() -> Optional[pd.DataFrame]:
@@ -1230,3 +1242,49 @@ def get_player_odds_ladder(player, slug=None, force_refresh: bool = False,
     except Exception:
         _logger.warning("Could not cache odds ladder for %s", resolved, exc_info=True)
     return pd.DataFrame(records, columns=ODDS_LADDER_COLUMNS)
+
+
+# =============================================================================
+# FFP status rendering
+# =============================================================================
+
+def render_ffp_status(feed: "FFPFeed", expected_gw: Optional[int] = None,
+                      contributed: bool = True) -> None:
+    """One line telling the reader which gameweek FFP contributed, if any.
+
+    Lives here, next to the feed, so every page says the same thing rather than
+    inventing its own wording. Kept deliberately quiet when FFP is current: the
+    caption is for the case where it is not, and a warning that fires every week
+    gets ignored the week it matters.
+    """
+    if feed is None:
+        return
+    if not feed.ok:
+        st.caption(
+            "⚠️ Fantasy Football Pundit is unavailable, so projections are "
+            "Rotowire-only. " + (feed.note or "")
+        )
+        return
+
+    if expected_gw is None:
+        expected_gw = config.CURRENT_GAMEWEEK
+
+    if feed.is_stale(expected_gw):
+        st.warning(
+            f"Fantasy Football Pundit has published **GW{feed.gameweek}**, not "
+            f"**GW{expected_gw}** — it is excluded from the numbers below, which "
+            f"are Rotowire-only. Blending a different gameweek's projections is "
+            f"invisible once it is in the totals, so it is left out rather than "
+            f"quietly mixed in."
+        )
+        return
+
+    if not contributed:
+        return
+
+    bits = ["Fantasy Football Pundit GW%s" % feed.gameweek] if feed.gameweek else ["Fantasy Football Pundit"]
+    if feed.updated is not None:
+        bits.append("published %s" % format_last_updated(feed.updated))
+    if feed.provenance == "sheet":
+        bits.append("read from their spreadsheet (site unreachable)")
+    st.caption("Projections blended with " + " · ".join(bits) + ".")

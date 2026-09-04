@@ -258,7 +258,7 @@ def _build_reference_pool(current_gw: int) -> pd.DataFrame:
     from scripts.common.fixture_helpers import get_fixture_difficulty_grid
     from scripts.common.fpl_draft_api import pull_fpl_player_stats
     from scripts.common.scraping import (
-        get_ffp_projections_data,
+        get_ffp_feed,
         get_rotowire_player_projections,
         get_rotowire_season_rankings,
     )
@@ -304,7 +304,11 @@ def _build_reference_pool(current_gw: int) -> pd.DataFrame:
     pool["Points"] = pd.to_numeric(pool["Points"], errors="coerce").fillna(0)
 
     try:
-        ffp = get_ffp_projections_data()
+        # get_ffp_feed() gates itself on the gameweek: a table published for
+        # another week is excluded rather than blended, so Proj_Blended falls
+        # back to Rotowire-only rather than mixing two gameweeks into a power
+        # ranking nobody can sanity-check by eye.
+        ffp = get_ffp_feed().df
     except Exception as e:
         _logger.warning("FFP projections unavailable: %s", e)
         ffp = None

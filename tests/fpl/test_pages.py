@@ -9,6 +9,14 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 
+def _empty_ffp_feed():
+    """An FFP feed that loaded nothing — the shape pages must survive."""
+    from scripts.common.scraping import FFPFeed
+    return FFPFeed(pd.DataFrame(), None, None, "none", "unavailable in tests")
+
+
+
+
 class TestFixturesPage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.fpl.fixtures.get_current_gameweek", return_value=25), \
@@ -118,11 +126,10 @@ class TestPlayerProjectionsPage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.fpl.player_projections.get_rotowire_player_projections", return_value=pd.DataFrame()), \
              patch("scripts.fpl.player_projections.get_rotowire_rankings_url", return_value="https://example.com"), \
-             patch("scripts.fpl.player_projections.get_ffp_projections_data", return_value=pd.DataFrame()), \
+             patch("scripts.fpl.player_projections.get_ffp_feed", return_value=_empty_ffp_feed()), \
              patch("scripts.fpl.player_projections.get_ffp_goalscorer_odds", return_value=pd.DataFrame()), \
              patch("scripts.fpl.player_projections.get_ffp_clean_sheet_odds", return_value=pd.DataFrame()), \
-             patch("scripts.fpl.player_projections.get_odds_api_match_odds", return_value=pd.DataFrame()), \
-             patch("scripts.fpl.player_projections.get_classic_bootstrap_static", return_value={"elements": [], "teams": [], "events": []}):
+             patch("scripts.fpl.player_projections.get_odds_api_match_odds", return_value=pd.DataFrame()):
             from scripts.fpl.player_projections import show_player_projections_page
             show_player_projections_page()
 

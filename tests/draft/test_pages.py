@@ -9,6 +9,14 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 
+def _empty_ffp_feed():
+    """An FFP feed that loaded nothing — the shape pages must survive."""
+    from scripts.common.scraping import FFPFeed
+    return FFPFeed(pd.DataFrame(), None, None, "none", "unavailable in tests")
+
+
+
+
 class TestDraftHomePage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.draft.home.get_current_gameweek", return_value=25), \
@@ -73,7 +81,7 @@ class TestWaiverWirePage:
              patch("scripts.draft.waiver_wire.normalize_fpl_players_to_rotowire_schema", return_value=pd.DataFrame()), \
              patch("scripts.draft.waiver_wire.normalize_rotowire_players", return_value=pd.DataFrame()), \
              patch("scripts.draft.waiver_wire.compute_healthy_form", return_value=5.0), \
-             patch("scripts.draft.waiver_wire.get_ffp_projections_data", return_value=None), \
+             patch("scripts.draft.waiver_wire.get_ffp_feed", return_value=_empty_ffp_feed()), \
              patch("scripts.draft.waiver_wire.blend_multi_gw_projections", side_effect=lambda df, *a, **kw: df), \
              patch("scripts.draft.waiver_wire.compute_positional_depth", return_value={}):
             from scripts.draft.waiver_wire import show_waiver_wire_page

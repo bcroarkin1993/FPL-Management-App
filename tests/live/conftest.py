@@ -137,9 +137,17 @@ def rotowire_projections(rotowire_url):
 
 
 @pytest.fixture(scope="session")
-def ffp_projections():
-    from scripts.common.scraping import get_ffp_projections_data
-    return skip_if_unreachable(lambda: get_ffp_projections_data(), "FFP sheet")
+def ffp_feed():
+    from scripts.common.scraping import get_ffp_feed
+    feed = skip_if_unreachable(lambda: get_ffp_feed(), "FFP")
+    if not feed.ok:
+        pytest.skip("FFP returned no rows: %s" % (feed.note or "unknown"))
+    return feed
+
+
+@pytest.fixture(scope="session")
+def ffp_projections(ffp_feed):
+    return ffp_feed.df
 
 
 @pytest.fixture(scope="session")

@@ -17,7 +17,7 @@ from fuzzywuzzy import fuzz
 from scripts.common.error_helpers import show_api_error
 from scripts.common.player_matching import canonical_normalize
 from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections
-from scripts.common.scraping import get_ffp_projections_data
+from scripts.common.scraping import get_ffp_feed, render_ffp_status
 from scripts.common.fixture_helpers import (
     compute_key_differentials, live_player_status, render_key_differentials,
 )
@@ -1286,7 +1286,9 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
     if projections_df is None or projections_df.empty:
         st.warning("Rotowire projections unavailable. Scores will show 0.")
 
-    ffp_df_h2h = get_ffp_projections_data()
+    ffp_feed_h2h = get_ffp_feed()
+    ffp_df_h2h = ffp_feed_h2h.df
+    render_ffp_status(ffp_feed_h2h, current_gw)
 
     # Render fixtures overview table
     sigma = 15.0
@@ -1629,7 +1631,9 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
         except Exception:
             pass
 
-        ffp_df = get_ffp_projections_data()
+        ffp_feed_result = get_ffp_feed()
+        ffp_df = ffp_feed_result.df
+        render_ffp_status(ffp_feed_result, current_gw)
 
         if not projections_available:
             st.warning("Rotowire projections unavailable. Projected GW points will show 0.")

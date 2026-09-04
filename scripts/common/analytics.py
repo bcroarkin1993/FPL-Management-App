@@ -940,6 +940,122 @@ def _claim_reference_rows(
     return resolved
 
 
+_FFP_GW_WARNED = set()
+
+#: Distinguishes "caller said nothing" from "caller explicitly disabled the check".
+_GW_AUTO = object()
+
+
+def _resolve_expected_gw(expected_gw):
+    """Default the gameweek gate to the live one.
+
+    The check lives *inside* the merges rather than at their callsites, and
+    defaults itself, so no future caller can forget it -- the same reason
+    locked-player filtering lives inside ``_compute_transfer_suggestions()``.
+    Pass ``expected_gw=None`` to switch it off deliberately.
+    """
+    if expected_gw is not _GW_AUTO:
+        return expected_gw
+    try:
+        return config.CURRENT_GAMEWEEK
+    except Exception:
+        return None
+
+
+def ffp_gameweek_matches(ffp_df, expected_gw, source_name="FFP") -> bool:
+    """Is this FFP table for the gameweek the caller is scoring?
+
+    FFP rolls its numbers forward on its own clock, which does not agree with
+    ``current_event``. Measured live, the app was blending Rotowire GW3 at 60%
+    with FFP GW2 at 40% and applying GW2 start probabilities -- undetectable by
+    inspection, because every value involved was plausible.
+
+    Answers True when the question cannot be asked (no ``expected_gw``, or a
+    frame with no ``FFP_GW``): an unknown gameweek is not a wrong one, and
+    refusing to blend on "we could not tell" would remove FFP from every page
+    whenever the fallback's fixture vote is inconclusive.
+    """
+    if expected_gw is None or ffp_df is None or getattr(ffp_df, "empty", True):
+        return True
+    if "FFP_GW" not in ffp_df.columns:
+        return True
+    stated = pd.to_numeric(ffp_df["FFP_GW"], errors="coerce").dropna()
+    if stated.empty:
+        return True
+    actual = int(stated.mode().iloc[0])
+    if actual == int(expected_gw):
+        return True
+    key = (source_name, actual, int(expected_gw))
+    if key not in _FFP_GW_WARNED:
+        _FFP_GW_WARNED.add(key)
+        _logger.warning(
+            "%s: FFP is published for GW%d but GW%d is being scored — excluding it "
+            "rather than blending two different gameweeks.",
+            source_name, actual, int(expected_gw))
+    return False
+
+
+def _claim_ffp_rows(player_df, ffp, name_col, source_name, stats=None,
+                    id_col="Player_ID"):
+    """Map player rows onto FFP rows, element id first and names second.
+
+    FFP's site payload publishes the FPL ``code`` for every player, which
+    resolves to an element id exactly -- 368 of 368 live. An id join cannot make
+    the class of mistake this app keeps re-learning (Alex Palmer wearing Cole
+    Palmer's numbers), so it runs first and the tiered ``ReferenceMatcher`` only
+    sees whatever is left. On the sheet fallback, which carries no ids, nothing
+    is claimed here and the matcher does all the work exactly as before.
+    """
+    claims = {}
+    remaining = player_df
+    id_matched = 0
+
+    if id_col in player_df.columns and id_col in ffp.columns:
+        player_ids = pd.to_numeric(player_df[id_col], errors="coerce")
+        ref_ids = pd.to_numeric(ffp[id_col], errors="coerce")
+        # A duplicated id on either side is not a join key -- drop those rather
+        # than pick arbitrarily.
+        ref_lookup = {}
+        for ref_idx, value in ref_ids.items():
+            if pd.isna(value):
+                continue
+            ref_lookup[int(value)] = None if int(value) in ref_lookup else ref_idx
+        taken = set()
+        for idx, value in player_ids.items():
+            if pd.isna(value):
+                continue
+            ref_idx = ref_lookup.get(int(value))
+            if ref_idx is None or ref_idx in taken:
+                continue
+            claims[idx] = ref_idx
+            taken.add(ref_idx)
+        id_matched = len(claims)
+        if id_matched:
+            remaining = player_df.loc[~player_df.index.isin(claims.keys())]
+            ffp = ffp.loc[~ffp.index.isin(taken)]
+
+    if not remaining.empty and not ffp.empty:
+        name_stats = {} if stats is not None else None
+        claims.update(_claim_reference_rows(
+            remaining, ffp,
+            name_col=name_col,
+            ref_name_col="Name",
+            ref_team_col="Team" if "Team" in ffp.columns else None,
+            allow_cross_team_exact=True,
+            source_name=source_name,
+            stats=name_stats,
+        ))
+        if stats is not None:
+            stats.update(name_stats or {})
+
+    if stats is not None:
+        total = stats.get("total", 0) + id_matched
+        stats.update(matched=len(claims), total=total,
+                     rate=len(claims) / total if total else 0.0,
+                     id_matched=id_matched)
+    return claims
+
+
 def blend_multi_gw_projections(
     player_df: pd.DataFrame,
     ffp_df: Optional[pd.DataFrame],
@@ -947,6 +1063,7 @@ def blend_multi_gw_projections(
     output_col: str = "MultiGW_Proj",
     remaining_gws: int = 3,
     stats: Optional[dict] = None,
+    expected_gw=_GW_AUTO,
 ) -> pd.DataFrame:
     """
     Blend FFP multi-GW (Next3GWs) projections into a player DataFrame.
@@ -962,6 +1079,10 @@ def blend_multi_gw_projections(
         remaining_gws: GWs left in season (caps fallback multiplier to avoid inflated projections
             near season end).
         stats: Optional dict, populated with matched/total/rate for the merge.
+        expected_gw: The gameweek being scored. When FFP's table is for a
+            different one, it is skipped entirely and the fallback stands --
+            blending a Next3GWs window that starts a week away from the one
+            being scored is worse than not blending at all.
 
     Returns:
         player_df with output_col added.
@@ -988,6 +1109,9 @@ def blend_multi_gw_projections(
     if "Next3GWs" not in ffp_df.columns or "Name" not in ffp_df.columns:
         return result
 
+    if not ffp_gameweek_matches(ffp_df, _resolve_expected_gw(expected_gw), "FFP Next3GWs"):
+        return result
+
     # Check if FFP multi-GW predictions are available (all-zero = not published yet)
     ffp_next3 = pd.to_numeric(ffp_df["Next3GWs"], errors="coerce")
     if not ffp_next3.gt(0).any():
@@ -1000,15 +1124,7 @@ def blend_multi_gw_projections(
     if ffp.empty:
         return result
 
-    claims = _claim_reference_rows(
-        result, ffp,
-        name_col=name_col,
-        ref_name_col="Name",
-        ref_team_col="Team" if "Team" in ffp.columns else None,
-        allow_cross_team_exact=True,
-        source_name="FFP Next3GWs",
-        stats=stats,
-    )
+    claims = _claim_ffp_rows(result, ffp, name_col, "FFP Next3GWs", stats)
     for idx, ref_idx in claims.items():
         result.at[idx, output_col] = ffp.at[ref_idx, "Next3GWs"]
 
@@ -1086,6 +1202,7 @@ def merge_ffp_single_gw_data(
     player_df: pd.DataFrame,
     ffp_df: Optional[pd.DataFrame],
     stats: Optional[dict] = None,
+    expected_gw=_GW_AUTO,
 ) -> pd.DataFrame:
     """Merge FFP single-GW data onto a player DataFrame.
 
@@ -1105,6 +1222,9 @@ def merge_ffp_single_gw_data(
         ffp_df: FFP projections with Name, Team, Predicted, StartingPredicted,
             Start, LongStart.
         stats: Optional dict, populated with matched/total/rate for the merge.
+        expected_gw: The gameweek being scored. A table for a different gameweek
+            leaves every FFP column NaN, which is already the "unmatched"
+            contract, so callers degrade to Rotowire-only with no other change.
 
     Returns:
         player_df with FFP_Predicted, FFP_Starting_Predicted, FFP_Start and
@@ -1126,6 +1246,9 @@ def merge_ffp_single_gw_data(
     if not ffp_cols or "Name" not in ffp_df.columns:
         return result
 
+    if not ffp_gameweek_matches(ffp_df, _resolve_expected_gw(expected_gw), "FFP single-GW"):
+        return result
+
     # Skip prediction columns that aren't ready (all-zero = FFP hasn't published yet).
     # Start/LongStart can legitimately be 0 for individual players, so only check Predicted.
     for _pred_col in ("Predicted", "StartingPredicted"):
@@ -1141,15 +1264,7 @@ def merge_ffp_single_gw_data(
     for col in ffp_cols:
         ffp[col] = pd.to_numeric(ffp[col], errors="coerce")
 
-    claims = _claim_reference_rows(
-        result, ffp,
-        name_col=name_col,
-        ref_name_col="Name",
-        ref_team_col="Team" if "Team" in ffp.columns else None,
-        allow_cross_team_exact=True,
-        source_name="FFP single-GW",
-        stats=stats,
-    )
+    claims = _claim_ffp_rows(result, ffp, name_col, "FFP single-GW", stats)
 
     col_map = {"Predicted": "FFP_Predicted",
                "StartingPredicted": "FFP_Starting_Predicted",
@@ -1174,6 +1289,7 @@ def blend_fixture_projections(
     players_df: pd.DataFrame,
     ffp_df: Optional[pd.DataFrame],
     rotowire_col: str = "Points",
+    expected_gw=_GW_AUTO,
 ) -> pd.DataFrame:
     """Blend Rotowire and FFP projections for fixture display (no percentile computation).
 
@@ -1185,9 +1301,11 @@ def blend_fixture_projections(
     Args:
         players_df: DataFrame with player projections. Must have a ``Position``
             column and the column named by ``rotowire_col`` (Rotowire projection).
-        ffp_df: FFP projections DataFrame (from ``get_ffp_projections_data()``).
+        ffp_df: FFP projections DataFrame (from ``get_ffp_feed()``).
             Pass None to fall back to Rotowire-only.
         rotowire_col: Column name holding Rotowire single-GW projected points.
+        expected_gw: The gameweek being displayed. FFP published for a different
+            gameweek is dropped, leaving a Rotowire-only blend.
 
     Returns:
         players_df with ``Proj_Blended`` and ``_proj_source`` columns added.
@@ -1201,13 +1319,29 @@ def blend_fixture_projections(
         result["_proj_source"] = rw.map(lambda v: "Rotowire" if v > 0 else "None")
         return result
 
-    # Merge FFP_Predicted and FFP_Start onto this DataFrame
-    result = merge_ffp_single_gw_data(result, ffp_df)
+    # Merge the FFP columns onto this DataFrame
+    result = merge_ffp_single_gw_data(result, ffp_df, expected_gw=expected_gw)
 
-    ffp_pred = numeric_col(result, "FFP_Predicted", 0)
     ffp_start = (pd.to_numeric(result["FFP_Start"], errors="coerce")
                  if "FFP_Start" in result.columns
                  else pd.Series(np.nan, index=result.index))
+
+    # Blend the *conditional* projection, not the unconditional one. Rotowire
+    # projects a player's points if he starts; FFP's `StartingPredicted` is on
+    # that same basis, while `Predicted` has already been multiplied by the
+    # start probability. This blended `Predicted` and then multiplied by
+    # `start_likelihood` again below -- charging the start discount twice and
+    # running every FFP-covered player low. Same bug `compute_player_scores()`
+    # was fixed for; the recovery path below mirrors it.
+    if "FFP_Starting_Predicted" in result.columns:
+        ffp_pred = pd.to_numeric(result["FFP_Starting_Predicted"], errors="coerce")
+    else:
+        ffp_pred = pd.Series(np.nan, index=result.index)
+    if "FFP_Predicted" in result.columns:
+        unconditional = pd.to_numeric(result["FFP_Predicted"], errors="coerce")
+        recovered = unconditional / (ffp_start / 100.0).clip(lower=0.05)
+        ffp_pred = ffp_pred.fillna(recovered.where(ffp_start.gt(0), unconditional))
+    ffp_pred = ffp_pred.fillna(0)
 
     # Blend (60/40) — fall back to whichever source is available
     both_mask = rw.gt(0) & ffp_pred.gt(0)

@@ -1227,7 +1227,7 @@ def pull_fpl_player_stats():
     player_df = pd.merge(player_df, position_df, left_on='element_type', right_on='position_id')
 
     # Organize columns
-    cols = ['id', 'web_name', 'player', 'position_abbrv', 'team_name', 'team_name_abbrv', 'clean_sheets', 'goals_scored',
+    cols = ['id', 'code', 'web_name', 'player', 'position_abbrv', 'team_name', 'team_name_abbrv', 'clean_sheets', 'goals_scored',
             'assists', 'minutes', 'own_goals', 'penalties_missed', 'penalties_saved', 'red_cards', 'yellow_cards',
             'starts', 'expected_goals', 'expected_assists', 'expected_goal_involvements', 'expected_goals_conceded',
             'creativity', 'influence', 'threat', 'ict_index', 'bonus', 'bps', 'form', 'points_per_game', 'total_points',

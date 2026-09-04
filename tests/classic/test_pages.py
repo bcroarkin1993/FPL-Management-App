@@ -19,6 +19,14 @@ import scripts.classic.initial_squad  # noqa: F401
 from scripts.common.data_validation import check_initial_squad
 
 
+def _empty_ffp_feed():
+    """An FFP feed that loaded nothing — the shape pages must survive."""
+    from scripts.common.scraping import FFPFeed
+    return FFPFeed(pd.DataFrame(), None, None, "none", "unavailable in tests")
+
+
+
+
 class TestClassicHomePage:
     def test_smoke(self, mock_all_utils):
         with patch("scripts.classic.home.get_league_standings", return_value=None), \
@@ -71,7 +79,7 @@ class TestClassicTransfersPage:
              patch("scripts.classic.transfers.position_converter", side_effect=lambda x: {1: "G", 2: "D", 3: "M", 4: "F"}.get(x, "M")), \
              patch("scripts.classic.transfers.show_api_error"), \
              patch("scripts.classic.transfers.compute_healthy_form", return_value=5.0), \
-             patch("scripts.classic.transfers.get_ffp_projections_data", return_value=None), \
+             patch("scripts.classic.transfers.get_ffp_feed", return_value=_empty_ffp_feed()), \
              patch("scripts.classic.transfers.blend_multi_gw_projections", side_effect=lambda df, *a, **kw: df), \
              patch("scripts.classic.transfers.compute_positional_depth", return_value={}):
             from scripts.classic.transfers import show_classic_transfers_page
@@ -112,7 +120,7 @@ class TestInitialSquadOptimizerPage:
              patch("scripts.classic.initial_squad.get_current_gameweek", return_value=25), \
              patch("scripts.classic.initial_squad.get_fixture_difficulty_grid", return_value=pd.DataFrame()), \
              patch("scripts.classic.initial_squad.get_rotowire_season_rankings", return_value=pd.DataFrame()), \
-             patch("scripts.classic.initial_squad.get_ffp_projections_data", return_value=None), \
+             patch("scripts.classic.initial_squad.get_ffp_feed", return_value=_empty_ffp_feed()), \
              patch("scripts.classic.initial_squad.position_converter", side_effect=lambda x: {1: "G", 2: "D", 3: "M", 4: "F"}.get(x, "M")), \
              patch("scripts.classic.initial_squad.show_api_error"):
             from scripts.classic.initial_squad import show_initial_squad_optimizer_page

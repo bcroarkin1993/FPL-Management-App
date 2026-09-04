@@ -15,6 +15,7 @@ from scripts.common.analytics import (
     compute_positional_depth,
     compute_transfer_urgency,
     blend_multi_gw_projections,
+    blend_fixture_projections,
     positional_percentile,
     positional_rank,
     dampen_form_by_starts,
@@ -1339,3 +1340,117 @@ class TestFFPMatchingGuards:
         merge_ffp_single_gw_data(pool, self.FFP, stats=stats)
         assert stats["matched"] == 1
         assert stats["total"] == len(self.FFP)
+
+
+class TestFfpGameweekGate:
+    """FFP is excluded when it is published for another gameweek.
+
+    The live failure: FFP's spreadsheet sat on GW2 while the app and Rotowire
+    were on GW3, and the 60/40 blend mixed the two with nothing on screen to say
+    so. Every number involved was individually plausible.
+    """
+
+    @staticmethod
+    def _pool():
+        return pd.DataFrame({
+            "Player": ["Bukayo Saka", "Benjamin White"],
+            "Team": ["Arsenal", "Arsenal"],
+            "Position": ["M", "D"],
+            "Player_ID": [12, 10],
+            "Points": [5.0, 4.0],
+        })
+
+    @staticmethod
+    def _ffp(gw):
+        return pd.DataFrame({
+            "Name": ["Bukayo Saka", "Benjamin White"],
+            "Team": ["Arsenal", "Arsenal"],
+            "Position": ["MID", "DEF"],
+            "Player_ID": [12, 10],
+            "Start": [90.0, 80.0],
+            "StartingPredicted": [5.9, 4.6],
+            "Predicted": [5.3, 3.7],
+            "Next3GWs": [15.8, 10.6],
+            "FFP_GW": [gw, gw],
+        })
+
+    def test_a_matching_gameweek_merges(self):
+        out = merge_ffp_single_gw_data(self._pool(), self._ffp(3), expected_gw=3)
+        assert out["FFP_Start"].notna().all()
+
+    def test_a_different_gameweek_is_excluded_entirely(self):
+        out = merge_ffp_single_gw_data(self._pool(), self._ffp(2), expected_gw=3)
+        assert out["FFP_Start"].isna().all()
+        assert out["FFP_Starting_Predicted"].isna().all()
+
+    def test_multi_gw_falls_back_when_the_gameweek_is_wrong(self):
+        out = blend_multi_gw_projections(
+            self._pool(), self._ffp(2), single_gw_col="Points",
+            remaining_gws=3, expected_gw=3)
+        # Fallback is single_gw x 3, not FFP's Next3GWs.
+        assert out["MultiGW_Proj"].tolist() == [15.0, 12.0]
+
+    def test_an_unstated_gameweek_is_not_treated_as_wrong(self):
+        """The spreadsheet fallback may not resolve a gameweek at all.
+
+        Refusing to blend on "we could not tell" would remove FFP from every
+        page whenever the fixture vote is inconclusive.
+        """
+        ffp = self._ffp(3).drop(columns=["FFP_GW"])
+        out = merge_ffp_single_gw_data(self._pool(), ffp, expected_gw=3)
+        assert out["FFP_Start"].notna().all()
+
+    def test_the_gate_is_off_when_no_gameweek_is_asked_for(self):
+        out = merge_ffp_single_gw_data(self._pool(), self._ffp(2), expected_gw=None)
+        assert out["FFP_Start"].notna().all()
+
+
+class TestFfpIdJoin:
+    """FFP publishes the FPL player code, so the merge need not guess at names."""
+
+    def test_ids_are_claimed_before_names_are_considered(self):
+        pool = pd.DataFrame({
+            # Deliberately unmatchable by name, to prove the id did the work.
+            "Player": ["Definitely Not His Name"],
+            "Team": ["Chelsea"], "Position": ["M"], "Player_ID": [12],
+        })
+        ffp = pd.DataFrame({
+            "Name": ["Bukayo Saka"], "Team": ["Arsenal"], "Position": ["MID"],
+            "Player_ID": [12], "Start": [90.0], "StartingPredicted": [5.9],
+            "Predicted": [5.3], "FFP_GW": [3],
+        })
+        stats = {}
+        out = merge_ffp_single_gw_data(pool, ffp, stats=stats, expected_gw=3)
+        assert out.loc[0, "FFP_Start"] == 90.0
+        assert stats["id_matched"] == 1
+
+    def test_a_frame_without_ids_still_matches_on_names(self):
+        pool = pd.DataFrame({
+            "Player": ["Bukayo Saka"], "Team": ["Arsenal"], "Position": ["M"],
+        })
+        ffp = pd.DataFrame({
+            "Name": ["Bukayo Saka"], "Team": ["Arsenal"], "Position": ["MID"],
+            "Start": [90.0], "StartingPredicted": [5.9], "Predicted": [5.3],
+        })
+        out = merge_ffp_single_gw_data(pool, ffp, expected_gw=3)
+        assert out.loc[0, "FFP_Start"] == 90.0
+
+
+class TestFixtureBlendBasis:
+    """`blend_fixture_projections` must not charge the start discount twice."""
+
+    def test_the_conditional_projection_is_what_gets_blended(self):
+        players = pd.DataFrame({
+            "Player": ["Bukayo Saka"], "Team": ["Arsenal"], "Position": ["M"],
+            "Points": [5.0],
+        })
+        ffp = pd.DataFrame({
+            "Name": ["Bukayo Saka"], "Team": ["Arsenal"], "Position": ["MID"],
+            "Start": [50.0], "StartingPredicted": [6.0], "Predicted": [3.0],
+            "FFP_GW": [3],
+        })
+        out = blend_fixture_projections(players, ffp, expected_gw=3)
+        # 0.6*5.0 + 0.4*6.0 = 5.4, then x the 0.68 MID floor (start 50% < floor).
+        assert out.loc[0, "Proj_Blended"] == pytest.approx(5.4 * 0.68, abs=0.01)
+        # The old behaviour blended Predicted (3.0) instead: 0.6*5 + 0.4*3 = 4.2.
+        assert out.loc[0, "Proj_Blended"] > 4.2 * 0.68

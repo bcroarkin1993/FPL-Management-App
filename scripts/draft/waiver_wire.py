@@ -54,7 +54,7 @@ from scripts.common.analytics import (
     enrich_reference_with_projections,
     numeric_col,
 )
-from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
+from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings, render_ffp_status
 
 # ---------------------------
 # SUGGESTION VIEW
@@ -2281,9 +2281,10 @@ def show_waiver_wire_page():
 
     # --- Multi-GW Projections (FFP) ---
     try:
-        ffp_df = get_ffp_projections_data()
+        ffp_feed_result = get_ffp_feed()
+        ffp_df = ffp_feed_result.df
     except Exception:
-        ffp_df = None
+        ffp_feed_result, ffp_df = None, None
 
     _remaining_gws = max(1, 38 - current_gw)
     if not avail_all.empty:
@@ -2318,6 +2319,8 @@ def show_waiver_wire_page():
     fpl_stats = merge_season_projections(fpl_stats, season_rankings_df)
     fpl_stats = merge_ffp_single_gw_data(fpl_stats, ffp_df)
     fpl_stats = enrich_reference_with_projections(fpl_stats, proj)
+
+    render_ffp_status(ffp_feed_result, current_gw)
 
     # --- Positional Depth ---
     depth_map = {}

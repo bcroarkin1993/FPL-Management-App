@@ -45,7 +45,7 @@ from scripts.common.utils import (
     merge_fpl_players_and_projections,
     get_current_gameweek,
 )
-from scripts.common.scraping import get_ffp_projections_data, get_rotowire_season_rankings
+from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings
 from scripts.common.analytics import (
     compute_player_scores,
     compute_positional_depth,
@@ -92,7 +92,7 @@ def _fetch_and_prepare_data() -> dict:
 
     print("  [3/7] FFP projections...")
     try:
-        ffp_df = get_ffp_projections_data()
+        ffp_df = get_ffp_feed().df
     except Exception:
         ffp_df = None
 

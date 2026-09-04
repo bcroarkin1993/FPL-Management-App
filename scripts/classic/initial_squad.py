@@ -55,7 +55,7 @@ from scripts.common.analytics import (
 from scripts.common.data_validation import check_initial_squad, format_issues
 from scripts.common.scraping import (
     FFP_POINTS_PREDICTOR_URL,
-    get_ffp_projections_data,
+    get_ffp_feed,
     get_rotowire_article_updated,
     get_rotowire_season_rankings,
 )
@@ -352,7 +352,7 @@ def _compute_scores(
     """
     result = pool.copy()
 
-    season_stats, gw1_stats = {}, {}
+    season_stats, gw1_stats, ffp_stats = {}, {}, {}
 
     # Season-long value: literal preseason Rotowire Season Rankings, not the
     # ongoing (and pre-season-unreliable) ROS blend.
@@ -366,7 +366,7 @@ def _compute_scores(
     result["Points"] = result["Points"].fillna(0)
 
     # FFP single-GW data (Predicted, Start, LongStart) for the 1GW blend.
-    result = merge_ffp_single_gw_data(result, ffp_df)
+    result = merge_ffp_single_gw_data(result, ffp_df, stats=ffp_stats)
 
     # Week1 Score: reuse the app's exact 1GW methodology (0.6 Rotowire + 0.4
     # FFP Predicted, x start likelihood). Discard ROS/Transfer/Keep — those
@@ -451,6 +451,7 @@ def _compute_scores(
     if stats is not None:
         stats["season"] = season_stats
         stats["gw1"] = gw1_stats
+        stats["ffp"] = ffp_stats
         stats["unmatched_season"] = n_unmatched
 
     return result
@@ -671,9 +672,10 @@ def show_initial_squad_optimizer_page():
                 season_rankings_df = pd.DataFrame()
 
             try:
-                ffp_df = get_ffp_projections_data()
+                ffp_feed_result = get_ffp_feed()
             except Exception:
-                ffp_df = None
+                ffp_feed_result = None
+            ffp_df = ffp_feed_result.df if ffp_feed_result is not None else None
 
             try:
                 _, _, fdr_avg = get_fixture_difficulty_grid(weeks=horizon)
@@ -704,10 +706,18 @@ def show_initial_squad_optimizer_page():
         season_stats = merge_stats.get("season", {})
         gw1_stats = merge_stats.get("gw1", {})
         ffp_rows = 0 if ffp_df is None else len(ffp_df)
+        ffp_gw = ffp_feed_result.gameweek if ffp_feed_result is not None else None
+        ffp_stale = (ffp_feed_result is not None
+                     and ffp_feed_result.is_stale(current_gw))
         ffp_note = ""
         ffp_pred_col = ("FFP_Starting_Predicted"
                         if "FFP_Starting_Predicted" in scored_pool.columns else "FFP_Predicted")
-        if ffp_rows and ffp_pred_col in scored_pool.columns \
+        if ffp_stale:
+            # Not "missing" — published, for a different week, and therefore
+            # excluded from scoring. Naming the gameweek is the whole point:
+            # a table for the wrong week is invisible unless it is labelled.
+            ffp_note = f"published for GW{ffp_gw}, not GW{current_gw}"
+        elif ffp_rows and ffp_pred_col in scored_pool.columns \
                 and not scored_pool[ffp_pred_col].notna().any():
             # Expected preseason: FFP publishes Predicted only once GW1 is close,
             # so the Week 1 projection is Rotowire-only until then.
@@ -724,15 +734,24 @@ def show_initial_squad_optimizer_page():
                 len(gw1_projections_df), gw1_stats.get("matched"),
                 ok=gw1_error is None and not gw1_projections_df.empty,
                 updated=get_rotowire_article_updated(gw1_url)),
-            # FFP is a live Google Sheet with no published revision time.
             _source_status_row(
-                "FFP Points Predictor", "Start likelihood + GW1 projection",
-                ffp_rows, None, ok=ffp_rows > 0, note=ffp_note, show_updated=False),
+                "FFP Points Predictor"
+                + (f" (GW{ffp_gw})" if ffp_gw is not None else ""),
+                "Start likelihood + GW1 projection",
+                ffp_rows,
+                (merge_stats.get("ffp") or {}).get("matched"),
+                ok=ffp_rows > 0 and not ffp_stale, note=ffp_note,
+                updated=ffp_feed_result.updated if ffp_feed_result is not None else None),
         ])
         for label, err in (("season rankings", season_error), ("GW1 rankings", gw1_error)):
             if err:
                 st.warning(f"Could not load Rotowire {label}: {err}")
-        if ffp_note:
+        if ffp_stale:
+            st.caption(
+                f"ℹ️ Fantasy Football Pundit has published GW{ffp_gw}, not GW{current_gw}, "
+                "so it is excluded and the Week 1 component is Rotowire-only."
+            )
+        elif ffp_note:
             st.caption(
                 "ℹ️ FFP hasn't published GW1 point predictions yet, so the Week 1 "
                 "component is Rotowire-only. FFP start percentages are still applied."

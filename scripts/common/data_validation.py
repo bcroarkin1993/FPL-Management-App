@@ -38,6 +38,7 @@ __all__ = [
     "check_transfer_risk",
     "check_transfer_windows",
     "check_transfer_odds",
+    "check_ffp_feed",
     "format_issues",
     "raise_on_error",
 ]
@@ -1104,5 +1105,110 @@ def check_transfer_odds(ladder_rows: Optional[Sequence[dict]],
                     "The feed may have stopped updating. This is survivable -- "
                     "odds_age_weight decays it to near nothing -- but the page "
                     "must show the age, never present it as current."))
+
+    return issues
+
+
+# --- FFP feed ---------------------------------------------------------------
+
+#: The site payload listed 368 players live. A sudden collapse means the parser
+#: is picking up a partial table, not that FFP shed two thirds of the league.
+MIN_PLAUSIBLE_FFP_ROWS = 150
+#: FFP republishes every gameweek, so a stamp older than a fortnight is a feed
+#: that has stopped moving.
+MAX_PLAUSIBLE_FFP_AGE_DAYS = 14
+
+
+def check_ffp_feed(df: Optional[pd.DataFrame],
+                   gameweek: Optional[int] = None,
+                   expected_gw: Optional[int] = None,
+                   age_days: Optional[float] = None) -> List[Issue]:
+    """Is this FFP table usable, and is it for the week we think it is?
+
+    The failure this exists for is not a crash. FFP's published spreadsheet fell
+    a gameweek behind their own site and kept serving 561 perfectly plausible
+    rows; the app blended them at 40% against Rotowire's current-gameweek
+    numbers and nothing anywhere said a word. Every value was individually
+    reasonable. Only the *gameweek* was wrong.
+
+    The other error this catches is the migration's own worst case. FFP's site
+    names its two prediction columns the opposite way round from the sheet:
+    ``predicted_points`` is conditional on starting while
+    ``predicted_points_start`` already carries the start discount. Map them
+    across by name instead of by basis and ``Predicted`` ends up larger than
+    ``StartingPredicted`` -- which then charges the start probability twice, or
+    not at all, depending on the consumer.
+    """
+    check = "ffp_feed"
+    issues: List[Issue] = []
+
+    if df is None or getattr(df, "empty", True):
+        return [Issue(check, "error", "FFP feed is empty",
+                      "A broken FFP feed renders a page identical to a working one -- "
+                      "every score silently drops to Rotowire-only. Check "
+                      "ffp_feed.fetch_points_predictor() and the spreadsheet fallback.")]
+
+    if len(df) < MIN_PLAUSIBLE_FFP_ROWS:
+        issues.append(Issue(check, "warning",
+            "only %d FFP rows (expected a few hundred)" % len(df),
+            "A short table usually means the payload parser captured a fragment "
+            "rather than that FFP published less."))
+
+    if expected_gw is not None and gameweek is not None and int(gameweek) != int(expected_gw):
+        issues.append(Issue(check, "error",
+            "FFP is published for GW%d but GW%d is being scored"
+            % (int(gameweek), int(expected_gw)),
+            "Blending two different gameweeks is undetectable by eye. Either gate "
+            "FFP off for this gameweek or wait for FFP to publish."))
+    elif gameweek is None:
+        issues.append(Issue(check, "warning",
+            "FFP feed does not state which gameweek it covers",
+            "Without a gameweek there is nothing to gate on, and a stale table "
+            "looks exactly like a current one."))
+
+    if {"Predicted", "StartingPredicted"}.issubset(df.columns):
+        pred = pd.to_numeric(df["Predicted"], errors="coerce")
+        cond = pd.to_numeric(df["StartingPredicted"], errors="coerce")
+        both = pred.notna() & cond.notna() & (cond > 0)
+        if both.any():
+            # Tolerance covers rounding only: the relation is exact by
+            # construction (Predicted == StartingPredicted x Start%), and the
+            # live sheet reproduces it to within 0.0003. A loose tolerance would
+            # let an inversion pass unnoticed for every high-start player, who
+            # are precisely the ones the blend leans on.
+            inverted = (pred[both] > cond[both] + 0.05)
+            if inverted.mean() > 0.10:
+                issues.append(Issue(check, "error",
+                    "Predicted exceeds StartingPredicted for %.0f%% of players"
+                    % (100 * inverted.mean()),
+                    "The two columns are on different bases: Predicted is "
+                    "StartingPredicted x Start%%, so it can never be the larger of "
+                    "the two. They have almost certainly been mapped across from "
+                    "the site payload by name instead of by basis."))
+
+    if "Start" in df.columns:
+        start = pd.to_numeric(df["Start"], errors="coerce").dropna()
+        if not start.empty and not start.between(0, 100).all():
+            issues.append(Issue(check, "error",
+                "Start%% outside 0-100 (min %.1f, max %.1f)" % (start.min(), start.max()),
+                "The app divides this by 100 to scale projections, so an out-of-range "
+                "value silently rescales every score that touches it."))
+
+    if age_days is not None:
+        try:
+            age = float(age_days)
+        except (TypeError, ValueError):
+            age = None
+        if age is not None:
+            if age < 0:
+                issues.append(Issue(check, "error",
+                    "FFP stamp is %.0f days in the future" % -age,
+                    "The publish time was parsed in the wrong timezone or the wrong "
+                    "year was inferred."))
+            elif age > MAX_PLAUSIBLE_FFP_AGE_DAYS:
+                issues.append(Issue(check, "warning",
+                    "FFP was last published %.0f days ago" % age,
+                    "FFP republishes weekly. A stamp this old means the feed has "
+                    "stopped moving -- show the age rather than presenting it as current."))
 
     return issues
