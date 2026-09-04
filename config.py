@@ -224,12 +224,23 @@ def refresh_league_settings():
     _LEAGUE_SETTINGS_CACHE = None
 
 
+def _env_int(name: str) -> int:
+    """Read an integer env var, tolerating a key that is present but empty.
+
+    `int(os.getenv(NAME, "0"))` looks safe and is not: the default only applies
+    when the key is *absent*, so a `NAME=` line with nothing after it reaches
+    int("") and raises. That fires on the unlocked-settings fallback path only,
+    which is the least convenient moment to discover it.
+    """
+    return int(os.getenv(name, "0") or 0)
+
+
 def _resolve_draft_league_id():
     settings = _get_league_settings()
     draft = settings.get("draft", {})
     if draft.get("locked") and draft.get("league_id"):
         return int(draft["league_id"])
-    return int(os.getenv("FPL_DRAFT_LEAGUE_ID", "0"))
+    return _env_int("FPL_DRAFT_LEAGUE_ID")
 
 
 def _resolve_draft_team_id():
@@ -237,7 +248,7 @@ def _resolve_draft_team_id():
     draft = settings.get("draft", {})
     if draft.get("locked") and draft.get("team_id"):
         return int(draft["team_id"])
-    return int(os.getenv("FPL_DRAFT_TEAM_ID", "0"))
+    return _env_int("FPL_DRAFT_TEAM_ID")
 
 
 def _resolve_classic_team_id():
@@ -245,7 +256,7 @@ def _resolve_classic_team_id():
     classic = settings.get("classic", {})
     if classic.get("locked") and classic.get("team_id"):
         return int(classic["team_id"])
-    return int(os.getenv("FPL_CLASSIC_TEAM_ID", "0"))
+    return _env_int("FPL_CLASSIC_TEAM_ID")
 
 
 def _resolve_classic_league_ids():

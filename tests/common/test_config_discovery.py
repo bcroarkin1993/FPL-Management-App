@@ -86,3 +86,53 @@ class TestRotowireArticleDiscovery:
 
     def test_no_matching_articles_returns_empty_string(self):
         assert _discover("<html><body><a href='/soccer/news/whatever'>x</a></body></html>", 1) == ""
+
+
+class TestLeagueIdEnvFallback:
+    """The env fallback used when league_settings.json is absent or unlocked.
+
+    `.env.example` ships FPL_DRAFT_LEAGUE_ID= and friends with empty values, and
+    the documented setup is `cp .env.example .env`. So "key present, value
+    empty" is the state a brand-new install is actually in — it must resolve to
+    0, not raise.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _unlocked(self, monkeypatch):
+        monkeypatch.setattr(config, "_get_league_settings",
+                            lambda: {"draft": {}, "classic": {}})
+
+    RESOLVERS = [
+        ("FPL_DRAFT_LEAGUE_ID", "_resolve_draft_league_id"),
+        ("FPL_DRAFT_TEAM_ID", "_resolve_draft_team_id"),
+        ("FPL_CLASSIC_TEAM_ID", "_resolve_classic_team_id"),
+    ]
+
+    @pytest.mark.parametrize("env_name,resolver", RESOLVERS)
+    def test_blank_value_resolves_to_zero(self, monkeypatch, env_name, resolver):
+        """int(os.getenv(NAME, "0")) looks safe and is not: the default only
+        fires when the key is absent, so a bare `NAME=` reaches int("")."""
+        monkeypatch.setenv(env_name, "")
+        assert getattr(config, resolver)() == 0
+
+    @pytest.mark.parametrize("env_name,resolver", RESOLVERS)
+    def test_absent_value_resolves_to_zero(self, monkeypatch, env_name, resolver):
+        monkeypatch.delenv(env_name, raising=False)
+        assert getattr(config, resolver)() == 0
+
+    @pytest.mark.parametrize("env_name,resolver", RESOLVERS)
+    def test_set_value_is_used(self, monkeypatch, env_name, resolver):
+        monkeypatch.setenv(env_name, "4544")
+        assert getattr(config, resolver)() == 4544
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_blank_classic_league_ids_resolve_to_empty_list(self, monkeypatch, value):
+        monkeypatch.setenv("FPL_CLASSIC_LEAGUE_IDS", value)
+        assert config._resolve_classic_league_ids() == []
+
+    def test_locked_settings_win_over_env(self, monkeypatch):
+        """The reason the stale IDs in .env went unnoticed for a season."""
+        monkeypatch.setattr(config, "_get_league_settings", lambda: {
+            "draft": {}, "classic": {"locked": True, "team_id": 4474334}})
+        monkeypatch.setenv("FPL_CLASSIC_TEAM_ID", "6720205")
+        assert config._resolve_classic_team_id() == 4474334
