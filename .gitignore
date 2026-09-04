@@ -41,6 +41,10 @@ Thumbs.db
 # Locally-logged pending FPL transfers (user-specific, pre-deadline)
 .fpl_pending_transfers.json
 
+# FPL session credential for the authenticated my-team endpoint (the only
+# source of a pre-deadline squad). A secret, and user-specific — never commit.
+.fpl_auth.json
+
 # Locally-set Draft/Classic league & team IDs (user-specific; repo is public)
 league_settings.json
 

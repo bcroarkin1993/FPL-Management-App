@@ -12,6 +12,7 @@ import streamlit as st
 from typing import Optional, Dict, List, Tuple
 import config
 
+from scripts.common.classic_squad import get_squad_budget as _get_user_budget
 from scripts.common.error_helpers import show_api_error
 from scripts.common.optimization import solve_squad_ilp
 from scripts.common.utils import (
@@ -47,39 +48,6 @@ FDR_MULTIPLIERS = {
 def _format_money(value: float) -> str:
     """Format money value to display format."""
     return f"£{value:.1f}m"
-
-
-def _get_user_budget(team_id: int) -> Tuple[float, str]:
-    """
-    Fetch the user's total budget (Squad Value + Bank).
-    Returns (budget, source_description) tuple.
-    """
-    if not team_id:
-        return 100.0, "default (no team configured)"
-
-    try:
-        # Try to get from current GW picks (most accurate)
-        current_gw = get_current_gameweek()
-        if current_gw:
-            picks_data = get_classic_team_picks(team_id, current_gw)
-            if picks_data:
-                entry_history = picks_data.get("entry_history", {})
-                value = entry_history.get("value", 0)  # Squad value in 0.1M
-                bank = entry_history.get("bank", 0)    # Bank in 0.1M
-                if value > 0:
-                    total = (value + bank) / 10.0
-                    return total, f"detected (value: £{value/10:.1f}m + bank: £{bank/10:.1f}m)"
-
-        # Fallback to entry details
-        details = get_entry_details(team_id)
-        if details:
-            raw_value = details.get('last_deadline_value', 0)
-            if raw_value > 0:
-                return raw_value / 10.0, "from last deadline value"
-    except Exception:
-        pass
-
-    return 100.0, "default (could not fetch)"
 
 
 def _get_fdr_color(fdr: float) -> str:
