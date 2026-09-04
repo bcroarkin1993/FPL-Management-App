@@ -39,6 +39,7 @@ __all__ = [
     "check_transfer_windows",
     "check_transfer_odds",
     "check_ffp_feed",
+    "check_resolved_squad",
     "format_issues",
     "raise_on_error",
 ]
@@ -1210,5 +1211,132 @@ def check_ffp_feed(df: Optional[pd.DataFrame],
                     "FFP was last published %.0f days ago" % age,
                     "FFP republishes weekly. A stamp this old means the feed has "
                     "stopped moving -- show the age rather than presenting it as current."))
+
+    return issues
+
+
+# --- Classic squad resolution -----------------------------------------------
+
+# A Classic squad is 15 players, at most 3 from any one club, and its value sits
+# in a narrow band: everyone starts on £100.0m and squad values drift by a few
+# million over a season. These are "this cannot be right" bounds, not a style guide.
+CLASSIC_SQUAD_SIZE = 15
+MAX_PLAYERS_PER_CLUB = 3
+MIN_PLAUSIBLE_SQUAD_VALUE = 900   # tenths — £90.0m
+MAX_PLAUSIBLE_SQUAD_VALUE = 1400  # tenths — £140.0m
+
+
+def check_resolved_squad(resolution: Optional[dict],
+                         bootstrap: Optional[dict] = None) -> List[Issue]:
+    """Assert a resolved Classic squad is a squad the manager could really own.
+
+    Takes a plain dict (SquadResolution rendered via dataclasses.asdict, or an
+    equivalent mapping) so this module stays free of Streamlit and of the app's
+    own types.
+
+    The bug this exists for is the *stale* case, which is invisible by
+    inspection: every value in a last-deadline squad is individually plausible,
+    it is simply the wrong fifteen players. That one is a warning rather than an
+    error, because between gameweeks it is also the correct and unavoidable
+    answer when the user has not connected their FPL account — what must never
+    happen is it passing unnoticed.
+    """
+    issues: List[Issue] = []
+    check = "resolved_squad"
+
+    if not resolution:
+        return [Issue(check, "error", "Squad resolution returned nothing.",
+                      "Every Classic page renders a blank or zeroed squad. Check "
+                      "the picks endpoint and the team ID.")]
+
+    picks = resolution.get("picks") or []
+    if not picks:
+        return [Issue(check, "error", "Resolved squad has no players.",
+                      "The GW walk found no picks. A brand-new entry, a wrong "
+                      "team ID, or every candidate gameweek being a Free Hit.")]
+
+    if len(picks) != CLASSIC_SQUAD_SIZE:
+        issues.append(Issue(
+            check, "error",
+            "Resolved squad has %d players, not %d." % (len(picks), CLASSIC_SQUAD_SIZE),
+            "A transfer replay dropped or duplicated a pick. Squad size is "
+            "arithmetic, not an estimate.",
+        ))
+
+    element_ids = [p.get("element") for p in picks]
+    duplicates = {e for e in element_ids if element_ids.count(e) > 1}
+    if duplicates:
+        issues.append(Issue(
+            check, "error",
+            "Resolved squad contains duplicate players: %s." % sorted(duplicates),
+            "apply_pending_transfers() swapped in a player already in the squad "
+            "— usually replaying a transfer whose element_out had already gone.",
+        ))
+
+    if bootstrap:
+        elements = {e["id"]: e for e in bootstrap.get("elements", [])}
+        unknown = [e for e in element_ids if e not in elements]
+        if unknown:
+            issues.append(Issue(
+                check, "error",
+                "Resolved squad has %d player(s) absent from the bootstrap: %s."
+                % (len(unknown), unknown[:5]),
+                "Stale cached picks against a new season's element ids. Purge "
+                "the 'classic_picks:' cache prefix.",
+            ))
+
+        club_counts = {}
+        for eid in element_ids:
+            team = elements.get(eid, {}).get("team")
+            if team is not None:
+                club_counts[team] = club_counts.get(team, 0) + 1
+        over = {t: n for t, n in club_counts.items() if n > MAX_PLAYERS_PER_CLUB}
+        if over:
+            issues.append(Issue(
+                check, "error",
+                "Resolved squad has more than %d players from one club: %s."
+                % (MAX_PLAYERS_PER_CLUB, over),
+                "An illegal squad — a replayed transfer that was never legal, or "
+                "a base squad merged with the wrong team's picks.",
+            ))
+
+    entry_history = resolution.get("entry_history") or {}
+    bank = entry_history.get("bank")
+    if bank is not None and bank < 0:
+        issues.append(Issue(
+            check, "error", "Resolved squad has a negative bank (%s)." % bank,
+            "Bank arithmetic applied twice — the signature of replaying a "
+            "transfer on top of a squad that already contains it.",
+        ))
+
+    value = entry_history.get("value")
+    if value:
+        if not (MIN_PLAUSIBLE_SQUAD_VALUE <= value <= MAX_PLAUSIBLE_SQUAD_VALUE):
+            issues.append(Issue(
+                check, "error",
+                "Resolved squad value £%.1fm is outside the plausible range "
+                "£%.1fm-£%.1fm." % (value / 10, MIN_PLAUSIBLE_SQUAD_VALUE / 10,
+                                    MAX_PLAUSIBLE_SQUAD_VALUE / 10),
+                "Squad value is in tenths of a million. A value near 100 means "
+                "the units were dropped somewhere.",
+            ))
+
+    if resolution.get("auth_status") == "expired":
+        issues.append(Issue(
+            check, "warning",
+            "FPL credentials have expired; the squad fell back to the last deadline.",
+            "The page is silently one deadline behind unless the expiry banner "
+            "renders. Re-paste the session cookie on League Setup.",
+        ))
+
+    if resolution.get("is_stale"):
+        issues.append(Issue(
+            check, "warning",
+            "Resolved squad is from GW%s but GW%s is the next deadline."
+            % (resolution.get("source_gw"), resolution.get("target_gw")),
+            "Expected between gameweeks without an FPL credential — FPL "
+            "publishes no pending transfers. The page must say so rather than "
+            "presenting it as current.",
+        ))
 
     return issues

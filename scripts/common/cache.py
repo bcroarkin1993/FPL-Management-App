@@ -271,3 +271,35 @@ def clear_cache(conn: Optional[sqlite3.Connection] = None) -> int:
     except Exception:
         _logger.warning("Cache clear error", exc_info=True)
         return 0
+
+
+@_synchronized
+def purge_cache_prefix(prefix: str, conn: Optional[sqlite3.Connection] = None) -> int:
+    """
+    Delete every cache entry whose key starts with `prefix`. Returns rows deleted.
+
+    Goes through the module lock like every other writer. An inline
+    `DELETE FROM cache ...` on the shared connection is the exact hazard that
+    "Stop the shared SQLite cache being used by two threads at once" fixed —
+    the connection is opened with check_same_thread=False and the background
+    transfer-news prefetch runs against it concurrently.
+
+    Used by the Refresh buttons: a permanently-cached entry (ttl=None, written
+    for any gameweek the app considered finished) survives clearing the
+    Streamlit layer alone, so without this the button cannot escape stale picks.
+    """
+    db = conn or get_cache_db()
+    try:
+        cursor = db.execute(
+            "DELETE FROM cache WHERE key LIKE ?", (prefix.replace("%", "") + "%",)
+        )
+        db.commit()
+        return cursor.rowcount
+    except sqlite3.DatabaseError:
+        _logger.warning("Cache purge error (corrupt DB) — resetting", exc_info=True)
+        if conn is None:
+            _reset_default_connection()
+        return 0
+    except Exception:
+        _logger.warning("Cache purge error for prefix %s", prefix, exc_info=True)
+        return 0

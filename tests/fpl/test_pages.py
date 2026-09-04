@@ -179,9 +179,19 @@ class TestLeagueSetupPage:
                 "classic": {"leagues": [], "team_id": None, "team_name": None, "locked": False},
             }), \
              patch("scripts.fpl.league_setup.save_settings", return_value=True), \
-             patch("scripts.fpl.league_setup.config.refresh_league_settings"):
+             patch("scripts.fpl.league_setup.config.refresh_league_settings"), \
+             patch("scripts.fpl.league_setup.save_auth") as save_auth, \
+             patch("scripts.fpl.league_setup.clear_auth") as clear_auth, \
+             patch("scripts.fpl.league_setup.load_auth", return_value={}), \
+             patch("scripts.fpl.league_setup.test_credentials",
+                   return_value=(None, "no_auth")), \
+             patch("scripts.fpl.league_setup.fetch_my_team"):
             from scripts.fpl.league_setup import show_league_setup_page
             show_league_setup_page()
+            # The credential writers must stay mocked — an unmocked Save would
+            # write a real .fpl_auth.json from this test run.
+            save_auth.assert_not_called()
+            clear_auth.assert_not_called()
 
     def test_smoke_locked_view(self, mock_all_utils):
         """Locked settings should render the read-only summary + unlock button.
@@ -206,9 +216,19 @@ class TestLeagueSetupPage:
              patch("scripts.fpl.league_setup.save_settings", return_value=True), \
              patch("scripts.fpl.league_setup.config.refresh_league_settings"), \
              patch("scripts.fpl.league_setup.is_draft_league_reachable", return_value=True), \
-             patch("scripts.fpl.league_setup.is_classic_league_reachable", return_value=True):
+             patch("scripts.fpl.league_setup.is_classic_league_reachable", return_value=True), \
+             patch("scripts.fpl.league_setup.save_auth") as save_auth, \
+             patch("scripts.fpl.league_setup.clear_auth") as clear_auth, \
+             patch("scripts.fpl.league_setup.load_auth", return_value={}), \
+             patch("scripts.fpl.league_setup.test_credentials",
+                   return_value=(None, "no_auth")), \
+             patch("scripts.fpl.league_setup.fetch_my_team"):
             from scripts.fpl.league_setup import show_league_setup_page
             show_league_setup_page()
+            # The credential writers must stay mocked — an unmocked Save would
+            # write a real .fpl_auth.json from this test run.
+            save_auth.assert_not_called()
+            clear_auth.assert_not_called()
 
     def test_smoke_locked_view_stale_ids(self, mock_all_utils):
         """A locked league ID that no longer resolves should show the stale
@@ -228,9 +248,19 @@ class TestLeagueSetupPage:
              patch("scripts.fpl.league_setup.save_settings", return_value=True) as mock_save, \
              patch("scripts.fpl.league_setup.config.refresh_league_settings"), \
              patch("scripts.fpl.league_setup.is_draft_league_reachable", return_value=False), \
-             patch("scripts.fpl.league_setup.is_classic_league_reachable", return_value=False):
+             patch("scripts.fpl.league_setup.is_classic_league_reachable", return_value=False), \
+             patch("scripts.fpl.league_setup.save_auth") as save_auth, \
+             patch("scripts.fpl.league_setup.clear_auth") as clear_auth, \
+             patch("scripts.fpl.league_setup.load_auth", return_value={}), \
+             patch("scripts.fpl.league_setup.test_credentials",
+                   return_value=(None, "no_auth")), \
+             patch("scripts.fpl.league_setup.fetch_my_team"):
             from scripts.fpl.league_setup import show_league_setup_page
             show_league_setup_page()
+            # The credential writers must stay mocked — an unmocked Save would
+            # write a real .fpl_auth.json from this test run.
+            save_auth.assert_not_called()
+            clear_auth.assert_not_called()
         # Best-effort archive of the now-unreachable IDs should have saved.
         assert mock_save.called
 
@@ -321,7 +351,13 @@ class TestUpsertClassicHistoryEntryPctFinish:
         settings = {"classic": {"league_history": [], "season_notes": {}}}
         with patch("scripts.fpl.league_setup.load_settings", return_value=settings), \
              patch("scripts.fpl.league_setup.save_settings", return_value=True) as mock_save, \
-             patch("scripts.fpl.league_setup.config.refresh_league_settings"):
+             patch("scripts.fpl.league_setup.config.refresh_league_settings"), \
+             patch("scripts.fpl.league_setup.save_auth") as save_auth, \
+             patch("scripts.fpl.league_setup.clear_auth") as clear_auth, \
+             patch("scripts.fpl.league_setup.load_auth", return_value={}), \
+             patch("scripts.fpl.league_setup.test_credentials",
+                   return_value=(None, "no_auth")), \
+             patch("scripts.fpl.league_setup.fetch_my_team"):
             _upsert_classic_history_entry(
                 "2025/26", 1161877, "Super League DMV Starboys",
                 manual_stats={"rank": 4, "total_points": None}, pct_finish=8.0,
@@ -335,7 +371,13 @@ class TestUpsertClassicHistoryEntryPctFinish:
         settings = {"classic": {"league_history": [], "season_notes": {"2025/26": {"pct_finish": 8.0}}}}
         with patch("scripts.fpl.league_setup.load_settings", return_value=settings), \
              patch("scripts.fpl.league_setup.save_settings", return_value=True) as mock_save, \
-             patch("scripts.fpl.league_setup.config.refresh_league_settings"):
+             patch("scripts.fpl.league_setup.config.refresh_league_settings"), \
+             patch("scripts.fpl.league_setup.save_auth") as save_auth, \
+             patch("scripts.fpl.league_setup.clear_auth") as clear_auth, \
+             patch("scripts.fpl.league_setup.load_auth", return_value={}), \
+             patch("scripts.fpl.league_setup.test_credentials",
+                   return_value=(None, "no_auth")), \
+             patch("scripts.fpl.league_setup.fetch_my_team"):
             _upsert_classic_history_entry(
                 "2025/26", 1555691, "FAFO FPL",
                 manual_stats={"rank": 1, "total_points": None}, pct_finish=None,

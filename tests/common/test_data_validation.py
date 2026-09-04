@@ -24,6 +24,7 @@ from scripts.common.data_validation import (
     check_win_probability,
     format_issues,
     raise_on_error,
+    check_resolved_squad,
 )
 
 
@@ -703,3 +704,85 @@ class TestCheckFfpFeed:
     def test_a_future_stamp_is_an_error(self):
         issues = check_ffp_feed(self._feed(), gameweek=3, expected_gw=3, age_days=-2)
         assert [i for i in issues if i.severity == "error" and "future" in i.message]
+
+
+class TestCheckResolvedSquad:
+    """Every 'bad data' fixture here is a shape the resolver can really produce."""
+
+    def _good(self, **over):
+        base = {
+            "picks": [{"element": i} for i in range(1, 16)],
+            "entry_history": {"bank": 15, "value": 1006},
+            "source": "my_team",
+            "source_gw": 3,
+            "target_gw": 3,
+            "is_stale": False,
+            "auth_status": "ok",
+        }
+        base.update(over)
+        return base
+
+    def _bootstrap(self, team_of=None):
+        team_of = team_of or {}
+        return {"elements": [{"id": i, "team": team_of.get(i, (i % 20) + 1)}
+                             for i in range(1, 40)]}
+
+    def test_healthy_squad_is_silent(self):
+        assert check_resolved_squad(self._good(), self._bootstrap()) == []
+
+    def test_missing_resolution_is_an_error(self):
+        issues = check_resolved_squad(None)
+        assert [i.severity for i in issues] == ["error"]
+
+    def test_empty_squad_is_an_error(self):
+        issues = check_resolved_squad(self._good(picks=[]))
+        assert issues and issues[0].severity == "error"
+
+    def test_wrong_squad_size_is_an_error(self):
+        issues = check_resolved_squad(self._good(picks=[{"element": 1}] * 14))
+        assert any("14 players" in i.message for i in issues)
+
+    def test_duplicate_players_are_an_error(self):
+        picks = [{"element": i} for i in range(1, 15)] + [{"element": 1}]
+        issues = check_resolved_squad(self._good(picks=picks))
+        assert any("duplicate" in i.message for i in issues)
+
+    def test_negative_bank_is_an_error(self):
+        """The signature of a transfer replayed onto a squad that already
+        contains it: the pick swap no-ops, the bank adjustment does not."""
+        issues = check_resolved_squad(
+            self._good(entry_history={"bank": -25, "value": 1006}))
+        assert any("negative bank" in i.message for i in issues)
+
+    def test_squad_value_in_the_wrong_units_is_an_error(self):
+        issues = check_resolved_squad(
+            self._good(entry_history={"bank": 0, "value": 100}))
+        assert any("outside the plausible range" in i.message for i in issues)
+
+    def test_too_many_players_from_one_club_is_an_error(self):
+        every_player_at_club_1 = {i: 1 for i in range(1, 16)}
+        issues = check_resolved_squad(
+            self._good(), self._bootstrap(every_player_at_club_1))
+        assert any("more than 3 players from one club" in i.message for i in issues)
+
+    def test_players_absent_from_bootstrap_are_an_error(self):
+        issues = check_resolved_squad(
+            self._good(picks=[{"element": i} for i in range(900, 915)]),
+            self._bootstrap())
+        assert any("absent from the bootstrap" in i.message for i in issues)
+
+    def test_stale_squad_is_a_warning_not_an_error(self):
+        """The reported bug. Between gameweeks without a credential this is also
+        the only available answer, so it must warn rather than fail — what it
+        must never do is pass unnoticed."""
+        issues = check_resolved_squad(
+            self._good(source="picks", source_gw=2, target_gw=3, is_stale=True),
+            self._bootstrap())
+        assert issues
+        assert all(i.severity == "warning" for i in issues)
+        assert any("GW2" in i.message and "GW3" in i.message for i in issues)
+
+    def test_expired_credentials_warn(self):
+        issues = check_resolved_squad(
+            self._good(auth_status="expired"), self._bootstrap())
+        assert any("expired" in i.message for i in issues)

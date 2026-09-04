@@ -69,6 +69,18 @@ def _apply_pending_scroll():
     )
 
 
+from scripts.common.fpl_auth import (
+    STATUS_EXPIRED,
+    STATUS_NO_AUTH,
+    STATUS_OK,
+    clear_auth,
+    fetch_my_team,
+    load_auth,
+    save_auth,
+    test_credentials,
+)
+
+
 def show_league_setup_page():
     st.title("League Setup")
     st.caption(
@@ -93,6 +105,9 @@ def show_league_setup_page():
         _show_classic_section(settings)
         st.divider()
         _show_classic_history_section(settings)
+        st.divider()
+        _anchor("col-fpl-account")
+        _show_fpl_account_section()
 
     _apply_pending_scroll()
 
@@ -819,3 +834,154 @@ def _show_classic_history_section(settings: dict):
                 _clear_classic_history_lookup_state()
                 st.success(f"Saved {season_clean}.")
                 _rerun_scrolled_to("col-classic")
+
+
+# =================================================================
+# FPL Account (optional) — the only source of a pre-deadline squad
+# =================================================================
+
+def _show_fpl_account_section():
+    """Store an FPL session credential for the authenticated my-team endpoint.
+
+    Every public FPL endpoint reports the squad as it stood at the *last*
+    deadline: `event/{gw}/picks/` 404s for an upcoming gameweek, `transfers/`
+    returns nothing until the deadline passes, and an active chip does not
+    appear in `history`. So a squad changed since the last deadline — after a
+    wildcard, say — cannot be reconstructed from public data at all. This
+    credential is what makes it visible.
+    """
+    st.subheader("🔐 FPL Account (optional)")
+    st.caption(
+        "Connect your FPL account to show your **live** squad before a deadline. "
+        "Without it, every Classic page can only show the squad you had at the "
+        "last deadline — FPL does not publish pending transfers or an active "
+        "Wildcard until the next deadline passes."
+    )
+
+    auth = load_auth()
+    connected = bool(auth.get("cookie"))
+
+    if connected and not st.session_state.get("_fpl_auth_editing"):
+        cookie_len = len(auth.get("cookie") or "")
+        saved_at = (auth.get("saved_at") or "")[:16].replace("T", " ")
+        st.success(
+            f"Connected — session cookie set ({cookie_len} chars)"
+            + (f", saved {saved_at} UTC" if saved_at else "")
+        )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button("Test connection", key="fpl_auth_test_locked"):
+                _test_fpl_connection()
+        with c2:
+            if st.button("Edit", key="fpl_auth_edit"):
+                st.session_state["_fpl_auth_editing"] = True
+                _rerun_scrolled_to("col-fpl-account")
+        with c3:
+            if st.button("Disconnect", key="fpl_auth_clear"):
+                clear_auth()
+                fetch_my_team.clear()
+                st.session_state["_fpl_auth_editing"] = False
+                _rerun_scrolled_to("col-fpl-account")
+        return
+
+    st.warning(
+        "This is a **session credential for your FPL account**. It is stored in "
+        "plain text in `.fpl_auth.json` on this machine only (gitignored), and is "
+        "sent only to `fantasy.premierleague.com`."
+    )
+
+    with st.expander("How to get your session cookie", expanded=not connected):
+        st.markdown(
+            "1. Sign in at [fantasy.premierleague.com](https://fantasy.premierleague.com).\n"
+            "2. Open DevTools (**F12** / **⌥⌘I**) → **Network** tab.\n"
+            "3. Reload the page and click any request to `fantasy.premierleague.com/api/…`.\n"
+            "4. Under **Request Headers**, copy the whole **`Cookie:`** value.\n"
+            "5. Paste it below.\n\n"
+            "The cookie expires every few weeks — if a page says your sign-in has "
+            "expired, repeat these steps."
+        )
+
+    cookie = st.text_input(
+        "Cookie header",
+        value="",
+        type="password",
+        key="fpl_auth_cookie_input",
+        help="The full Cookie value, e.g. pl_profile=...; sessionid=...",
+    )
+    with st.expander("Advanced"):
+        bearer = st.text_input(
+            "Bearer token (optional)",
+            value="",
+            type="password",
+            key="fpl_auth_bearer_input",
+            help=(
+                "Only needed if FPL rejects the cookie alone. Copy the "
+                "X-API-Authorization request header, without the leading 'Bearer '."
+            ),
+        )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Test connection", key="fpl_auth_test"):
+            if not cookie.strip():
+                st.error("Paste your Cookie header first.")
+            else:
+                _test_fpl_connection(cookie=cookie, bearer=bearer)
+    with c2:
+        if st.button("💾 Save", key="fpl_auth_save"):
+            if not cookie.strip():
+                st.error("Paste your Cookie header first.")
+            else:
+                save_auth(_normalize_cookie(cookie), bearer)
+                fetch_my_team.clear()
+                st.session_state["_fpl_auth_editing"] = False
+                st.success("Saved. Classic pages will now show your live squad.")
+                _rerun_scrolled_to("col-fpl-account")
+
+
+def _normalize_cookie(raw: str) -> str:
+    """Accept a value pasted with or without the leading `Cookie:` header name."""
+    value = (raw or "").strip()
+    if value.lower().startswith("cookie:"):
+        value = value.split(":", 1)[1]
+    return " ".join(value.split())
+
+
+def _test_fpl_connection(cookie: str = None, bearer: str = None):
+    """Validate a credential against the live endpoint and report precisely.
+
+    Runs uncached and reports the exact failure, because the whole point of the
+    credential is to remove a silent wrong answer — a vague "didn't work" would
+    reintroduce one.
+    """
+    team_id = config.FPL_CLASSIC_TEAM_ID
+    if not team_id:
+        st.error("Set your Classic team ID above first.")
+        return
+
+    creds = ({"cookie": _normalize_cookie(cookie), "bearer": bearer}
+             if cookie is not None else None)
+    payload, status = test_credentials(team_id, creds)
+
+    if status == STATUS_OK and payload:
+        picks = payload.get("picks", [])
+        eh = payload.get("entry_history", {})
+        chip = payload.get("active_chip")
+        st.success(
+            f"Connected. {len(picks)} players, squad value "
+            f"£{eh.get('value', 0) / 10:.1f}m, bank £{eh.get('bank', 0) / 10:.1f}m"
+            + (f" — **{chip}** active." if chip else ".")
+        )
+    elif status == STATUS_EXPIRED:
+        st.error(
+            "FPL rejected these credentials (401/403). The cookie may be "
+            "truncated or expired — copy the whole `Cookie:` value again. If it "
+            "still fails, add the `X-API-Authorization` token under Advanced."
+        )
+    elif status == STATUS_NO_AUTH:
+        st.error("No credential provided.")
+    else:
+        st.error(
+            "Could not reach the FPL my-team endpoint. FPL may be in its "
+            "post-deadline maintenance window — try again shortly."
+        )

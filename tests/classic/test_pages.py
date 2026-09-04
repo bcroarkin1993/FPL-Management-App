@@ -7,6 +7,7 @@ verifying no exception is raised.
 import numpy as np
 import pandas as pd
 import pytest
+from contextlib import ExitStack
 from unittest.mock import patch, MagicMock
 
 # Import eagerly (before any test patches scripts.common.utils.* via
@@ -17,6 +18,7 @@ from unittest.mock import patch, MagicMock
 # exercises this module's internals directly (unmocked) after test_smoke.
 import scripts.classic.initial_squad  # noqa: F401
 from scripts.common.data_validation import check_initial_squad
+from scripts.common.classic_squad import SquadResolution
 
 
 def _empty_ffp_feed():
@@ -44,27 +46,47 @@ class TestClassicHomePage:
 
 class TestClassicFixtureProjectionsPage:
     def test_smoke(self, mock_all_utils):
-        with patch("scripts.classic.fixture_projections.get_current_gameweek", return_value=25), \
-             patch("scripts.classic.fixture_projections.get_classic_bootstrap_static", return_value={"elements": [], "teams": [], "events": []}), \
-             patch("scripts.classic.fixture_projections.get_classic_team_picks", return_value=None), \
-             patch("scripts.classic.fixture_projections.get_rotowire_player_projections", return_value=pd.DataFrame()), \
-             patch("scripts.classic.fixture_projections.find_optimal_lineup", return_value=pd.DataFrame()), \
-             patch("scripts.classic.fixture_projections.get_entry_details", return_value={"name": "Test", "id": 1}), \
-             patch("scripts.classic.fixture_projections.get_league_standings", return_value=None), \
-             patch("scripts.classic.fixture_projections.get_h2h_league_matches", return_value=[]), \
-             patch("scripts.classic.fixture_projections.get_classic_h2h_record", return_value={"wins": 0, "draws": 0, "losses": 0, "record_str": "0-0-0", "matches": []}), \
-             patch("scripts.classic.fixture_projections.get_classic_transfers", return_value=[]), \
-             patch("scripts.classic.fixture_projections.position_converter", side_effect=lambda x: {1: "G", 2: "D", 3: "M", 4: "F"}.get(x, "M")), \
-             patch("scripts.classic.fixture_projections.is_gameweek_live", return_value=False), \
-             patch("scripts.classic.fixture_projections.get_live_gameweek_stats", return_value={}), \
-             patch("scripts.classic.fixture_projections.get_fpl_player_mapping", return_value={}), \
-             patch("scripts.classic.fixture_projections.get_gw_finished_teams", return_value=set()), \
-             patch("scripts.classic.fixture_projections.simulate_auto_subs", return_value=(pd.DataFrame(), [])), \
-             patch("scripts.classic.fixture_projections.show_api_error"), \
-             patch("scripts.classic.fixture_projections.compute_key_differentials", return_value=([], [])), \
-             patch("scripts.classic.fixture_projections.render_key_differentials"):
+        # ExitStack rather than a chained `with`: CPython caps statically
+        # nested blocks at 20 and this page has more dependencies than that.
+        targets = {
+            "get_current_gameweek": 25,
+            "get_classic_bootstrap_static": {"elements": [], "teams": [], "events": []},
+            "get_classic_team_picks": None,
+            "get_rotowire_player_projections": pd.DataFrame(),
+            "find_optimal_lineup": pd.DataFrame(),
+            "get_entry_details": {"name": "Test", "id": 1},
+            "get_league_standings": None,
+            "get_h2h_league_matches": [],
+            "get_classic_h2h_record": {"wins": 0, "draws": 0, "losses": 0,
+                                       "record_str": "0-0-0", "matches": []},
+            "get_classic_transfers": [],
+            "is_gameweek_live": False,
+            "get_live_gameweek_stats": {},
+            "get_fpl_player_mapping": {},
+            "get_gw_finished_teams": set(),
+            "simulate_auto_subs": (pd.DataFrame(), []),
+            "compute_key_differentials": ([], []),
+            "resolve_classic_squad": SquadResolution(),
+        }
+        with ExitStack() as stack:
+            mod = "scripts.classic.fixture_projections"
+            for name, value in targets.items():
+                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
+            stack.enter_context(patch(
+                f"{mod}.position_converter",
+                side_effect=lambda x: {1: "G", 2: "D", 3: "M", 4: "F"}.get(x, "M")))
+            for name in ("show_api_error", "render_key_differentials",
+                         "get_classic_team_history", "fetch_my_team"):
+                stack.enter_context(patch(f"{mod}.{name}"))
+            # mock_streamlit's buttons are unconditionally truthy, so the
+            # Refresh body always runs. purge_cache_prefix MUST stay patched
+            # or this test wipes the developer's real .fpl_cache.db.
+            purge = stack.enter_context(patch(f"{mod}.purge_cache_prefix"))
+
             from scripts.classic.fixture_projections import show_classic_fixture_projections_page
             show_classic_fixture_projections_page()
+
+        assert purge.called
 
 
 class TestClassicTransfersPage:
@@ -81,7 +103,12 @@ class TestClassicTransfersPage:
              patch("scripts.classic.transfers.compute_healthy_form", return_value=5.0), \
              patch("scripts.classic.transfers.get_ffp_feed", return_value=_empty_ffp_feed()), \
              patch("scripts.classic.transfers.blend_multi_gw_projections", side_effect=lambda df, *a, **kw: df), \
-             patch("scripts.classic.transfers.compute_positional_depth", return_value={}):
+             patch("scripts.classic.transfers.compute_positional_depth", return_value={}), \
+             patch("scripts.classic.transfers.fetch_my_team"), \
+             patch("scripts.classic.transfers.resolve_classic_squad",
+                   return_value=SquadResolution()), \
+             patch("scripts.classic.transfers.purge_cache_prefix"), \
+             patch("scripts.classic.transfers._save_pending_file"):
             from scripts.classic.transfers import show_classic_transfers_page
             show_classic_transfers_page()
 

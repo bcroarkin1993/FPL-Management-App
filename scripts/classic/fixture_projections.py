@@ -16,6 +16,13 @@ from datetime import datetime, timezone
 from fuzzywuzzy import fuzz
 from scripts.common.error_helpers import show_api_error
 from scripts.common.player_matching import canonical_normalize
+from scripts.common.cache import purge_cache_prefix
+from scripts.common.fpl_classic_api import get_classic_team_history
+from scripts.common.fpl_auth import STATUS_EXPIRED, STATUS_NO_AUTH, fetch_my_team
+from scripts.common.classic_squad import (
+    SOURCE_MY_TEAM,
+    resolve_classic_squad,
+)
 from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections
 from scripts.common.scraping import get_ffp_feed, render_ffp_status
 from scripts.common.fixture_helpers import (
@@ -147,56 +154,64 @@ def _blend_live_with_squad(squad_df: pd.DataFrame, live_stats: dict) -> pd.DataF
     return result
 
 
-def _get_team_current_squad(team_id: int, target_gw: int, bootstrap: dict) -> list:
+CHIP_LABELS = {
+    "wildcard": "Wildcard",
+    "freehit": "Free Hit",
+    "bboost": "Bench Boost",
+    "3xc": "Triple Captain",
+    "manager": "Assistant Manager",
+}
+
+
+def _render_squad_provenance(team_id: int, bootstrap: dict, current_gw: int) -> None:
+    """Say where the user's own squad came from, once per page.
+
+    This page used to render a squad with no provenance at all. Between
+    gameweeks that squad is the one registered at the *last* deadline, because
+    FPL publishes neither pending transfers nor an active chip until the next
+    deadline passes — so a manager who had just played a wildcard saw their old
+    team presented as current, with nothing on the page to suggest otherwise.
     """
-    Get a team's current squad by looking at previous GW picks and applying transfers.
+    if not team_id:
+        return
 
-    This is used when the target GW's picks are not yet available (pre-deadline).
+    resolution = resolve_classic_squad(team_id, bootstrap, current_gw)
+    if not resolution.ok:
+        return
 
-    Parameters:
-    - team_id: The FPL team ID.
-    - target_gw: The gameweek we're projecting for.
-    - bootstrap: Bootstrap-static data.
+    if resolution.auth_status == STATUS_EXPIRED:
+        st.warning(
+            "⚠️ Your FPL sign-in has expired, so this page is showing your "
+            f"**last-deadline** squad — any GW{resolution.target_gw} transfers or an "
+            "active chip are missing. Re-paste your session cookie on the "
+            "🆔 League Setup page."
+        )
+        return
 
-    Returns:
-    - List of element IDs representing the current squad.
-    """
-    # Try to get picks from the most recent completed gameweek
-    prev_gw = target_gw - 1
-
-    # Find the most recent GW with available picks
-    squad_elements = None
-    source_gw = None
-
-    for gw in range(prev_gw, 0, -1):
-        picks_data = get_classic_team_picks(team_id, gw)
-        if picks_data and picks_data.get("picks"):
-            squad_elements = [p["element"] for p in picks_data["picks"]]
-            source_gw = gw
-            break
-
-    if not squad_elements:
-        return []
-
-    # Apply any transfers made after the source GW
-    transfers = get_classic_transfers(team_id)
-    if transfers:
-        # Sort transfers by event (gameweek)
-        transfers = sorted(transfers, key=lambda t: t.get("event", 0))
-
-        for transfer in transfers:
-            transfer_gw = transfer.get("event", 0)
-            # Only apply transfers that happened after our source GW and before/during target GW
-            if source_gw < transfer_gw <= target_gw:
-                element_out = transfer.get("element_out")
-                element_in = transfer.get("element_in")
-
-                if element_out in squad_elements:
-                    squad_elements.remove(element_out)
-                if element_in and element_in not in squad_elements:
-                    squad_elements.append(element_in)
-
-    return squad_elements
+    if resolution.source == SOURCE_MY_TEAM:
+        chip = resolution.active_chip
+        if chip:
+            st.success(
+                f"✅ **{CHIP_LABELS.get(chip, chip)}** is active for "
+                f"GW{resolution.target_gw} — showing your live squad from your FPL account."
+            )
+        else:
+            st.caption(f"✅ {resolution.provenance}")
+    elif resolution.local_stale:
+        names = ", ".join(str(t.get("element_out")) for t in resolution.local_stale)
+        st.warning(
+            f"⚠️ You logged transfer(s) locally that FPL does not show in your squad "
+            f"(out: {names}). They have been left out of these projections."
+        )
+    elif resolution.is_stale:
+        st.warning(f"⚠️ {resolution.provenance}")
+        if resolution.auth_status == STATUS_NO_AUTH:
+            st.caption(
+                "Connect your FPL account on the 🆔 League Setup page to show your "
+                "live squad here, including transfers made before the deadline."
+            )
+    elif resolution.provenance:
+        st.caption(resolution.provenance)
 
 
 def _build_squad_from_elements(element_ids: list, bootstrap: dict) -> pd.DataFrame:
@@ -876,15 +891,26 @@ def _get_team_squad_and_lineup(
         squad_df = _build_squad_dataframe(picks_data.get("picks", []), bootstrap)
         active_chip = picks_data.get("active_chip")
     else:
-        # Fallback: Get current squad and calculate optimal lineup
-        is_predicted = True
-        squad_elements = _get_team_current_squad(team_id, current_gw, bootstrap)
+        # Pre-deadline. The shared resolver prefers the authenticated live squad
+        # for the user's own team and otherwise reconstructs from the last
+        # deadline; either way it skips Free Hit gameweeks, which this page's
+        # own walk-back never did (it would rebuild the temporary FH squad).
+        resolution = resolve_classic_squad(team_id, bootstrap, current_gw)
 
-        if not squad_elements:
+        if not resolution.ok:
             return pd.DataFrame(), None, True
 
-        # Build squad from elements
-        squad_df = _build_squad_from_elements(squad_elements, bootstrap)
+        active_chip = resolution.active_chip
+
+        if resolution.source == SOURCE_MY_TEAM:
+            # This IS the registered lineup — real positions, real captain.
+            # Nothing to predict.
+            squad_df = _build_squad_dataframe(resolution.picks, bootstrap)
+        else:
+            is_predicted = True
+            squad_df = _build_squad_from_elements(
+                [p["element"] for p in resolution.picks], bootstrap
+            )
 
     # Add Rotowire projections then blend with FFP
     if projections_df is not None and not projections_df.empty:
@@ -1233,6 +1259,9 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
             f"**Pre-deadline mode:** Gameweek {current_gw} hasn't started yet. "
             "Showing predicted optimal lineups based on current squads."
         )
+        # Only pre-deadline: once the GW has started its picks are authoritative
+        # and there is nothing stale to disclose.
+        _render_squad_provenance(config.FPL_CLASSIC_TEAM_ID, bootstrap, current_gw)
 
     # Get live stats if gameweek is live
     live_stats = get_live_gameweek_stats(current_gw) if gw_is_live else {}
@@ -1619,6 +1648,7 @@ def _show_classic_leaderboard_projections(league_id: int, league_name: str, curr
                 f"**Pre-deadline mode:** Gameweek {current_gw} hasn't started yet. "
                 "Showing predicted optimal lineups based on current squads."
             )
+            _render_squad_provenance(config.FPL_CLASSIC_TEAM_ID, bootstrap, current_gw)
 
         projections_df = None
         projections_available = False
@@ -1824,6 +1854,13 @@ def show_classic_fixture_projections_page():
         if st.button("🔄", help="Refresh data", key="classic_gw_refresh"):
             # Clear all relevant caches (team picks, transfers, live stats)
             get_classic_team_picks.clear()
+            get_classic_team_history.clear()
+            fetch_my_team.clear()
+            # This page renders a whole league, so purge every team's picks.
+            # Clearing only the Streamlit layer (as this button used to) leaves
+            # permanently-cached rows in place, which is exactly what a user
+            # clicking Refresh is trying to escape.
+            purge_cache_prefix("classic_picks:")
             get_classic_transfers.clear()
             get_live_gameweek_stats.clear()
             is_gameweek_live.clear()

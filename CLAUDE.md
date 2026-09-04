@@ -288,6 +288,81 @@ value in `Display_Name`. **Match on `Player`, display `Display_Name`** — swapp
 them silently degrades match rates, since projection sources are matched against
 the full name.
 
+### Pre-deadline Classic squad — one resolver, explicit provenance
+
+`scripts/common/classic_squad.py` answers "what 15 does this Classic manager
+currently have?" for every Classic page. `scripts/common/fpl_auth.py` is the
+authenticated read that makes a pre-deadline answer possible at all.
+
+**The bug: a squad that is wrong but looks right.** A manager played a wildcard
+and Fixture Projections rendered the *pre-wildcard* squad, with nothing on the
+page to suggest it was anything but current. Four pages resolved this question
+three different ways, and only one of them said where its answer came from.
+
+**`entry/{id}/event/{gw}/picks/` 404s for any gameweek whose deadline has not
+passed** — confirmed, and pinned in `tests/live/test_classic_squad_sources.py`.
+`my-team/{id}/` is the only endpoint defined to return the live squad, and it
+403s without credentials.
+
+Whether `entry/{id}/transfers/` and `history.chips` also withhold a move until
+its deadline is **inferred, not observed** — see the note at the top of
+`fpl_auth.py`. Do not restate it as verified; the next pre-deadline transfer
+settles it. The design does not depend on the answer, because `my-team` is
+correct either way.
+
+**Precedence**, in `resolve_classic_squad()`:
+
+| Source | Meaning |
+|---|---|
+| `my_team` | authenticated live squad — the only pre-deadline truth |
+| `local_pending` | transfers logged in-app, replayed on the base squad |
+| `picks_replay` | last-deadline picks + transfers FPL has confirmed |
+| `picks` | last-deadline picks, nothing to replay |
+
+**`allow_auth` defaults to "this is the user's own configured team."** The
+unauthenticated path is therefore the default, and the H2H opponent calls and
+the league leaderboard loop can never reach for a credential on someone else's
+behalf.
+
+**`is_stale` and `provenance` are the point, not a nicety.** Between gameweeks
+without a credential, the last-deadline squad is the only available answer —
+what must never happen again is it being presented as current. The banner
+renders only pre-deadline, since once a gameweek starts its own picks are
+authoritative.
+
+Three traps this code exists to avoid:
+
+- **Never replay a transfer onto an authenticated squad.** `apply_pending_transfers()`
+  no-ops the pick swap when `element_out` is already gone, but its bank
+  adjustment fires regardless — so replaying a move the live squad already
+  contains double-counts the money. `my_team` returns early and instead
+  *retires* settled entries from the pending log. An entry the live squad
+  contradicts (`element_out` still present) never went through: it is surfaced,
+  never applied.
+- **`my-team` is not shaped like `picks`.** Bank and value live under a
+  top-level `transfers` object, the active chip is a `status_for_entry ==
+  "active"` entry in `chips`, and picks carry **no `multiplier`** — which
+  `_build_squad_dataframe()` defaults to 1, silently giving the captain a 1x
+  multiplier and the bench 1x instead of 0. `normalise_my_team()` is the seam
+  that keeps every downstream consumer unchanged.
+- **Never SQLite-cache `my-team`.** The payload changes the instant the manager
+  makes a transfer, and `cached_api_call`'s `ttl=None` branch would pin it
+  permanently. `@st.cache_data(ttl=60)` only. Credentials are likewise never
+  `cache_data` *arguments* — Streamlit hashes those into the cache key and
+  surfaces them in hash-error messages.
+
+`purge_cache_prefix()` (`cache.py`) takes the module lock, unlike the inline
+`DELETE FROM cache` it replaced — the shared connection is `check_same_thread=False`
+and the transfer-news prefetch runs against it concurrently. Both Refresh
+buttons now use it; Fixture Projections' previously cleared only the Streamlit
+layer, so a permanently-cached row survived the very click meant to escape it.
+
+Credential storage is `.fpl_auth.json` at the repo root, gitignored and
+`0600` — its own file, not `league_settings.json`, which holds non-secret IDs
+in a public repo. Set it on the **🆔 League Setup** page; "Test connection"
+validates a pasted value before saving. Expiry is a distinct, user-visible
+state, never a silent fallback.
+
 ### Caching
 
 Two-tier caching strategy for fast page navigation:
@@ -336,6 +411,7 @@ to import from GitHub Actions.
 | `check_merge_match_rate()` | A name-based merge quietly ceasing to match (the 356/425 season-rankings regression). Pass `input_rows`: the check **abstains** when the merged frame is smaller than the reference, since a subset can never claim every reference row — judged against the reference alone it logged an ERROR on every Waiver Wire load while matching 100% of its input |
 | `check_initial_squad()` | Illegal or implausibly-priced Classic squads; a scale-free objective, whose signature is unspent budget |
 | `check_team_strength()` | Degenerate power rankings — every team scoring ~50 because position codes were `GKP/DEF/MID/FWD` instead of `G/D/M/F`, short squads, impossible injury costs |
+| `check_resolved_squad()` | A Classic squad that is illegal (size, duplicates, >3 per club, negative bank from double-applied transfer arithmetic) or **stale** — the last-deadline fifteen presented as current, whose every individual value is plausible |
 | `check_element_states()` | Draft player states changing shape — an unknown `status` code, `owner` disagreeing with the status, an owned count that isn't teams x 15. Every one makes locked players read as available, so the Waiver Wire suggests players who cannot be picked up |
 
 Ranges are deliberately wide — these are "this cannot be right" boundaries, not

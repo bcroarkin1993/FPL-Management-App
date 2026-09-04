@@ -6,12 +6,10 @@ Shows squad analysis with suggested transfers and upcoming fixtures.
 """
 
 import config
-import json
 import numpy as np
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fuzzywuzzy import fuzz
 
@@ -40,6 +38,15 @@ from scripts.common.analytics import (
 )
 from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings, render_ffp_status
 from scripts.common.player_matching import canonical_normalize
+from scripts.common.cache import purge_cache_prefix
+from scripts.common.fpl_auth import fetch_my_team
+from scripts.common.classic_squad import (
+    PENDING_FILE as _PENDING_FILE,
+    apply_pending_transfers as _apply_pending_transfers,
+    load_pending_file as _load_pending_file,
+    resolve_classic_squad,
+    save_pending_file as _save_pending_file,
+)
 
 
 # ---------------------------
@@ -50,24 +57,11 @@ from scripts.common.player_matching import canonical_normalize
 # ---------------------------
 
 _PENDING_KEY = "fpl_classic_pending_transfers"
-_PENDING_FILE = Path(".fpl_pending_transfers.json")
 
-
-def _load_pending_file() -> list:
-    """Read all pending transfers from the JSON file."""
-    try:
-        if _PENDING_FILE.exists():
-            return json.loads(_PENDING_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        pass
-    return []
-
-
-def _save_pending_file(transfers: list) -> None:
-    """Write all pending transfers to the JSON file."""
-    _PENDING_FILE.write_text(
-        json.dumps(transfers, indent=2), encoding="utf-8"
-    )
+# _PENDING_FILE / _load_pending_file / _save_pending_file / _apply_pending_transfers
+# are imported from scripts.common.classic_squad — this page owns the session-state
+# layer and the add/remove UI, the shared resolver owns the file and the replay so
+# read-only consumers (Fixture Projections, the optimizers) see the same squad.
 
 
 def _init_pending_state(_state=None) -> None:
@@ -542,75 +536,6 @@ def _compute_free_transfers(history: dict, entry_history: dict, current_gw: int,
         break  # Made transfers last non-FH GW → 1 FT this GW
 
     return 1
-
-
-def _apply_pending_transfers(picks_data: dict, picks_source_gw: int,
-                              all_transfers: list, fh_gws: set,
-                              bootstrap: dict) -> tuple:
-    """Apply transfers registered after picks_source_gw (excluding FH GWs).
-
-    Returns (updated_picks_data, list_of_applied_descriptions).
-    This is needed because the FPL picks endpoint returns 404 for upcoming
-    GWs, so between GWs we load the last completed GW's picks and replay
-    any transfers on top to reconstruct the current registered squad.
-    """
-    import copy
-
-    # Apply permanent transfers registered after the base squad snapshot.
-    # Two categories:
-    #   - API transfers: exclude FH GW events (those are temporary FH squad
-    #     changes stored with the FH event number; replaying them rebuilds
-    #     the wrong squad).
-    #   - Local transfers (local=True): always apply — these are user-confirmed
-    #     permanent transfers. get_current_gameweek() may return the FH GW
-    #     number between gameweeks, causing local transfers to be saved with
-    #     event == fh_gw. We must NOT filter those out.
-    pending = [
-        t for t in (all_transfers or [])
-        if (
-            # Local transfers: allow event == picks_source_gw since the base picks
-            # represent the squad *before* the user's intended transfer. Using strict >
-            # would drop the transfer when FPL returns current-GW picks as the base.
-            t.get("local") and t.get("event", 0) >= picks_source_gw
-        ) or (
-            not t.get("local")
-            and t.get("event", 0) > picks_source_gw
-            and t.get("event", 0) not in fh_gws
-        )
-    ]
-    if not pending:
-        return picks_data, []
-
-    picks_data = copy.deepcopy(picks_data)
-    picks = picks_data.get("picks", [])
-    elements_lookup = {p["id"]: p for p in bootstrap.get("elements", [])}
-
-    applied = []
-    for transfer in sorted(pending, key=lambda t: (t.get("event", 0), t.get("time", ""))):
-        out_id = transfer["element_out"]
-        in_id = transfer["element_in"]
-        for pick in picks:
-            if pick["element"] == out_id:
-                pick["element"] = in_id
-                # selling_price = what was paid (can only sell for this or less if risen)
-                pick["selling_price"] = transfer.get(
-                    "element_in_cost",
-                    elements_lookup.get(in_id, {}).get("now_cost", 0)
-                )
-                out_name = elements_lookup.get(out_id, {}).get("web_name", str(out_id))
-                in_name = elements_lookup.get(in_id, {}).get("web_name", str(in_id))
-                applied.append(f"{out_name} → {in_name} (GW{transfer['event']})")
-                break
-
-        # Update bank: selling price received minus purchase price
-        out_cost = transfer.get("element_out_cost", 0)
-        in_cost = transfer.get("element_in_cost", 0)
-        if "entry_history" in picks_data and out_cost and in_cost:
-            picks_data["entry_history"]["bank"] = (
-                picks_data["entry_history"].get("bank", 0) + out_cost - in_cost
-            )
-
-    return picks_data, applied
 
 
 def _ownership_badge(pct: float) -> str:
@@ -1547,17 +1472,13 @@ def show_classic_transfers_page():
             # Clear Streamlit in-memory caches
             get_classic_transfers.clear()
             get_classic_team_picks.clear()
+            get_classic_team_history.clear()
+            fetch_my_team.clear()
             # Also clear SQLite picks cache — permanent cache can store stale/corrupt data
             # (e.g. FH squad data stored under GW32 key during a FH period)
             _team_id_for_clear = config.FPL_CLASSIC_TEAM_ID
             if _team_id_for_clear:
-                from scripts.common.cache import get_cache_db
-                _db = get_cache_db()
-                _db.execute(
-                    "DELETE FROM cache WHERE key LIKE ?",
-                    (f"classic_picks:{_team_id_for_clear}:%",)
-                )
-                _db.commit()
+                purge_cache_prefix(f"classic_picks:{_team_id_for_clear}:")
             st.rerun()
 
     # Check configuration
@@ -1589,40 +1510,10 @@ def show_classic_transfers_page():
     # Team name (used in squad header below)
     team_name = entry.get("name", "Unknown Team")
 
-    # Determine the most relevant GW to load picks for.
-    # Use the Classic bootstrap events to find next/current GW — more accurate
-    # than the Draft API's get_current_gameweek() between GWs.
-    events = bootstrap.get("events", [])
-    next_gw_from_bootstrap = next((e["id"] for e in events if e.get("is_next")), None)
-    # Try the next GW first: between GWs, transfers are registered there even
-    # though get_current_gameweek() may still return the just-finished GW.
-    gws_to_try_base = sorted(
-        {current_gw + 1, next_gw_from_bootstrap, current_gw, current_gw - 1,
-         current_gw - 2, current_gw - 3} - {None},
-        reverse=True,  # highest GW first
-    )
-
     # Skip any GW where Free Hit was active — squad reverts after FH so those
     # picks represent a temporary squad, not the real registered 15.
     chips_list = history.get("chips", []) if history else []
     fh_gws = {c["event"] for c in chips_list if c.get("name") == "freehit"}
-
-    picks_data = None
-    picks_source_gw = None
-    for try_gw in gws_to_try_base:
-        if try_gw < 1:
-            continue
-        if try_gw in fh_gws:
-            continue  # Free Hit GW — squad is temporary, skip it
-        candidate = get_classic_team_picks(team_id, try_gw)
-        if candidate:
-            picks_data = candidate
-            picks_source_gw = try_gw
-            break
-
-    if not picks_data:
-        show_api_error("loading your current squad")
-        return
 
     # Fetch confirmed transfers from FPL API.
     # Note: FPL only returns confirmed (post-deadline) transfers here.
@@ -1643,12 +1534,24 @@ def show_classic_transfers_page():
                    if (t["element_out"], t["element_in"], t.get("event", 0)) not in confirmed_keys]
     effective_transfers = all_transfers + extra_local
 
-    # Reconstruct the squad by replaying all post-base transfers.
-    picks_data, applied_transfers = _apply_pending_transfers(
-        picks_data, picks_source_gw, effective_transfers, fh_gws, bootstrap
+    # Resolve the squad through the shared resolver so this page, Fixture
+    # Projections and the two optimizers always agree on the same 15. The
+    # session-state-merged transfer list is passed in explicitly — this page
+    # owns that layer, the resolver only reads the file.
+    resolution = resolve_classic_squad(
+        team_id, bootstrap, current_gw,
+        history=history, extra_transfers=effective_transfers,
     )
 
-    # Surface a notice when local pending transfers are in effect
+    if not resolution.ok:
+        show_api_error("loading your current squad")
+        return
+
+    picks_data = resolution.as_picks_data()
+    picks_source_gw = resolution.source_gw
+    applied_transfers = resolution.applied_transfers
+
+    # Surface where the squad came from.
     if extra_local:
         local_names = []
         for t in extra_local:
@@ -1659,6 +1562,8 @@ def show_classic_transfers_page():
             f"⏳ Locally-logged transfer(s) applied: **{', '.join(local_names)}**  "
             f"— these will auto-clear once FPL confirms them after the deadline."
         )
+    elif resolution.source == "my_team":
+        st.caption(f"✅ {resolution.provenance}")
     elif picks_source_gw and picks_source_gw < current_gw - 1:
         fh_gw = picks_source_gw + 1
         msg = f"Base squad loaded from GW{picks_source_gw} (GW{fh_gw} was a Free Hit)."
@@ -1667,6 +1572,8 @@ def show_classic_transfers_page():
         st.info(msg)
     elif applied_transfers:
         st.info(f"Applied confirmed transfer(s): {', '.join(applied_transfers)}.")
+    elif resolution.is_stale:
+        st.warning(f"⚠️ {resolution.provenance}")
 
     picks = picks_data.get("picks", [])
     active_chip = picks_data.get("active_chip")  # e.g., "wildcard", "freehit", "bboost", "3xc"
