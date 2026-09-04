@@ -6,8 +6,12 @@ __pycache__/
 # Ignore Python virtual environment folder
 venv/
 
-# Ignore .env files containing sensitive data
+# Ignore .env files containing sensitive data. The .bak glob matters: this
+# repo is public and .env carries an API key and a Discord webhook, so a
+# timestamped backup left lying around is one `git add -A` from being
+# published -- the same accident that once committed nine "file 2.py" copies.
 .env
+.env.bak*
 
 # Streamlit-specific (track config.toml for theming, ignore secrets)
 .streamlit/secrets.toml
