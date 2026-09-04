@@ -1340,3 +1340,115 @@ def check_resolved_squad(resolution: Optional[dict],
         ))
 
     return issues
+
+
+# --------------------------------------------------------------------------
+# Blended projections
+# --------------------------------------------------------------------------
+
+#: How far outside the range of its own inputs a blend may sit before it is an
+#: error rather than a rounding artefact. A weighted mean of positive numbers is
+#: mathematically bounded by them; anything past this is arithmetic gone wrong.
+BLEND_BOUNDS_TOLERANCE = 0.01
+
+
+def check_blended_projections(df: Optional[pd.DataFrame],
+                              source: str = "projection engine") -> List[Issue]:
+    """Assert the engine's output is internally consistent.
+
+    Every source-level check in this module validates one feed in isolation.
+    None of them looks at the *blend*, which is the number the whole app now
+    renders -- and the blend is where the app's most expensive bugs lived: two
+    implementations disagreeing, and a start probability charged twice.
+
+    Four things must hold, and each maps to a real failure:
+
+    1. ``Proj <= Proj_Start``. Expected points cannot exceed points-if-he-starts.
+       A violation means the multiplication went the wrong way.
+    2. ``Proj == Proj_Start * Start_Pct``. If these drift apart, some caller has
+       written one of the columns by hand instead of going through the engine.
+    3. ``Start_Pct`` in [0, 1]. A percentage that got stored as 0-100 makes every
+       projection 100x too large, and would still look like a number.
+    4. The blend lies within the range of the sources that fed it. A weighted
+       mean cannot escape its inputs; if it has, the weights are wrong or a
+       source was converted to the wrong basis.
+    """
+    issues: List[Issue] = []
+    check = "blended_projections"
+
+    if df is None or df.empty:
+        return [Issue(check, "error", "%s produced no rows." % source,
+                      "Every projection surface reads this frame. An empty blend "
+                      "renders a page identical to a working one, with every "
+                      "score silently neutral.")]
+
+    if "Proj" not in df.columns or "Proj_Start" not in df.columns:
+        return [Issue(check, "error",
+                      "%s is missing Proj/Proj_Start." % source,
+                      "The engine's output contract is Proj, Proj_Start and "
+                      "Start_Pct. A consumer reading a differently-named column "
+                      "is reading a hand-rolled blend.")]
+
+    proj = pd.to_numeric(df["Proj"], errors="coerce")
+    proj_start = pd.to_numeric(df["Proj_Start"], errors="coerce")
+    start = pd.to_numeric(df.get("Start_Pct"), errors="coerce") if "Start_Pct" in df.columns else None
+
+    both = proj.notna() & proj_start.notna()
+    over = both & (proj > proj_start + BLEND_BOUNDS_TOLERANCE)
+    if over.any():
+        issues.append(Issue(
+            check, "error",
+            "%d players have Proj above Proj_Start (max excess %.2f)."
+            % (int(over.sum()), float((proj - proj_start)[over].max())),
+            "Expected points cannot exceed points-if-he-starts. Proj is "
+            "Proj_Start x Start_Pct, so this means the start probability was "
+            "applied in the wrong direction or a column was overwritten.",
+        ))
+
+    if start is not None:
+        bad_start = start.notna() & ((start < 0) | (start > 1))
+        if bad_start.any():
+            issues.append(Issue(
+                check, "error",
+                "%d players have Start_Pct outside [0, 1] (range %.2f to %.2f)."
+                % (int(bad_start.sum()), float(start.min()), float(start.max())),
+                "Start_Pct is a fraction, not a percentage. Stored as 0-100 it "
+                "inflates every projection a hundredfold while still looking "
+                "like a plausible number in isolation.",
+            ))
+
+        consistent = both & start.notna()
+        if consistent.any():
+            expected = proj_start[consistent] * start[consistent]
+            drift = (proj[consistent] - expected).abs()
+            # Engine output is rounded to 3dp; allow for that plus float noise.
+            if (drift > 0.02).any():
+                issues.append(Issue(
+                    check, "error",
+                    "%d players where Proj != Proj_Start x Start_Pct "
+                    "(max drift %.2f)." % (int((drift > 0.02).sum()), float(drift.max())),
+                    "These three columns are one identity. If they disagree, "
+                    "something outside projection_engine wrote one of them -- "
+                    "which is how the app came to have two blends that differed.",
+                ))
+
+    per_source = [c for c in df.columns if c.startswith("Proj_Start__")]
+    if per_source:
+        stacked = df[per_source].apply(pd.to_numeric, errors="coerce")
+        priced = stacked.notna() & stacked.gt(0)
+        lo = stacked.where(priced).min(axis=1)
+        hi = stacked.where(priced).max(axis=1)
+        outside = (proj_start.notna() & lo.notna()
+                   & ((proj_start < lo - BLEND_BOUNDS_TOLERANCE)
+                      | (proj_start > hi + BLEND_BOUNDS_TOLERANCE)))
+        if outside.any():
+            issues.append(Issue(
+                check, "error",
+                "%d players whose blend falls outside the range of its own "
+                "sources." % int(outside.sum()),
+                "A weighted mean of positive values is bounded by those values. "
+                "Escaping that range means the weights are wrong, or a source "
+                "was converted to the wrong basis before blending.",
+            ))
+
+    return issues

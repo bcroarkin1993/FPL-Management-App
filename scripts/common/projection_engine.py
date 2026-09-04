@@ -356,6 +356,15 @@ def blend_aligned(
     out["Proj_Start"] = proj_start.round(3)
     out["Proj"] = (proj_start * start_pct).round(3)
 
+    # A unit mismatch between two sources is the single most expensive failure
+    # this app has had: Rotowire once published a five-gameweek cumulative table
+    # under a weekly heading and every projection in the app was 5x too big,
+    # with nothing raising. `check_source_scale_agreement` was written for
+    # exactly that and, until now, ran only inside tests -- so the blend itself
+    # was unguarded at runtime. Logged, never raised: a page must degrade, not die.
+    if len(blend_names) >= 2:
+        _warn_on_scale_disagreement(per_source_start, blend_names)
+
     # --- Provenance and disagreement ---------------------------------------
     if blend_names:
         stacked = pd.concat([per_source_start[n].rename(n) for n in blend_names], axis=1)
@@ -394,6 +403,27 @@ def blend_aligned(
 
     out["Proj_GW"] = gameweek
     return out
+
+
+def _warn_on_scale_disagreement(per_source_start, blend_names) -> None:
+    """Log if two sources look denominated in different units.
+
+    Independent projections disagree about individual players constantly; they
+    should still agree within a factor of two on the *typical* player. A
+    systematic multiple is a unit mismatch, not a difference of opinion.
+    """
+    try:
+        from scripts.common.data_validation import check_source_scale_agreement
+    except Exception:                       # pragma: no cover - defensive
+        return
+    for i, a in enumerate(blend_names):
+        for b in blend_names[i + 1:]:
+            for issue in check_source_scale_agreement(
+                per_source_start[a].dropna(), per_source_start[b].dropna(),
+                label_a=a, label_b=b,
+            ):
+                log = _logger.error if issue.severity == "error" else _logger.warning
+                log("Projection blend: %s", issue)
 
 
 def attach_projections(

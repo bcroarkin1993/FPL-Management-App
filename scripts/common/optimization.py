@@ -59,7 +59,17 @@ def find_optimal_lineup(df, points_col='Points'):
     :return: optimal 11-player lineup DataFrame
     """
     if points_col not in df.columns:
-        points_col = 'Points'
+        # Deliberately loud. This used to fall back to 'Points' silently, which
+        # during the migration to the projection engine would let a page ask for
+        # 'Proj' and quietly get raw un-blended Rotowire instead -- the XI would
+        # look fine and be selected on the wrong number. A caller that genuinely
+        # wants Rotowire can say so.
+        raise KeyError(
+            f"find_optimal_lineup: {points_col!r} is not on the frame "
+            f"(columns: {sorted(df.columns)}). Pass the column you actually "
+            f"want the XI ranked by -- silently substituting 'Points' selects "
+            f"the lineup on a different metric than the caller reports."
+        )
     # 1. Find the top scoring GK (exactly 1)
     top_gk = df[df['Position'] == 'G'].sort_values(by=points_col, ascending=False).head(1)
 

@@ -10,7 +10,6 @@ from scripts.common.utils import (
     format_team_name,
     check_valid_lineup,
     find_optimal_lineup,
-    apply_availability_penalty,
     clean_text,
     _clean_player_name,
     _norm_text,
@@ -209,27 +208,6 @@ class TestFindOptimalLineup:
         assert "Player_7" in selected
 
 
-class TestApplyAvailabilityPenalty:
-    def test_basic_penalty(self):
-        df = pd.DataFrame({
-            "Player": ["A", "B"],
-            "Score": [10.0, 8.0],
-            "PlayPct": [100.0, 50.0],
-        })
-        result = apply_availability_penalty(df, "Score", "AdjScore")
-        assert result.loc[0, "AdjScore"] == 10.0  # 100% play
-        assert result.loc[1, "AdjScore"] == 4.0    # 50% play
-
-    def test_zero_availability(self):
-        df = pd.DataFrame({
-            "Player": ["A"],
-            "Score": [10.0],
-            "PlayPct": [0.0],
-        })
-        result = apply_availability_penalty(df, "Score", "AdjScore")
-        assert result.loc[0, "AdjScore"] == 0.0
-
-
 class TestFindOptimalLineupPointsCol:
     """The XI must be rankable on the same column the team total is reported on.
     Draft/Classic fixture pages blend projections into 'Proj_Blended' and sum that,
@@ -259,11 +237,14 @@ class TestFindOptimalLineupPointsCol:
         xi = find_optimal_lineup(self._squad(), points_col="Proj_Blended")
         assert "blend_favourite" in xi["Player"].tolist()
 
-    def test_missing_column_falls_back_to_points(self):
+    def test_missing_column_raises_rather_than_substituting_points(self):
+        """It used to fall back to 'Points' silently. That is the worst possible
+        behaviour during a migration: the caller asks for the blended column,
+        gets the raw one, and the XI looks entirely plausible while being
+        selected on a different metric than the total reported beside it."""
         df = self._squad().drop(columns=["Proj_Blended"])
-        xi = find_optimal_lineup(df, points_col="Proj_Blended")
-        assert len(xi) == 11
-        assert "raw_favourite" in xi["Player"].tolist()
+        with pytest.raises(KeyError, match="Proj_Blended"):
+            find_optimal_lineup(df, points_col="Proj_Blended")
 
     def test_ffp_only_player_is_selectable(self):
         """Points == 0 but a real blended projection -- previously unpickable."""

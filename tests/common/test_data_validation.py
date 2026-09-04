@@ -25,6 +25,7 @@ from scripts.common.data_validation import (
     format_issues,
     raise_on_error,
     check_resolved_squad,
+    check_blended_projections,
 )
 
 
@@ -786,3 +787,63 @@ class TestCheckResolvedSquad:
         issues = check_resolved_squad(
             self._good(auth_status="expired"), self._bootstrap())
         assert any("expired" in i.message for i in issues)
+
+
+class TestCheckBlendedProjections:
+    """The blend is the number the whole app renders, and nothing validated it.
+
+    Every fixture below is a shape the app either shipped or would have shipped
+    without the projection engine's basis contract.
+    """
+
+    def _good(self):
+        return pd.DataFrame({
+            "Proj_Start": [10.0, 6.0, 4.0],
+            "Start_Pct": [0.9, 0.5, 1.0],
+            "Proj": [9.0, 3.0, 4.0],
+            "Proj_Start__rotowire": [11.0, 6.0, np.nan],
+            "Proj_Start__ffp": [8.5, np.nan, 4.0],
+        })
+
+    def test_consistent_frame_is_clean(self):
+        assert check_blended_projections(self._good()) == []
+
+    def test_empty_frame_is_an_error(self):
+        issues = check_blended_projections(pd.DataFrame())
+        assert any(i.severity == "error" for i in issues)
+
+    def test_expected_value_above_conditional_is_an_error(self):
+        """Proj > Proj_Start means the start multiplier ran backwards."""
+        df = self._good()
+        df.loc[0, "Proj"] = 12.0
+        issues = check_blended_projections(df)
+        assert any("above Proj_Start" in i.message for i in issues)
+
+    def test_start_pct_stored_as_a_percentage_is_caught(self):
+        """0-100 instead of 0-1 inflates every projection a hundredfold."""
+        df = self._good()
+        df["Start_Pct"] = [90.0, 50.0, 100.0]
+        issues = check_blended_projections(df)
+        assert any("outside [0, 1]" in i.message for i in issues)
+
+    def test_identity_drift_is_caught(self):
+        """Proj, Proj_Start and Start_Pct are one identity. If a page hand-writes
+        one of them they stop agreeing -- which is exactly how the app came to
+        carry two blends that differed."""
+        df = self._good()
+        df.loc[1, "Proj"] = 5.5      # not 6.0 * 0.5
+        issues = check_blended_projections(df)
+        assert any("Proj_Start x Start_Pct" in i.message for i in issues)
+
+    def test_blend_outside_its_own_sources_is_caught(self):
+        """A weighted mean cannot escape its inputs. If it has, a source was
+        converted to the wrong basis."""
+        df = self._good()
+        df.loc[0, "Proj_Start"] = 25.0
+        df.loc[0, "Proj"] = 22.5
+        issues = check_blended_projections(df)
+        assert any("outside the range of its own sources" in i.message for i in issues)
+
+    def test_missing_contract_columns_is_an_error(self):
+        issues = check_blended_projections(pd.DataFrame({"Points": [5.0]}))
+        assert any("missing Proj/Proj_Start" in i.message for i in issues)

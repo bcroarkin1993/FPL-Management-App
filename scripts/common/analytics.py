@@ -1415,13 +1415,13 @@ def _add_fdr_and_form(
     return base
 
 
-def apply_availability_penalty(df: pd.DataFrame, score_col: str, out_col: str) -> pd.DataFrame:
-    """
-    Multiply a score column by (PlayPct/100) so low availability downweights adds/drops.
-    """
-    out = df.copy()
-    out[out_col] = pd.to_numeric(out[score_col], errors="coerce") * (pd.to_numeric(out["PlayPct"], errors="coerce")/100.0)
-    return out
+# ``apply_availability_penalty()`` was removed here. It had zero callsites and
+# its docstring invited exactly the bug the projection engine exists to prevent:
+# "multiply a score column by PlayPct/100". Applied to ``_effective_proj`` --
+# which is already expected value, start probability included -- it would have
+# charged availability twice, the same shape as the FFP double discount. A
+# loaded gun on the shelf beside a contract that now makes basis explicit.
+# Availability belongs in ``Start_Pct``, priced once, inside the engine.
 
 
 def attach_availability(df: pd.DataFrame, avail_df: pd.DataFrame) -> pd.DataFrame:

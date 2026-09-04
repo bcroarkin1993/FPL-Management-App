@@ -701,7 +701,12 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
         # Find the optimal lineup (top 11 players) for each team. Rank on the same
         # column the team total is reported on, otherwise the XI is chosen on raw
         # Rotowire points while the score shown comes from the blend.
-        _xi_col = 'Proj_Blended' if 'Proj_Blended' in team1_full.columns else 'Points'
+        # Test the frames actually passed, not team1_full: find_optimal_lineup no
+        # longer substitutes 'Points' silently, and these are column selections
+        # of team1_full rather than team1_full itself.
+        _xi_col = ('Proj_Blended'
+                   if 'Proj_Blended' in team1_df.columns and 'Proj_Blended' in team2_df.columns
+                   else 'Points')
         team1_df = find_optimal_lineup(team1_df, points_col=_xi_col)
         team2_df = find_optimal_lineup(team2_df, points_col=_xi_col)
 
