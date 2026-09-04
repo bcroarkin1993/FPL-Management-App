@@ -299,13 +299,17 @@ def render_ffp_data():
         for col in prediction_cols
     )
 
-    # Build display columns based on available data
-    base_cols = ['Name', 'Team', 'Position', 'Fixture', 'Price', 'Ownership', 'Start']
+    # Render the common name, not the legal one. FFP republishes the bootstrap's
+    # full name ("Igor Thiago Nascimento Rodrigues"), which is what the merges
+    # key on and not what anyone reads. The spreadsheet fallback carries no
+    # Display_Name, so fall back to Name there.
+    name_col = 'Display_Name' if 'Display_Name' in raw_df.columns else 'Name'
+    base_cols = [name_col, 'Team', 'Position', 'Fixture', 'Price', 'Ownership', 'Start']
 
     if has_predictions:
         display_cols = base_cols + ['Predicted', 'StartingPredicted', 'Next2GWs', 'Next3GWs', 'Next6GWs']
         display_names = {
-            'Name': 'Player', 'Ownership': 'Own %', 'Start': 'Start %',
+            name_col: 'Player', 'Ownership': 'Own %', 'Start': 'Start %',
             'Predicted': 'Pred Pts', 'StartingPredicted': 'Pts (if starts)',
             'Next2GWs': 'Next 2 GW', 'Next3GWs': 'Next 3 GW', 'Next6GWs': 'Next 6 GW'
         }
@@ -318,7 +322,7 @@ def render_ffp_data():
         # Fallback to odds-based columns when predictions unavailable
         display_cols = base_cols + ['CS', 'AnytimeGoal', 'AnytimeAssist', 'AnytimeReturn']
         display_names = {
-            'Name': 'Player', 'Ownership': 'Own %', 'Start': 'Start %',
+            name_col: 'Player', 'Ownership': 'Own %', 'Start': 'Start %',
             'CS': 'CS %', 'AnytimeGoal': 'Goal %', 'AnytimeAssist': 'Assist %', 'AnytimeReturn': 'Return %'
         }
         gradient_cols = {

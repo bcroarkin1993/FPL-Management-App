@@ -98,6 +98,25 @@ class TestSheetSchema:
         assert saka["Next3GWsStart"] == pytest.approx(
             saka["StartingPredicted"] + saka["GW2"] + saka["GW3"], abs=0.01)
 
+    def test_the_common_name_is_available_alongside_the_legal_one(self):
+        """FFP republishes the bootstrap's legal name, which nobody says aloud.
+
+        `Name` has to stay the legal one -- every merge keys on it, and the
+        projection sources are matched against the full name. So the readable
+        version rides alongside it and the UI renders that.
+        """
+        rows = [_row(3, 100, "Thiago", "Igor Thiago", "Nascimento Rodrigues",
+                     4, "Brentford", "SUN", 6.5, 90),
+                _row(3, 101, "B.Fernandes", "Bruno", "Borges Fernandes",
+                     3, "Man Utd", "EVE", 6.1, 90),
+                _row(3, 102, "Gabriel", "Gabriel", "dos Santos Magalhães",
+                     2, "Arsenal", "CHE", 4.5, 90)]
+        df = ffp_feed.to_sheet_schema(rows, gw=3).set_index("Web_Name")
+        assert df.at["Thiago", "Name"] == "Igor Thiago Nascimento Rodrigues"
+        assert df.at["Thiago", "Display_Name"] == "Igor Thiago"
+        assert df.at["B.Fernandes", "Display_Name"] == "Bruno Fernandes"
+        assert df.at["Gabriel", "Display_Name"] == "Gabriel"
+
     def test_long_start_is_not_invented(self, payload_rows):
         """The site has one start rate per player, so there is no long-run figure.
 

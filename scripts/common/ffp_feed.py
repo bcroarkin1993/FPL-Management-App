@@ -53,6 +53,8 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import requests
 
+from scripts.common.text_helpers import TEAM_FULL_TO_SHORT, to_display_name
+
 try:                                    # zoneinfo is 3.9+ with tzdata present
     from zoneinfo import ZoneInfo
     _TZ_LONDON = ZoneInfo("Europe/London")
@@ -303,6 +305,16 @@ def to_sheet_schema(rows: List[dict], gw: Optional[int] = None,
     second = current.get("second_name", pd.Series("", index=current.index)).fillna("")
     out["Name"] = (first.astype(str) + " " + second.astype(str)).str.strip()
     out["Web_Name"] = current.get("web_name")
+
+    # FFP republishes the FPL bootstrap's full legal name, which is not what
+    # anybody says out loud -- "Igor Thiago Nascimento Rodrigues" for a player
+    # everyone calls Igor Thiago. `Name` stays the legal one because that is what
+    # the merges key on; `Display_Name` is what the UI renders. Match on Name,
+    # display Display_Name -- swapping them silently degrades match rates.
+    web = current.get("web_name", pd.Series("", index=current.index)).fillna("")
+    out["Display_Name"] = [
+        to_display_name(f, s_, w) for f, s_, w in zip(first, second, web)
+    ]
     out["Team"] = current.get("team_name")
     out["Position"] = pd.to_numeric(current.get("element_type"), errors="coerce").map(
         _ELEMENT_TYPE_TO_POS)
@@ -461,8 +473,6 @@ def resolve_ffp_gameweek(df: Optional[pd.DataFrame],
             return int(stated.mode().iloc[0])
     if "Team" not in df.columns or "Fixture" not in df.columns:
         return None
-
-    from scripts.common.text_helpers import TEAM_FULL_TO_SHORT
 
     pairs = set()
     for team, fixture in df[["Team", "Fixture"]].dropna().drop_duplicates().itertuples(index=False):

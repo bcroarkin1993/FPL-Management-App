@@ -726,8 +726,9 @@ def get_ffp_goalscorer_odds() -> Optional[pd.DataFrame]:
     if df is None:
         return None
 
+    # Display the common name; `Name` stays the legal one the merges key on.
     cols = {
-        'Name': 'Player',
+        ('Display_Name' if 'Display_Name' in df.columns else 'Name'): 'Player',
         'Team': 'Team',
         'Position': 'Position',
         'Fixture': 'Fixture',

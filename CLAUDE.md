@@ -159,6 +159,12 @@ double-discount bug under "FFP has two prediction bases"; `check_ffp_feed()`
 errors on it, since an inversion makes `Predicted` exceed `StartingPredicted`,
 which the relation forbids.
 
+FFP republishes the bootstrap's full legal name, so `to_sheet_schema()` also
+emits `Display_Name` via `to_display_name()` — "Igor Thiago Nascimento
+Rodrigues" is what the merges key on, "Igor Thiago" is what the Projections Hub
+renders. Match on `Name`, display `Display_Name`, per "Player Display Names".
+The spreadsheet fallback has no `Display_Name`, so consumers fall back to `Name`.
+
 `to_sheet_schema()` is the compatibility seam — it emits the legacy sheet column
 names, so all seven page callsites and every merge in `analytics.py` are
 unchanged. Sheet semantics it reproduces, pinned live: `GW2…GW6` are **relative

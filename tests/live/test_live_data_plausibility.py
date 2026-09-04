@@ -152,6 +152,34 @@ class TestFfpSource:
             context="FFP feed",
         )
 
+    def test_names_are_rendered_short_enough_to_read(self, ffp_projections):
+        """FFP republishes the bootstrap's full legal name.
+
+        `Name` must stay legal -- the merges key on it -- while `Display_Name`
+        carries what a manager actually reads. Rendering `Name` put "Igor Thiago
+        Nascimento Rodrigues" on the Projections Hub.
+        """
+        if "Display_Name" not in ffp_projections.columns:
+            pytest.skip("spreadsheet fallback carries no Display_Name")
+        display = ffp_projections["Display_Name"].dropna().astype(str)
+        assert (display.str.strip() != "").all(), "some players have no display name"
+
+        # A long *display* name can be perfectly correct ("Micky Van de Ven"),
+        # and so can a long name passed through untouched ("El Hadji Malick
+        # Diouf" is what people call him). The regression to catch is systematic
+        # pass-through, so assert on the rate rather than on any single name.
+        legal = ffp_projections["Name"].astype(str)
+        verbose = legal.str.split().str.len() >= 4
+        if verbose.sum() < 5:
+            pytest.skip("too few multi-part legal names to judge")
+        shortened = (display[verbose] != legal[verbose]).mean()
+        assert shortened > 0.80, (
+            "only %.0f%% of FFP's multi-part legal names were simplified -- "
+            "Display_Name looks like a copy of Name. Unsimplified: %s"
+            % (100 * shortened,
+               ffp_projections.loc[verbose & (display == legal), "Name"].head(5).tolist())
+        )
+
     def test_start_percentages_are_percentages(self, ffp_projections):
         start = pd.to_numeric(ffp_projections["Start"], errors="coerce").dropna()
         if start.empty:
