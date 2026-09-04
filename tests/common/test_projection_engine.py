@@ -243,3 +243,44 @@ class TestAttachProjections:
         proj = pd.DataFrame({"Proj": [5.0]}, index=pd.Index([1], name="Player_ID"))
         page = pd.DataFrame({"Player": ["Haaland"]})
         assert attach_projections(page, proj).equals(page)
+
+
+class TestPositionCodesAndFallbacks:
+    """Two traps that make the blend quietly wrong rather than obviously broken."""
+
+    def test_gkp_style_position_codes_still_get_the_rotowire_floor(self):
+        """Draft pages carry GK/DEF/MID/FWD; analytics groups on G/D/M/F. Feeding
+        the wrong codes in makes the start floors match nothing and silently do
+        nothing -- the same failure that had every Power Rankings team at 50."""
+        from scripts.common.analytics import blend_projections_onto
+
+        df = pd.DataFrame({
+            "Player": ["Erling Haaland"],
+            "Team": ["MCI"],
+            "Position": ["FWD"],          # not "F"
+            "Points": [10.0],
+            "chance_of_playing_next_round": [25],
+        })
+        out = blend_projections_onto(df, None)
+        assert out.loc[0, "Start_Pct"] == pytest.approx(DEFAULT_START_FLOORS["F"])
+
+    def test_ep_next_fills_only_where_nothing_else_priced_the_player(self):
+        """FPL's expected points used to be written into the Rotowire column,
+        taking Rotowire's 60% weight while reading as Rotowire downstream. As a
+        declared fallback it fills the same gap and says so."""
+        from scripts.common.analytics import blend_projections_onto
+
+        df = pd.DataFrame({
+            "Player": ["Erling Haaland", "Cole Palmer"],
+            "Team": ["MCI", "CHE"],
+            "Position": ["F", "M"],
+            "Points": [10.0, 0.0],        # Rotowire priced only Haaland
+            "ep_next": [3.0, 4.0],
+        })
+        out = blend_projections_onto(df, None)
+        # Haaland keeps Rotowire's number -- the fallback cannot displace it.
+        assert out.loc[0, "Proj_Start"] == pytest.approx(10.0)
+        assert out.loc[0, "Proj_Src"] == "RW"
+        # Palmer, whom nobody else priced, gets FPL's number under its own label.
+        assert out.loc[1, "Proj_Start"] == pytest.approx(4.0)
+        assert out.loc[1, "Proj_Src"] == "xP"

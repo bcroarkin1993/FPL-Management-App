@@ -265,6 +265,7 @@ def blend_aligned(
     chance_of_playing: Optional[pd.Series] = None,
     status: Optional[pd.Series] = None,
     weights: Optional[Dict[str, float]] = None,
+    fallback_names: Optional[Sequence[str]] = None,
     gameweek: Optional[int] = None,
     extra: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
@@ -353,6 +354,23 @@ def blend_aligned(
         denom = denom.add(pd.Series(w, index=index).where(present, 0.0), fill_value=0.0)
 
     proj_start = (numer / denom).where(denom.gt(0))
+
+    # --- Fallback sources ---------------------------------------------------
+    # A fallback fills only where no weighted source priced the player at all.
+    # This is what FPL's `ep_next` was already doing on Classic Transfers, except
+    # it was written *into the Rotowire column*, so it silently took Rotowire's
+    # 60% weight and read as Rotowire everywhere downstream. Same behaviour,
+    # declared: it appears in Proj_Src under its own name, and it can never
+    # displace a source that actually priced the player.
+    used_fallback = pd.Series(False, index=index)
+    for _fb in (fallback_names or []):
+        if _fb not in per_source_start:
+            continue
+        v = per_source_start[_fb]
+        fills = proj_start.isna() & v.notna() & v.gt(0)
+        proj_start = proj_start.fillna(v.where(fills))
+        used_fallback |= fills
+
     out["Proj_Start"] = proj_start.round(3)
     out["Proj"] = (proj_start * start_pct).round(3)
 
@@ -378,7 +396,14 @@ def blend_aligned(
         out["Proj_Src"] = labels.replace("", "None")
     else:
         out["Proj_Spread"] = np.nan
-        out["Proj_Src"] = "None"
+        out["Proj_Src"] = pd.Series("None", index=index)
+
+    for _fb in (fallback_names or []):
+        if _fb not in per_source_start:
+            continue
+        v = per_source_start[_fb]
+        fills = used_fallback & v.notna() & v.gt(0)
+        out["Proj_Src"] = out["Proj_Src"].where(~fills, SOURCE_LABELS.get(_fb, _fb))
 
     # --- Blank gameweeks are unknown, not zero ------------------------------
     # A player nobody priced who is not injured or suspended has almost always

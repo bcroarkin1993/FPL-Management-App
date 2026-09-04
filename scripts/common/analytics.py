@@ -1302,6 +1302,17 @@ def blend_projections_onto(
         if "MultiGW_Proj" in result.columns:
             per_source_next3["ffp"] = numeric_col(result, "MultiGW_Proj", np.nan)
 
+    # FPL's own expected points, as a declared fallback rather than a value
+    # laundered into the Rotowire column. It is unconditional -- FPL's number
+    # already prices in the chance of playing -- so the engine un-discounts it
+    # before comparing it with anything.
+    fallback_names = []
+    if "ep_next" in result.columns:
+        ep = numeric_col(result, "ep_next", 0)
+        per_source_raw["fpl_ep"] = ep.where(ep.gt(0))
+        per_source_basis["fpl_ep"] = projection_engine.BASIS_UNCONDITIONAL
+        fallback_names.append("fpl_ep")
+
     result = projection_engine.blend_aligned(
         index=result.index,
         per_source_raw=per_source_raw,
@@ -1309,14 +1320,41 @@ def blend_projections_onto(
         per_source_startpct=per_source_startpct,
         per_source_next3=per_source_next3,
         starters_only={"rotowire"},
-        positions=(result["Position"] if "Position" in result.columns
-                   else pd.Series("M", index=result.index)),
-        chance_of_playing=result.get("chance_of_playing_next_round"),
+        fallback_names=fallback_names,
+        # Normalized to G/D/M/F. Pages disagree about this: the Draft pages carry
+        # GK/DEF/MID/FWD while analytics groups on single letters. Feeding the
+        # wrong codes in makes the Rotowire start floors match no position and
+        # silently do nothing -- the same class of failure that once had every
+        # team in the Power Rankings scoring exactly 50.
+        positions=_normalized_positions(result),
+        chance_of_playing=_chance_of_playing_col(result),
         status=result.get("status"),
         gameweek=gw,
         extra=result,
     )
     return result
+
+
+def _normalized_positions(df: pd.DataFrame) -> pd.Series:
+    """The frame's positions as G/D/M/F, defaulting to M when absent."""
+    if "Position" not in df.columns:
+        return pd.Series("M", index=df.index)
+    return (df["Position"].astype(str).str.strip()
+            .map(POS_MAP_TO_RW).fillna(df["Position"]))
+
+
+def _chance_of_playing_col(df: pd.DataFrame):
+    """FPL's availability read, under either name the app stores it as.
+
+    The bootstrap field is ``chance_of_playing_next_round``, but the Free Hit and
+    Wildcard pools shorten it to ``chance_of_playing`` when they build their own
+    rows. Accepting both is what stops those pages from silently losing the
+    start-probability fallback that the fixture pages get.
+    """
+    for col in ("chance_of_playing_next_round", "chance_of_playing"):
+        if col in df.columns:
+            return df[col]
+    return None
 
 
 def blend_fixture_projections(

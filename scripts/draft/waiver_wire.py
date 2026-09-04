@@ -2392,12 +2392,17 @@ def show_waiver_wire_page():
         for col in _display_roster.select_dtypes(include=[np.number]).columns:
             _display_roster[col] = _display_roster[col].round(2)
 
-        display_cols_roster = ["Player", "Team", "Position", "Pos_Rank", "Season_Points", "Projected_Points", "Form", "AvgFDRNextN", "1GW", "ROS", "Keep Score"]
+        # "Proj Pts" is the blend that the 1GW score is computed from, not raw
+        # Rotowire. These tables used to print the raw number beside scores
+        # derived from a different one, so a player could look mediocre in the
+        # column and strong in the score with nothing to explain the gap.
+        display_cols_roster = ["Player", "Team", "Position", "Pos_Rank", "Season_Points", "Proj", "Proj_Src", "Form", "AvgFDRNextN", "1GW", "ROS", "Keep Score"]
         display_cols_roster = [c for c in display_cols_roster if c in _display_roster.columns]
-        roster_show = _display_roster[display_cols_roster].rename(columns={"Pos_Rank": "Pos Rank"})
+        roster_show = _display_roster[display_cols_roster].rename(
+            columns={"Pos_Rank": "Pos Rank", "Proj": "Proj Pts", "Proj_Src": "Src"})
         render_styled_table(
             roster_show,
-            col_formats={"Projected_Points": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}",
+            col_formats={"Proj Pts": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}",
                          "1GW": "{:.2f}", "ROS": "{:.2f}", "Keep Score": "{:.2f}"},
             positive_color_cols=["1GW", "ROS", "Keep Score"],
         )
@@ -2449,11 +2454,12 @@ def show_waiver_wire_page():
             "so they cannot be picked up until the next waiver deadline. They are ranked "
             "here for waiver planning but are never proposed as transfers."
         )
-    display_cols_avail = ["Player", "Team", "Position", "Status", "Points", "Form", "AvgFDRNextN", "Season_Points", "1GW", "ROS", "Transfer Score"]
+    display_cols_avail = ["Player", "Team", "Position", "Status", "Proj", "Proj_Src", "Form", "AvgFDRNextN", "Season_Points", "1GW", "ROS", "Transfer Score"]
     display_cols_avail = [c for c in display_cols_avail if c in _display_avail.columns]
     render_styled_table(
-        _display_avail[display_cols_avail].reset_index(drop=True),
-        col_formats={"Points": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}",
+        _display_avail[display_cols_avail].reset_index(drop=True).rename(
+            columns={"Proj": "Proj Pts", "Proj_Src": "Src"}),
+        col_formats={"Proj Pts": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}",
                      "1GW": "{:.2f}", "ROS": "{:.2f}", "Transfer Score": "{:.2f}"},
         positive_color_cols=["1GW", "ROS", "Transfer Score"],
         max_height=500,

@@ -17,6 +17,9 @@ from scripts.common.error_helpers import show_api_error
 from scripts.common.optimization import solve_squad_ilp
 from scripts.common.utils import (
     get_rotowire_player_projections,
+    get_ffp_feed,
+    render_ffp_status,
+    blend_projections_onto,
     get_classic_bootstrap_static,
     get_current_gameweek,
     get_entry_details,
@@ -166,6 +169,39 @@ def _calculate_multi_gw_projection(
                 per_gw.append(0.0)
 
     return sum(per_gw), per_gw
+
+
+
+def _apply_blended_gw1(pool: pd.DataFrame, ffp_df) -> pd.DataFrame:
+    """Replace the pool's first-gameweek term with the blended projection.
+
+    Only the opening gameweek of the horizon comes from Rotowire; the rest is
+    FDR-adjusted points-per-game, which has no source to blend with. So the
+    blend applies to that one term, and ``Total_Points`` is recomputed rather
+    than scaled -- scaling would silently move the PPG weeks too.
+
+    The blended value is expected points (start likelihood priced in), which is
+    the right currency for an optimiser: ranking on "if he starts" buys rotation
+    risk for free.
+    """
+    if pool.empty:
+        return pool
+    blended = blend_projections_onto(pool, ffp_df, rotowire_col="Rotowire_Proj")
+    gw1 = pd.to_numeric(blended["Proj"], errors="coerce").fillna(0.0)
+
+    per_gw = []
+    totals = []
+    for value, row in zip(gw1, blended.itertuples(index=False)):
+        weeks = list(getattr(row, "Per_GW_Points", []) or [])
+        if weeks:
+            weeks = [float(value)] + [float(w) for w in weeks[1:]]
+        else:
+            weeks = [float(value)]
+        per_gw.append(weeks)
+        totals.append(sum(weeks))
+    blended["Per_GW_Points"] = per_gw
+    blended["Total_Points"] = totals
+    return blended
 
 
 def _build_player_pool(
@@ -490,9 +526,22 @@ def show_wildcard_page():
                 st.error("No players available after filtering.")
                 return
 
+            # Blend the opening gameweek with FFP before optimising.
+            ffp_feed_result = get_ffp_feed()
+            player_pool = _apply_blended_gw1(player_pool, ffp_feed_result.df)
+            player_pool = player_pool[player_pool["Total_Points"] > 0].reset_index(drop=True)
+            if player_pool.empty:
+                st.error("No players available after filtering.")
+                return
+            render_ffp_status(ffp_feed_result)
+
             # Show pool info
             has_rotowire = not projections_df.empty
-            data_sources = "Rotowire + FDR-adjusted PPG" if has_rotowire else "FDR-adjusted PPG only"
+            _ffp_ok = ffp_feed_result.ok and not ffp_feed_result.is_stale(current_gw)
+            if has_rotowire:
+                data_sources = "Rotowire + FFP + FDR-adjusted PPG" if _ffp_ok else "Rotowire + FDR-adjusted PPG"
+            else:
+                data_sources = "FFP + FDR-adjusted PPG" if _ffp_ok else "FDR-adjusted PPG only"
             st.info(f"Player pool: {len(player_pool)} players | Data: {data_sources} | Horizon: GW{current_gw}-GW{current_gw + horizon - 1}")
 
         with st.spinner("Running optimization..."):

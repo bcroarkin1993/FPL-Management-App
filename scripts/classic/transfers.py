@@ -35,6 +35,7 @@ from scripts.common.analytics import (
     positional_rank,
     merge_season_projections,
     merge_ffp_single_gw_data,
+    blend_projections_onto,
 )
 from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings, render_ffp_status
 from scripts.common.player_matching import canonical_normalize
@@ -1676,18 +1677,20 @@ def show_classic_transfers_page():
         # showing non-zero projections for teams with no fixture this GW.
         blanking_team_ids = _get_blanking_team_ids(current_gw, bootstrap)
 
-        # Fallback: when Rotowire hasn't published yet, use FPL's own ep_next so
-        # players don't all land on the neutral 0.5 in the 1GW score.
-        # Skip blank GW teams — FPL's ep_next doesn't account for blank GWs.
+        # FPL's ep_next used to be written straight into Projected_Points -- the
+        # Rotowire slot -- when Rotowire had not published. That gave it 60% of
+        # the blend while being labelled Rotowire everywhere downstream, and
+        # _proj_source (which would have disclosed it) is not written on this
+        # path. It is now a declared fallback source inside the engine, so it
+        # fills the same gap and says so in Proj_Src. All that remains here is
+        # the blank-gameweek rule, which no projection source models.
         for _df in [all_players, squad_df]:
-            if "ep_next" in _df.columns and "Projected_Points" in _df.columns:
-                fallback_mask = _df["Projected_Points"].isna() & (_df["ep_next"] > 0)
-                if blanking_team_ids and "Team_ID" in _df.columns:
-                    fallback_mask = fallback_mask & (~_df["Team_ID"].isin(blanking_team_ids))
-                _df.loc[fallback_mask, "Projected_Points"] = _df.loc[fallback_mask, "ep_next"]
-                # Zero out any projections (Rotowire or ep_next) for blank GW teams
-                if blanking_team_ids and "Team_ID" in _df.columns:
-                    _df.loc[_df["Team_ID"].isin(blanking_team_ids), "Projected_Points"] = 0
+            if blanking_team_ids and "Team_ID" in _df.columns:
+                _blank = _df["Team_ID"].isin(blanking_team_ids)
+                if "Projected_Points" in _df.columns:
+                    _df.loc[_blank, "Projected_Points"] = 0
+                if "ep_next" in _df.columns:
+                    _df.loc[_blank, "ep_next"] = 0
 
         # Compute healthy form for squad players (15 players — fast)
         for idx, row in squad_df.iterrows():
@@ -1725,6 +1728,12 @@ def show_classic_transfers_page():
         # FFP Single-GW Data (Predicted, Start, LongStart)
         squad_df = merge_ffp_single_gw_data(squad_df, ffp_df)
         all_players = merge_ffp_single_gw_data(all_players, ffp_df)
+
+        # The canonical blend. "Proj Pts" on this page used to be raw Rotowire
+        # while the Fixture Projections page showed the blended number for the
+        # same player, under a near-identical heading.
+        squad_df = blend_projections_onto(squad_df, ffp_df, rotowire_col="Projected_Points")
+        all_players = blend_projections_onto(all_players, ffp_df, rotowire_col="Projected_Points")
 
     render_ffp_status(ffp_feed_result, current_gw)
 
@@ -1875,20 +1884,25 @@ def show_classic_transfers_page():
     for sc in ["1GW", "ROS", "Keep Score"]:
         if sc in squad_show.columns:
             squad_show[sc] = squad_show[sc].round(3)
-    squad_show["Projected_Points"] = squad_show["Projected_Points"].fillna("-")
+    # "Proj Pts" is the blend: expected points, start likelihood priced in.
+    # "Src" says which sources produced it, so a number resting on FFP alone --
+    # or on FPL's own expected points because Rotowire has not published -- is
+    # visible rather than indistinguishable from a fully-corroborated one.
+    squad_show["Proj"] = squad_show["Proj"].fillna("-")
 
     # Rename for display
     squad_show = squad_show.rename(columns={
         form_display_col: "Form",
         "total_points": "Season Pts",
-        "Projected_Points": "Proj Pts",
+        "Proj": "Proj Pts",
+        "Proj_Src": "Src",
         "Pos_Rank": "Pos Rank",
         "AvgFDR": "Avg FDR",
     })
 
     render_styled_table(
         squad_show[["Player", "Team", "Position", "Pos Rank", "Price", "Form", "Season Pts",
-                    "Proj Pts", "Avg FDR", "1GW", "ROS", "Keep Score", "Status"]],
+                    "Proj Pts", "Src", "Avg FDR", "1GW", "ROS", "Keep Score", "Status"]],
         col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}", "Keep Score": "{:.3f}"},
         positive_color_cols=["1GW", "ROS", "Keep Score"],
     )
@@ -1947,13 +1961,14 @@ def show_classic_transfers_page():
     targets_show = targets_show.rename(columns={
         target_form_col: "Form",
         "total_points": "Season Pts",
-        "Projected_Points": "Proj Pts",
+        "Proj": "Proj Pts",
+        "Proj_Src": "Src",
         "AvgFDR": "Avg FDR",
         "Price_Change": "Δ",
     })
 
     display_cols_final = ["Player", "Team", "Position", "Price", "Δ", "Rush", "Form",
-                          "Season Pts", "Proj Pts", "Ownership", "Avg FDR",
+                          "Season Pts", "Proj Pts", "Src", "Ownership", "Avg FDR",
                           "1GW", "ROS", "Transfer Score", "Status"]
     display_cols_final = [c for c in display_cols_final if c in targets_show.columns]
     render_styled_table(
@@ -2005,12 +2020,12 @@ def show_classic_transfers_page():
             pos_show["Own%"] = pos_show["selected_by_percent"].apply(lambda x: f"{x:.1f}%")
 
             pos_display_cols = ["Player", "Team", "Price", "form", "total_points",
-                          "Projected_Points", "Own%", "AvgFDR", "1GW", "ROS", "Transfer Score"]
+                          "Proj", "Proj_Src", "Own%", "AvgFDR", "1GW", "ROS", "Transfer Score"]
             pos_display_cols = [c for c in pos_display_cols if c in pos_show.columns]
             pos_display = pos_show[pos_display_cols].copy()
             pos_display = pos_display.rename(columns={
                 "form": "Form", "total_points": "Season Pts",
-                "Projected_Points": "Proj Pts", "AvgFDR": "Avg FDR",
+                "Proj": "Proj Pts", "Proj_Src": "Src", "AvgFDR": "Avg FDR",
             })
             render_styled_table(
                 pos_display,

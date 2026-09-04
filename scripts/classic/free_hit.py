@@ -18,6 +18,9 @@ from scripts.common.optimization import solve_squad_ilp
 from scripts.common.player_matching import canonical_normalize
 from scripts.common.utils import (
     get_rotowire_player_projections,
+    get_ffp_feed,
+    render_ffp_status,
+    blend_projections_onto,
     get_classic_bootstrap_static,
     get_current_gameweek,
     get_entry_details,
@@ -234,7 +237,7 @@ def solve_optimal_squad(
     squad_df, totals = solve_squad_ilp(
         df,
         budget,
-        score_col="Points",
+        score_col="Proj",
         formation=formation,
         bench_weight=0.0,
         problem_name="FPL_Free_Hit_Optimizer",
@@ -353,6 +356,21 @@ def show_free_hit_page():
                 st.error("No players with projections found.")
                 return
 
+            # Blend Rotowire with FFP and price in start likelihood. The
+            # optimiser maximises expected points, so it must be fed expected
+            # points: ranking on raw "if he starts" numbers buys the rotation
+            # risk for free, and this page previously did exactly that while the
+            # Fixture Projections page showed the discounted number for the same
+            # player.
+            ffp_feed_result = get_ffp_feed()
+            player_pool = blend_projections_onto(player_pool, ffp_feed_result.df)
+            # A player nobody priced is unknown, not worth zero -- but an
+            # optimiser cannot spend budget on unknown, so it is floored here
+            # rather than inside the engine, where NaN is the honest value.
+            player_pool["Proj"] = pd.to_numeric(
+                player_pool["Proj"], errors="coerce").fillna(0.0)
+            render_ffp_status(ffp_feed_result)
+
             # Show how many players are in the pool
             st.info(f"Player pool: {len(player_pool)} players available after filtering")
 
@@ -379,16 +397,16 @@ def show_free_hit_page():
         bench = squad_df[~squad_df['Is_Starter']].copy()
 
         # Find captain (highest projected points)
-        if starters.empty or starters['Points'].isna().all():
+        if starters.empty or starters['Proj'].isna().all():
             cap_name = "N/A"
             cap_points = 0.0
         else:
-            cap_idx = starters['Points'].idxmax()
+            cap_idx = starters['Proj'].idxmax()
             cap_name = starters.loc[cap_idx, 'Player']
-            cap_points = starters.loc[cap_idx, 'Points']
+            cap_points = starters.loc[cap_idx, 'Proj']
 
         # Calculate totals
-        starter_points = starters['Points'].sum()
+        starter_points = starters['Proj'].sum()
         total_with_captain = starter_points + cap_points  # Captain gets double
         starter_cost = starters['Price'].sum()
         bench_cost = bench['Price'].sum()
@@ -441,7 +459,7 @@ def show_free_hit_page():
                 "Team": row['Team'],
                 "Pos": row['Position'],
                 "Price": f"£{row['Price']:.1f}m",
-                "Proj Pts": row['Points'],
+                "Proj Pts": row['Proj'],
                 "Fixture": fixture,
             })
 
@@ -465,7 +483,7 @@ def show_free_hit_page():
                 "Team": row['Team'],
                 "Pos": row['Position'],
                 "Price": f"£{row['Price']:.1f}m",
-                "Proj Pts": row['Points'],
+                "Proj Pts": row['Proj'],
             })
 
         bench_display = pd.DataFrame(bench_rows)
@@ -482,11 +500,11 @@ def show_free_hit_page():
             team_counts = squad_df.groupby('Team').agg({
                 'Player': 'count',
                 'Price': 'sum',
-                'Points': 'sum'
+                'Proj': 'sum'
             }).rename(columns={
                 'Player': 'Players',
                 'Price': 'Total Cost',
-                'Points': 'Total Proj Pts'
+                'Proj': 'Total Proj Pts'
             })
             team_counts['Total Cost'] = team_counts['Total Cost'].apply(lambda x: f"£{x:.1f}m")
             team_counts['Total Proj Pts'] = team_counts['Total Proj Pts'].round(1)
@@ -497,11 +515,11 @@ def show_free_hit_page():
             pos_breakdown = squad_df.groupby('Position').agg({
                 'Player': 'count',
                 'Price': 'sum',
-                'Points': 'sum'
+                'Proj': 'sum'
             }).rename(columns={
                 'Player': 'Count',
                 'Price': 'Total Cost',
-                'Points': 'Total Proj Pts'
+                'Proj': 'Total Proj Pts'
             })
             pos_breakdown['Total Cost'] = pos_breakdown['Total Cost'].apply(lambda x: f"£{x:.1f}m")
             pos_breakdown['Total Proj Pts'] = pos_breakdown['Total Proj Pts'].round(1)

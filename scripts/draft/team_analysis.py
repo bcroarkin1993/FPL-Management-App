@@ -14,6 +14,9 @@ from scripts.common.utils import (
     get_draft_team_players_with_points,
     get_classic_bootstrap_static,
     get_draft_league_details,
+    get_ffp_feed,
+    render_ffp_status,
+    blend_projections_onto,
 )
 from scripts.common.team_analysis_helpers import render_season_highlights
 from scripts.common.styled_tables import render_styled_table
@@ -31,15 +34,27 @@ def _stat_card(label: str, value: str, accent: str = "#00ff87") -> str:
     )
 
 
-def show_team_projections(team_id, fpl_player_projections, gameweek):
+def show_team_projections(team_id, fpl_player_projections, gameweek, ffp_df=None):
     # Get the team composition for the team in the current gameweek
     team_composition_df = get_team_composition_for_gameweek(config.FPL_DRAFT_LEAGUE_ID, team_id, gameweek)
 
     # Merge the FPL team df with the fpl_player_projections
     team_player_projections = merge_fpl_players_and_projections(team_composition_df, fpl_player_projections)
 
-    # Format columns
-    team_player_projections = team_player_projections[['Player', 'Team', 'Matchup', 'Position', 'Points', 'Pos Rank']]
+    # Blend with FFP and price in start likelihood. This page showed raw Rotowire
+    # under the heading "Points" while Draft Fixture Projections showed the blend
+    # for the same player in the same gameweek.
+    team_player_projections = blend_projections_onto(team_player_projections, ffp_df)
+
+    # Format columns. "Proj" is expected points; "If Starts" is the conditional
+    # number, kept beside it so a doubtful player's upside stays visible.
+    team_player_projections["If Starts"] = team_player_projections["Proj_Start"]
+    team_player_projections["Start %"] = pd.to_numeric(
+        team_player_projections["Start_Pct"], errors="coerce") * 100
+    team_player_projections = team_player_projections[
+        ['Player', 'Team', 'Matchup', 'Position', 'Proj', 'If Starts', 'Start %',
+         'Proj_Src', 'Pos Rank']
+    ].rename(columns={'Proj': 'Proj Pts', 'Proj_Src': 'Src'})
 
     # Return the df
     return(team_player_projections)
@@ -151,16 +166,20 @@ def show_team_stats_page():
             "Check back closer to the gameweek deadline."
         )
     else:
-        proj_df = show_team_projections(team_id, player_projections, config.CURRENT_GAMEWEEK)
+        _ffp = get_ffp_feed()
+        proj_df = show_team_projections(
+            team_id, player_projections, config.CURRENT_GAMEWEEK, ffp_df=_ffp.df
+        )
         if not proj_df.empty:
             _pos_sort = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
             proj_df["_pos_order"] = proj_df["Position"].map(_pos_sort)
-            proj_df["_pts"] = pd.to_numeric(proj_df["Points"], errors="coerce").fillna(0)
+            proj_df["_pts"] = pd.to_numeric(proj_df["Proj Pts"], errors="coerce").fillna(0)
             proj_df = proj_df.sort_values(["_pos_order", "_pts"], ascending=[True, False]).drop(columns=["_pos_order", "_pts"])
         render_styled_table(
             proj_df,
-            col_formats={"Points": "{:.1f}"},
+            col_formats={"Proj Pts": "{:.1f}", "If Starts": "{:.1f}", "Start %": "{:.0f}%"},
         )
+        render_ffp_status(_ffp, config.CURRENT_GAMEWEEK)
 
     st.divider()
 

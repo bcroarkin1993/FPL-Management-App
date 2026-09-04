@@ -18,6 +18,9 @@ from scripts.common.utils import (
     get_entry_details,
     get_current_gameweek,
     get_rotowire_player_projections,
+    get_ffp_feed,
+    render_ffp_status,
+    blend_projections_onto,
     position_converter,
 )
 from scripts.common.team_analysis_helpers import render_season_highlights, build_classic_season_history_df
@@ -497,6 +500,7 @@ def show_classic_team_analysis_page():
     # Try to fetch and merge projections
     projections_available = False
     projections_df = None
+    ffp_feed_result = None
     try:
         rotowire_url = config.ROTOWIRE_URL
         if rotowire_url:
@@ -512,6 +516,14 @@ def show_classic_team_analysis_page():
         st.info("Rotowire projections unavailable. Displaying squad without projected points.")
         squad_df["Points"] = None
         squad_df["Pos Rank"] = None
+    else:
+        # Blend Rotowire with FFP and price in start likelihood. This page used
+        # to render raw Rotowire under the heading "Proj Pts" while the Fixture
+        # Projections page showed the blend for the same player, with nothing
+        # to say the two numbers meant different things.
+        ffp_feed_result = get_ffp_feed()
+        squad_df = blend_projections_onto(squad_df, ffp_feed_result.df)
+        render_ffp_status(ffp_feed_result)
 
     # Split into starting XI and bench
     starting_xi = squad_df[squad_df["squad_position"] <= 11].copy()
@@ -532,8 +544,8 @@ def show_classic_team_analysis_page():
 
     # Calculate totals
     if projections_available:
-        starting_proj_total = pd.to_numeric(starting_xi["Points"], errors="coerce").sum()
-        bench_proj_total = pd.to_numeric(bench["Points"], errors="coerce").sum()
+        starting_proj_total = pd.to_numeric(starting_xi["Proj"], errors="coerce").sum()
+        bench_proj_total = pd.to_numeric(bench["Proj"], errors="coerce").sum()
     else:
         starting_proj_total = None
         bench_proj_total = None
@@ -546,14 +558,21 @@ def show_classic_team_analysis_page():
     # Prepare display columns
     starting_display = starting_xi[["Display Name", "Team", "Position"]].copy()
     if projections_available:
-        starting_display["Proj Pts"] = starting_xi["Points"]
+        # "Proj Pts" is expected points (start likelihood already priced in);
+        # "If Starts" is the conditional number. Both are shown because a
+        # manager deciding on a doubtful player needs to see the upside and the
+        # discount separately, not one number that silently mixes them.
+        starting_display["Proj Pts"] = starting_xi["Proj"]
+        starting_display["If Starts"] = starting_xi["Proj_Start"]
+        starting_display["Start %"] = pd.to_numeric(
+            starting_xi["Start_Pct"], errors="coerce") * 100
         starting_display["Pos Rank"] = starting_xi["Pos Rank"]
 
     starting_display = starting_display.rename(columns={"Display Name": "Player"})
 
     render_styled_table(
         starting_display,
-        col_formats={"Proj Pts": "{:.1f}"},
+        col_formats={"Proj Pts": "{:.1f}", "If Starts": "{:.1f}", "Start %": "{:.0f}%"},
     )
 
     st.markdown("---")
@@ -565,13 +584,15 @@ def show_classic_team_analysis_page():
 
     bench_display = bench[["Display Name", "Team", "Position", "Priority"]].copy()
     if projections_available:
-        bench_display["Proj Pts"] = bench["Points"]
+        bench_display["Proj Pts"] = bench["Proj"]
+        bench_display["If Starts"] = bench["Proj_Start"]
+        bench_display["Start %"] = pd.to_numeric(bench["Start_Pct"], errors="coerce") * 100
 
     bench_display = bench_display.rename(columns={"Display Name": "Player"})
 
     render_styled_table(
         bench_display,
-        col_formats={"Proj Pts": "{:.1f}"},
+        col_formats={"Proj Pts": "{:.1f}", "If Starts": "{:.1f}", "Start %": "{:.0f}%"},
     )
 
     st.markdown("---")
