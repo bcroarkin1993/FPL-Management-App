@@ -103,13 +103,20 @@ def caplog_at_error():
         def emit(self, record):
             records.append(record)
 
-    logger = logging.getLogger("fpl_app.scraping")
+    # The Rotowire fetch moved to projection_sources.py (Streamlit-free, so the
+    # Actions snapshot collector can import it); scraping.py keeps the cached
+    # wrapper. Listen on both so this stays a test of the refusal, not of which
+    # module happens to host it.
+    loggers = [logging.getLogger("fpl_app.scraping"),
+               logging.getLogger("fpl_app.projections")]
     handler = _Handler(level=logging.ERROR)
-    logger.addHandler(handler)
+    for logger in loggers:
+        logger.addHandler(handler)
     try:
         yield records
     finally:
-        logger.removeHandler(handler)
+        for logger in loggers:
+            logger.removeHandler(handler)
 
 
 def _safe_numeric(val, default=0):

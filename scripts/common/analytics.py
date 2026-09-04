@@ -18,6 +18,7 @@ import config
 from scripts.common.error_helpers import get_logger
 from scripts.common.data_validation import check_merge_match_rate, format_issues
 from scripts.common.player_matching import ReferenceMatcher, canonical_normalize
+from scripts.common import projection_engine, projection_sources
 from scripts.common.text_helpers import POS_MAP_TO_RW
 
 _logger = get_logger("fpl_app.analytics")
@@ -339,84 +340,49 @@ def compute_player_scores(
     ref_season_col = "total_points" if (all_players_df is not None and "total_points" in all_players_df.columns) else season_col
 
     # --- 1GW Score (pure expected value) ---
-    # Blend Rotowire's projection with FFP's, then apply start likelihood once.
-    #
-    # Both inputs must be on the same basis for that to be valid. Rotowire
-    # projects a player's points *if he starts*. FFP publishes both bases, and
-    # its `Predicted` is the unconditional one -- verified against live data,
-    # Predicted == StartingPredicted * Start/100 at r=0.9998. Blending
-    # `Predicted` here and multiplying by start_likelihood below therefore
-    # charged the start probability twice, running the FFP term ~44% low at a
-    # median start rate of 60%. Use the conditional column, and fall back to
-    # un-discounting `Predicted` when FFP hasn't published it.
+    # The blend is `projection_engine.blend_aligned` -- the same call the fixture
+    # pages make, so a player cannot score differently here than he displays
+    # there. This block used to be a hand-copied twin of
+    # `blend_fixture_projections`: same weights, same floors, same FFP recovery,
+    # but only this copy fell back to the FPL `chance_of_playing` when FFP had no
+    # start percentage. On a week FFP was unpublished a 25%-chance player was
+    # discounted to 0.25 in his 1GW score and left at the position floor on the
+    # fixture pages, under the same label.
     rotowire_proj = numeric_col(result, proj_col, 0)
-    ffp_start_raw = (pd.to_numeric(result.get("FFP_Start"), errors="coerce")
-                     if "FFP_Start" in result.columns else pd.Series(np.nan, index=result.index))
-    if "FFP_Starting_Predicted" in result.columns:
-        ffp_pred = pd.to_numeric(result["FFP_Starting_Predicted"], errors="coerce")
+    if "FFP_Start" in result.columns:
+        _ffp_start = pd.to_numeric(result["FFP_Start"], errors="coerce") / 100.0
     else:
-        ffp_pred = pd.Series(np.nan, index=result.index)
-    if "FFP_Predicted" in result.columns:
-        unconditional = pd.to_numeric(result["FFP_Predicted"], errors="coerce")
-        # Recover the conditional value from the unconditional one where needed.
-        recovered = unconditional / (ffp_start_raw / 100.0).clip(lower=0.05)
-        ffp_pred = ffp_pred.fillna(recovered.where(ffp_start_raw.gt(0), unconditional))
+        _ffp_start = pd.Series(np.nan, index=result.index)
 
-    blended_proj = rotowire_proj.copy()
-    # Treat FFP_Predicted <= 0 as missing (FFP publishes 0 when predictions aren't available)
-    both_mask = rotowire_proj.gt(0) & ffp_pred.gt(0)
-    ffp_only_mask = rotowire_proj.eq(0) & ffp_pred.gt(0)
-    blended_proj[both_mask] = 0.6 * rotowire_proj[both_mask] + 0.4 * ffp_pred[both_mask]
-    blended_proj[ffp_only_mask] = ffp_pred[ffp_only_mask]
+    _per_source_raw = {"rotowire": rotowire_proj.where(rotowire_proj.gt(0))}
+    _per_source_basis = {"rotowire": projection_engine.BASIS_CONDITIONAL}
+    _per_source_startpct = {}
+    if "FFP_Start" in result.columns:
+        _per_source_startpct["ffp"] = _ffp_start.clip(0, 1)
+    if "FFP_Starting_Predicted" in result.columns or "FFP_Predicted" in result.columns:
+        _per_source_raw["ffp"] = projection_sources.ffp_conditional_points(
+            result.get("FFP_Predicted"), result.get("FFP_Starting_Predicted"), _ffp_start
+        )
+        _per_source_basis["ffp"] = projection_engine.BASIS_CONDITIONAL
 
-    # Start likelihood: FFP_Start (primary), FPL chance_of_playing (fallback), default 100%
-    ffp_start = pd.to_numeric(result.get("FFP_Start"), errors="coerce") if "FFP_Start" in result.columns else pd.Series(np.nan, index=result.index)
-    fpl_chance = pd.to_numeric(result.get("chance_of_playing_next_round"), errors="coerce") if "chance_of_playing_next_round" in result.columns else pd.Series(np.nan, index=result.index)
-
-    start_likelihood = pd.Series(1.0, index=result.index)
-    # Use FFP_Start where available (already a percentage)
-    ffp_mask = ffp_start.notna()
-    start_likelihood[ffp_mask] = ffp_start[ffp_mask] / 100.0
-    # Fallback to FPL chance_of_playing where FFP is missing
-    fpl_mask = ~ffp_mask & fpl_chance.notna()
-    start_likelihood[fpl_mask] = fpl_chance[fpl_mask] / 100.0
-    start_likelihood = start_likelihood.clip(lower=0, upper=1)
-
-    # When Rotowire explicitly projects a player as a starter, apply a position-specific
-    # floor to start_likelihood. Rotowire only projects expected starters, so their
-    # presence is itself a confidence signal — prevents FFP uncertainty from fully
-    # overriding an expert lineup projection. DEF floor is highest: defenders who start
-    # play 90 mins; unlike FWD/MID there's no "subbed on late for 2 pts" scenario.
-    _ROTOWIRE_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.68, "F": 0.65}
-    _pos_col = result["Position"] if "Position" in result.columns else pd.Series("M", index=result.index)
-    _has_rotowire = rotowire_proj.gt(0)
-    for _pos_code, _floor_val in _ROTOWIRE_START_FLOORS.items():
-        _pos_mask = _has_rotowire & (_pos_col == _pos_code)
-        start_likelihood[_pos_mask] = start_likelihood[_pos_mask].clip(lower=_floor_val)
-
-    # Effective projected points
-    result["_effective_proj"] = blended_proj * start_likelihood
-
-    # Detect blank-GW players: 0 projection from ALL sources but not clearly injured/suspended.
-    # These are players whose team has no fixture this GW — they deserve neutral 1GW (0.5),
-    # not near-0 which would trigger false drop recommendations for elite players.
-    # Use a blacklist approach: only exclude players who are clearly injured/suspended/unavailable.
-    _status_col = result["status"] if "status" in result.columns else pd.Series(np.nan, index=result.index)
-    _chance_col = (
-        pd.to_numeric(result["chance_of_playing_next_round"], errors="coerce")
-        if "chance_of_playing_next_round" in result.columns
-        else pd.Series(np.nan, index=result.index)
+    result = projection_engine.blend_aligned(
+        index=result.index,
+        per_source_raw=_per_source_raw,
+        per_source_basis=_per_source_basis,
+        per_source_startpct=_per_source_startpct,
+        starters_only={"rotowire"},
+        positions=(result["Position"] if "Position" in result.columns
+                   else pd.Series("M", index=result.index)),
+        chance_of_playing=result.get("chance_of_playing_next_round"),
+        status=result.get("status"),
+        extra=result,
     )
-    _clearly_unavailable = (
-        _status_col.isin(["i", "s", "u"])  # Injured, suspended, unavailable
-        | (_chance_col.notna() & _chance_col.lt(50))  # < 50% chance → genuinely doubtful
-    )
-    blank_gw_mask = (
-        (result["_effective_proj"] == 0)
-        & (blended_proj == 0)           # No projection from any source
-        & ~_clearly_unavailable         # Not injured/suspended/unavailable
-    )
-    result.loc[blank_gw_mask, "_effective_proj"] = np.nan
+
+    # `_effective_proj` is the historical name for the engine's `Proj`. Kept
+    # because the Waiver Wire suggestion engine and its cards read it; both
+    # columns hold the same number.
+    result["_effective_proj"] = result["Proj"]
+    blended_proj = numeric_col(result, "Proj_Start", 0)
 
     # 1GW = two-tier positional percentile of effective projected points.
     #
@@ -1285,96 +1251,96 @@ def merge_ffp_single_gw_data(
     return result
 
 
+def blend_projections_onto(
+    players_df: pd.DataFrame,
+    ffp_df: Optional[pd.DataFrame] = None,
+    rotowire_col: str = "Points",
+    expected_gw=_GW_AUTO,
+) -> pd.DataFrame:
+    """Attach the canonical projection columns to a page's frame.
+
+    This is the app-facing entry point to :mod:`scripts.common.projection_engine`.
+    It writes ``Proj``, ``Proj_Start``, ``Start_Pct``, ``Proj_Src``,
+    ``Proj_Spread`` and ``Proj_GW`` -- see that module for what each means.
+
+    Rotowire values are expected to be already on the frame (in ``rotowire_col``),
+    which is how every page gets them; FFP is joined here by
+    ``merge_ffp_single_gw_data``'s tiered matcher. The arithmetic itself is
+    ``projection_engine.blend_aligned`` -- the *only* implementation. This
+    function and ``compute_player_scores`` used to carry hand-copied twins of it
+    that had drifted apart, so the same player showed different "blended"
+    numbers on different pages.
+
+    Args:
+        players_df: frame with ``Position`` and ``rotowire_col``.
+        ffp_df: FFP table from ``get_ffp_feed()``. None falls back to
+            Rotowire-only.
+        rotowire_col: column holding Rotowire's single-GW projection.
+        expected_gw: the gameweek being displayed. FFP published for another
+            gameweek is dropped rather than blended.
+    """
+    result = players_df.copy()
+    gw = _resolve_expected_gw(expected_gw)
+
+    rw = numeric_col(result, rotowire_col, 0)
+    per_source_raw = {"rotowire": rw.where(rw.gt(0))}
+    per_source_basis = {"rotowire": projection_engine.BASIS_CONDITIONAL}
+    per_source_startpct = {}
+    per_source_next3 = {}
+
+    if ffp_df is not None and not ffp_df.empty:
+        result = merge_ffp_single_gw_data(result, ffp_df, expected_gw=expected_gw)
+        if "FFP_Start" in result.columns:
+            ffp_start = pd.to_numeric(result["FFP_Start"], errors="coerce") / 100.0
+            per_source_startpct["ffp"] = ffp_start.clip(0, 1)
+        else:
+            ffp_start = pd.Series(np.nan, index=result.index)
+        per_source_raw["ffp"] = projection_sources.ffp_conditional_points(
+            result.get("FFP_Predicted"), result.get("FFP_Starting_Predicted"), ffp_start
+        )
+        per_source_basis["ffp"] = projection_engine.BASIS_CONDITIONAL
+        if "MultiGW_Proj" in result.columns:
+            per_source_next3["ffp"] = numeric_col(result, "MultiGW_Proj", np.nan)
+
+    result = projection_engine.blend_aligned(
+        index=result.index,
+        per_source_raw=per_source_raw,
+        per_source_basis=per_source_basis,
+        per_source_startpct=per_source_startpct,
+        per_source_next3=per_source_next3,
+        starters_only={"rotowire"},
+        positions=(result["Position"] if "Position" in result.columns
+                   else pd.Series("M", index=result.index)),
+        chance_of_playing=result.get("chance_of_playing_next_round"),
+        status=result.get("status"),
+        gameweek=gw,
+        extra=result,
+    )
+    return result
+
+
 def blend_fixture_projections(
     players_df: pd.DataFrame,
     ffp_df: Optional[pd.DataFrame],
     rotowire_col: str = "Points",
     expected_gw=_GW_AUTO,
 ) -> pd.DataFrame:
-    """Blend Rotowire and FFP projections for fixture display (no percentile computation).
+    """Blend Rotowire and FFP for fixture display.
 
-    Produces a ``Proj_Blended`` column (60% Rotowire + 40% FFP, scaled by start
-    likelihood) and a ``_proj_source`` column indicating which sources were used.
-    Uses ``Proj_Blended`` (not ``Blended_Points``) to avoid collision with the live
-    blending column that ``_blend_live_with_squad`` writes during live gameweeks.
+    Thin wrapper over :func:`blend_projections_onto`. It additionally writes the
+    legacy ``Proj_Blended`` and ``_proj_source`` columns, which the two Fixture
+    Projections pages and ``team_strength`` still read; new code should use
+    ``Proj`` and ``Proj_Src``.
 
-    Args:
-        players_df: DataFrame with player projections. Must have a ``Position``
-            column and the column named by ``rotowire_col`` (Rotowire projection).
-        ffp_df: FFP projections DataFrame (from ``get_ffp_feed()``).
-            Pass None to fall back to Rotowire-only.
-        rotowire_col: Column name holding Rotowire single-GW projected points.
-        expected_gw: The gameweek being displayed. FFP published for a different
-            gameweek is dropped, leaving a Rotowire-only blend.
-
-    Returns:
-        players_df with ``Proj_Blended`` and ``_proj_source`` columns added.
+    ``Proj_Blended`` stays distinct from ``Blended_Points``, which is the *live*
+    blend written during a gameweek in progress -- a name collision this code
+    tripped over once already.
     """
-    result = players_df.copy()
-
-    rw = numeric_col(result, rotowire_col, 0)
-
-    if ffp_df is None or ffp_df.empty:
-        result["Proj_Blended"] = rw
-        result["_proj_source"] = rw.map(lambda v: "Rotowire" if v > 0 else "None")
-        return result
-
-    # Merge the FFP columns onto this DataFrame
-    result = merge_ffp_single_gw_data(result, ffp_df, expected_gw=expected_gw)
-
-    ffp_start = (pd.to_numeric(result["FFP_Start"], errors="coerce")
-                 if "FFP_Start" in result.columns
-                 else pd.Series(np.nan, index=result.index))
-
-    # Blend the *conditional* projection, not the unconditional one. Rotowire
-    # projects a player's points if he starts; FFP's `StartingPredicted` is on
-    # that same basis, while `Predicted` has already been multiplied by the
-    # start probability. This blended `Predicted` and then multiplied by
-    # `start_likelihood` again below -- charging the start discount twice and
-    # running every FFP-covered player low. Same bug `compute_player_scores()`
-    # was fixed for; the recovery path below mirrors it.
-    if "FFP_Starting_Predicted" in result.columns:
-        ffp_pred = pd.to_numeric(result["FFP_Starting_Predicted"], errors="coerce")
-    else:
-        ffp_pred = pd.Series(np.nan, index=result.index)
-    if "FFP_Predicted" in result.columns:
-        unconditional = pd.to_numeric(result["FFP_Predicted"], errors="coerce")
-        recovered = unconditional / (ffp_start / 100.0).clip(lower=0.05)
-        ffp_pred = ffp_pred.fillna(recovered.where(ffp_start.gt(0), unconditional))
-    ffp_pred = ffp_pred.fillna(0)
-
-    # Blend (60/40) — fall back to whichever source is available
-    both_mask = rw.gt(0) & ffp_pred.gt(0)
-    ffp_only_mask = rw.eq(0) & ffp_pred.gt(0)
-    rw_only_mask = rw.gt(0) & ffp_pred.eq(0)
-
-    blended = pd.Series(0.0, index=result.index)
-    blended[both_mask] = 0.6 * rw[both_mask] + 0.4 * ffp_pred[both_mask]
-    blended[ffp_only_mask] = ffp_pred[ffp_only_mask]
-    blended[rw_only_mask] = rw[rw_only_mask]
-
-    # Source label per player
-    src = pd.Series("None", index=result.index)
-    src[both_mask] = "Rotowire + FFP"
-    src[ffp_only_mask] = "FFP"
-    src[rw_only_mask] = "Rotowire"
-    result["_proj_source"] = src
-
-    # Start likelihood: FFP_Start% (primary) → 1.0 default
-    start_likelihood = pd.Series(1.0, index=result.index)
-    ffp_mask = ffp_start.notna()
-    start_likelihood[ffp_mask] = (ffp_start[ffp_mask] / 100.0).clip(0, 1)
-
-    # When Rotowire projected the player, apply position-specific floor — Rotowire
-    # only covers expected starters, so presence is a confidence signal.
-    _FLOORS = {"G": 0.80, "D": 0.75, "M": 0.68, "F": 0.65}
-    pos_col = result["Position"] if "Position" in result.columns else pd.Series("M", index=result.index)
-    has_rw = rw.gt(0)
-    for pos_code, floor_val in _FLOORS.items():
-        mask = has_rw & (pos_col == pos_code)
-        start_likelihood[mask] = start_likelihood[mask].clip(lower=floor_val)
-
-    result["Proj_Blended"] = (blended * start_likelihood).round(2)
+    result = blend_projections_onto(players_df, ffp_df, rotowire_col, expected_gw)
+    result["Proj_Blended"] = numeric_col(result, "Proj", 0).round(2)
+    result["_proj_source"] = result["Proj_Src"].replace(
+        {"RW": "Rotowire", "FFP": "FFP", "RW+FFP": "Rotowire + FFP", "None": "None"}
+    )
     return result
 
 

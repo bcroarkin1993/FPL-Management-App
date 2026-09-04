@@ -44,6 +44,7 @@ and GitHub Actions imports that. Caching wrappers live in ``scraping.py``.
 """
 
 import json
+import os
 import logging
 import re
 import time
@@ -65,11 +66,16 @@ _logger = logging.getLogger(__name__)
 
 # Every FFP address lives here. These used to be spread across scraping.py and
 # data_source_checks.py, which meant a URL change had to be made twice.
+# Env-overridable, like every Rotowire URL in config.py. FFP had none, so an
+# endpoint change could only be fixed by editing code -- awkward for the Actions
+# snapshot collector, which cannot be hand-patched between runs. Read via
+# os.getenv rather than config so this module stays importable on its own.
 FFP_BASE = "https://www.fantasyfootballpundit.com"
-FFP_POINTS_PREDICTOR_URL = FFP_BASE + "/fpl-points-predictor/"
+FFP_POINTS_PREDICTOR_URL = (os.getenv("FFP_POINTS_PREDICTOR_URL")
+                            or FFP_BASE + "/fpl-points-predictor/")
 FFP_GOAL_ASSIST_URL = FFP_BASE + "/premier-league-goalscorer-assist-odds/"
 FFP_CLEAN_SHEET_URL = FFP_BASE + "/premier-league-clean-sheet-odds/"
-FFP_SHEET_URL = (
+FFP_SHEET_URL = os.getenv("FFP_SHEET_URL") or (
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vRaiTmUKjtQ7MxiGibN2GAZ8m9NHF3"
     "IA2U-yE0PhBpCOXHewhs57PrjZO7GQzZvrEGGBW7HFEE43yX0/pub?output=csv"
 )

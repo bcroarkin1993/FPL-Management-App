@@ -23,6 +23,7 @@ import config
 from scripts.common.error_helpers import get_logger
 from scripts.common.text_helpers import TZ_ET, format_last_updated
 from scripts.common import ffp_feed
+from scripts.common import projection_sources
 
 _logger = get_logger("fpl_app.scraping")
 
@@ -30,265 +31,27 @@ _logger = get_logger("fpl_app.scraping")
 # =============================================================================
 # ROTOWIRE SCRAPING
 # =============================================================================
+#
+# The fetch/parse itself now lives in ``projection_sources.py``, which is
+# Streamlit-free so the GitHub Actions snapshot collector can import it. This
+# module keeps the ``@st.cache_data`` wrapper -- the TTL is what makes page
+# navigation fast, and it belongs on the Streamlit side of the line.
 
-# Rotowire publishes at least two distinct table shapes under the same CSS
-# classes: the standard weekly rankings table (12 columns, includes
-# per-position rank breakdown and a Matchup/TSB% column) and a preseason
-# "best picks" preview table (6 columns: Rank, Player, Team, Pos, Price,
-# Adj Total -- no per-position ranks, no matchup). A fixed column-count/order
-# assumption silently drops every row of whichever shape it wasn't written
-# for. Since both shapes include a real <thead> with clear column names,
-# map by header text instead -- resilient to Rotowire adding, removing, or
-# reordering columns, not just these two known shapes.
-_ROTOWIRE_HEADER_ALIASES = {
-    'Overall Rank': ('overall rank', 'rank'),
-    'FW Rank': ('fw rank',),
-    'MID Rank': ('mid rank',),
-    'DEF Rank': ('def rank',),
-    'GK Rank': ('gk rank',),
-    'Player': ('player',),
-    'Team': ('team',),
-    'Matchup': ('matchup',),
-    'Position': ('pos', 'position'),
-    'Price': ('price',),
-    'TSB %': ('tsb%', 'tsb %'),
-    'Points': ('pts', 'points', 'adj total'),
-}
-
-
-def _map_rotowire_header_row(header_cells):
-    """Map a <thead> row's header text to canonical field -> column index."""
-    lower_headers = [h.strip().lower() for h in header_cells]
-    mapping = {}
-    for canonical, aliases in _ROTOWIRE_HEADER_ALIASES.items():
-        for alias in aliases:
-            if alias in lower_headers:
-                mapping[canonical] = lower_headers.index(alias)
-                break
-    return mapping
-
-
-def _rotowire_row_from_header_map(cells, header_map, safe_numeric):
-    """Build a canonical row dict from a <td> row using a header->index map.
-    Returns None if the row can't be resolved to at least Player + Team
-    (e.g. a stray header/subtitle row inside <tbody>)."""
-    def get(field, default=""):
-        idx = header_map.get(field)
-        return cells[idx] if idx is not None and idx < len(cells) else default
-
-    player, team = get('Player'), get('Team')
-    if not player or not team:
-        return None
-
-    return {
-        'Overall Rank': get('Overall Rank'),
-        'FW Rank': safe_numeric(get('FW Rank')),
-        'MID Rank': safe_numeric(get('MID Rank')),
-        'DEF Rank': safe_numeric(get('DEF Rank')),
-        'GK Rank': safe_numeric(get('GK Rank')),
-        'Player': player,
-        'Team': team,
-        'Matchup': get('Matchup'),
-        'Position': get('Position'),
-        'Price': safe_numeric(get('Price')),
-        'TSB %': get('TSB %'),
-        'Points': safe_numeric(get('Points')),
-    }
-
-
-# Rotowire's "best picks for gameweeks X-Y" articles are not a projection source at
-# all. Their points column is headed "Adj Total" and holds an adjusted value metric
-# accumulated over the whole range -- not projected points for any single gameweek.
-# Scaling it down by the number of gameweeks would not recover a projection, it would
-# just make a fabricated number look plausible, so these are refused outright.
-# config._discover_rotowire_article() already declines to select them; this is the
-# backstop for a URL pinned by hand via ROTOWIRE_URL.
-_ROTOWIRE_RANGE_ARTICLE_RE = re.compile(r"best-fpl-picks-for-gameweeks-(\d+)-(\d+)-")
-
-# Above this, a "single gameweek" projection table is not credible (the highest realistic
-# single-GW Rotowire projection is well under 10) — used as a tripwire, not a correction.
-_ROTOWIRE_MAX_PLAUSIBLE_MEDIAN = 10
+_ROTOWIRE_HEADER_ALIASES = projection_sources._ROTOWIRE_HEADER_ALIASES
+_ROTOWIRE_RANGE_ARTICLE_RE = projection_sources._ROTOWIRE_RANGE_ARTICLE_RE
+_ROTOWIRE_MAX_PLAUSIBLE_MEDIAN = projection_sources._ROTOWIRE_MAX_PLAUSIBLE_MEDIAN
+_map_rotowire_header_row = projection_sources._map_rotowire_header_row
+_rotowire_row_from_header_map = projection_sources._rotowire_row_from_header_map
 
 
 @st.cache_data(ttl=3600)
 def get_rotowire_player_projections(url, limit=None):
+    """Fetch Rotowire's weekly rankings table (cached).
+
+    Thin wrapper over ``projection_sources.fetch_rotowire_projections``. See
+    there for the table-shape handling and the multi-gameweek article refusal.
     """
-    Fetches fantasy rankings and projected points for players from RotoWire.
-
-    Parameters:
-    - url (str): URL to fetch the data from.
-    - limit (int, optional): Number of players to display. Defaults to None (displays all players).
-
-    Returns:
-    - DataFrame: A DataFrame containing player rankings, projected points, and calculated value.
-                 Returns empty DataFrame on error.
-    """
-    LEGACY_EXPECTED_COLUMNS = 12  # Fallback positional layout, used only if no <thead> is found
-
-    # Helper to safely convert to numeric
-    def _safe_numeric(val, default=0):
-        if val is None:
-            return default
-        s = str(val).strip()
-        if s in {"#N/A", "N/A", "", "-", "—"}:
-            return default
-        s = re.sub(r"[£$,%]", "", s)  # Strip currency/formatting
-        s = s.replace("\u200b", "").replace("\xa0", "").strip()
-        try:
-            return float(s)
-        except ValueError:
-            return default
-
-    # Download the page
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        _logger.warning("Failed to fetch Rotowire projections from %s: %s", url, e)
-        return pd.DataFrame()
-
-    soup = BeautifulSoup(response.content, 'html.parser')
-
-    # Find table with fallback selectors (most specific to least specific)
-    table = soup.select_one("table.article-table__tablesorter.article-table__standard.article-table__figure")
-    if table is None:
-        table = soup.select_one("table.article-table__tablesorter")
-        if table:
-            _logger.info("Rotowire: Using fallback table selector (article-table__tablesorter)")
-    if table is None:
-        table = soup.select_one("table.ck-table-resized")
-        if table:
-            _logger.info("Rotowire: Using ck-table-resized selector")
-    if table is None:
-        table = soup.find("table")
-        if table:
-            _logger.info("Rotowire: Using generic table selector")
-    if table is None:
-        _logger.warning("Rotowire: Could not locate any table on page %s", url)
-        return pd.DataFrame()
-
-    # Extract rows from table body or table directly
-    try:
-        tbody = table.find("tbody")
-        rows = tbody.find_all("tr") if tbody else table.find_all("tr")
-    except AttributeError as e:
-        _logger.warning("Rotowire: Error extracting table rows: %s", e)
-        return pd.DataFrame()
-
-    thead = table.find("thead")
-    header_map = {}
-    if thead:
-        header_cells = [th.get_text(strip=True) for th in thead.find_all("th")]
-        header_map = _map_rotowire_header_row(header_cells)
-        if 'Player' not in header_map or 'Team' not in header_map:
-            _logger.warning(
-                "Rotowire: <thead> found but couldn't resolve Player/Team columns from %s -- "
-                "falling back to legacy positional parsing.",
-                header_cells,
-            )
-            header_map = {}
-
-    # Parse each row
-    data = []
-    skipped_rows = 0
-    for tr in rows:
-        tds = tr.find_all("td")
-        if not tds:
-            skipped_rows += 1
-            continue
-        cells = [td.get_text(strip=True) for td in tds]
-
-        if header_map:
-            row_data = _rotowire_row_from_header_map(cells, header_map, _safe_numeric)
-            if row_data is None:
-                skipped_rows += 1
-                continue
-            data.append(row_data)
-            continue
-
-        # Legacy fallback: fixed 12-column positional layout (no <thead> on the page)
-        if len(cells) < LEGACY_EXPECTED_COLUMNS:
-            skipped_rows += 1
-            continue
-        cells = cells[:LEGACY_EXPECTED_COLUMNS]
-        try:
-            row_data = {
-                'Overall Rank': cells[0],
-                'FW Rank': _safe_numeric(cells[1]),
-                'MID Rank': _safe_numeric(cells[2]),
-                'DEF Rank': _safe_numeric(cells[3]),
-                'GK Rank': _safe_numeric(cells[4]),
-                'Player': cells[5],
-                'Team': cells[6],
-                'Matchup': cells[7],
-                'Position': cells[8],
-                'Price': _safe_numeric(cells[9]),
-                'TSB %': cells[10],
-                'Points': _safe_numeric(cells[11]),
-            }
-            data.append(row_data)
-        except IndexError as e:
-            _logger.warning("Rotowire: Error parsing row, skipping: %s", e)
-            skipped_rows += 1
-            continue
-
-    if skipped_rows > 0:
-        _logger.debug("Rotowire: Skipped %d rows with unexpected structure", skipped_rows)
-
-    if not data:
-        _logger.warning("Rotowire: No valid player data extracted from %s", url)
-        return pd.DataFrame()
-
-    # Create DataFrame
-    player_rankings = pd.DataFrame(data)
-
-    # Refuse multi-gameweek range articles outright -- see _ROTOWIRE_RANGE_ARTICLE_RE.
-    # Returning nothing surfaces the app's existing "projections unavailable" warning,
-    # which is a far better outcome than plausible-looking invented numbers.
-    if _ROTOWIRE_RANGE_ARTICLE_RE.search(url or ""):
-        _logger.error(
-            "Rotowire: %s is a multi-gameweek 'best picks' article, not a gameweek "
-            "projection table (its column is an adjusted value total, not points). "
-            "Refusing to use it. Pin a single-gameweek rankings article via "
-            "ROTOWIRE_URL, or leave it unset to let discovery find one.",
-            url,
-        )
-        return pd.DataFrame()
-
-    # Tripwire for the next slug shape Rotowire invents: if the table still doesn't look
-    # like single-gameweek data, say so loudly rather than silently inflating every score.
-    _median_points = player_rankings['Points'].median()
-    if pd.notna(_median_points) and _median_points > _ROTOWIRE_MAX_PLAUSIBLE_MEDIAN:
-        _logger.warning(
-            "Rotowire: median Points is %.1f for %s -- implausible for a single gameweek. "
-            "This article may be a multi-GW or season-long table; check ROTOWIRE_URL discovery.",
-            _median_points, url,
-        )
-
-    # Create 'Pos Rank' by summing the four position ranks
-    player_rankings['Pos Rank'] = (
-        player_rankings['FW Rank'] + player_rankings['MID Rank'] +
-        player_rankings['DEF Rank'] + player_rankings['GK Rank']
-    ).astype(int)
-
-    # Drop individual position rank columns
-    player_rankings.drop(columns=['FW Rank', 'MID Rank', 'DEF Rank', 'GK Rank'], inplace=True)
-
-    # Create the 'Value' column by dividing 'Points' by 'Price'
-    player_rankings['Value'] = player_rankings.apply(
-        lambda row: row['Points'] / row['Price'] if row['Price'] > 0 else float('nan'), axis=1
-    )
-
-    # If a limit is provided, return only the top 'limit' players
-    if limit:
-        player_rankings = player_rankings.head(limit)
-
-    # Format the DataFrame to remove the index and reset it with a starting value of 1
-    player_rankings.reset_index(drop=True, inplace=True)
-    player_rankings.index = player_rankings.index + 1
-
-    _logger.debug("Rotowire: Successfully parsed %d players from %s", len(player_rankings), url)
-    return player_rankings
+    return projection_sources.fetch_rotowire_projections(url, limit=limit)
 
 
 # Rotowire stamps every article with "Updated on August 20, 2026 10:54AM EST" in
@@ -667,37 +430,8 @@ def get_ffp_feed() -> FFPFeed:
     was plainly working. On failure this returns ``provenance="none"`` with the
     reason in ``note``, and ``ok`` is False, so a caller can say what went wrong.
     """
-    try:
-        rows, gw, updated = ffp_feed.fetch_points_predictor()
-        if rows:
-            code_to_id = ffp_feed.bootstrap_code_to_id()
-            df = ffp_feed.to_sheet_schema(rows, gw, code_to_id)
-            if df is not None and not df.empty:
-                goal_rows, _, _ = ffp_feed.fetch_goal_assist()
-                cs_rows, _, _ = ffp_feed.fetch_clean_sheet()
-                df = ffp_feed.attach_odds_columns(df, goal_rows, cs_rows, gw)
-                return FFPFeed(df, gw, updated, "site")
-    except Exception as e:
-        _logger.warning("FFP site feed failed, falling back to the sheet: %s", e)
-
-    try:
-        sheet = ffp_feed.fetch_sheet()
-    except Exception as e:
-        _logger.warning("FFP sheet fetch failed: %s", e)
-        sheet = None
-
-    if sheet is None or sheet.empty:
-        return FFPFeed(None, None, None, "none",
-                       "Neither the Fantasy Football Pundit site nor its published "
-                       "spreadsheet could be read.")
-
-    sheet_gw = ffp_feed.resolve_ffp_gameweek(sheet)
-    if sheet_gw is not None:
-        sheet = sheet.copy()
-        sheet["FFP_GW"] = sheet_gw
-    return FFPFeed(sheet, sheet_gw, None, "sheet",
-                   "Read from FFP's published spreadsheet; their site payload was "
-                   "unavailable.")
+    df, gw, updated, provenance, note = projection_sources.fetch_ffp_table()
+    return FFPFeed(df, gw, updated, provenance, note)
 
 
 def get_ffp_projections_data() -> Optional[pd.DataFrame]:

@@ -134,6 +134,55 @@ ROTOWIRE_GW1_URL = os.getenv(
     "https://www.rotowire.com/soccer/article/fpl-gameweek-1-best-players-captain-picks-2026-27-rankings-gw1-127487",
 )
 
+# ----- Projections -----
+# The blend weights the projection engine uses. These lived as bare `0.6` and
+# `0.4` literals inside two hand-copied functions in analytics.py, restated in
+# six comments and reachable from none of them -- changing the split meant
+# editing two magic numbers and hoping you found every comment.
+#
+# `fpl_ep` is FPL's own expected points. It was already influencing the app,
+# silently: classic/transfers.py wrote `ep_next` into the Rotowire column when
+# Rotowire had not published, so it took Rotowire's weight while being labelled
+# Rotowire. It is now a declared source, carried through for display and for the
+# accuracy snapshot, but weighted 0 until there is measured evidence for a
+# number. Same for `odds`.
+#
+# Override with e.g. FPL_PROJECTION_WEIGHTS="rotowire:0.55,ffp:0.45".
+def _parse_projection_weights(raw, default):
+    if not raw:
+        return dict(default)
+    out = {}
+    for part in str(raw).split(","):
+        if ":" not in part:
+            continue
+        name, _, value = part.partition(":")
+        try:
+            out[name.strip()] = float(value)
+        except ValueError:
+            continue
+    return out or dict(default)
+
+
+_DEFAULT_PROJECTION_WEIGHTS = {"rotowire": 0.6, "ffp": 0.4, "fpl_ep": 0.0, "odds": 0.0}
+PROJECTION_SOURCE_WEIGHTS = _parse_projection_weights(
+    os.getenv("FPL_PROJECTION_WEIGHTS"), _DEFAULT_PROJECTION_WEIGHTS
+)
+
+# A floor on start probability for players Rotowire prices. Rotowire projects
+# only expected starters, so its listing a player is itself a confidence signal
+# and stops FFP's uncertainty from fully overriding an expert lineup call. DEF is
+# highest because a defender who starts plays 90 minutes -- there is no "came on
+# late for two points" outcome the way there is for MID/FWD.
+ROTOWIRE_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.68, "F": 0.65}
+
+# ----- Fantasy Football Pundit -----
+# Env overrides for FFP's addresses. Rotowire has had four of these for a while
+# and FFP had none, so an FFP endpoint change could only be fixed by editing
+# code -- awkward for the GitHub Actions snapshot collector, which cannot be
+# hand-patched between runs.
+FFP_POINTS_PREDICTOR_URL = os.getenv("FFP_POINTS_PREDICTOR_URL", "")
+FFP_SHEET_URL = os.getenv("FFP_SHEET_URL", "")
+
 # ----- Notifications / Discord -----
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
