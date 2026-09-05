@@ -296,9 +296,16 @@ def compute_player_scores(
     A score of 0.85 means "top 15% at this position" — immediately interpretable.
 
     1GW (pure expected value):
-        blended_projection = avg(Rotowire, FFP_Predicted) — whichever available
-        effective_proj = blended_projection * start_likelihood
-        1GW = positional_percentile(effective_proj)
+        The blend comes from projection_engine.blend_aligned() -- the same call
+        the fixture pages make, so this score and the number displayed beside it
+        cannot disagree. It writes Proj (expected points), Proj_Start (points if
+        he starts) and Start_Pct; `_effective_proj` is kept as the historical
+        name for Proj.
+        1GW = positional_percentile(Proj)
+
+        Note the blend takes FFP's *conditional* column, not `FFP_Predicted`,
+        which has the start probability already applied -- blending that and
+        then discounting again is the double discount this model was fixed for.
 
     ROS (multi-GW dominant, dynamic weights):
         season_quality = p * season_pts_pctile + (1-p) * season_proj_pctile

@@ -221,6 +221,100 @@ Rotowire-only rather than taking a page down, and `tests/live/` fails on a
 payload that changes shape, states no gameweek, states the wrong one, or whose
 fixtures contradict its own gameweek claim.
 
+### Projection Engine — one blend, one contract
+
+`scripts/common/projection_engine.py` (pure), `projection_sources.py` (fetch,
+also pure), `analytics.blend_projections_onto()` (the app-facing entry point).
+
+**The app had two implementations of "the 60/40 blend" and they disagreed.**
+`compute_player_scores()` and `blend_fixture_projections()` were hand-copied
+twins — same weights, same start floors, same FFP basis-recovery — that had
+drifted at one line: only the first fell back to the FPL `chance_of_playing`
+when FFP published no start percentage. A player at `chance_of_playing = 25`
+was discounted to 0.25 in his 1GW score and left at the position floor
+(0.65–0.80) on the fixture pages, both labelled "the blend". Meanwhile
+`Proj_Blended` was written in one place and read by three files: every other
+surface rendered raw Rotowire under headings a user cannot tell apart.
+
+**Sources declare their basis; the engine converts.** This is the structural
+fix for a bug class the app has paid for three times.
+
+| Field | Meaning |
+|---|---|
+| `basis` | `conditional` (points if he starts) or `unconditional` (expected value) |
+| `covers` | `starters_only` or `all_players` |
+| `gameweek` | the week these numbers describe, or None |
+
+Conversion — `Proj = Proj_Start × Start_Pct` — happens once, inside the engine.
+No caller holds a number whose basis it has to remember, which is what caused
+the double discount every previous time.
+
+**Output contract** (`CANONICAL_COLUMNS`), plus one `Proj_Start__<source>`
+column per source so the Hub can show what fed the blend:
+
+| Column | Meaning |
+|---|---|
+| `Proj_Start` | points if he starts |
+| `Start_Pct` | P(starts), 0–1 |
+| `Proj` | expected points (`_effective_proj` is the historical alias) |
+| `Proj_Next3` | 3-gameweek expected points |
+| `Proj_Src` | contributing sources, e.g. `RW+FFP` |
+| `Proj_Spread` | max−min of `Proj_Start` across sources — disagreement |
+
+**Weights are renormalised over the sources that priced *this* player**, so a
+missing source no longer needs the ad-hoc mask substitution each old callsite
+carried. They live in `config.PROJECTION_SOURCE_WEIGHTS` (env-overridable via
+`FPL_PROJECTION_WEIGHTS="rotowire:0.55,ffp:0.45"`), not as bare literals in two
+functions restated in six comments.
+
+**`covers=starters_only` is why absence from Rotowire is a signal.** Rotowire
+lists 20 clubs × 11, so a player it does not price is not un-priced, he is not
+expected to start. The engine encodes that as a positional floor on `Start_Pct`
+(`config.ROTOWIRE_START_FLOORS`, DEF highest because a defender who starts plays
+90 minutes) rather than dropping the source.
+
+**FPL's `ep_next` is a declared source, not a substitute.** It was already in
+the app: `classic/transfers.py` wrote it straight into `Projected_Points` — the
+Rotowire slot — whenever Rotowire had not published, so it took Rotowire's 60%
+weight while reading as Rotowire everywhere downstream. It is now a *fallback*
+source: it fills only players no weighted source priced, and shows as `xP` in
+`Proj_Src`. Weight 0 until the accuracy harness has an opinion; carried through
+for display either way.
+
+**`fpl_ep_source()` picks `ep_this` or `ep_next` by target gameweek.** FPL
+publishes both and they describe different weeks. Taking `ep_next`
+unconditionally makes the source describe GW+1 the moment a deadline passes,
+and the gameweek gate then correctly throws it away — so it silently vanishes
+for most of every gameweek. Confirmed live: at GW3 the bootstrap's `is_next` is
+4.
+
+**Streamlit-free is a hard constraint** on `projection_engine.py`,
+`projection_sources.py` and `name_matching.py` (which exists only because
+`player_matching.py` imports Streamlit for its cached registry; it re-exports
+`ReferenceMatcher`, so no callsite changed). The Actions snapshot collector
+imports them, and that workflow installs requirements with `|| true`. A test
+asserts it.
+
+**Two traps handled inside the entry point, not at each callsite:** positions
+are normalised to `G/D/M/F` (Draft pages carry `GK/DEF/MID/FWD`, and the wrong
+codes make the start floors match nothing and silently do nothing — the failure
+that once had every Power Rankings team scoring exactly 50), and
+`chance_of_playing` is read under either name (the Free Hit and Wildcard pools
+shorten the bootstrap field when building their own rows).
+
+**Validation.** `check_blended_projections()` asserts `Proj <= Proj_Start`,
+`Proj == Proj_Start × Start_Pct`, `Start_Pct ∈ [0,1]`, and that the blend lies
+inside the range of its own sources. `check_source_scale_agreement()` — written
+after the cumulative-article incident and, until now, only ever run in tests —
+runs inside the engine on every build, logged rather than raised so a page
+degrades instead of dying. `tests/common/test_projection_wiring.py` asserts the
+two callsites produce identical numbers and that no page re-derives the blend.
+
+`team_strength.py` percentiles `Proj_Start`, not `Proj`. That model already
+prices availability twice more — explicitly as `Start_Security` (10%) and again
+as `Injury_Mult` on the whole product — so ranking on the discounted projection
+charged a rotation risk three times over.
+
 ### Source Freshness
 
 `get_rotowire_article_updated()` (`scripts/common/scraping.py`) scrapes an
@@ -476,12 +570,18 @@ The scoring model answers two questions: **"Who should I pick up?"** (Transfer S
 **Principle**: 1GW should reflect *expected points this gameweek* and nothing else. Form, season points, and FDR are intentionally excluded because Rotowire and FFP projections already incorporate those signals — adding them again would double-count.
 
 ```
-blended_projection = 0.6 × Rotowire + 0.4 × FFP Predicted  — use whichever is available
-start_likelihood   = FFP Start% (primary) | FPL chance_of_playing (fallback) | 100%
-effective_proj     = blended_projection × start_likelihood
+Proj_Start = weighted mean of every source that priced him, on the
+             "points if he starts" basis  (see "Projection Engine")
+Start_Pct  = FFP Start% (primary) | FPL chance_of_playing (fallback) | 100%,
+             floored per position where Rotowire lists him
+Proj       = Proj_Start × Start_Pct        (`_effective_proj` is an alias)
 
-1GW = positional_percentile(effective_proj)
+1GW = positional_percentile(Proj)
 ```
+
+The arithmetic is `projection_engine.blend_aligned()` — see "Projection
+Engine". `compute_player_scores()` does not implement it; it used to, in a
+hand-copied twin of `blend_fixture_projections()` that had drifted.
 
 **Key design decisions**:
 - **Start likelihood is critical**: A player with 5.0 projected but 50% start chance is really worth 2.5. The old model ignored this entirely.
@@ -561,7 +661,9 @@ Score = α × 1GW + (1-α) × ROS
 | `compute_dynamic_alpha()` | `scripts/common/analytics.py` | Per-player alpha based on context |
 | `merge_ffp_single_gw_data()` | `scripts/common/analytics.py` | Merges FFP Predicted/Start/LongStart onto player DataFrames |
 | `blend_multi_gw_projections()` | `scripts/common/analytics.py` | Merges FFP Next3GWs (falls back to PPG×3 if unpublished) |
-| `blend_fixture_projections()` | `scripts/common/analytics.py` | Lightweight fixture display blend: Rotowire 60% + FFP 40% × start likelihood → `Proj_Blended` column. No percentile computation. Uses `Proj_Blended` (not `Blended_Points`) to avoid collision with the live-blending column. |
+| `blend_projections_onto()` | `scripts/common/analytics.py` | The app-facing entry point to the projection engine. Attaches `Proj`, `Proj_Start`, `Start_Pct`, `Proj_Src`, `Proj_Spread`. |
+| `blend_fixture_projections()` | `scripts/common/analytics.py` | Thin wrapper that additionally writes the legacy `Proj_Blended` / `_proj_source`. Prefer `blend_projections_onto()`. `Proj_Blended` stays distinct from `Blended_Points`, the *live* in-gameweek blend. |
+| `blend_aligned()` | `scripts/common/projection_engine.py` | The blend itself — the only implementation. |
 | `positional_percentile()` | `scripts/common/analytics.py` | Within-position percentile against full FPL pool |
 | `season_progress_weight()` | `scripts/common/analytics.py` | Concave GW→weight curve for season quality blend |
 
@@ -1240,6 +1342,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
+| Projection accuracy harness | Phase 1 of 4 complete | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Remaining: **Phase 2** snapshot each gameweek's projections and actuals to `archive/projections/` via a GitHub Actions cron, committed (no history exists today, so this must start collecting before anything can be measured); **Phase 3** per-player accuracy scoring (MAE/RMSE/bias/Spearman by source and position, scored twice — `Proj` over all players, `Proj_Start` over players who actually started, which separates the points model from the minutes model) surfaced as an Accuracy tab on the Hub; **Phase 4** fit `PROJECTION_SOURCE_WEIGHTS` from measured accuracy, give `fpl_ep` a real weight, and add an odds-derived source from stored match odds. |
 | Multi-GW Transfer Planner | Completed (polish available) | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. Gaps: only Next3GWs used (Next2/4–6 fetched but ignored); Classic Transfers lacks sanity-check gate that Draft has. |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
 | Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |
@@ -1248,7 +1351,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Fixture Projections Enhancements | Completed | Key differentials section, captain comparison (Classic), H2H layout fix (Classic now matches Draft order). Blended projections (Rotowire 60% + FFP 40% × start likelihood) added to Draft and Classic fixture pages; blend weight unified app-wide at 60/40. |
+| Fixture Projections Enhancements | Completed | Key differentials section, captain comparison (Classic), H2H layout fix (Classic now matches Draft order). Blended projections added to Draft and Classic fixture pages. Superseded by the Projection Engine — the blend is now produced in one place and rendered app-wide; see "Projection Engine". |
 
 ### Low Priority
 

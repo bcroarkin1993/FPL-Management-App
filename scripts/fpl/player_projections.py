@@ -30,6 +30,9 @@ from scripts.common.utils import (
     get_odds_api_match_odds,
 )
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.text_helpers import to_display_name
+from scripts.common.analytics import blend_projections_onto, merge_season_projections
+from scripts.common.fpl_classic_api import get_classic_bootstrap_static
 
 
 # =============================================================================
@@ -712,21 +715,230 @@ def render_match_odds():
 
 # =============================================================================
 # Main Page
+
+# =============================================================================
+# Blended projections — the number the rest of the app actually uses
+# =============================================================================
+
+def _build_pool(bootstrap) -> pd.DataFrame:
+    """The canonical player universe for the blend, from the FPL bootstrap.
+
+    Carries both name forms on purpose: ``Player`` is the full legal name that
+    projection sources are matched against, ``Display_Name`` is what a human
+    calls him. Match on Player, display Display_Name -- swapping them silently
+    degrades match rates.
+    """
+    teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
+    pos_map = {1: "G", 2: "D", 3: "M", 4: "F"}
+    rows = []
+    for e in bootstrap.get("elements", []):
+        first, second = e.get("first_name", ""), e.get("second_name", "")
+        rows.append({
+            "Player_ID": e.get("id"),
+            "Player": f"{first} {second}".strip(),
+            "Display_Name": to_display_name(first, second, e.get("web_name", "")),
+            "Web_Name": e.get("web_name", ""),
+            "Team": teams.get(e.get("team"), ""),
+            "Position": pos_map.get(e.get("element_type"), "M"),
+            "ep_next": pd.to_numeric(e.get("ep_next"), errors="coerce"),
+            "status": e.get("status"),
+            "chance_of_playing_next_round": e.get("chance_of_playing_next_round"),
+        })
+    return pd.DataFrame(rows)
+
+
+def _blended_source_status(rotowire_df, feed, blended, current_gw) -> None:
+    """One row per source: is it up, how many players, how fresh, what weight.
+
+    Modelled on the Initial Squad Optimizer's Data Sources panel, which exists
+    because every fetch in this app degrades to an empty frame on failure --
+    without a panel like this a broken source renders a page identical to a
+    working one, just with every number quietly leaning on whatever survived.
+    """
+    weights = getattr(config, "PROJECTION_SOURCE_WEIGHTS", {}) or {}
+
+    def _row(name, ok, rows, note, updated, weight_key):
+        w = float(weights.get(weight_key, 0.0))
+        if not ok or not rows:
+            status = "🔴 Unavailable"
+        elif note:
+            status = f"🟡 {note}"
+        else:
+            status = "🟢 OK"
+        return {
+            "Source": name,
+            "Status": status,
+            "Players": int(rows or 0),
+            "Weight": f"{w:.0%}" if w > 0 else "fallback only",
+            "Updated": format_last_updated(updated) if updated else "—",
+        }
+
+    rows = []
+    rw_ok = rotowire_df is not None and not rotowire_df.empty
+    rows.append(_row(
+        "Rotowire", rw_ok, len(rotowire_df) if rw_ok else 0,
+        "" if rw_ok else "no rankings table for this gameweek",
+        get_rotowire_article_updated(config.ROTOWIRE_URL) if config.ROTOWIRE_URL else None,
+        "rotowire",
+    ))
+    ffp_note = ""
+    if feed.ok and feed.is_stale(current_gw):
+        ffp_note = f"published for GW{feed.gameweek} — excluded"
+    elif feed.ok and feed.provenance == "sheet":
+        ffp_note = "read from their spreadsheet"
+    rows.append(_row(
+        "Fantasy Football Pundit", feed.ok, len(feed.df) if feed.ok else 0,
+        ffp_note, feed.updated, "ffp",
+    ))
+    _n_xp = int((blended["Proj_Src"] == "xP").sum()) if "Proj_Src" in blended.columns else 0
+    rows.append(_row(
+        "FPL expected points (ep_next)", True, _n_xp,
+        "" if _n_xp else "not needed — every player priced by another source",
+        None, "fpl_ep",
+    ))
+
+    st.markdown("##### Data Sources")
+    render_styled_table(pd.DataFrame(rows))
+    st.caption(
+        "Weight is each source's share of the blend where it prices a player; "
+        "weights are renormalised over whichever sources are actually available, "
+        "so a missing source does not shrink the projection. FPL's own expected "
+        "points fills only players nobody else priced."
+    )
+
+
+def render_blended_projections():
+    """The blend, with the sources that produced it on the same row.
+
+    This is the number every other page in the app now renders. Until this tab
+    existed the Projections Hub showed Rotowire and FFP in separate tabs with no
+    join between them, so the one figure the app actually scores on appeared
+    nowhere, and a user could not see where two sources disagreed.
+    """
+    current_gw = config.CURRENT_GAMEWEEK
+    rotowire_url = config.ROTOWIRE_URL
+
+    rotowire_df = pd.DataFrame()
+    if rotowire_url:
+        rotowire_df = get_rotowire_player_projections(rotowire_url)
+    feed = get_ffp_feed()
+
+    if (rotowire_df is None or rotowire_df.empty) and not feed.ok:
+        st.warning(
+            f"No projections available for GW{current_gw}. Rotowire has not "
+            "published a rankings table and Fantasy Football Pundit could not "
+            "be read."
+        )
+        return
+
+    bootstrap = get_classic_bootstrap_static()
+    if not bootstrap:
+        st.error("Could not load the FPL player pool, so projections cannot be assembled.")
+        return
+
+    pool = _build_pool(bootstrap)
+    if pool.empty:
+        st.error("The FPL bootstrap carried no players.")
+        return
+
+    # Rotowire values land on the pool by name (merge_season_projections is the
+    # app's tiered name-matched merge); FFP joins on the element id inside
+    # blend_projections_onto.
+    pool = merge_season_projections(pool, rotowire_df, output_col="Points")
+    blended = blend_projections_onto(pool, feed.df, expected_gw=current_gw)
+
+    _blended_source_status(rotowire_df, feed, blended, current_gw)
+
+    st.markdown(f"#### GW{current_gw} Blended Projections")
+    st.caption(
+        "**Proj** is expected points — what he is worth allowing for the chance "
+        "he does not start. **If Starts** is the same projection assuming he "
+        "does. **Spread** is the gap between the sources: a large one means they "
+        "disagree about this player, not that he is a bad pick."
+    )
+
+    display = pd.DataFrame({
+        "Player": blended.get("Display_Name", blended["Player"]),
+        "Team": blended["Team"],
+        "Pos": blended["Position"],
+        "Proj": pd.to_numeric(blended["Proj"], errors="coerce"),
+        "If Starts": pd.to_numeric(blended["Proj_Start"], errors="coerce"),
+        "Start %": pd.to_numeric(blended["Start_Pct"], errors="coerce") * 100,
+        "Rotowire": pd.to_numeric(blended.get("Proj_Start__rotowire"), errors="coerce"),
+        "FFP": pd.to_numeric(blended.get("Proj_Start__ffp"), errors="coerce"),
+        "FPL xP": pd.to_numeric(blended.get("Proj_Start__fpl_ep"), errors="coerce"),
+        "Spread": pd.to_numeric(blended.get("Proj_Spread"), errors="coerce"),
+        "Src": blended["Proj_Src"],
+    })
+    display = display[display["Proj"].notna()]
+
+    with st.expander("Filters", expanded=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            search = st.text_input("Search player", key="blend_search")
+        with col2:
+            positions = st.multiselect(
+                "Position", ["G", "D", "M", "F"], default=[], key="blend_pos"
+            )
+        only_disagree = st.checkbox(
+            "Only where sources disagree by 1.5+ points", key="blend_disagree",
+            help="Where Rotowire and FFP are far apart the blend is doing real "
+                 "work, and the pick deserves a second look.",
+        )
+
+    if search:
+        display = display[display["Player"].str.contains(search, case=False, na=False)]
+    if positions:
+        display = display[display["Pos"].isin(positions)]
+    if only_disagree:
+        display = display[display["Spread"].fillna(0) >= 1.5]
+
+    display = display.sort_values("Proj", ascending=False).reset_index(drop=True)
+    display.insert(0, "#", range(1, len(display) + 1))
+
+    render_styled_table(
+        display.head(300),
+        col_formats={
+            "Proj": "{:.2f}", "If Starts": "{:.2f}", "Start %": "{:.0f}%",
+            "Rotowire": "{:.2f}", "FFP": "{:.2f}", "FPL xP": "{:.2f}",
+            "Spread": "{:.2f}",
+        },
+        positive_color_cols=["Proj", "If Starts"],
+        negative_color_cols=["Spread"],
+        max_height=600,
+    )
+    st.caption(
+        f"Showing {min(len(display), 300)} of {len(display)} projected players. "
+        "The per-source columns are on the *if he starts* basis, so they are "
+        "directly comparable with each other and with **If Starts**."
+    )
+
+
 # =============================================================================
 
 def show_player_projections_page():
     """Main projections hub page with tabbed interface."""
     st.title("Projections Hub")
-    st.caption("Player and team projections from multiple data sources to inform your FPL decisions.")
+    st.caption(
+        "The **Blended** tab is the projection the rest of the app uses. The "
+        "other tabs show each source on its own, unblended."
+    )
 
     # Create tabs for different data sources
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    # Blended leads. The individual sources stay one click away rather than
+    # being hidden: the blend is the answer, but seeing what fed it is how you
+    # judge whether to trust it on a particular player.
+    tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Blended",
         "Rotowire",
         "FFP Data",
         "Goal/Assist Odds",
         "Clean Sheet Odds",
         "Match Odds"
     ])
+
+    with tab0:
+        render_blended_projections()
 
     with tab1:
         render_rotowire_projections()

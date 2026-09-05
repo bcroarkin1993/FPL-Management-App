@@ -138,7 +138,20 @@ def compute_player_strength(
     result["Quality"] = p * result["Actuals"] + (1.0 - p) * result["Pedigree"]
 
     # --- Supporting signals ----------------------------------------------------
-    result["GW_Proj_Pctile"] = positional_percentile(result, ref, "Proj_Blended")
+    # Percentile the *conditional* projection, not the expected-value one.
+    # `Proj` has start likelihood already priced in, and this model prices
+    # availability twice more: once explicitly as Start_Security (10%) and again
+    # as Injury_Mult on the whole product. Ranking on the discounted projection
+    # too charged a rotation risk three times over -- defensible only if it were
+    # deliberate, and nothing here said it was. `Proj_Start` is the pure
+    # "how good is he when he plays" signal this term is meant to carry.
+    _proj_col = next(
+        (c for c in ("Proj_Start", "Proj_Blended", "Points") if c in result.columns), None
+    )
+    result["GW_Proj_Pctile"] = (
+        positional_percentile(result, ref, _proj_col) if _proj_col
+        else pd.Series(0.5, index=result.index)
+    )
     result["Start_Security"] = positional_percentile(
         result, ref, "Start_Security_Raw", min_minutes=min_minutes
     )

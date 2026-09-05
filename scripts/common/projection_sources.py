@@ -530,7 +530,7 @@ def ffp_source(ffp_df=None, gameweek=None, updated=None, note="") -> SourceResul
                         gameweek=gameweek, updated=updated, note=note)
 
 
-def fpl_ep_source(bootstrap=None, timeout: int = 20) -> SourceResult:
+def fpl_ep_source(bootstrap=None, gameweek=None, timeout: int = 20) -> SourceResult:
     """FPL's own expected points (``ep_next``) from the bootstrap.
 
     Basis is **unconditional** -- FPL's expected points already price in the
@@ -558,13 +558,35 @@ def fpl_ep_source(bootstrap=None, timeout: int = 20) -> SourceResult:
         return SourceResult("fpl_ep", None, BASIS_UNCONDITIONAL, COVERS_ALL,
                             note="FPL bootstrap carried no elements.")
 
+    # FPL publishes two expectations and they describe different gameweeks:
+    # `ep_this` is the event flagged `is_current`, `ep_next` the one flagged
+    # `is_next`. Taking `ep_next` unconditionally makes this source describe
+    # GW+1 the moment a deadline passes, and the engine's gameweek gate then
+    # (correctly) throws it away -- so the source silently vanishes for most of
+    # every gameweek. Pick the column that matches the gameweek being asked for.
+    current_gw = next_gw = None
+    for ev in (bootstrap or {}).get("events") or []:
+        if ev.get("is_current"):
+            current_gw = int(ev.get("id"))
+        if ev.get("is_next"):
+            next_gw = int(ev.get("id"))
+
+    if gameweek is not None and current_gw == int(gameweek):
+        ep_field, source_gw = "ep_this", current_gw
+    elif gameweek is not None and next_gw == int(gameweek):
+        ep_field, source_gw = "ep_next", next_gw
+    else:
+        # Cannot tell which gameweek is wanted: default to `ep_next` and report
+        # the gameweek it really describes, so the gate can judge it.
+        ep_field, source_gw = "ep_next", next_gw
+
     pos_map = {1: "G", 2: "D", 3: "M", 4: "F"}
     rows = []
     for e in elements:
         rows.append({
             "Player_ID": int(e.get("id")),
             "Position": pos_map.get(e.get("element_type")),
-            "Proj": pd.to_numeric(e.get("ep_next"), errors="coerce"),
+            "Proj": pd.to_numeric(e.get(ep_field), errors="coerce"),
             "Chance_Of_Playing": e.get("chance_of_playing_next_round"),
         })
     out = pd.DataFrame(rows)
@@ -576,10 +598,6 @@ def fpl_ep_source(bootstrap=None, timeout: int = 20) -> SourceResult:
     out["Start_Pct"] = chance.clip(0, 1)
     out = out.drop(columns=["Chance_Of_Playing"])
 
-    gw = None
-    for ev in (bootstrap or {}).get("events") or []:
-        if ev.get("is_next"):
-            gw = int(ev.get("id"))
-            break
-
-    return SourceResult("fpl_ep", out, BASIS_UNCONDITIONAL, COVERS_ALL, gameweek=gw)
+    return SourceResult("fpl_ep", out, BASIS_UNCONDITIONAL, COVERS_ALL,
+                        gameweek=source_gw,
+                        note=f"FPL {ep_field} for GW{source_gw}" if source_gw else "")
