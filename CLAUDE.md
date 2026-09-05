@@ -389,6 +389,82 @@ the archived and spreadsheet tables. Measured on the recovered GW3 archive: it
 cost 32 of 543 matches, silently. `_resolve_ids()` now normalises both sides and
 retries on `Web_Name`.
 
+### Projection snapshots — the record that makes measurement possible
+
+`scripts/common/projection_archive.py` (store), `projection_snapshot.py`
+(collector entrypoint), `.github/workflows/projection-snapshots.yml` (schedule).
+Both modules are pure and Streamlit-free.
+
+**Nothing in this app had ever been scored after the fact.** The 60/40
+Rotowire/FFP split was assumed, not measured, and there was no way to find out
+whether it was right, because no projection was ever written down — `cache.py`
+is a TTL blob store and every projection the app computed vanished at process
+exit.
+
+Two files per gameweek under `archive/projections/`, both committed:
+
+| File | Contents |
+|---|---|
+| `GW03_pre.json` | what **every source** said and what the engine blended them into, plus per-source status, the deadline, and match odds |
+| `GW03_actual.json` | what each player actually scored — points, minutes, starts, bonus, goals, assists, clean sheet |
+
+The pre file stores the blend *and* each contributing source
+(`proj_start__rotowire`, `proj_start__ffp`, `proj_start__fpl_ep`). Scoring the
+blend alone would answer "is the app right" but never "which source is right",
+and the second question is the one that sets the weights.
+
+**Why a scheduled job and not something the app does.** History that only
+accrues when someone opens Streamlit has holes in it, and a missed gameweek
+cannot be recovered — FFP rolls its window forward and the old week is gone from
+their site permanently. That is not hypothetical; it is exactly how GW3's FFP
+projections were lost.
+
+**Timing rules, each of which is a way the archive would otherwise become
+useless:**
+
+- **The pre file is rewritten while the window is open and frozen at the
+  deadline.** `within_pre_deadline_window()` returns False the moment the
+  deadline passes, so the committed file is the last state a manager could have
+  acted on — which is the thing worth scoring.
+- **Actuals wait for `data_checked`, not `finished`.** Bonus and adjustments
+  land well after full time, and storing a provisional score as an actual would
+  bake a wrong number into the record permanently. They are written **once** and
+  never revised.
+- **A backfill is labelled as one.** `captured_before_deadline` distinguishes a
+  genuine pre-deadline capture from a `--gameweek` backfill, which can see team
+  news — in the limit, lineups — that no manager had. Scoring one as the other
+  flatters every source in it. Odds are omitted entirely on a backfill, since
+  The Odds API returns whatever is *upcoming* and those would be a later
+  gameweek's fixtures filed under this one.
+- **The Rotowire article is resolved for the gameweek being captured**, via
+  `config._discover_rotowire_article(gw)` — deliberately *not*
+  `config.ROTOWIRE_URL`, which resolves for `CURRENT_GAMEWEEK`. Those happen to
+  agree, because the resolver rolls forward once a gameweek finishes, but that
+  is a coincidence of timing rather than a guarantee; if it ever failed, the
+  collector would pair one gameweek's Rotowire article with another's FFP table
+  and store the result as a projection.
+
+**A write that changes nothing is skipped.** The job runs hourly and commits, so
+an unchanged rewrite would produce an hourly commit and bury the real changes.
+Rows are serialised deterministically (sorted by `player_id`, rounded, stable
+column order), compared before writing, and `captured_at` is preserved when they
+match — so the file stays byte-identical and the commit step is a clean no-op.
+`test_projection_archive.py` pins this, including that row order in the input
+frame cannot change the output.
+
+**Two workflows now commit to `main`.** `projection-snapshots.yml` is separate
+from `fpl-notifications.yml` on purpose — a snapshot failure must never stop a
+deadline alert going out — but it means either can find the branch moved since
+checkout. Both now `git pull --rebase --autostash` before pushing; they touch
+different paths, so a rebase resolves it. Without that the *alert* push simply
+fails and alert state silently stops persisting. The snapshot job is also
+`concurrency`-grouped: it has no deadline to race, and two collectors writing
+the same file is a guaranteed conflict.
+
+Note `.gitignore` un-ignores these with `archive/*` rather than `archive/`: git
+cannot re-include a file whose parent *directory* is excluded, so the negation
+would otherwise do nothing.
+
 ### Source Freshness
 
 `get_rotowire_article_updated()` (`scripts/common/scraping.py`) scrapes an
@@ -1416,7 +1492,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Projection accuracy harness | Phase 1 of 4 complete | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Remaining: **Phase 2** snapshot each gameweek's projections and actuals to `archive/projections/` via a GitHub Actions cron, committed (no history exists today, so this must start collecting before anything can be measured); **Phase 3** per-player accuracy scoring (MAE/RMSE/bias/Spearman by source and position, scored twice — `Proj` over all players, `Proj_Start` over players who actually started, which separates the points model from the minutes model) surfaced as an Accuracy tab on the Hub; **Phase 4** fit `PROJECTION_SOURCE_WEIGHTS` from measured accuracy, give `fpl_ep` a real weight, and add an odds-derived source from stored match odds. |
+| Projection accuracy harness | Phases 1-2 of 4 complete | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Remaining: **Phase 3** per-player accuracy scoring (MAE/RMSE/bias/Spearman by source and position, scored twice — `Proj` over all players, `Proj_Start` over players who actually started, which separates the points model from the minutes model) surfaced as an Accuracy tab on the Hub; **Phase 4** fit `PROJECTION_SOURCE_WEIGHTS` from measured accuracy, give `fpl_ep` a real weight, and add an odds-derived source from stored match odds. |
 | Multi-GW Transfer Planner | Completed (polish available) | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. Gaps: only Next3GWs used (Next2/4–6 fetched but ignored); Classic Transfers lacks sanity-check gate that Draft has. |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
 | Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |

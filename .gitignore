@@ -69,6 +69,13 @@ archive/*
 !archive/ffp/
 !archive/ffp/*.json
 
+# Same for the projection snapshots: what every source said before each
+# deadline, and what actually happened. Committed because the accuracy harness
+# cannot measure anything without history, and history that lives on one laptop
+# is one reinstall from being lost.
+!archive/projections/
+!archive/projections/*.json
+
 # Scoring test script cache
 .scoring_test_cache/
 

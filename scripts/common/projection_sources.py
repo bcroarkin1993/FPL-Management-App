@@ -659,3 +659,89 @@ def fpl_ep_source(bootstrap=None, gameweek=None, timeout: int = 20) -> SourceRes
     return SourceResult("fpl_ep", out, BASIS_UNCONDITIONAL, COVERS_ALL,
                         gameweek=source_gw,
                         note=f"FPL {ep_field} for GW{source_gw}" if source_gw else "")
+
+
+# =============================================================================
+# Match odds (The Odds API)
+# =============================================================================
+
+def fetch_match_odds(api_key: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """EPL match odds from The Odds API, as implied probabilities.
+
+    Odds are averaged across bookmakers and converted to implied percentages.
+    Note the three outcomes sum to more than 100 -- that excess is the
+    bookmaker's margin, and it is deliberately left in rather than normalised
+    away, because a caller modelling from these needs to decide for itself how
+    to handle it.
+
+    Returns None when no ``ODDS_API_KEY`` is configured, which is not an error:
+    the key is optional and every consumer degrades to not showing odds.
+    """
+    import os
+    key = api_key or os.getenv("ODDS_API_KEY", "")
+    if not key:
+        _logger.debug("No ODDS_API_KEY configured")
+        return None
+
+    base_url = "https://api.the-odds-api.com/v4/sports/soccer_epl"
+
+    try:
+        # Fetch h2h odds
+        h2h_resp = requests.get(
+            f"{base_url}/odds",
+            params={"apiKey": key, "regions": "uk", "markets": "h2h", "oddsFormat": "decimal"},
+            timeout=15
+        )
+        h2h_resp.raise_for_status()
+        h2h_data = h2h_resp.json()
+
+        if not h2h_data:
+            return None
+
+        matches = []
+        for match in h2h_data:
+            home = match.get("home_team", "")
+            away = match.get("away_team", "")
+            kickoff = match.get("commence_time", "")
+
+            # Get average odds across bookmakers
+            h2h_odds = {"home": [], "draw": [], "away": []}
+            for bm in match.get("bookmakers", []):
+                for market in bm.get("markets", []):
+                    if market.get("key") == "h2h":
+                        for outcome in market.get("outcomes", []):
+                            name = outcome.get("name", "")
+                            price = outcome.get("price", 0)
+                            if name == home:
+                                h2h_odds["home"].append(price)
+                            elif name == away:
+                                h2h_odds["away"].append(price)
+                            elif name == "Draw":
+                                h2h_odds["draw"].append(price)
+
+            # Convert average odds to implied probability
+            def odds_to_prob(odds_list):
+                if not odds_list:
+                    return None
+                avg_odds = sum(odds_list) / len(odds_list)
+                return round((1 / avg_odds) * 100, 1) if avg_odds > 0 else None
+
+            matches.append({
+                "Home Team": home,
+                "Away Team": away,
+                "Kickoff": kickoff[:16].replace("T", " ") if kickoff else "",
+                "Home Win %": odds_to_prob(h2h_odds["home"]),
+                "Draw %": odds_to_prob(h2h_odds["draw"]),
+                "Away Win %": odds_to_prob(h2h_odds["away"]),
+            })
+
+        df = pd.DataFrame(matches)
+        _logger.debug("Odds API: fetched %d matches", len(df))
+        return df
+
+    except requests.exceptions.RequestException as e:
+        _logger.warning("Failed to fetch Odds API data: %s", str(e))
+        return None
+    except Exception as e:
+        _logger.warning("Error processing Odds API data: %s", str(e))
+        return None
