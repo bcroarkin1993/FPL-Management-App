@@ -315,6 +315,80 @@ prices availability twice more — explicitly as `Start_Security` (10%) and agai
 as `Injury_Mult` on the whole product — so ranking on the discounted projection
 charged a rotation risk three times over.
 
+### FFP archive — their window rolls, so ours has to keep up
+
+`scripts/common/ffp_archive.py` (pure), read and written by
+`projection_sources.fetch_ffp_table(gameweek=...)`.
+
+**FFP rolls its publication window forward and the old gameweek is gone.**
+Measured 2026-09-05: the site payload covered **GW4–GW9**, published 03:17 that
+morning, while the app was still scoring GW3 because GW3 was in progress. GW3
+was not in the payload at all, and FFP was persisted nowhere — so the app's FFP
+GW3 numbers had simply ceased to exist. Nothing raised. FFP just stopped
+contributing partway through the gameweek, every gameweek, and the page looked
+identical either way.
+
+Two consequences, both load-bearing:
+
+1. **Archive the whole window, not the current slice.** Each payload carries six
+   gameweeks — 2274 rows, of which `to_sheet_schema()` kept 379 and discarded
+   1895 on every single fetch. Storing all six means the moment FFP publishes
+   GW N it is captured for every week through GW N+5.
+2. **Newest publication wins.** A GW6 forecast taken from a GW4 window is two
+   weeks of team news less informed than one from a GW6 window. An entry with no
+   publication timestamp (the spreadsheet has none) never displaces one that has
+   a timestamp — "vintage unknown" must lose to a real publication.
+
+Precedence in `fetch_ffp_table(gameweek=...)`: **live payload for that gameweek →
+archive → spreadsheet.** `get_ffp_feed()` defaults the gameweek to
+`config.CURRENT_GAMEWEEK`, so no caller has to remember to ask.
+
+Stored in the **sheet schema**, not raw site rows: that schema is the app's
+stable compatibility seam, and a spreadsheet recovery cannot be expressed as
+site rows at all. One file per gameweek under `archive/ffp/`, ~215 KB each,
+**committed** — `.gitignore` un-ignores it specifically. It is public projection
+data with nothing personal in it, and committing is what makes the history
+survive a laptop. It is also the seed of the accuracy harness, which cannot
+measure anything without it.
+
+**Recovering a gameweek that was already lost.** `recover_from_sheet_offsets()`
+reads the spreadsheet's `GW2..GW6` — which are **relative offsets**, the 2nd..6th
+gameweek of its window — so a sheet published for GW2 holds a GW3 forecast in
+its `GW2` column. Re-verified live: `Next2GWsStart == StartingPredicted + GW2`
+at MAE 0.029 against 0.45 for `GW2 + GW3`. This is how GW3 was recovered after
+FFP had already rolled past it.
+
+A recovered table must be made **self-consistent**, and the live suite is what
+proved it was not:
+
+- `NextNGWs` totals are **rebuilt** from the offsets that now lead the window.
+  `Next3GWs` is 40% of the ROS score, so dropping it would silently put every
+  archived player on the `single_gw × 3` fallback.
+- The raw `GWn` columns are then **dropped, never shifted** — a mis-aligned
+  multi-GW column is exactly the plausible-but-wrong value nothing downstream
+  can catch.
+- `Fixture` is **re-pointed at the recovered gameweek** from the real FPL
+  fixture list. Carrying the window week's fixture under a later week's label is
+  precisely what `resolve_ffp_gameweek()` votes against — the recovered table
+  has to be able to prove its own gameweek, and at first it could not. Fixtures
+  are written with the club's **full name** (`"Chelsea (h)"`), because that
+  resolution goes through `TEAM_FULL_TO_SHORT`, in which a short code is not a
+  key.
+
+It is stored under `PROV_SHEET_OFFSET` with no timestamp, so any real FFP
+publication for that gameweek replaces it, and `render_ffp_status()` says on the
+page that the numbers came from the archive.
+
+**Positions must be normalised before matching, on both sides.** FFP publishes
+`GK/DEF/MID/FWD` on both its paths while the FPL pool uses `G/D/M/F`, and every
+`ReferenceMatcher` tier below the first two is scoped by position — so mismatched
+encodings share no group and any name that is not an exact `(name, team)` hit
+falls straight through. The site payload is saved by its integer `Player_ID`, so
+this never showed; it bites exactly where there is no id to join on, which is
+the archived and spreadsheet tables. Measured on the recovered GW3 archive: it
+cost 32 of 543 matches, silently. `_resolve_ids()` now normalises both sides and
+retries on `Web_Name`.
+
 ### Source Freshness
 
 `get_rotowire_article_updated()` (`scripts/common/scraping.py`) scrapes an

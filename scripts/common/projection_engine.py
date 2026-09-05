@@ -117,24 +117,48 @@ def _resolve_ids(source: SourceResult, pool: pd.DataFrame) -> pd.Series:
     if "Player" not in df.columns:
         return pd.Series(np.nan, index=df.index)
 
+    # Normalise positions on BOTH sides before matching. Every ReferenceMatcher
+    # tier below the first two is scoped by position, so a G/D/M/F pool and a
+    # GK/DEF/MID/FWD source share no group and every name that is not an exact
+    # (name, team) hit falls straight through. FFP publishes GK/DEF/MID/FWD on
+    # both its paths; the site payload is saved by its integer Player_ID, so this
+    # only bites where there is no id to join on -- which is exactly the archived
+    # and spreadsheet tables. Measured live on the GW3 archive: it costs roughly
+    # a third of the matches, and the misses are silent.
+    matcher_pool = pool.copy()
+    if "Position" in matcher_pool.columns:
+        matcher_pool["Position"] = _normalise_positions(matcher_pool["Position"])
+
     matcher = ReferenceMatcher(
-        pool,
+        matcher_pool,
         name_col="Player",
-        web_name_col="Web_Name" if "Web_Name" in pool.columns else None,
-        team_col="Team" if "Team" in pool.columns else None,
-        position_col="Position" if "Position" in pool.columns else None,
+        web_name_col="Web_Name" if "Web_Name" in matcher_pool.columns else None,
+        team_col="Team" if "Team" in matcher_pool.columns else None,
+        position_col="Position" if "Position" in matcher_pool.columns else None,
     )
-    pool_ids = pool["Player_ID"] if "Player_ID" in pool.columns else pd.Series(pool.index, index=pool.index)
+    pool_ids = (matcher_pool["Player_ID"] if "Player_ID" in matcher_pool.columns
+                else pd.Series(matcher_pool.index, index=matcher_pool.index))
+
+    positions = (_normalise_positions(df["Position"]) if "Position" in df.columns
+                 else pd.Series(None, index=df.index))
 
     out = []
-    for _, row in df.iterrows():
-        idx = matcher.match(
-            row.get("Player"),
-            row.get("Team"),
-            row.get("Position"),
-        )
-        out.append(pool_ids.loc[idx] if idx is not None else np.nan)
+    for idx_label, row in df.iterrows():
+        # Query on the full name first, then the short one. A source publishes
+        # common names ("Bruno Fernandes") while the bootstrap publishes legal
+        # ones ("Bruno Borges Fernandes"), and either can be the one that hits.
+        hit = matcher.match(row.get("Player"), row.get("Team"), positions.loc[idx_label])
+        if hit is None and row.get("Web_Name"):
+            hit = matcher.match(row.get("Web_Name"), row.get("Team"),
+                                positions.loc[idx_label])
+        out.append(pool_ids.loc[hit] if hit is not None else np.nan)
     return pd.Series(out, index=df.index, dtype="float64")
+
+
+def _normalise_positions(values: pd.Series) -> pd.Series:
+    """Positions as G/D/M/F, whatever spelling arrived."""
+    from scripts.common.text_helpers import POS_MAP_TO_RW
+    return values.astype(str).str.strip().map(POS_MAP_TO_RW).fillna(values)
 
 
 def build_projections(

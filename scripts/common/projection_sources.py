@@ -389,6 +389,17 @@ def ffp_conditional_points(predicted, starting_predicted, start_pct):
     return conditional.where(conditional.gt(0))
 
 
+def _column(df: pd.DataFrame, col: str) -> pd.Series:
+    """A numeric Series for ``col``, all-NaN when the column is absent.
+
+    The same guard as ``analytics.numeric_col``, repeated here because this
+    module must not import from analytics (Streamlit).
+    """
+    if col not in df.columns:
+        return pd.Series(np.nan, index=df.index, dtype="float64")
+    return pd.to_numeric(df[col], errors="coerce")
+
+
 def _as_series(value, index) -> pd.Series:
     """A numeric Series for ``value``, all-NaN when the column was absent."""
     if value is None:
@@ -435,29 +446,71 @@ def rotowire_source(url, limit=None) -> SourceResult:
     return SourceResult("rotowire", out, BASIS_CONDITIONAL, COVERS_STARTERS)
 
 
-def fetch_ffp_table(timeout: int = ffp_feed.DEFAULT_TIMEOUT):
-    """FFP's table, site first and published sheet second.
+def fetch_ffp_table(timeout: int = ffp_feed.DEFAULT_TIMEOUT, gameweek=None):
+    """FFP's table for ``gameweek``: live payload, then archive, then sheet.
 
     Returns ``(df, gameweek, updated, provenance, note)``. This is the pure body
     behind ``scraping.get_ffp_feed()`` -- that function wraps it in
     ``@st.cache_data`` and packs the result into an ``FFPFeed``. Kept in one
     place so the Actions collector and the app read FFP identically.
 
+    **The archive step is what keeps FFP available for a whole gameweek.** FFP
+    publishes GW N+1 as soon as GW N kicks off, so for most of every gameweek
+    the live payload describes a week the app is not scoring, and the gameweek
+    gate correctly discards it -- silently taking FFP off every page partway
+    through the week. Measured 2026-09-05: the payload had rolled to a GW4-GW9
+    window while the app was still scoring GW3, and because FFP was persisted
+    nowhere, its GW3 numbers no longer existed anywhere.
+
+    Every fetch therefore archives all six gameweeks of the payload before
+    returning, and a request for a gameweek the live payload does not cover
+    falls back to the archive. See :mod:`scripts.common.ffp_archive`.
+
     A failure is never reported as a success: on total failure ``df`` is None
     and ``provenance`` is ``"none"`` with the reason in ``note``.
     """
+    from scripts.common import ffp_archive
+
+    live_gw = None
     try:
         rows, gw, updated = ffp_feed.fetch_points_predictor()
         if rows:
+            live_gw = gw
             code_to_id = ffp_feed.bootstrap_code_to_id(timeout=timeout)
-            df = ffp_feed.to_sheet_schema(rows, gw, code_to_id)
-            if df is not None and not df.empty:
-                goal_rows, _, _ = ffp_feed.fetch_goal_assist()
-                cs_rows, _, _ = ffp_feed.fetch_clean_sheet()
-                df = ffp_feed.attach_odds_columns(df, goal_rows, cs_rows, gw)
-                return df, gw, updated, "site", ""
+            # Archive the whole window first, so the data is kept even when this
+            # call ends up serving a different gameweek from the archive below.
+            try:
+                ffp_archive.archive_payload(rows, gw, updated, code_to_id)
+            except Exception as e:                  # never let archiving break a read
+                _logger.warning("FFP: could not archive payload: %s", e)
+
+            if gameweek is None or gw == gameweek:
+                df = ffp_feed.to_sheet_schema(rows, gw, code_to_id)
+                if df is not None and not df.empty:
+                    goal_rows, _, _ = ffp_feed.fetch_goal_assist()
+                    cs_rows, _, _ = ffp_feed.fetch_clean_sheet()
+                    df = ffp_feed.attach_odds_columns(df, goal_rows, cs_rows, gw)
+                    return df, gw, updated, "site", ""
     except Exception as e:
         _logger.warning("FFP site feed failed, falling back to the sheet: %s", e)
+
+    # The live payload is for another gameweek (or unreachable). Serve the
+    # archived table for the one actually being scored.
+    if gameweek is not None:
+        archived, meta = ffp_archive.load_gameweek(gameweek)
+        if archived is not None and not archived.empty:
+            note = ""
+            if meta.get("provenance") == ffp_archive.PROV_SHEET_OFFSET:
+                note = ("recovered from FFP's spreadsheet, which publishes no "
+                        "revision time")
+            elif live_gw is not None:
+                note = f"archived — FFP's live payload has moved on to GW{live_gw}"
+            else:
+                note = "archived — FFP's site was unreachable"
+            # Back to a datetime: FFPFeed.updated is consumed by
+            # format_last_updated(), which needs one. JSON only carries strings.
+            return (archived, gameweek, ffp_archive.parse_updated(meta.get("updated")),
+                    "archive", note)
 
     try:
         sheet = ffp_feed.fetch_sheet()
@@ -504,22 +557,27 @@ def ffp_source(ffp_df=None, gameweek=None, updated=None, note="") -> SourceResul
 
     out = pd.DataFrame(index=ffp_df.index)
     name_col = "Name" if "Name" in ffp_df.columns else "Player"
-    out["Player"] = ffp_df.get(name_col)
-    out["Team"] = ffp_df.get("Team")
-    out["Position"] = ffp_df.get("Position")
+    # Every read here goes through a column-or-NaN helper. `df.get(missing)`
+    # returns **None**, and pd.to_numeric(None) is a scalar -- so the natural
+    # spelling either raises on the next Series method or, worse, broadcasts one
+    # value to every row. An archived table recovered from the spreadsheet has no
+    # Next3GWs at all, so this is the normal case, not a degraded one.
+    out["Player"] = ffp_df[name_col] if name_col in ffp_df.columns else None
+    out["Team"] = ffp_df["Team"] if "Team" in ffp_df.columns else None
+    out["Position"] = ffp_df["Position"] if "Position" in ffp_df.columns else None
     if "Player_ID" in ffp_df.columns:
         out["Player_ID"] = pd.to_numeric(ffp_df["Player_ID"], errors="coerce")
     if "Display_Name" in ffp_df.columns:
         out["Display_Name"] = ffp_df["Display_Name"]
 
-    start = pd.to_numeric(ffp_df.get("Start"), errors="coerce") / 100.0
+    start = _column(ffp_df, "Start") / 100.0
     out["Start_Pct"] = start.clip(0, 1)
 
     out["Proj_Start"] = ffp_conditional_points(
         ffp_df.get("Predicted"), ffp_df.get("StartingPredicted"), start
     )
 
-    next3 = pd.to_numeric(ffp_df.get("Next3GWs"), errors="coerce")
+    next3 = _column(ffp_df, "Next3GWs")
     out["Proj_Next3"] = next3.where(next3.gt(0))
 
     if gameweek is None and "FFP_GW" in ffp_df.columns:

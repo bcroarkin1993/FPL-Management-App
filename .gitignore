@@ -55,7 +55,19 @@ league_settings.json
 # Local, permanent archive of personal league data (past season League
 # Wrapped exports and their extracted data — team/manager names, repo is
 # public) — never committed, never auto-deleted.
-archive/
+# Note this is `archive/*`, not `archive/`: git cannot re-include a file whose
+# parent *directory* is excluded, so the negation below would silently do
+# nothing against `archive/`.
+archive/*
+
+# ...except the FFP projection archive, which IS committed. FFP rolls its
+# publication window forward and the old gameweek is gone from their site
+# permanently — GW3 was lost exactly that way. This is public projection data
+# with nothing personal in it, one immutable file per gameweek, and committing
+# it is what makes the history survive a laptop. It is also the seed of the
+# projection accuracy harness, which cannot measure anything without it.
+!archive/ffp/
+!archive/ffp/*.json
 
 # Scoring test script cache
 .scoring_test_cache/

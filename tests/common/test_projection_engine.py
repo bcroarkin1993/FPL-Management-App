@@ -284,3 +284,53 @@ class TestPositionCodesAndFallbacks:
         # Palmer, whom nobody else priced, gets FPL's number under its own label.
         assert out.loc[1, "Proj_Start"] == pytest.approx(4.0)
         assert out.loc[1, "Proj_Src"] == "xP"
+
+
+class TestSourcePositionCodesDoNotBreakMatching:
+    """FFP publishes GK/DEF/MID/FWD; the FPL pool uses G/D/M/F.
+
+    Every ReferenceMatcher tier below the first two is scoped by position, so
+    mismatched encodings share no group and any name that is not an exact
+    (name, team) hit falls straight through. FFP's site payload is saved by its
+    integer Player_ID, so this stayed invisible -- it only bites where there is
+    no id to join on, which is exactly the archived and spreadsheet tables.
+    Measured live on the recovered GW3 archive: it cost 32 of 543 matches.
+    """
+
+    def test_ffp_style_codes_still_match_a_gdmf_pool(self):
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL, {
+            # Common name + FFP's position spelling, and no Player_ID -- the
+            # exact shape of an archived table.
+            "Player": ["Bruno Fernandes"],
+            "Team": ["MUN"],
+            "Position": ["MID"],
+            "Proj_Start": [7.0],
+            "Start_Pct": [0.9],
+        })
+        out = build_projections([ffp], gameweek=3, pool=_pool(), weights={"ffp": 1.0})
+        assert out.loc[2, "Proj_Start"] == pytest.approx(7.0)
+
+    def test_position_scoping_still_keeps_the_palmers_apart(self):
+        """Normalising encodings must not weaken the scoping itself."""
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL, {
+            "Player": ["Cole Palmer"],
+            "Team": ["CHE"],
+            "Position": ["MID"],
+            "Proj_Start": [9.0],
+            "Start_Pct": [1.0],
+        })
+        out = build_projections([ffp], gameweek=3, pool=_pool(), weights={"ffp": 1.0})
+        assert out.loc[4, "Proj_Start"] == pytest.approx(9.0)
+        assert pd.isna(out.loc[3, "Proj_Start"])      # Alex Palmer, backup GK
+
+    def test_web_name_is_tried_when_the_full_name_misses(self):
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL, {
+            "Player": ["Not A Real Name"],
+            "Web_Name": ["Haaland"],
+            "Team": ["MCI"],
+            "Position": ["FWD"],
+            "Proj_Start": [8.0],
+            "Start_Pct": [1.0],
+        })
+        out = build_projections([ffp], gameweek=3, pool=_pool(), weights={"ffp": 1.0})
+        assert out.loc[1, "Proj_Start"] == pytest.approx(8.0)

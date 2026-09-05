@@ -396,7 +396,7 @@ class FFPFeed(NamedTuple):
     df: Optional[pd.DataFrame]
     gameweek: Optional[int]
     updated: Optional[datetime]
-    provenance: str                     # "site" | "sheet" | "none"
+    provenance: str                     # "site" | "archive" | "sheet" | "none"
     note: str = ""
 
     @property
@@ -416,7 +416,7 @@ class FFPFeed(NamedTuple):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_ffp_feed() -> FFPFeed:
+def get_ffp_feed(gameweek: Optional[int] = None) -> FFPFeed:
     """Fetch FFP, site first, published Google Sheet second.
 
     The sheet was the app's only source until FFP stopped keeping it in step
@@ -430,7 +430,18 @@ def get_ffp_feed() -> FFPFeed:
     was plainly working. On failure this returns ``provenance="none"`` with the
     reason in ``note``, and ``ok`` is False, so a caller can say what went wrong.
     """
-    df, gw, updated, provenance, note = projection_sources.fetch_ffp_table()
+    # Defaults to the gameweek the app is scoring. FFP publishes GW N+1 as soon
+    # as GW N kicks off, so without asking for a specific gameweek the feed
+    # spends most of every week describing a week we are not scoring -- and the
+    # gameweek gate then discards it, silently taking FFP off every page.
+    if gameweek is None:
+        try:
+            gameweek = config.CURRENT_GAMEWEEK
+        except Exception:                           # pragma: no cover - defensive
+            gameweek = None
+    df, gw, updated, provenance, note = projection_sources.fetch_ffp_table(
+        gameweek=gameweek
+    )
     return FFPFeed(df, gw, updated, provenance, note)
 
 
@@ -1022,4 +1033,11 @@ def render_ffp_status(feed: "FFPFeed", expected_gw: Optional[int] = None,
         bits.append("published %s" % format_last_updated(feed.updated))
     if feed.provenance == "sheet":
         bits.append("read from their spreadsheet (site unreachable)")
+    elif feed.provenance == "archive":
+        # Say so plainly. An archived table is real FFP data for the right
+        # gameweek, but it was captured earlier -- the reader should know the
+        # numbers predate anything FFP has published since.
+        bits.append("from our archive of their last publication for this gameweek")
+        if feed.note:
+            bits.append(feed.note)
     st.caption("Projections blended with " + " · ".join(bits) + ".")
