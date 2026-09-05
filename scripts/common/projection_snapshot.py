@@ -241,6 +241,22 @@ def collect_actuals(gameweek: int) -> bool:
     return written
 
 
+def refresh_ffp_archive(gameweek: Optional[int] = None) -> None:
+    """Pull FFP's current payload so its whole window is archived.
+
+    ``fetch_ffp_table`` archives every gameweek in the payload as a side effect,
+    so this is simply a call made for that effect. Failure is logged and
+    swallowed: keeping the archive warm must never fail a run whose real job is
+    the actuals.
+    """
+    try:
+        _, gw, updated, prov, _ = fetch_ffp_table(gameweek=gameweek)
+        _logger.info("FFP archive refreshed (provenance=%s, gameweek=%s, published=%s)",
+                     prov, gw, updated)
+    except Exception as e:
+        _logger.warning("Could not refresh the FFP archive: %s", e)
+
+
 def _events(bootstrap) -> list:
     return bootstrap.get("events") or []
 
@@ -325,6 +341,12 @@ def run(force_gameweek: Optional[int] = None, skip_actuals: bool = False) -> int
         written += bool(collect_pre(gw, bootstrap, deadline))
     else:
         _logger.info("Outside the pre-deadline window (next: GW%s at %s)", gw, deadline)
+        # Still refresh the FFP archive. FFP publishes a six-gameweek window and
+        # rolls it forward as soon as a gameweek kicks off, so a week only ever
+        # exists on their site for a limited time. Capturing it on every run --
+        # not just inside the deadline window -- means a single failed
+        # pre-deadline run cannot lose a gameweek the way GW3 was lost.
+        refresh_ffp_archive(gw)
 
     if not skip_actuals:
         for done_gw in pending_actuals(bootstrap):

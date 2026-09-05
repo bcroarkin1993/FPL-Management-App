@@ -136,3 +136,30 @@ class TestRunSkipsWorkItDoesNotNeedToDo:
             raise RuntimeError("network down")
         monkeypatch.setattr(snap, "_get_json", _boom)
         assert snap.run() == 0
+
+
+class TestFfpArchiveIsKeptWarm:
+    """FFP publishes a six-gameweek window and rolls it forward as soon as a
+    gameweek kicks off, so a week only exists on their site for a limited time.
+    Refreshing on every run -- not just inside the deadline window -- means one
+    failed pre-deadline run cannot lose a gameweek the way GW3 was lost."""
+
+    def test_refreshed_even_outside_the_deadline_window(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(snap, "_get_json", lambda url, timeout=30: _events())
+        monkeypatch.setattr(snap, "within_pre_deadline_window", lambda *a, **k: False)
+        monkeypatch.setattr(snap, "refresh_ffp_archive",
+                            lambda gw=None: calls.append(gw))
+        monkeypatch.setattr(snap.projection_archive, "list_actuals", lambda: [1, 2])
+        monkeypatch.setattr(snap.projection_archive, "list_pre", lambda: [])
+        monkeypatch.setattr(snap.projection_archive, "scoreable_gameweeks", lambda: [])
+        snap.run()
+        assert calls == [4]
+
+    def test_a_failing_refresh_never_fails_the_run(self, monkeypatch):
+        """The run's real job may be the actuals; keeping the archive warm is
+        opportunistic and must not take it down."""
+        def _boom(gameweek=None, **kw):
+            raise RuntimeError("FFP unreachable")
+        monkeypatch.setattr(snap, "fetch_ffp_table", _boom)
+        snap.refresh_ffp_archive(4)      # must not raise
