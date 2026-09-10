@@ -652,3 +652,83 @@ class TestClassicTeamAnalysisSeasonHistory:
              ]):
             from scripts.classic.team_analysis import show_classic_team_analysis_page
             show_classic_team_analysis_page()
+
+
+class TestClassicSuggestionsDoNotReuseATarget:
+    """You can only buy a player once.
+
+    Same flaw as the Draft Waiver Wire had: the best affordable replacement at a
+    position was offered against every weak squad player at that position, so
+    the list read as a plan but was one transfer written several times.
+    """
+
+    def _squad(self):
+        import pandas as pd
+        n = 4
+        return pd.DataFrame({
+            "Player_ID": [1, 2, 3, 4],
+            "Player": ["Weakest", "Middle", "Strongest", "Anchor"],
+            "Full Name": ["Weakest", "Middle", "Strongest", "Anchor"],
+            "Team": ["AVL", "MCI", "BRE", "ARS"],
+            "Team_ID": [1, 2, 3, 4],
+            "Position": ["D"] * n,
+            "Keep Score": [0.05, 0.15, 0.25, 0.95],
+            "now_cost": [40, 45, 50, 60],
+            "selling_price": [40, 45, 50, 60],
+            "squad_position": [1, 2, 3, 4],
+            "total_points": [0, 5, 10, 60],
+            "form": [0.0, 1.0, 2.0, 6.0],
+            "chance_of_playing_next_round": [None] * n,
+            "status": ["a"] * n,
+            "news": [""] * n,
+            "Projected_Points": [0.0, 1.0, 2.0, 6.0],
+            "MultiGW_Proj": [0.0, 3.0, 6.0, 18.0],
+            "ep_next": [0.5, 1.0, 2.0, 6.0],
+            "selected_by_percent": [1.0, 2.0, 3.0, 40.0],
+        })
+
+    def _available(self):
+        import pandas as pd
+        n = 3
+        return pd.DataFrame({
+            "Player_ID": [10, 11, 12],
+            "Player": ["Best Target", "Second Target", "Third Target"],
+            "Full Name": ["Best Target", "Second Target", "Third Target"],
+            "Team": ["CRY", "EVE", "FUL"],
+            "Team_ID": [5, 6, 7],
+            "Position": ["D"] * n,
+            "Transfer Score": [0.90, 0.80, 0.70],
+            "now_cost": [45, 45, 45],
+            "total_points": [40, 35, 30],
+            "form": [6.0, 5.0, 4.0],
+            "chance_of_playing_next_round": [None] * n,
+            "status": ["a"] * n,
+            "news": [""] * n,
+            "Projected_Points": [6.0, 5.0, 4.0],
+            "MultiGW_Proj": [18.0, 15.0, 12.0],
+            "ep_next": [6.0, 5.0, 4.0],
+            "selected_by_percent": [10.0, 8.0, 6.0],
+        })
+
+    def _run(self):
+        from scripts.classic.transfers import _build_transfer_suggestions
+        return _build_transfer_suggestions(
+            self._squad(), self._available(), bank=20, top_n=3, free_transfers=3
+        )
+
+    def test_no_target_is_suggested_twice(self):
+        adds = [s["add_player"] for s in self._run()]
+        assert len(adds) == len(set(adds)), f"duplicate targets: {adds}"
+
+    def test_the_most_urgent_drop_gets_the_best_target(self):
+        """drop_candidates is ordered by urgency, so first-come-first-served on
+        that ordering is what puts the best replacement where it matters."""
+        out = self._run()
+        assert out, "expected at least one suggestion"
+        assert out[0]["drop_player"] == "Weakest"
+        assert out[0]["add_player"] == "Best Target"
+
+    def test_a_later_drop_falls_through_to_its_runner_up(self):
+        by_drop = {s["drop_player"]: s["add_player"] for s in self._run()}
+        if "Middle" in by_drop:
+            assert by_drop["Middle"] != "Best Target"

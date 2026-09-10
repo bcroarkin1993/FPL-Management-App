@@ -1092,6 +1092,18 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         if len(drop_candidates) == top_n:
             break
 
+    # A player can only be bought once, so a target claimed by an earlier
+    # suggestion has to leave the next drop its runner-up. Without this the same
+    # standout replacement was offered against every weak squad player, which
+    # reads as a plan but is one transfer written several times.
+    #
+    # Drops are deliberately *not* re-sorted by gain the way the Draft page does
+    # it: drop_candidates is already ordered by urgency -- unavailable players
+    # and uncovered blanks first -- and that ordering is more useful here than
+    # raw score improvement, so first-come-first-served on it gives the best
+    # target to the player who most needs replacing.
+    used_add_ids: set = set()
+
     for drop_row in drop_candidates:
         pos = drop_row["Position"]
         drop_id = drop_row["Player_ID"]
@@ -1111,6 +1123,8 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         squad_without_drop = squad_df[squad_df["Player_ID"] != drop_id]
         add_row = None
         for _, candidate in candidates.head(10).iterrows():
+            if candidate.get("Player_ID") in used_add_ids:
+                continue  # already suggested for another drop — take the next best
             cand_team = candidate.get("Team")
             if (squad_without_drop["Team"] == cand_team).sum() >= 3:
                 continue  # would violate 3-per-club rule
@@ -1118,7 +1132,12 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
             break
 
         if add_row is None:
-            add_row = candidates.iloc[0]  # Fallback if all top-10 breach rule
+            # Fallback if every top-10 candidate breaches the club rule or is
+            # already spoken for. Still must not re-suggest a claimed player.
+            _free = candidates[~candidates["Player_ID"].isin(used_add_ids)]
+            if _free.empty:
+                continue
+            add_row = _free.iloc[0]
 
         # Calculate score improvement using Transfer Score vs Keep Score
         score_diff = add_row.get("Transfer Score", 0) - drop_row.get("Keep Score", 0)
@@ -1244,6 +1263,11 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         is_hit = remaining_ft <= 0
         hit_verdict = _compute_hit_verdict(ep_delta, is_hit)
         remaining_ft = max(0, remaining_ft - 1)
+
+        # Claim the target only now that the pairing has actually cleared its
+        # threshold -- marking it earlier would burn a good replacement on a
+        # suggestion that was never made.
+        used_add_ids.add(add_row.get("Player_ID"))
 
         suggestions.append({
             "position": pos_labels.get(pos, pos),

@@ -1185,6 +1185,54 @@ def _sanity_check_suggestion(drop_row: pd.Series, add_row: pd.Series) -> Tuple[b
     return True, "ok"
 
 
+def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef):
+    """One suggestion card's payload.
+
+    Extracted from the middle of the search loop so that loop can be read as
+    what it is -- collect pairs, then assign them -- rather than as forty lines
+    of dictionary construction with the algorithm hidden inside it.
+    """
+    _drop_proj = _ef(worst_roster.get('_effective_proj', 0))
+    _add_proj = _ef(best_avail.get('_effective_proj', 0))
+    # Fall back to raw Points column if effective_proj unavailable for ADD
+    if _add_proj == 0:
+        _add_proj = _ef(best_avail.get('Points', 0))
+
+    return {
+        'drop_player': _display_of(worst_roster),
+        'drop_team': str(worst_roster.get('Team', '')),
+        'drop_position': pos,
+        'drop_value': round(float(worst_roster.get('Keep Score', 0)), 3),
+        'drop_form': round(float(worst_roster.get('Form', 0) or 0), 1),
+        'drop_season_pts': int(float(worst_roster.get('Season_Points', 0) or 0)),
+        'drop_proj_pts': round(_drop_proj, 1),
+        'drop_3gw_proj': round(_ef(worst_roster.get('MultiGW_Proj', 0)), 1),
+        'drop_has_data': _drop_proj > 0,
+        'drop_injury': _format_availability(
+            worst_roster.get('chance_of_playing_next_round'),
+            worst_roster.get('status'),
+            worst_roster.get('news')
+        ),
+        'add_player': _display_of(best_avail),
+        'add_team': str(best_avail.get('Team', '')),
+        'add_position': pos,
+        'add_value': round(float(best_avail.get('Transfer Score', 0)), 3),
+        'add_proj_pts': round(_add_proj, 1),
+        'add_3gw_proj': round(_ef(best_avail.get('MultiGW_Proj', 0)), 1),
+        'add_has_data': _add_proj > 0,
+        'add_season_pts': int(float(best_avail.get('Season_Points', 0) or 0)),
+        'add_form': round(float(best_avail.get('Form', 0) or 0), 1),
+        'add_injury': _format_availability(
+            best_avail.get('chance_of_playing_next_round'),
+            best_avail.get('status'),
+            best_avail.get('news')
+        ),
+        'transaction_score': round(float(txn_score), 3),
+        'rationale': _build_rationale(worst_roster, best_avail),
+        'urgency': compute_transfer_urgency(pos, depth_map) if depth_map else "",
+    }
+
+
 def _compute_transfer_suggestions(
     avail_df: pd.DataFrame,
     roster_df: pd.DataFrame,
@@ -1294,21 +1342,19 @@ def _compute_transfer_suggestions(
         avail_sorted = avail_pos.sort_values('_adj_value', ascending=False)
 
         pos_debug_pairs = []
-        pos_suggestion_found = False
-
-        # Evaluate the weakest roster players against the strongest available ones.
-        # Limiting both sides prevents a single injured/overrated player from
-        # blocking the whole position; lifting the limits (both None) enumerates
-        # every upgrade instead of just the headline one.
         roster_iter = (roster_sorted if roster_candidates is None
                        else roster_sorted.head(roster_candidates))
         avail_iter = (avail_sorted if avail_candidates is None
                       else avail_sorted.head(avail_candidates))
 
-        for _, worst_roster in roster_iter.iterrows():
-            if one_per_position and pos_suggestion_found:
-                break
-
+        # Pass 1 -- collect every viable (drop, add) pair.
+        #
+        # This deliberately does *not* stop at the first add that clears a drop's
+        # threshold, the way it used to. An add claimed by a better pairing has
+        # to leave its runners-up behind for the drops that lose it, or those
+        # drops vanish from the list entirely.
+        candidates = []
+        for drop_idx, worst_roster in roster_iter.iterrows():
             keep_val = float(worst_roster.get('Keep Score', 0.5) or 0.5)
             if keep_val > 0.7:
                 min_threshold = 0.12   # elite: 12%+ improvement required
@@ -1317,7 +1363,7 @@ def _compute_transfer_suggestions(
             else:
                 min_threshold = 0.05   # weak: 5% — raised from 2% to cut noise
 
-            for _, best_avail in avail_iter.iterrows():
+            for add_idx, best_avail in avail_iter.iterrows():
                 txn_score = best_avail['_adj_value'] - worst_roster['_adj_value']
 
                 pair_info = {
@@ -1332,6 +1378,9 @@ def _compute_transfer_suggestions(
                     'threshold': min_threshold,
                     'passed': txn_score > min_threshold,
                     'sanity': 'n/a',
+                    # Clearing the threshold is no longer the same thing as being
+                    # recommended: an add can be claimed by a stronger pairing.
+                    'assigned': False,
                 }
                 if len(pos_debug_pairs) < DEBUG_PAIR_CAP:
                     pos_debug_pairs.append(pair_info)
@@ -1341,57 +1390,49 @@ def _compute_transfer_suggestions(
                     pair_info['sanity'] = sanity_reason
                     if not sanity_ok:
                         pair_info['passed'] = False
-                        continue  # try next available candidate for this drop player
-
-                    _drop_proj = _ef(worst_roster.get('_effective_proj', 0))
-                    _add_proj = _ef(best_avail.get('_effective_proj', 0))
-                    # Fall back to raw Points column if effective_proj unavailable for ADD
-                    if _add_proj == 0:
-                        _add_proj = _ef(best_avail.get('Points', 0))
-
-                    rationale = _build_rationale(worst_roster, best_avail)
-                    urgency = compute_transfer_urgency(pos, depth_map) if depth_map else ""
-                    suggestions.append({
-                        'drop_player': _display_of(worst_roster),
-                        'drop_team': str(worst_roster.get('Team', '')),
-                        'drop_position': pos,
-                        'drop_value': round(float(worst_roster.get('Keep Score', 0)), 3),
-                        'drop_form': round(float(worst_roster.get('Form', 0) or 0), 1),
-                        'drop_season_pts': int(float(worst_roster.get('Season_Points', 0) or 0)),
-                        'drop_proj_pts': round(_drop_proj, 1),
-                        'drop_3gw_proj': round(_ef(worst_roster.get('MultiGW_Proj', 0)), 1),
-                        'drop_has_data': _drop_proj > 0,
-                        'drop_injury': _format_availability(
-                            worst_roster.get('chance_of_playing_next_round'),
-                            worst_roster.get('status'),
-                            worst_roster.get('news')
-                        ),
-                        'add_player': _display_of(best_avail),
-                        'add_team': str(best_avail.get('Team', '')),
-                        'add_position': pos,
-                        'add_value': round(float(best_avail.get('Transfer Score', 0)), 3),
-                        'add_proj_pts': round(_add_proj, 1),
-                        'add_3gw_proj': round(_ef(best_avail.get('MultiGW_Proj', 0)), 1),
-                        'add_has_data': _add_proj > 0,
-                        'add_season_pts': int(float(best_avail.get('Season_Points', 0) or 0)),
-                        'add_form': round(float(best_avail.get('Form', 0) or 0), 1),
-                        'add_injury': _format_availability(
-                            best_avail.get('chance_of_playing_next_round'),
-                            best_avail.get('status'),
-                            best_avail.get('news')
-                        ),
-                        'transaction_score': round(float(txn_score), 3),
-                        'rationale': rationale,
-                        'urgency': urgency,
+                        continue
+                    candidates.append({
+                        'score': float(txn_score),
+                        'drop_idx': drop_idx,
+                        'add_idx': add_idx,
+                        'drop': worst_roster,
+                        'add': best_avail,
+                        'debug': pair_info,
                     })
-                    pos_suggestion_found = True
-                    break  # found a suggestion for this roster candidate; move on
                 elif avail_candidates is None:
                     # Available players are sorted by value descending, so once one
                     # misses this drop's threshold no lower-ranked player can clear
                     # it either. Only worth short-circuiting on a full-pool scan.
                     break
 
+        # Pass 2 -- assign, greedily, best gain first.
+        #
+        # A player can only be added once and dropped once, so the list has to be
+        # a *set of moves you can actually make*, not a set of alternatives that
+        # all want the same target. It used to offer the single best available
+        # player against every drop that cleared a threshold.
+        #
+        # Greedy on gain gives the intuitively right answer for free: gain is
+        # add_adj - drop_adj, so for a fixed add it is largest against the
+        # weakest drop. The best target lands on the player you most want to
+        # replace, and the next drop takes the next-best target.
+        #
+        # This is the assignment problem, and greedy is not provably optimal --
+        # but scipy is not a dependency here (Spearman is hand-rolled in
+        # projection_accuracy for the same reason) and at 4 positions x a handful
+        # of droppable players the difference is not worth the dependency.
+        used_drops, used_adds = set(), set()
+        for cand in sorted(candidates, key=lambda c: c['score'], reverse=True):
+            if cand['drop_idx'] in used_drops or cand['add_idx'] in used_adds:
+                continue
+            cand['debug']['assigned'] = True
+            suggestions.append(_build_suggestion(
+                cand['drop'], cand['add'], pos, cand['score'], depth_map, _ef
+            ))
+            used_drops.add(cand['drop_idx'])
+            used_adds.add(cand['add_idx'])
+            if one_per_position:
+                break
         debug_rows.append({
             'pos': pos,
             'skipped': False,
@@ -1482,13 +1523,14 @@ def _render_transfer_suggestions(
                 f"switch **Show** to *All improvements* to see the rest.")
     else:
         note = f"{shown} improving move{'s' if shown != 1 else ''} found."
-    # Each card is the best available upgrade for *that* roster player, so one
-    # standout target can legitimately head up several cards. Say so rather than
-    # letting it read as a repeated suggestion.
-    _adds = [s.get('add_player') for s in suggestions]
-    if len(set(_adds)) < len(_adds):
-        note += (" Each card is the best upgrade for that specific player, so the "
-                 "same target can appear more than once.")
+    # Every add and every drop appears at most once, so this is a set of moves
+    # you can actually make rather than a list of alternatives competing for the
+    # same target. Worth saying: the cards used to repeat one standout player
+    # against each weak roster spot, which read as a plan but was one move.
+    if len(suggestions) > 1:
+        note += (" Each player appears once, so these can all be made — the best "
+                 "target goes to the player you most want to replace, and the "
+                 "next drop takes the next-best target.")
     st.caption(note)
 
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
@@ -2029,8 +2071,8 @@ def show_waiver_wire_page():
                 index=0,
                 help="'Best per position' shows the single strongest move at each "
                      "position. The other views search your whole roster against "
-                     "the entire available pool and list every swap that clears "
-                     "the improvement threshold for its position.",
+                     "the entire available pool. No player is added or dropped "
+                     "twice, so the list is a set of moves you can all make.",
             )
         with _ctl_pos:
             sugg_pos_labels = st.multiselect(

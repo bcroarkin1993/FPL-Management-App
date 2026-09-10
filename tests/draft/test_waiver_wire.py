@@ -322,3 +322,94 @@ class TestDisplayNames:
 
         scored = compute_player_scores(df, df, current_gw=5, format_context="draft")
         assert "Display_Name" in scored.columns
+
+
+class TestOneAddCannotBeSuggestedTwice:
+    """A suggestion list has to be a set of moves you can actually make.
+
+    Reported from the app: with several weak defenders, the same available
+    player was offered against each of them. You can add him once. The list read
+    as a plan but was really the same move written three times.
+    """
+
+    def _roster(self):
+        # Three droppable defenders of increasing value, plus a fourth so the
+        # position is never reduced below a legal squad.
+        return pd.DataFrame({
+            "Player": ["Weakest", "Middle", "Strongest", "Anchor"],
+            "Team": ["AVL", "MCI", "BRE", "ARS"],
+            "Position": ["D"] * 4,
+            "Keep Score": [0.05, 0.25, 0.40, 0.90],
+            "Season_Points": [0, 10, 20, 60],
+            "Form": [0.0, 1.0, 2.0, 5.0],
+            "_effective_proj": [0.0, 2.0, 3.0, 5.0],
+            "MultiGW_Proj": [0.0, 6.0, 9.0, 15.0],
+            "chance_of_playing_next_round": [None, None, None, None],
+            "status": ["a", "a", "a", "a"],
+            "news": ["", "", "", ""],
+        })
+
+    def _avail(self):
+        return pd.DataFrame({
+            "Player": ["Best Target", "Second Target", "Third Target"],
+            "Team": ["CRY", "EVE", "FUL"],
+            "Position": ["D"] * 3,
+            "Transfer Score": [0.80, 0.70, 0.60],
+            "Season_Points": [30, 25, 20],
+            "Form": [5.0, 4.0, 3.0],
+            "_effective_proj": [5.0, 4.0, 3.5],
+            "Points": [5.0, 4.0, 3.5],
+            "MultiGW_Proj": [15.0, 12.0, 10.0],
+            "chance_of_playing_next_round": [None, None, None],
+            "status": ["a", "a", "a"],
+            "news": ["", "", ""],
+        })
+
+    def _run(self):
+        return _compute_transfer_suggestions(
+            self._avail(), self._roster(), top_n=None, positions=["D"],
+            roster_candidates=None, avail_candidates=None, one_per_position=False,
+        )[0]
+
+    def test_no_add_appears_more_than_once(self):
+        adds = [s["add_player"] for s in self._run()]
+        assert len(adds) == len(set(adds)), f"duplicate adds: {adds}"
+
+    def test_no_drop_appears_more_than_once(self):
+        drops = [s["drop_player"] for s in self._run()]
+        assert len(drops) == len(set(drops)), f"duplicate drops: {drops}"
+
+    def test_the_best_target_goes_to_the_player_you_most_want_to_replace(self):
+        """Gain is add - drop, so for a fixed add it is largest against the
+        weakest drop. That is the behaviour asked for, and it falls out of
+        sorting by gain rather than needing a special case."""
+        by_drop = {s["drop_player"]: s["add_player"] for s in self._run()}
+        assert by_drop["Weakest"] == "Best Target"
+
+    def test_a_losing_drop_still_gets_its_next_best_alternative(self):
+        """Losing the contested target must not remove the drop from the list --
+        it still wants replacing, just with someone else."""
+        by_drop = {s["drop_player"]: s["add_player"] for s in self._run()}
+        assert by_drop.get("Middle") == "Second Target"
+
+    def test_compact_view_still_returns_a_single_move_per_position(self):
+        out = _compute_transfer_suggestions(
+            self._avail(), self._roster(), top_n=None, positions=["D"],
+            roster_candidates=2, avail_candidates=5, one_per_position=True,
+        )[0]
+        assert len(out) == 1
+        assert out[0]["drop_player"] == "Weakest"
+        assert out[0]["add_player"] == "Best Target"
+
+    def test_debug_rows_separate_clearing_the_bar_from_being_recommended(self):
+        """An add can clear a drop's threshold and still lose it to a stronger
+        pairing. The transparency expander has to show which happened."""
+        _, debug = _compute_transfer_suggestions(
+            self._avail(), self._roster(), top_n=None, positions=["D"],
+            roster_candidates=None, avail_candidates=None, one_per_position=False,
+        )
+        pairs = debug[0]["pairs"]
+        assert any(p["passed"] and not p["assigned"] for p in pairs), (
+            "expected at least one pair that cleared its threshold but lost the "
+            "add to a better pairing"
+        )

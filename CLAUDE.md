@@ -942,6 +942,36 @@ can clear it and the inner loop breaks. And `DEBUG_PAIR_CAP` bounds the
 transparency expander, which otherwise renders every evaluated pair — 15 roster
 players against 150 available ones is a wall of rows, not transparency.
 
+**A suggestion list has to be a set of moves you can actually make.** Each drop
+used to be offered the single best available player at its position, so one
+standout target headed several cards -- reported from the app as Tyrick Mitchell
+being suggested to replace most of a defence he could only replace once.
+
+`_compute_transfer_suggestions()` now runs in two passes: collect every viable
+`(drop, add)` pair, then assign greedily by gain, taking a pair only if neither
+its drop nor its add is already claimed. Crucially the collection pass no longer
+stops at the first add that clears a drop's threshold -- an add claimed by a
+better pairing has to leave its runners-up behind, or the drops that lose it
+disappear from the list.
+
+Sorting by gain gives the intuitively right answer for free: gain is
+`add_adj - drop_adj`, so for a fixed add it is largest against the *weakest*
+drop. The best target lands on the player you most want to replace and the next
+drop takes the next-best target, with no special case for it.
+
+This is the assignment problem and greedy is not provably optimal. scipy is not
+a dependency here (Spearman is hand-rolled in `projection_accuracy` for the same
+reason), and at four positions against a handful of droppable players the
+difference does not justify one. Debug rows carry `assigned` alongside `passed`,
+because clearing a threshold and being recommended are no longer the same thing.
+
+Classic (`_build_transfer_suggestions`) has the same rule but keeps its own
+ordering: `drop_candidates` is already sorted by urgency -- unavailable players
+and uncovered blanks first -- which is more useful there than raw gain, so it is
+first-come-first-served on that ordering instead. A target is claimed only once
+a pairing clears its threshold, so a rejected suggestion never burns a good
+replacement.
+
 **`_effective_proj` column**: `compute_player_scores()` retains `_effective_proj` (blended_proj × start_likelihood) in its output. Consumers (Waiver Wire suggestion engine, card rendering) rely on it for GW projection display and sanity checking. Do not drop it from the result.
 
 **FFP name matching goes through `ReferenceMatcher`.** `merge_ffp_single_gw_data()`,
