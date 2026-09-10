@@ -26,7 +26,8 @@ from scripts.common.classic_squad import (
 from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections
 from scripts.common.scraping import get_ffp_feed, render_ffp_status
 from scripts.common.fixture_helpers import (
-    compute_key_differentials, live_player_status, render_key_differentials,
+    attach_matchups, compute_key_differentials, live_player_status,
+    render_key_differentials,
 )
 from scripts.common.utils import (
     find_optimal_lineup,
@@ -918,6 +919,13 @@ def _get_team_squad_and_lineup(
     else:
         squad_df["Points"] = 0.0
         squad_df["Pos Rank"] = "N/A"
+
+    # The fixture comes from the fixture list, not from whichever projection
+    # source happened to list the player. Rotowire covers only expected starters,
+    # so every other player was rendering the literal string "N/A" beside a real
+    # projection -- visible now that the blend gives FFP-only players numbers
+    # good enough to reach a lineup.
+    squad_df = attach_matchups(squad_df, config.CURRENT_GAMEWEEK)
 
     squad_df = blend_fixture_projections(squad_df, ffp_df)
 

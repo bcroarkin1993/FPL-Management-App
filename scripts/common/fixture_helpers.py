@@ -253,6 +253,91 @@ def style_fixture_difficulty(disp: pd.DataFrame, diffs: pd.DataFrame) -> str:
     return "".join(parts)
 
 
+@st.cache_data(ttl=600)
+def get_team_matchups(gameweek: int) -> dict:
+    """``{team_short: "MCI v. AVL"}`` for one gameweek, from the real fixture list.
+
+    Rotowire publishes a ``Matchup`` string, but only for the ~220 players it
+    expects to start. Every other player was falling through
+    ``merge_fpl_players_and_projections``'s unmatched branch and rendering the
+    literal string ``"N/A"`` next to a perfectly good projection -- visible now
+    that the blend gives FFP-only players real numbers and they reach a lineup.
+
+    A fixture is a property of the club, not of whichever projection source
+    happened to list the player, so it is read from the fixture list where it is
+    known for all 20 clubs. Rotowire's format is kept ("v." at home, "at" away)
+    so the two are indistinguishable on the page.
+
+    Returns an empty dict if the fixture list cannot be read; callers fall back
+    to whatever the projection source gave them.
+    """
+    try:
+        teams = _bootstrap_teams_df()
+        short = dict(zip(teams["id"], teams["short_name"]))
+        resp = requests.get(config.FPL_FIXTURES_BY_EVENT.format(gw=int(gameweek)), timeout=15)
+        resp.raise_for_status()
+        fixtures = resp.json()
+    except Exception as e:
+        _logger.warning("Could not build matchups for GW%s: %s", gameweek, e)
+        return {}
+
+    out: dict = {}
+    for fx in fixtures:
+        h, a = short.get(fx.get("team_h")), short.get(fx.get("team_a"))
+        if not h or not a:
+            continue
+        # A club plays twice in a double gameweek; show both rather than pick.
+        out.setdefault(h, []).append(f"{h} v. {a}")
+        out.setdefault(a, []).append(f"{a} at {h}")
+    return {team: ", ".join(v) for team, v in out.items()}
+
+
+def attach_matchups(df: pd.DataFrame, gameweek: int,
+                    team_col: str = "Team",
+                    matchup_col: str = "Matchup") -> pd.DataFrame:
+    """Set ``Matchup`` from the real fixture list for every row.
+
+    The fixture list is authoritative and the projection source is not, for two
+    reasons. It covers all 20 clubs, where Rotowire lists only the ~220 players
+    it expects to start -- everyone else fell through
+    ``merge_fpl_players_and_projections``'s unmatched branch and rendered the
+    literal string ``"N/A"`` beside a perfectly good projection. And it cannot go
+    stale: a source's matchup string is whatever gameweek that source was
+    written for, so a frame carrying last week's article would show last week's
+    opponent, which is the plausible-but-wrong failure this codebase keeps
+    paying for.
+
+    A club with no fixture is labelled **"No fixture"** rather than left blank.
+    A blank gameweek is real information -- it is why the projection is zero --
+    and an empty cell reads as missing data instead.
+
+    Rotowire's format is preserved ("v." at home, "at" away) so backfilled rows
+    are indistinguishable from ones the source supplied. If the fixture list
+    cannot be read, the frame is returned untouched: a stale matchup is a
+    cosmetic problem, and this must never take a page down.
+    """
+    if df is None or df.empty or team_col not in df.columns:
+        return df
+    matchups = get_team_matchups(gameweek)
+    if not matchups:
+        return df
+
+    out = df.copy()
+    resolved = out[team_col].map(matchups)
+    known_club = out[team_col].isin(matchups) | out[team_col].isin(_all_clubs(gameweek))
+    out[matchup_col] = resolved.where(resolved.notna(),
+                                      pd.Series("No fixture", index=out.index).where(known_club, ""))
+    return out
+
+
+def _all_clubs(gameweek: int) -> set:
+    """Every club in the league, so "no fixture" can be told from "unknown club"."""
+    try:
+        return set(_bootstrap_teams_df()["short_name"])
+    except Exception:                       # pragma: no cover - defensive
+        return set()
+
+
 def live_player_status(has_played: bool, fixture_finished: bool = False,
                        fixture_started: bool = False) -> str:
     """Classify a player's live-gameweek state for display and scoring.

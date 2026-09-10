@@ -15,7 +15,8 @@ from scripts.common.utils import (
     get_team_actual_lineup, get_gw_finished_teams, get_classic_bootstrap_static,
 )
 from scripts.common.fixture_helpers import (
-    compute_key_differentials, live_player_status, render_key_differentials,
+    attach_matchups, compute_key_differentials, live_player_status,
+    render_key_differentials,
 )
 from scripts.common.styled_tables import render_styled_table
 
@@ -649,6 +650,13 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
         )
 
         # Blend starters with FFP
+        # Fixtures come from the fixture list, not from whichever projection
+        # source listed the player. Rotowire covers only expected starters, so
+        # everyone else fell through merge_fpl_players_and_projections' unmatched
+        # branch and rendered the literal string "N/A" beside a real projection.
+        team1_df = attach_matchups(team1_df, config.CURRENT_GAMEWEEK)
+        team2_df = attach_matchups(team2_df, config.CURRENT_GAMEWEEK)
+
         team1_df = blend_fixture_projections(team1_df, ffp_df)
         team2_df = blend_fixture_projections(team2_df, ffp_df)
 
@@ -660,6 +668,7 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
                 projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']],
                 carry_cols=_bench1_carry,
             )
+            bench1_merged = attach_matchups(bench1_merged, config.CURRENT_GAMEWEEK)
             bench1_merged = blend_fixture_projections(bench1_merged, ffp_df)
             bench1_df = bench1_merged.set_index('Player') if 'Player' in bench1_merged.columns else bench1_merged
         if not team2_bench_raw.empty:
@@ -669,6 +678,7 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
                 projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']],
                 carry_cols=_bench2_carry,
             )
+            bench2_merged = attach_matchups(bench2_merged, config.CURRENT_GAMEWEEK)
             bench2_merged = blend_fixture_projections(bench2_merged, ffp_df)
             bench2_df = bench2_merged.set_index('Player') if 'Player' in bench2_merged.columns else bench2_merged
     else:

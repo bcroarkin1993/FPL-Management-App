@@ -4,6 +4,7 @@ from unittest.mock import patch, MagicMock
 
 import pandas as pd
 import pytest
+from scripts.common import fixture_helpers
 from scripts.common.fixture_helpers import (
     compute_key_differentials,
     _bootstrap_teams_df,
@@ -181,3 +182,66 @@ class TestGetFixtureDifficultyGrid:
         disp, diffs, avg = get_fixture_difficulty_grid(weeks=1)
         assert "ARS" in disp.index
         assert "99" not in disp.index
+
+
+class TestAttachMatchups:
+    """`merge_fpl_players_and_projections` writes the literal string "N/A" as the
+    Matchup for any player Rotowire did not list. Rotowire covers only the ~220
+    players it expects to start, so once the blend started giving FFP-only
+    players real projections they reached lineups and rendered "N/A" beside a
+    perfectly good number.
+    """
+
+    MATCHUPS = {"MCI": "MCI at MUN", "BRE": "BRE at BOU", "CHE": "CHE v. HUL"}
+
+    @pytest.fixture(autouse=True)
+    def _stub_fixtures(self, monkeypatch):
+        monkeypatch.setattr(fixture_helpers, "get_team_matchups",
+                            lambda gw: dict(self.MATCHUPS))
+        monkeypatch.setattr(fixture_helpers, "_all_clubs",
+                            lambda gw: {"MCI", "BRE", "CHE", "EVE"})
+
+    def _frame(self):
+        return pd.DataFrame({
+            "Player": ["O'Reilly", "Collins", "Haaland", "Pickford", "Ghost"],
+            "Team": ["MCI", "BRE", "MCI", "EVE", "ZZZ"],
+            "Matchup": ["N/A", "N/A", "MCI v. AVL", "N/A", "N/A"],
+        })
+
+    def test_placeholder_is_replaced_with_the_real_fixture(self):
+        out = fixture_helpers.attach_matchups(self._frame(), 4)
+        assert out.loc[0, "Matchup"] == "MCI at MUN"
+        assert out.loc[1, "Matchup"] == "BRE at BOU"
+
+    def test_a_stale_matchup_is_overridden(self):
+        """A source's matchup is whatever gameweek that source was written for.
+        Trusting it lets last week's opponent render under this week's heading --
+        plausible, wrong, and undetectable by eye."""
+        out = fixture_helpers.attach_matchups(self._frame(), 4)
+        assert out.loc[2, "Matchup"] == "MCI at MUN"
+
+    def test_a_club_with_no_fixture_says_so(self):
+        """A blank gameweek is why the projection is zero. An empty cell reads
+        as missing data instead."""
+        out = fixture_helpers.attach_matchups(self._frame(), 4)
+        assert out.loc[3, "Matchup"] == "No fixture"
+
+    def test_an_unknown_club_is_left_blank_not_mislabelled(self):
+        out = fixture_helpers.attach_matchups(self._frame(), 4)
+        assert out.loc[4, "Matchup"] == ""
+
+    def test_an_unreadable_fixture_list_leaves_the_frame_untouched(self, monkeypatch):
+        """Cosmetic. This must never take a page down."""
+        monkeypatch.setattr(fixture_helpers, "get_team_matchups", lambda gw: {})
+        before = self._frame()
+        out = fixture_helpers.attach_matchups(before, 4)
+        pd.testing.assert_frame_equal(out, before)
+
+    def test_a_frame_without_a_team_column_is_returned_unchanged(self):
+        df = pd.DataFrame({"Player": ["X"]})
+        pd.testing.assert_frame_equal(fixture_helpers.attach_matchups(df, 4), df)
+
+    def test_missing_matchup_column_is_created(self):
+        df = pd.DataFrame({"Player": ["O'Reilly"], "Team": ["MCI"]})
+        out = fixture_helpers.attach_matchups(df, 4)
+        assert out.loc[0, "Matchup"] == "MCI at MUN"
