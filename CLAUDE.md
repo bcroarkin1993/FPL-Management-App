@@ -589,6 +589,33 @@ Card heights in these lineups are computed in Python and the iframe does not scr
 (`components.html(..., scrolling=False)`), so every line-height in the CSS is
 load-bearing — underestimate one and the last card is silently clipped.
 
+### Projected Lineups — Rotowire lists more than one gameweek
+
+`scrape_rotowire_lineups()` takes every `lineup__main` section on Rotowire's
+lineups page, and that page carries whatever matches Rotowire has lineups for --
+which runs past the gameweek the app is showing. Observed 2026-09-10: eleven
+matchups, ten from GW4 and one ("Brentford vs Chelsea", 18 September) from GW5,
+rendered under a GW4 heading. Brentford were playing Bournemouth that week.
+
+Matchups are now matched as ordered `(home, away)` pairs against the real
+fixture list for the gameweek, the same technique `resolve_ffp_gameweek()` uses.
+Two details are load-bearing:
+
+- **It fails open.** An unresolvable club label, or an unreadable fixture list,
+  keeps the matchup. Showing one extra match is an annoyance; silently dropping
+  a real one is a functional loss, and club spellings are exactly what goes
+  stale when a source changes.
+- **`MatchupIndex` is assigned after filtering**, so indices stay contiguous.
+  The renderer pairs home and away by that index, and a gap would leave a
+  matchup showing only one side.
+
+Rotowire's lineups page spells clubs formally -- "AFC Bournemouth", "Brighton &
+Hove Albion", "Newcastle United" -- where every other source uses the short
+form, and none of those three were in `TEAM_FULL_TO_SHORT`. Since an unmapped
+label disables the filter for that matchup (fail-open), the missing aliases
+would have quietly let the extra fixture back in. A test pins every label the
+page currently publishes.
+
 ### Player Display Names
 
 **Always render player names via `to_display_name()` (`scripts/common/text_helpers.py`).

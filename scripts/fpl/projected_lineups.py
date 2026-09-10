@@ -8,6 +8,8 @@ import streamlit as st
 from scripts.common.error_helpers import get_logger
 from scripts.fpl.injuries import get_fpl_availability_df
 from scripts.common.utils import get_classic_bootstrap_static
+from scripts.common.text_helpers import TEAM_FULL_TO_SHORT
+from scripts.common.fixture_helpers import _bootstrap_teams_df
 from scripts.common.player_matching import canonical_normalize
 
 _logger = get_logger("fpl_app.projected_lineups")
@@ -48,13 +50,66 @@ def extract_players(section, team_type, team_name, matchup_index):
 
     return player_list
 
-def scrape_rotowire_lineups(url):
+def _gameweek_fixture_pairs(gameweek):
+    """``{(home_short, away_short)}`` for one gameweek, from the FPL fixture list.
+
+    Returns an empty set when the list cannot be read, which callers treat as
+    "do not filter" -- see :func:`_matchup_is_in_gameweek`.
+    """
+    try:
+        teams = _bootstrap_teams_df()
+        short = dict(zip(teams["id"], teams["short_name"]))
+        resp = requests.get(
+            config.FPL_FIXTURES_BY_EVENT.format(gw=int(gameweek)), timeout=15
+        )
+        resp.raise_for_status()
+        return {
+            (short.get(f.get("team_h")), short.get(f.get("team_a")))
+            for f in resp.json()
+            if short.get(f.get("team_h")) and short.get(f.get("team_a"))
+        }
+    except Exception as e:
+        _logger.warning("Could not read the GW%s fixture list: %s", gameweek, e)
+        return set()
+
+
+def _matchup_is_in_gameweek(home_team, away_team, fixture_pairs) -> bool:
+    """Does this Rotowire matchup belong to the gameweek being displayed?
+
+    Rotowire's lineups page lists whatever matches it has lineups for, which
+    runs past the current gameweek -- observed 2026-09-10 with 11 matchups, ten
+    from GW4 and one ("Brentford vs Chelsea", 18 September) from GW5. Rendered
+    under a GW4 heading that is simply the wrong fixture.
+
+    **Fails open.** An unresolvable club label, or an unreadable fixture list,
+    keeps the matchup. Showing one extra match is a mild annoyance; silently
+    dropping a real one is a functional loss, and club labels are exactly the
+    thing that goes stale when a source changes its spelling.
+    """
+    if not fixture_pairs:
+        return True
+    home = TEAM_FULL_TO_SHORT.get(str(home_team).strip())
+    away = TEAM_FULL_TO_SHORT.get(str(away_team).strip())
+    if not home or not away:
+        _logger.info(
+            "Projected Lineups: unmapped club label in %r vs %r -- keeping the "
+            "matchup rather than dropping it", home_team, away_team
+        )
+        return True
+    return (home, away) in fixture_pairs
+
+
+def scrape_rotowire_lineups(url, gameweek=None):
     """
     Scrapes the Rotowire Soccer Lineups page to extract the projected lineups for all matchups,
     excluding players listed in the Injuries section.
 
     Parameters:
     - url (str): The URL of the Rotowire lineups page.
+    - gameweek (int, optional): restrict to matchups belonging to this gameweek.
+      Rotowire lists whatever it has lineups for, which runs past the current
+      week; without this a later gameweek's fixture renders under this one's
+      heading. Defaults to ``config.CURRENT_GAMEWEEK``; pass ``0`` to disable.
 
     Returns:
     - DataFrame containing the team names, player names, positions, and matchup index.
@@ -70,15 +125,28 @@ def scrape_rotowire_lineups(url):
     # Initialize an empty list to store match data
     all_players = []
 
+    if gameweek is None:
+        gameweek = config.CURRENT_GAMEWEEK
+    fixture_pairs = _gameweek_fixture_pairs(gameweek) if gameweek else set()
+
     # Find all lineup sections (home and away matchups)
     lineup_sections = soup.find_all('div', class_='lineup__main')
 
-    # Iterate through each section to extract team and player data
-    for matchup_index, section in enumerate(lineup_sections):
+    # Iterate through each section to extract team and player data.
+    # MatchupIndex is assigned *after* the gameweek filter so the indices stay
+    # contiguous -- the renderer pairs home and away by this index, and a gap
+    # would leave a matchup with only one side.
+    matchup_index = 0
+    skipped_other_gw = 0
+    for section in lineup_sections:
         try:
             # Extract home and away team names
             home_team = section.find_previous('div', class_='lineup__mteam is-home').text.strip()
             away_team = section.find_previous('div', class_='lineup__mteam is-visit').text.strip()
+
+            if not _matchup_is_in_gameweek(home_team, away_team, fixture_pairs):
+                skipped_other_gw += 1
+                continue
 
             # Extract players while excluding those listed in the Injuries section
             home_players = extract_players(section, 'home', home_team, matchup_index)
@@ -86,9 +154,14 @@ def scrape_rotowire_lineups(url):
 
             # Add players to the list
             all_players.extend(home_players + away_players)
+            matchup_index += 1
 
         except AttributeError as e:
             _logger.warning("Error parsing lineup section (HTML structure may have changed): %s", e)
+
+    if skipped_other_gw:
+        _logger.info("Projected Lineups: skipped %d matchup(s) outside GW%s",
+                     skipped_other_gw, gameweek)
 
     # Convert the data to a pandas DataFrame
     lineups_df = pd.DataFrame(all_players, columns=['Team', 'Position', 'Player', 'MatchupIndex'])

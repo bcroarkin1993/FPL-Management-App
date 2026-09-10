@@ -41,6 +41,14 @@ TZ_ET = ZoneInfo("America/New_York")
 # guess, which happened to be right ("LEE") but logged a warning on every row of
 # every player table. tests/live/ now fails when a current club is absent.
 TEAM_FULL_TO_SHORT = {
+    # Rotowire's *lineups* page spells clubs out formally ("AFC Bournemouth",
+    # "Brighton & Hove Albion") where every other source uses the short form.
+    # An unmapped label is not cosmetic here: the Projected Lineups gameweek
+    # filter resolves both sides through this map, and a club it cannot resolve
+    # cannot be matched to a fixture.
+    "AFC Bournemouth": "BOU",
+    "Brighton & Hove Albion": "BHA", "Brighton and Hove Albion": "BHA",
+    "Newcastle United": "NEW", "Newcastle Utd": "NEW",
     "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
     "Brentford": "BRE", "Brighton": "BHA", "Chelsea": "CHE",
     "Coventry": "COV", "Coventry City": "COV",
