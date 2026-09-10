@@ -334,3 +334,67 @@ class TestSourcePositionCodesDoNotBreakMatching:
         })
         out = build_projections([ffp], gameweek=3, pool=_pool(), weights={"ffp": 1.0})
         assert out.loc[1, "Proj_Start"] == pytest.approx(8.0)
+
+
+class TestUnpricedPlayersAreNotNeutral:
+    """A player no source priced is a non-starter, not an unknown.
+
+    Reported from the app: the Waiver Wire suggested dropping Nathan Collins
+    (projected 2.9, but a 25%-chance calf injury) while keeping Taylor
+    Harwood-Bellis, who was projected 0. The drop queue sorts on
+    ``Keep Score x injury_factor``, and the two came out at 0.242 and 0.245 --
+    a gap of 0.003, entirely created by Harwood-Bellis being handed a neutral
+    1GW of 0.50 for having no projection at all.
+
+    Measured on GW4: 120 players sat on that neutral, and all 20 clubs had a
+    fixture, so not one of them was in a blank gameweek.
+    """
+
+    def _pool(self):
+        return pd.DataFrame({
+            "Player_ID": [1, 2, 3, 4],
+            "Player": ["Priced One", "Priced Two", "Unpriced Sub", "Blank Club Star"],
+            "Web_Name": ["One", "Two", "Sub", "Star"],
+            "Team": ["MCI", "MCI", "MCI", "BLA"],
+            "Position": ["M", "D", "D", "M"],
+            "status": ["a", "a", "a", "a"],
+        })
+
+    def _source(self):
+        # Two of MCI's players are priced; nobody at BLA is (a blank gameweek,
+        # or that club missing from the feed).
+        return _src("ffp", BASIS_CONDITIONAL, COVERS_ALL, {
+            "Player_ID": [1, 2],
+            "Proj_Start": [6.0, 4.0],
+            "Start_Pct": [1.0, 1.0],
+        })
+
+    def test_unpriced_player_at_a_covered_club_scores_zero(self):
+        """His club is clearly in the feed, so his absence from it means he is
+        not expected to start -- which is information, not a gap."""
+        out = build_projections([self._source()], gameweek=4,
+                                pool=self._pool(), weights={"ffp": 1.0})
+        assert out.loc[3, "Proj"] == 0.0
+
+    def test_unpriced_player_at_an_uncovered_club_stays_unknown(self):
+        """A club with no priced players at all is either blank or missing from
+        the feeds. Scoring an elite asset 0 there reads as "drop him"."""
+        out = build_projections([self._source()], gameweek=4,
+                                pool=self._pool(), weights={"ffp": 1.0})
+        assert pd.isna(out.loc[4, "Proj"])
+
+    def test_a_dead_feed_zeroes_nobody(self):
+        """If nothing was priced anywhere, the feed is down -- and no player
+        should be marked a non-starter on the strength of data that is absent."""
+        empty = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL,
+                     {"Player_ID": [], "Proj_Start": [], "Start_Pct": []})
+        out = build_projections([empty], gameweek=4,
+                                pool=self._pool(), weights={"ffp": 1.0})
+        assert out["Proj"].isna().all()
+
+    def test_an_injured_unpriced_player_scores_zero_even_at_a_blank_club(self):
+        pool = self._pool()
+        pool.loc[3, "status"] = "i"
+        out = build_projections([self._source()], gameweek=4,
+                                pool=pool, weights={"ffp": 1.0})
+        assert out.loc[4, "Proj"] == 0.0

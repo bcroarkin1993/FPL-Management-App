@@ -259,6 +259,7 @@ def build_projections(
         per_source_next3=per_source_next3,
         starters_only={s.name for s in usable if s.covers == COVERS_STARTERS},
         positions=_pool_col(pool, "Position", out.index, default="M"),
+        teams=_pool_col(pool, "Team", out.index),
         chance_of_playing=_pool_col(pool, "chance_of_playing_next_round", out.index),
         status=_pool_col(pool, "status", out.index),
         weights=weights,
@@ -286,6 +287,7 @@ def blend_aligned(
     per_source_next3: Optional[Dict[str, pd.Series]] = None,
     starters_only: Optional[set] = None,
     positions: Optional[pd.Series] = None,
+    teams: Optional[pd.Series] = None,
     chance_of_playing: Optional[pd.Series] = None,
     status: Optional[pd.Series] = None,
     weights: Optional[Dict[str, float]] = None,
@@ -429,19 +431,45 @@ def blend_aligned(
         fills = used_fallback & v.notna() & v.gt(0)
         out["Proj_Src"] = out["Proj_Src"].where(~fills, SOURCE_LABELS.get(_fb, _fb))
 
-    # --- Blank gameweeks are unknown, not zero ------------------------------
-    # A player nobody priced who is not injured or suspended has almost always
-    # had his fixture postponed. Scoring that as 0 reads as "drop him", which is
-    # how an elite asset came to be recommended for the waiver wire in a blank.
-    # NaN is the honest value and every consumer already treats it as neutral.
+    # --- Unpriced: not expected to start, or genuinely unknown? -------------
+    # These need different answers and used to get the same one.
+    #
+    # A player no source priced is almost always a squad player nobody expects
+    # to start -- Rotowire lists 20 clubs x 11, so absence from it *is* the
+    # "not starting" signal. Scoring that as unknown hands him a neutral 0.50
+    # on the 1GW percentile, which ranks him above players who are projected to
+    # play but carry a doubt. Measured on GW4: 120 players sat on exactly 0.50,
+    # and every one of the 20 clubs had a fixture, so not one of them was blank.
+    #
+    # The case the old rule was written for is real but rarer: a genuinely blank
+    # gameweek, where scoring an elite asset as 0 reads as "drop him". The two
+    # are told apart by whether the player's *club* was priced at all. A club
+    # with a fixture has 20+ priced players in a healthy feed, so an unpriced
+    # player there is a non-starter. A club with none is either blank or missing
+    # from the feeds, and "unknown" is then the honest answer.
+    #
+    # Keying on club coverage rather than the fixture list also makes this
+    # degrade correctly when a source is down: if the feeds carry nothing for
+    # anyone, nobody is zeroed on the strength of a feed that isn't there.
+    unpriced = out["Proj_Start"].isna()
+    if teams is not None:
+        club = teams.reindex(index).astype(str)
+        club_priced = (~unpriced).groupby(club).transform("sum")
+        club_known = club_priced.gt(0)
+    else:
+        # Without club information, fall back to whether anything was priced at
+        # all -- coarse, but it still separates "a source is down" from
+        # "this player is not in the lineup".
+        club_known = pd.Series(bool((~unpriced).any()), index=index)
+
     unavailable = pd.Series(False, index=index)
     if status is not None:
         unavailable |= status.reindex(index).isin(["i", "s", "u"]).fillna(False)
     if chance_of_playing is not None:
         c = pd.to_numeric(chance_of_playing.reindex(index), errors="coerce")
         unavailable |= (c.notna() & c.lt(50))
-    unpriced = out["Proj_Start"].isna()
-    out.loc[unpriced & unavailable, ["Proj", "Proj_Start"]] = 0.0
+
+    out.loc[unpriced & (club_known | unavailable), ["Proj", "Proj_Start"]] = 0.0
 
     # --- Multi-gameweek -----------------------------------------------------
     next3 = pd.Series(np.nan, index=index, dtype="float64")

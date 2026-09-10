@@ -302,6 +302,29 @@ that once had every Power Rankings team scoring exactly 50), and
 `chance_of_playing` is read under either name (the Free Hit and Wildcard pools
 shorten the bootstrap field when building their own rows).
 
+**An unpriced player is a non-starter, not an unknown — unless his whole club
+is missing.** These need different answers and once got the same one. A player
+no source priced is almost always a squad player nobody expects to start:
+Rotowire lists 20 clubs x 11, so absence from it *is* the "not starting" signal.
+Treating that as unknown handed him a neutral 0.50 on the 1GW percentile, which
+ranks him **above** players who are projected to play but carry a doubt.
+
+That surfaced as a real bad recommendation: the Waiver Wire suggested dropping
+Nathan Collins (projected 2.9, 25%-chance calf injury) while keeping Taylor
+Harwood-Bellis, projected 0. The drop queue sorts on `Keep Score x
+injury_factor`, and the two landed at 0.242 and 0.245 — a gap of 0.003 created
+entirely by the phantom neutral. Measured on GW4, 120 players sat on exactly
+0.50 and every one of the 20 clubs had a fixture, so not one was blank.
+
+The two cases are told apart by **whether the player's club was priced at all**.
+A club with a fixture has 20+ priced players in a healthy feed, so an unpriced
+player there is a non-starter and scores 0. A club with none is either blank or
+missing from the feeds, and "unknown" is then the honest answer — which is the
+case the rule was originally written for, where scoring an elite asset 0 reads
+as "drop him". Keying on club coverage rather than the fixture list also makes
+it degrade correctly when a source is down: if the feeds carry nothing for
+anyone, nobody is zeroed on the strength of data that is absent.
+
 **Validation.** `check_blended_projections()` asserts `Proj <= Proj_Start`,
 `Proj == Proj_Start × Start_Pct`, `Start_Pct ∈ [0,1]`, and that the blend lies
 inside the range of its own sources. `check_source_scale_agreement()` — written

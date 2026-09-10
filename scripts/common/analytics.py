@@ -1334,6 +1334,9 @@ def blend_projections_onto(
         # silently do nothing -- the same class of failure that once had every
         # team in the Power Rankings scoring exactly 50.
         positions=_normalized_positions(result),
+        # Club coverage is how the engine tells "not expected to start" from
+        # "this whole club is missing from the feeds", so it needs the club.
+        teams=(result["Team"] if "Team" in result.columns else None),
         chance_of_playing=_chance_of_playing_col(result),
         status=result.get("status"),
         gameweek=gw,
