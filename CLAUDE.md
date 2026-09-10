@@ -465,6 +465,59 @@ Note `.gitignore` un-ignores these with `archive/*` rather than `archive/`: git
 cannot re-include a file whose parent *directory* is excluded, so the negation
 would otherwise do nothing.
 
+### Projection accuracy — replacing the assumption with a measurement
+
+`scripts/common/projection_accuracy.py` (pure), surfaced as the **Accuracy** tab
+on the Projections Hub.
+
+Reads the pre/actual pairs from `projection_archive` and reports how wrong each
+source was. Pure and dependency-free beyond pandas: Spearman is computed from
+ranks, because `Series.corr(method="spearman")` imports scipy, which is not a
+dependency and which the scheduled workflow would then install every run.
+
+**Two scorings, because they answer different questions.**
+
+| Scope | Question |
+|---|---|
+| `all` | `Proj` (expected points) vs actual, over **every** player — including those who never played and scored zero, which is a projection error like any other. The number the app is judged on. |
+| `starters` | `Proj_Start` (if he starts) vs actual, restricted to players who **actually started**. Isolates the points model from the minutes model. |
+
+A source can be good at what a player scores when he plays and bad at predicting
+whether he plays; one number cannot tell you which you are looking at.
+
+**Coverage is not comparable, so cross-source comparison needs a common subset.**
+Measured on GW3: Rotowire priced 220 players, FFP 543, FPL's `ep_this` 368.
+Rotowire lists only expected starters — higher-scoring, higher-variance players —
+so scoring each source over its own coverage ranks Rotowire worst for reasons
+that have nothing to do with accuracy. `common_subset=True` restricts every
+source to the players all of them priced. It is deliberately **not** applied to
+the `all` scope: that scope's whole point is the full population, and
+restricting it would drop the non-starters and quietly turn the honest
+end-to-end number into a starters-only one.
+
+**Bias is signed and reported separately from MAE.** A source that is
+consistently 0.4 points high is a different problem from one that is noisy, and
+MAE cannot tell them apart. On GW3 this already separated the three cleanly:
+Rotowire +0.74, FFP +0.05, FPL xP −0.45. Bias converges far faster than the MAE
+ordering does.
+
+**A backfill is never fitted on.** `captured_before_deadline` marks a snapshot
+taken after the fact, which can see team news — in the limit, lineups — that no
+manager had. Backfills are shown, clearly labelled, but `fit_blend_weights()`
+skips them: letting a flattered source move the weights the app runs on is
+exactly how a measurement harness makes things worse.
+
+**The UI refuses to overclaim.** Below `MIN_GAMEWEEKS_FOR_CONFIDENCE` (5) the
+tab warns that differences this small are noise and that the configured weights
+are deliberately left alone. With nothing scoreable it says which half is
+missing for which gameweek, rather than rendering blank — that is the state
+every user sees until a gameweek completes after snapshots began.
+
+`fit_blend_weights()` grid-searches the simplex and reports the fitted weights,
+their MAE, and the MAE of the currently configured weights for comparison.
+Nothing is applied automatically; Phase 4 is where a measured weight actually
+moves `config.PROJECTION_SOURCE_WEIGHTS`.
+
 ### Source Freshness
 
 `get_rotowire_article_updated()` (`scripts/common/scraping.py`) scrapes an
@@ -1492,7 +1545,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Projection accuracy harness | Phases 1-2 of 4 complete | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Remaining: **Phase 3** per-player accuracy scoring (MAE/RMSE/bias/Spearman by source and position, scored twice — `Proj` over all players, `Proj_Start` over players who actually started, which separates the points model from the minutes model) surfaced as an Accuracy tab on the Hub; **Phase 4** fit `PROJECTION_SOURCE_WEIGHTS` from measured accuracy, give `fpl_ep` a real weight, and add an odds-derived source from stored match odds. |
+| Projection accuracy harness | Phases 1-3 of 4 complete | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". Remaining: **Phase 4** fit `PROJECTION_SOURCE_WEIGHTS` from measured accuracy, give `fpl_ep` a real weight, and add an odds-derived source from stored match odds. |
 | Multi-GW Transfer Planner | Completed (polish available) | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. Gaps: only Next3GWs used (Next2/4–6 fetched but ignored); Classic Transfers lacks sanity-check gate that Draft has. |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
 | Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |

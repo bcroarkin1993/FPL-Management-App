@@ -33,6 +33,7 @@ from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import to_display_name
 from scripts.common.analytics import blend_projections_onto, merge_season_projections
 from scripts.common.fpl_classic_api import get_classic_bootstrap_static
+from scripts.common import projection_accuracy, projection_archive
 
 
 # =============================================================================
@@ -916,6 +917,179 @@ def render_blended_projections():
 
 # =============================================================================
 
+# =============================================================================
+# Accuracy — how wrong has each source actually been?
+# =============================================================================
+
+_SOURCE_LABELS = {
+    "blend": "Blended (what the app uses)",
+    "rotowire": "Rotowire",
+    "ffp": "Fantasy Football Pundit",
+    "fpl_ep": "FPL expected points",
+}
+
+
+def render_accuracy():
+    """Score archived projections against what actually happened.
+
+    The 60/40 Rotowire/FFP split was an assumption for as long as this app has
+    existed, because no projection was ever written down. This tab is what turns
+    it into a measurement -- and it is deliberately cautious about saying so,
+    because a confident-looking table built on two gameweeks would be worse than
+    no table at all.
+    """
+    scored = projection_accuracy.score_archive(common_subset=True)
+    note = projection_accuracy.confidence_note(scored)
+
+    if scored.empty:
+        st.info(note)
+        pre = projection_archive.list_pre()
+        act = projection_archive.list_actuals()
+        st.caption(
+            "Snapshots held: projections for %s, actual points for %s. Both "
+            "halves are needed before a gameweek can be scored."
+            % (_gw_list(pre), _gw_list(act))
+        )
+        return
+
+    gws = sorted(scored["gameweek"].unique())
+    if scored["gameweek"].nunique() < projection_accuracy.MIN_GAMEWEEKS_FOR_CONFIDENCE:
+        st.warning(note)
+    else:
+        st.caption(note)
+
+    if (scored["capture"] == "backfill").any():
+        backfilled = sorted(scored.loc[scored["capture"] == "backfill", "gameweek"].unique())
+        st.caption(
+            "⚠️ %s captured after the deadline. A backfill can see team news — in "
+            "the limit, lineups — that no manager had when they picked, so it "
+            "flatters every source in it. Shown here, but never used to fit "
+            "blend weights." % _gw_list(backfilled)
+        )
+
+    st.markdown("#### Error by source")
+    st.caption(
+        "**Starters** compares each source's *if he starts* projection against "
+        "what players who actually started scored — it isolates the points model "
+        "from the minutes model. Every source is scored on the same players, "
+        "because Rotowire prices only expected starters and would otherwise be "
+        "judged on a harder population than the rest. **MAE** is the average "
+        "miss in points; **bias** is signed, so a source that is consistently "
+        "high reads positive."
+    )
+
+    summary = projection_accuracy.summarise(scored)
+    starters = summary[summary["scope"] == projection_accuracy.SCOPE_STARTERS].copy()
+    if not starters.empty:
+        show = pd.DataFrame({
+            "Source": starters["source"].map(_SOURCE_LABELS).fillna(starters["source"]),
+            "GWs": starters["gameweeks"],
+            "Players scored": starters["n"],
+            "Coverage": starters["coverage"] * 100,
+            "MAE": starters["mae"],
+            "RMSE": starters["rmse"],
+            "Bias": starters["bias"],
+            "Rank corr": starters["spearman"],
+        })
+        render_styled_table(
+            show.reset_index(drop=True),
+            col_formats={"Coverage": "{:.0f}%", "MAE": "{:.2f}", "RMSE": "{:.2f}",
+                         "Bias": "{:+.2f}", "Rank corr": "{:.2f}"},
+            negative_color_cols=["MAE", "RMSE"],
+        )
+        st.caption(
+            "Coverage is the share of the player pool each source priced at all — "
+            "a real property of the source, not a flaw. Rotowire's low number is "
+            "it listing only expected starters."
+        )
+
+    ev = summary[summary["scope"] == projection_accuracy.SCOPE_ALL]
+    if not ev.empty:
+        row = ev.iloc[0]
+        st.markdown("#### End-to-end")
+        st.caption(
+            "The blended **expected points** against actual points across every "
+            "player, including those who never played and scored zero — a "
+            "projection error like any other. This is the number the app is "
+            "actually judged on."
+        )
+        c1, c2, c3 = st.columns(3)
+        c1.metric("MAE", f"{row['mae']:.2f}")
+        c2.metric("Bias", f"{row['bias']:+.2f}")
+        c3.metric("Rank correlation", f"{row['spearman']:.2f}")
+
+    with st.expander("Per gameweek"):
+        detail = scored.copy()
+        detail["Source"] = detail["source"].map(_SOURCE_LABELS).fillna(detail["source"])
+        detail = detail[["gameweek", "Source", "scope", "capture", "n",
+                         "mae", "bias", "spearman"]]
+        detail.columns = ["GW", "Source", "Scope", "Capture", "N", "MAE", "Bias", "Rank corr"]
+        render_styled_table(
+            detail.reset_index(drop=True),
+            col_formats={"MAE": "{:.2f}", "Bias": "{:+.2f}", "Rank corr": "{:.2f}"},
+        )
+
+    _render_weight_fit(scored)
+
+
+def _render_weight_fit(scored):
+    """What weights would have been best, and whether that is worth acting on."""
+    st.markdown("#### Blend weights")
+    fit = projection_accuracy.fit_blend_weights()
+
+    if fit.get("fitted") is None:
+        st.info(
+            fit.get("note")
+            or "Not enough pre-deadline history to fit weights yet."
+        )
+        st.caption(
+            "Current weights: "
+            + " · ".join(f"{_SOURCE_LABELS.get(k, k)} {v:.0%}"
+                         for k, v in (config.PROJECTION_SOURCE_WEIGHTS or {}).items()
+                         if v > 0)
+        )
+        return
+
+    fitted, current = fit["fitted"], fit["current"]
+    gain = fit["current_mae"] - fit["mae"]
+    st.caption(
+        "Fitted on %d gameweek%s (%d player-gameweeks), pre-deadline captures "
+        "only." % (fit["gameweeks"], "" if fit["gameweeks"] == 1 else "s", fit["n"])
+    )
+    rows = [{
+        "Source": _SOURCE_LABELS.get(k, k),
+        "Current": current.get(k, 0.0) * 100,
+        "Best fit": fitted.get(k, 0.0) * 100,
+    } for k in fitted]
+    render_styled_table(
+        pd.DataFrame(rows),
+        col_formats={"Current": "{:.0f}%", "Best fit": "{:.0f}%"},
+    )
+    st.caption(
+        "Current weights give MAE **%.3f**; the best fit gives **%.3f** "
+        "(%.3f better)." % (fit["current_mae"], fit["mae"], gain)
+    )
+
+    if fit["gameweeks"] < projection_accuracy.MIN_GAMEWEEKS_FOR_CONFIDENCE:
+        st.warning(
+            "This fit is on %d gameweek%s. Weights chosen from a sample this "
+            "small would be fitting noise — the app's configured weights are "
+            "deliberately left alone until there are at least %d."
+            % (fit["gameweeks"], "" if fit["gameweeks"] == 1 else "s",
+               projection_accuracy.MIN_GAMEWEEKS_FOR_CONFIDENCE)
+        )
+
+
+def _gw_list(gws) -> str:
+    """'GW1, GW2 and GW3', or 'none'."""
+    if not gws:
+        return "none"
+    labels = [f"GW{g}" for g in gws]
+    if len(labels) == 1:
+        return labels[0]
+    return ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
 def show_player_projections_page():
     """Main projections hub page with tabbed interface."""
     st.title("Projections Hub")
@@ -928,8 +1102,9 @@ def show_player_projections_page():
     # Blended leads. The individual sources stay one click away rather than
     # being hidden: the blend is the answer, but seeing what fed it is how you
     # judge whether to trust it on a particular player.
-    tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "Blended",
+        "Accuracy",
         "Rotowire",
         "FFP Data",
         "Goal/Assist Odds",
@@ -941,18 +1116,21 @@ def show_player_projections_page():
         render_blended_projections()
 
     with tab1:
-        render_rotowire_projections()
+        render_accuracy()
 
     with tab2:
-        render_ffp_data()
+        render_rotowire_projections()
 
     with tab3:
-        render_goalscorer_odds()
+        render_ffp_data()
 
     with tab4:
-        render_clean_sheet_odds()
+        render_goalscorer_odds()
 
     with tab5:
+        render_clean_sheet_odds()
+
+    with tab6:
         render_match_odds()
 
     # Footer with data source summary
