@@ -999,6 +999,26 @@ first-come-first-served on that ordering instead. A target is claimed only once
 a pairing clears its threshold, so a rejected suggestion never burns a good
 replacement.
 
+**A multi-transfer plan is one move, so it has to be legal as a whole.**
+`_build_multi_transfer_plan()` proposes two transfers made together, and every
+constraint it enforces is therefore joint. Budget is the one that bit: both
+incoming players come out of a single pot -- bank plus *both* selling prices --
+so testing each add against the whole pot independently proposed Gabriel
+(£8.0m) alongside Morgan Rogers (£7.6m) against £10.7m, each affordable alone
+and the pair impossible. The same "as a pair, not one transfer at a time"
+reasoning covers the other two: the legs could name the **same player** (two
+drops in one position searched an identical candidate list and picked its
+identical winner), and two adds from one club could take that club to four.
+
+It is a small exact search -- the top `candidates_per_position` affordable
+players at each of the two positions, every combination scored on summed
+`Transfer Score - Keep Score` -- rather than best-add-per-drop, because a
+greedy pick cannot see that the cheaper partner is what makes the premium
+affordable. ~0.1s against a 600-player pool.
+
+Single-transfer suggestions stay individually budgeted (`bank + selling_price`
+per drop): they are alternatives, ranked, and only one of them gets made.
+
 **`_effective_proj` column**: `compute_player_scores()` retains `_effective_proj` (blended_proj × start_likelihood) in its output. Consumers (Waiver Wire suggestion engine, card rendering) rely on it for GW projection display and sanity checking. Do not drop it from the result.
 
 **FFP name matching goes through `ReferenceMatcher`.** `merge_ffp_single_gw_data()`,

@@ -866,99 +866,149 @@ def _render_chip_advisor(chip_status: dict, squad_df: pd.DataFrame, current_gw: 
             st.success("All chips used — focus on optimizing weekly transfers.")
 
 
+def _selling_price(row) -> float:
+    """What a squad player releases into the bank when sold."""
+    price = row.get("selling_price")
+    if price is None or (isinstance(price, float) and pd.isna(price)):
+        price = row.get("now_cost", 0)
+    return float(price or 0)
+
+
+def _plan_card(drop_row, add_row, pos_labels: Dict, depth_map: Optional[Dict],
+               funds: float, outlay: float) -> Dict:
+    """One leg of a multi-transfer plan, in the shape the card renderer wants."""
+    pos = drop_row["Position"]
+    add_form_col = "HealthyForm" if "HealthyForm" in add_row.index else "form"
+    drop_form_col = "HealthyForm" if "HealthyForm" in drop_row.index else "form"
+    proj = pd.to_numeric(add_row.get("Projected_Points"), errors="coerce")
+    return {
+        "position": pos_labels.get(pos, pos),
+        "score_diff": float(add_row.get("Transfer Score", 0)) - float(drop_row.get("Keep Score", 0)),
+        "drop_player": drop_row["Player"],
+        "drop_full_name": drop_row.get("Full Name") or drop_row["Player"],
+        "drop_team": drop_row["Team"],
+        "drop_price": f"£{_selling_price(drop_row)/10:.1f}m",
+        "drop_form": f"{float(drop_row.get(drop_form_col, 0) or 0):.1f}",
+        "drop_season_pts": drop_row.get("total_points", 0),
+        "drop_injury": _get_availability_indicator(
+            drop_row.get("chance_of_playing_next_round"), drop_row.get("news", "")),
+        "add_player": add_row["Player"],
+        "add_full_name": add_row.get("Full Name") or add_row["Player"],
+        "add_team": add_row["Team"],
+        "add_price": f"£{add_row['now_cost']/10:.1f}m",
+        "add_form": f"{float(add_row.get(add_form_col, 0) or 0):.1f}",
+        "add_proj_pts": f"{proj:.1f}" if pd.notna(proj) else "N/A",
+        "add_injury": _get_availability_indicator(
+            add_row.get("chance_of_playing_next_round"), add_row.get("news", "")),
+        "rationale": "Part of optimal 2-transfer plan",
+        "urgency": compute_transfer_urgency(pos, depth_map) if depth_map else "",
+        "ep_delta": None,
+        "price_trend": None,
+        "add_ownership_badge": _ownership_badge(add_row.get("selected_by_percent", 0)),
+        "hit_verdict": None,
+        "plan_label": "2-Transfer Plan (Both Free)",
+        # Budget the whole plan was solved against, carried on each leg so the
+        # renderer can show what the pair actually costs.
+        "plan_funds": funds,
+        "plan_outlay": outlay,
+    }
+
+
 def _build_multi_transfer_plan(squad_df: pd.DataFrame, available_df: pd.DataFrame,
-                                bank: int, depth_map: Optional[Dict] = None) -> List[Dict]:
-    """Find optimal 2-player swap when both transfers are free."""
+                                bank: int, depth_map: Optional[Dict] = None,
+                                candidates_per_position: int = 25) -> List[Dict]:
+    """Find the best *affordable* pair of transfers when both are free.
+
+    Affordability is a **joint** constraint. Both incoming players are bought
+    out of one pot -- the bank plus both selling prices -- so pricing each add
+    against the whole pot independently is how this came to propose two
+    premiums that could not be bought together: Gabriel (£8.0m) and Rogers
+    (£7.6m) against a pot of £10.7m, each of which cleared the test on its own.
+
+    The same "legal as a pair, not one transfer at a time" rule applies twice
+    more, and both were broken for the same reason: the two legs could name the
+    **same player** (identical position, identical candidate list, identical
+    winner), and two adds from one club could take that club to four.
+    """
     if squad_df.empty or available_df.empty or "Keep Score" not in squad_df.columns:
         return []
 
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
 
-    # Bottom-6 Keep Score as drop candidates
-    drop_candidates = squad_df.nsmallest(6, "Keep Score")
+    # Best-first within a position, so a truncated candidate list keeps the
+    # players worth having. The caller sorts this way already; do not rely on it.
+    pool = available_df
+    if "Transfer Score" in pool.columns:
+        pool = pool.sort_values("Transfer Score", ascending=False)
+
+    drop_list = [row for _, row in squad_df.nsmallest(6, "Keep Score").iterrows()]
 
     best_score = -999.0
-    best_plan: List[Dict] = []
+    best: Optional[tuple] = None
 
-    drop_list = list(drop_candidates.iterrows())
-    for i, (_, drop1) in enumerate(drop_list):
-        for _, drop2 in drop_list[i + 1:]:
+    for i, drop1 in enumerate(drop_list):
+        for drop2 in drop_list[i + 1:]:
             if drop1["Player_ID"] == drop2["Player_ID"]:
                 continue
 
-            combined_budget = bank + drop1.get("selling_price", drop1.get("now_cost", 0)) + \
-                              drop2.get("selling_price", drop2.get("now_cost", 0))
+            funds = bank + _selling_price(drop1) + _selling_price(drop2)
+            squad_without = squad_df[
+                ~squad_df["Player_ID"].isin([drop1["Player_ID"], drop2["Player_ID"]])
+            ]
+            team_counts = squad_without["Team"].value_counts().to_dict()
 
-            # Find best add for each drop position independently
-            pair_suggestions = []
-            for drop_row in [drop1, drop2]:
-                pos = drop_row["Position"]
-                cands = available_df[
-                    (available_df["Position"] == pos) &
-                    (available_df["now_cost"] <= combined_budget)
-                ].head(10)
+            by_position = {}
+            for pos in {drop1["Position"], drop2["Position"]}:
+                affordable = pool[(pool["Position"] == pos) & (pool["now_cost"] <= funds)]
+                by_position[pos] = [r for _, r in affordable.head(candidates_per_position).iterrows()]
 
-                found = None
-                for _, add_row in cands.iterrows():
-                    # Club rule check
-                    squad_without = squad_df[
-                        ~squad_df["Player_ID"].isin([drop1["Player_ID"], drop2["Player_ID"]])
-                    ]
-                    add_team = add_row.get("Team")
-                    if (squad_without["Team"] == add_team).sum() >= 3:
+            for add1 in by_position[drop1["Position"]]:
+                for add2 in by_position[drop2["Position"]]:
+                    if add1["Player_ID"] == add2["Player_ID"]:
                         continue
-                    found = add_row
-                    break
+                    if float(add1["now_cost"]) + float(add2["now_cost"]) > funds:
+                        continue
+                    counts = dict(team_counts)
+                    legal = True
+                    for add in (add1, add2):
+                        team = add.get("Team")
+                        counts[team] = counts.get(team, 0) + 1
+                        if counts[team] > 3:
+                            legal = False
+                            break
+                    if not legal:
+                        continue
 
-                if found is None:
-                    break
+                    combined = (
+                        float(add1.get("Transfer Score", 0)) - float(drop1.get("Keep Score", 0))
+                        + float(add2.get("Transfer Score", 0)) - float(drop2.get("Keep Score", 0))
+                    )
+                    if combined > best_score:
+                        best_score = combined
+                        best = (drop1, add1, drop2, add2, funds)
 
-                add_form_col = "HealthyForm" if "HealthyForm" in found.index else "form"
-                proj = pd.to_numeric(found.get("Projected_Points"), errors="coerce")
-                pair_suggestions.append({
-                    "position": pos_labels.get(pos, pos),
-                    "score_diff": float(found.get("Transfer Score", 0)) - float(drop_row.get("Keep Score", 0)),
-                    "drop_player": drop_row["Player"],
-                    "drop_full_name": drop_row.get("Full Name") or drop_row["Player"],
-                    "drop_team": drop_row["Team"],
-                    "drop_price": f"£{drop_row['now_cost']/10:.1f}m",
-                    "drop_form": f"{float(drop_row.get('HealthyForm' if 'HealthyForm' in drop_row.index else 'form', 0) or 0):.1f}",
-                    "drop_season_pts": drop_row.get("total_points", 0),
-                    "drop_injury": _get_availability_indicator(
-                        drop_row.get("chance_of_playing_next_round"), drop_row.get("news", "")),
-                    "add_player": found["Player"],
-                    "add_full_name": found.get("Full Name") or found["Player"],
-                    "add_team": found["Team"],
-                    "add_price": f"£{found['now_cost']/10:.1f}m",
-                    "add_form": f"{float(found.get(add_form_col, 0) or 0):.1f}",
-                    "add_proj_pts": f"{proj:.1f}" if pd.notna(proj) else "N/A",
-                    "add_injury": _get_availability_indicator(
-                        found.get("chance_of_playing_next_round"), found.get("news", "")),
-                    "rationale": "Part of optimal 2-transfer plan",
-                    "urgency": compute_transfer_urgency(pos, depth_map) if depth_map else "",
-                    "ep_delta": None,
-                    "price_trend": None,
-                    "add_ownership_badge": _ownership_badge(found.get("selected_by_percent", 0)),
-                    "hit_verdict": None,
-                    "plan_label": "2-Transfer Plan (Both Free)",
-                })
+    if best is None:
+        return []
 
-            if len(pair_suggestions) == 2:
-                combined_score = sum(s["score_diff"] for s in pair_suggestions)
-                if combined_score > best_score:
-                    best_score = combined_score
-                    best_plan = pair_suggestions
-
-    return best_plan
+    drop1, add1, drop2, add2, funds = best
+    outlay = float(add1["now_cost"]) + float(add2["now_cost"])
+    return [
+        _plan_card(drop1, add1, pos_labels, depth_map, funds, outlay),
+        _plan_card(drop2, add2, pos_labels, depth_map, funds, outlay),
+    ]
 
 
-def _render_multi_transfer_plan(plan: List[Dict]):
+def _render_multi_transfer_plan(plan: List[Dict], free_transfers: int = 2):
     """Render the optimal 2-transfer plan side-by-side."""
     if not plan:
         return
 
     st.subheader("2-Transfer Plan (Both Free)")
-    st.caption("Optimal pair of transfers when you have 2 free transfers banked.")
+    # The section only renders when the transfers are banked, so stating the
+    # condition reads as a hypothetical. State the fact instead.
+    banked = "2 free transfers" if free_transfers == 2 else f"{free_transfers} free transfers"
+    st.caption(f"You have {banked} banked — this is the best pair to spend two of them on, "
+               "within your budget.")
 
     cols = st.columns(2)
     for col, s in zip(cols, plan):
@@ -987,7 +1037,16 @@ def _render_multi_transfer_plan(plan: List[Dict]):
             """
             st.markdown(card_html, unsafe_allow_html=True)
 
-    st.caption("Both transfers are free this gameweek — optimal pair based on Transfer/Keep Scores.")
+    funds = plan[0].get("plan_funds")
+    outlay = plan[0].get("plan_outlay")
+    if funds is not None and outlay is not None:
+        st.caption(
+            f"Both transfers are free this gameweek — optimal pair based on Transfer/Keep Scores. "
+            f"Cost £{outlay/10:.1f}m of the £{funds/10:.1f}m you'd have available "
+            f"(bank plus both sales), leaving £{(funds - outlay)/10:.1f}m."
+        )
+    else:
+        st.caption("Both transfers are free this gameweek — optimal pair based on Transfer/Keep Scores.")
 
 
 def _get_blanking_team_ids(current_gw: int, bootstrap: dict) -> set:
@@ -1835,7 +1894,7 @@ def show_classic_transfers_page():
         multi_plan = _build_multi_transfer_plan(squad_df, available, bank, depth_map=depth_map)
         if multi_plan:
             st.markdown("")
-            _render_multi_transfer_plan(multi_plan)
+            _render_multi_transfer_plan(multi_plan, free_transfers=free_transfers)
 
     st.markdown("---")
 
