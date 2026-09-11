@@ -25,6 +25,7 @@ from scripts.common.utils import (
     position_converter,
 )
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.text_helpers import compact_html
 from scripts.common.analytics import (
     compute_player_scores,
     compute_healthy_form,
@@ -1051,7 +1052,7 @@ def _render_multi_transfer_plan(plan: List[Dict], free_transfers: int = 2):
                 </div>
             </div>
             """
-            st.markdown(card_html, unsafe_allow_html=True)
+            st.markdown(compact_html(card_html), unsafe_allow_html=True)
 
     funds = plan[0].get("plan_funds")
     outlay = plan[0].get("plan_outlay")
@@ -1544,7 +1545,7 @@ def _render_transfer_suggestions(suggestions: List[Dict], free_transfers: int = 
             {_build_trend_ownership_row(s)}
         </div>
         """
-        st.markdown(card_html, unsafe_allow_html=True)
+        st.markdown(compact_html(card_html), unsafe_allow_html=True)
 
 
 # ---------------------------

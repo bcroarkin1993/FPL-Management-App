@@ -8,6 +8,7 @@ from scripts.common.text_helpers import (
     TEAM_FULL_TO_SHORT,
     TZ_ET,
     _to_short_team_code,
+    compact_html,
     format_last_updated,
     to_display_name,
 )
@@ -132,3 +133,33 @@ class TestToShortTeamCode:
     def test_every_mapped_code_is_three_letters(self):
         bad = {k: v for k, v in TEAM_FULL_TO_SHORT.items() if len(v) != 3 or not v.isupper()}
         assert not bad, "malformed short codes: %s" % bad
+
+
+class TestCompactHtml:
+    """A blank line ends an HTML block in Markdown.
+
+    Everything after it is parsed as fresh Markdown, and indented four spaces
+    that is an indented code block -- which is how a card's closing `</div>`
+    came to render as visible text whenever an optional fragment on its own
+    line was empty.
+    """
+
+    def test_drops_blank_lines(self):
+        assert compact_html("<div>\n\n  <p>hi</p>\n\n</div>") == "<div> <p>hi</p> </div>"
+
+    def test_an_empty_fragment_leaves_no_gap(self):
+        card = '<div class="c">\n    <span>x</span>\n    {}\n</div>'.format("")
+        out = compact_html(card)
+        assert "\n" not in out
+        assert out == '<div class="c"> <span>x</span> </div>'
+
+    def test_keeps_a_space_between_fragments(self):
+        """A CSS declaration split across source lines must not be welded shut."""
+        out = compact_html('<div style="border: 1px solid #444;\n  background: #000;">x</div>')
+        assert "#444; background:" in out
+
+    def test_single_line_input_is_unchanged(self):
+        assert compact_html("<div>x</div>") == "<div>x</div>"
+
+    def test_empty_input(self):
+        assert compact_html("") == ""

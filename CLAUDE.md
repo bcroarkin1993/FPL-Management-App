@@ -1019,6 +1019,21 @@ affordable. ~0.1s against a 600-player pool.
 Single-transfer suggestions stay individually budgeted (`bank + selling_price`
 per drop): they are alternatives, ranked, and only one of them gets made.
 
+**A blank line ends an HTML block, so cards are flattened before rendering.**
+`compact_html()` (`text_helpers.py`) joins a multi-line card onto one line, and
+every `st.markdown(..., unsafe_allow_html=True)` card goes through it. Markdown
+terminates an HTML block at a blank line and parses what follows as fresh
+Markdown -- indented four spaces, that is a *code block* -- so an optional
+fragment that renders to `""` on a line of its own dumps the card's closing
+`</div>` on screen as literal text.
+
+Which fragments are empty depends on the data, which is why it shipped: the
+2-Transfer Plan card renders correctly for a 25%-owned add (who gets a
+"Template" badge) and breaks for a 9%-owned one (who gets `""`). The
+suggestion cards carry two such lines -- `_build_hit_verdict_row()` and
+`_build_trend_ownership_row()` -- and the Projected Lineups matchup card two
+more. `components.html()` renders raw HTML in an iframe and needs none of this.
+
 **Cards render the blend, via `_blended_proj()`.** Every "Proj" on this page --
 the suggestion cards, both legs of the plan, and the comparison tool's
 "Projected points change" -- read `Projected_Points`, which is Rotowire's raw

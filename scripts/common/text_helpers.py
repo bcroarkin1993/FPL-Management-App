@@ -421,3 +421,24 @@ def canonical_normalize(name: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
 
     return s
+
+
+def compact_html(html: str) -> str:
+    """Flatten a multi-line HTML block onto one line before rendering it.
+
+    A blank line **ends an HTML block** in Markdown: everything after it is
+    parsed as fresh Markdown, and at four spaces of indentation that means an
+    indented code block. So an optional fragment that renders to "" on a line of
+    its own -- an ownership badge on a player who is neither template nor
+    differential, a card with no hit verdict -- leaves a blank line mid-card and
+    the closing ``</div>`` reaches the user as literal text.
+
+    It is invisible until the data makes it visible: the same card renders
+    correctly for a 25%-owned player and breaks for a 9%-owned one. Use this on
+    any multi-line HTML passed to ``st.markdown(..., unsafe_allow_html=True)``.
+    ``components.html()`` renders raw HTML in an iframe and needs no such care.
+
+    Lines are joined with a space, so a CSS declaration split across source
+    lines survives intact.
+    """
+    return " ".join(line.strip() for line in html.splitlines() if line.strip())

@@ -8,7 +8,7 @@ import streamlit as st
 from scripts.common.error_helpers import get_logger
 from scripts.fpl.injuries import get_fpl_availability_df
 from scripts.common.utils import get_classic_bootstrap_static
-from scripts.common.text_helpers import TEAM_FULL_TO_SHORT
+from scripts.common.text_helpers import TEAM_FULL_TO_SHORT, compact_html
 from scripts.common.fixture_helpers import _bootstrap_teams_df
 from scripts.common.player_matching import canonical_normalize
 
@@ -708,7 +708,7 @@ def show_projected_lineups():
                 home_df = lineups_df[(lineups_df['Team'] == home_team) & (lineups_df['MatchupIndex'] == idx)]
                 away_df = lineups_df[(lineups_df['Team'] == away_team) & (lineups_df['MatchupIndex'] == idx)]
                 card_html = _build_lineup_card_html(home_team, away_team, home_df, away_df)
-                cols[i % 2].markdown(card_html, unsafe_allow_html=True)
+                cols[i % 2].markdown(compact_html(card_html), unsafe_allow_html=True)
 
     # -- Drill-down: full soccer field + squad detail cards --
     st.markdown("---")
