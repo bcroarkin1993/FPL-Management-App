@@ -795,7 +795,14 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
             row = {
                 'Player': fpl_player,
                 'Team': fpl_team,
-                'Matchup': 'N/A',
+                # Empty, not "N/A". Rotowire lists only expected starters, so
+                # this branch is every squad player it left out -- and a fixture
+                # is a property of the club, which is perfectly well known. The
+                # pages backfill it from the fixture list via attach_matchups();
+                # where one forgets, an empty cell renders as nothing, while
+                # "N/A" renders as a confident statement that the club has no
+                # fixture. The module's own other default here is already ''.
+                'Matchup': '',
                 'Position': fpl_position,
                 'Price': np.nan,
                 'TSB %': np.nan,

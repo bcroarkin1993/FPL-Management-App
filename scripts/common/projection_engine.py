@@ -290,6 +290,11 @@ def build_projections(
         per_source_startpct=per_source_startpct,
         per_source_next3=per_source_next3,
         starters_only={s.name for s in usable if s.covers == COVERS_STARTERS},
+        source_club_coverage={
+            s.name: {str(k): int(v) for k, v in s.df["Team"].value_counts().items()}
+            for s in usable
+            if s.covers == COVERS_STARTERS and "Team" in s.df.columns and not s.df.empty
+        },
         positions=_pool_col(pool, "Position", out.index, default="M"),
         teams=_pool_col(pool, "Team", out.index),
         chance_of_playing=_pool_col(pool, "chance_of_playing_next_round", out.index),
@@ -325,6 +330,7 @@ def blend_aligned(
     weights: Optional[Dict[str, float]] = None,
     fallback_names: Optional[Sequence[str]] = None,
     gameweek: Optional[int] = None,
+    source_club_coverage: Optional[Dict[str, Dict[str, int]]] = None,
     extra: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """The blend itself, over Series that are already aligned to one index.
@@ -342,6 +348,7 @@ def blend_aligned(
     """
     weights = dict(weights) if weights is not None else _weights()
     floors = _start_floors()
+    source_club_coverage = dict(source_club_coverage or {})
     per_source_startpct = dict(per_source_startpct or {})
     per_source_next3 = dict(per_source_next3 or {})
     starters_only = set(starters_only or ())
@@ -415,8 +422,20 @@ def blend_aligned(
         if club.isna().all():
             continue
         known_club = club.notna()
-        covered = (priced.groupby(club.astype(str)).transform("sum")
-                   .ge(min_coverage) & known_club)
+        # Coverage is a property of the SOURCE's table, not of the frame being
+        # blended. Counting within the frame works only when the frame is the
+        # whole player pool: a 15-player Classic squad holds two or three
+        # players per club, so the threshold can never be met and the penalty
+        # silently does nothing on every per-squad page -- which is exactly how
+        # this shipped looking correct, having been measured against a 652-row
+        # pool. `source_club_coverage` carries the real counts; the in-frame
+        # count remains the fallback, and being unreachable it fails open.
+        published = source_club_coverage.get(name)
+        if published:
+            club_count = club.astype(str).map(published).fillna(0)
+        else:
+            club_count = priced.groupby(club.astype(str)).transform("sum")
+        covered = club_count.ge(min_coverage) & known_club
         implied = positions.map(omitted_starts).astype("float64")
         target = covered & ~priced & implied.notna()
         if not target.any():

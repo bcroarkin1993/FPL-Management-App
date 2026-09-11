@@ -693,6 +693,12 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
         team2_full = merge_fpl_players_and_projections(
             team2_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
         )
+        # As above: merge_fpl_players_and_projections writes the literal string
+        # "N/A" into Matchup for anyone Rotowire did not list, and this branch --
+        # the one that runs pre-deadline, when there are no picks to read -- was
+        # the path the fixture-list backfill missed.
+        team1_full = attach_matchups(team1_full, config.CURRENT_GAMEWEEK)
+        team2_full = attach_matchups(team2_full, config.CURRENT_GAMEWEEK)
         team1_full = blend_fixture_projections(team1_full, ffp_df)
         team2_full = blend_fixture_projections(team2_full, ffp_df)
         team1_df = team1_full.copy()

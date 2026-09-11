@@ -18,6 +18,7 @@ from scripts.common.utils import (
     render_ffp_status,
     blend_projections_onto,
 )
+from scripts.common.fixture_helpers import attach_matchups
 from scripts.common.team_analysis_helpers import render_season_highlights
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.bench_analysis import compute_draft_bench_data, render_bench_analysis
@@ -40,6 +41,11 @@ def show_team_projections(team_id, fpl_player_projections, gameweek, ffp_df=None
 
     # Merge the FPL team df with the fpl_player_projections
     team_player_projections = merge_fpl_players_and_projections(team_composition_df, fpl_player_projections)
+
+    # Rotowire lists only expected starters, so everyone else comes out of that
+    # merge with the literal string "N/A" in Matchup. The fixture is a property
+    # of the club and is read from the fixture list, where all 20 are known.
+    team_player_projections = attach_matchups(team_player_projections, gameweek)
 
     # Blend with FFP and price in start likelihood. This page showed raw Rotowire
     # under the heading "Points" while Draft Fixture Projections showed the blend

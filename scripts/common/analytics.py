@@ -378,6 +378,7 @@ def compute_player_scores(
         per_source_basis=_per_source_basis,
         per_source_startpct=_per_source_startpct,
         starters_only={"rotowire"},
+        source_club_coverage=_rotowire_club_coverage(),
         positions=(result["Position"] if "Position" in result.columns
                    else pd.Series("M", index=result.index)),
         # Club coverage is how the engine tells "Rotowire left him out of the
@@ -1262,6 +1263,24 @@ def merge_ffp_single_gw_data(
     return result
 
 
+def _rotowire_club_coverage() -> dict:
+    """Per-club row counts from the last full Rotowire fetch, as {"rotowire": {...}}.
+
+    The engine needs this to tell "Rotowire left him out of the XI" from
+    "Rotowire has nothing for this club". It cannot be counted off the frame
+    being blended -- a 15-player squad holds two or three players per club, so
+    the test can never be met and the omission penalty does nothing on every
+    per-squad page. Every caller here has already fetched the table (that is
+    where the merged Rotowire column came from), so the memo is warm; empty
+    means no penalty, which is the same fail-open as having no team labels.
+    """
+    try:
+        counts = projection_sources.rotowire_club_coverage()
+    except Exception:                       # pragma: no cover
+        return {}
+    return {"rotowire": counts} if counts else {}
+
+
 def blend_projections_onto(
     players_df: pd.DataFrame,
     ffp_df: Optional[pd.DataFrame] = None,
@@ -1331,6 +1350,7 @@ def blend_projections_onto(
         per_source_startpct=per_source_startpct,
         per_source_next3=per_source_next3,
         starters_only={"rotowire"},
+        source_club_coverage=_rotowire_club_coverage(),
         fallback_names=fallback_names,
         # Normalized to G/D/M/F. Pages disagree about this: the Draft pages carry
         # GK/DEF/MID/FWD while analytics groups on single letters. Feeding the

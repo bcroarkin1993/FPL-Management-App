@@ -18,7 +18,7 @@ cached wrappers live in ``scraping.py``, which delegates here.
 import logging
 import re
 from datetime import datetime
-from typing import NamedTuple, Optional
+from typing import Dict, NamedTuple, Optional
 
 from bs4 import BeautifulSoup
 import numpy as np
@@ -172,6 +172,39 @@ _ROTOWIRE_RANGE_ARTICLE_RE = re.compile(r"best-fpl-picks-for-gameweeks-(\d+)-(\d
 # Above this, a "single gameweek" projection table is not credible (the highest realistic
 # single-GW Rotowire projection is well under 10) — used as a tripwire, not a correction.
 _ROTOWIRE_MAX_PLAUSIBLE_MEDIAN = 10
+
+
+# How many players Rotowire published per club, memoised from the last full
+# fetch. The engine needs it to tell "left out of the XI" from "this club is
+# missing", and that question is a property of *Rotowire's table*, not of
+# whatever frame is being blended: a 15-player Classic squad holds two or three
+# players per club, so a coverage test run against the frame can never be
+# satisfied and the omission penalty silently does nothing on every per-squad
+# page. Recorded here rather than passed down through ten callsites, and read
+# through `rotowire_club_coverage()`.
+#
+# It is only ever *read* as evidence for a penalty, so an empty memo -- offline,
+# in unit tests, before the first fetch -- means no penalty, which is the same
+# fail-open behaviour as having no team labels at all.
+_ROTOWIRE_CLUB_COVERAGE: Dict[str, int] = {}
+
+
+def _record_club_coverage(df, limit) -> None:
+    """Memoise per-club row counts from a full Rotowire table."""
+    if limit:
+        return   # a truncated table under-counts every club
+    try:
+        if df is not None and not df.empty and "Team" in df.columns:
+            _ROTOWIRE_CLUB_COVERAGE.clear()
+            _ROTOWIRE_CLUB_COVERAGE.update(
+                {str(k): int(v) for k, v in df["Team"].value_counts().items()})
+    except Exception:                       # pragma: no cover - never break a fetch
+        _logger.debug("Could not record Rotowire club coverage", exc_info=True)
+
+
+def rotowire_club_coverage() -> Dict[str, int]:
+    """``{club: players published}`` from the last full Rotowire fetch, or {}."""
+    return dict(_ROTOWIRE_CLUB_COVERAGE)
 
 
 def fetch_rotowire_projections(url, limit=None):
@@ -351,6 +384,7 @@ def fetch_rotowire_projections(url, limit=None):
     player_rankings.index = player_rankings.index + 1
 
     _logger.debug("Rotowire: Successfully parsed %d players from %s", len(player_rankings), url)
+    _record_club_coverage(player_rankings, limit)
     return player_rankings
 
 

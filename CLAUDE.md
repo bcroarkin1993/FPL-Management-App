@@ -301,6 +301,17 @@ load-bearing:
   None, when the pool has no `Team` column, so `is not None` is not the test:
   grouping those on `str(None)` puts every player in one trivially-"covered"
   bucket and fires the penalty on exactly the frames carrying no evidence for it.
+- **Coverage is a property of Rotowire's table, not of the frame being blended.**
+  Counting priced players *within the frame* is only meaningful when the frame is
+  the whole pool: a 15-player Classic squad holds two or three players per club,
+  so the threshold is unreachable and the penalty silently does nothing on every
+  per-squad page — Fixture Projections, the lineup cards, Team Analysis. This
+  shipped that way and looked right, having been measured against a 652-row pool.
+  `projection_sources` memoises per-club counts at the fetch
+  (`rotowire_club_coverage()`), `build_projections` derives them from the source's
+  own table, and the two `analytics` entry points read the memo — so no page has
+  to pass anything and none can forget. A truncated (`limit=`) fetch is not
+  recorded, since it under-counts every club and would read as an outage.
 - **Calibrated on bias, not MAE.** A cohort that mostly scores zero always
   rewards projecting zero, so MAE alone drives the constant to 0. Replaying GW3:
   omitted-cohort bias +0.129 → −0.097, their MAE 0.655 → 0.497, listed players
@@ -646,6 +657,18 @@ Two details are load-bearing:
 - **`MatchupIndex` is assigned after filtering**, so indices stay contiguous.
   The renderer pairs home and away by that index, and a gap would leave a
   matchup showing only one side.
+
+**The unmatched branch of `merge_fpl_players_and_projections()` leaves `Matchup`
+empty, not `"N/A"`.** Rotowire lists only expected starters, so that branch is
+every squad player it left out — and a fixture is a property of the club, which
+is perfectly well known. `attach_matchups()` backfills it from the fixture list;
+where a page forgets, an empty cell renders as nothing while `"N/A"` renders as
+a confident claim that the club has no fixture. The backfill was added to four
+of six callsites, and the two it missed — Draft Fixture Projections' optimal-XI
+branch and Draft Team Analysis — are the ones that run *pre-deadline*, which is
+when anyone looks at a projection. `tests/common/test_matchup_wiring.py` walks
+the AST of the pages that render a matchup and fails on a merged frame that
+never reaches `attach_matchups()`.
 
 Rotowire's lineups page spells clubs formally -- "AFC Bournemouth", "Brighton &
 Hove Albion", "Newcastle United" -- where every other source uses the short

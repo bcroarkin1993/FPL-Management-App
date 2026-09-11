@@ -139,3 +139,65 @@ class TestNobodyReimplementsTheBlend:
             capture_output=True, text=True,
         )
         assert result.returncode == 0, result.stderr
+
+
+class TestRotowireCoverageMemo:
+    """The omission penalty needs Rotowire's club coverage, and no page passes it.
+
+    Coverage is a property of Rotowire's published table, not of the frame being
+    blended -- a 15-player squad can never show 5 priced players at one club. So
+    it is memoised at the fetch and read by the two analytics entry points,
+    rather than threaded through ten page callsites where one would be forgotten.
+    """
+
+    def test_the_fetch_records_club_counts(self):
+        import pandas as pd
+        from scripts.common import projection_sources
+
+        projection_sources._ROTOWIRE_CLUB_COVERAGE.clear()
+        projection_sources._record_club_coverage(
+            pd.DataFrame({"Team": ["LIV"] * 11 + ["ARS"] * 11}), limit=None)
+        assert projection_sources.rotowire_club_coverage() == {"LIV": 11, "ARS": 11}
+
+    def test_a_truncated_table_is_not_recorded(self):
+        """A `limit` under-counts every club, which reads as an outage."""
+        import pandas as pd
+        from scripts.common import projection_sources
+
+        projection_sources._ROTOWIRE_CLUB_COVERAGE.clear()
+        projection_sources._record_club_coverage(
+            pd.DataFrame({"Team": ["LIV"] * 3}), limit=20)
+        assert projection_sources.rotowire_club_coverage() == {}
+
+    def test_an_empty_memo_means_no_penalty(self):
+        """Offline, in tests, before the first fetch: fail open, never punish."""
+        import pandas as pd
+        from scripts.common import projection_sources
+        from scripts.common.analytics import blend_fixture_projections
+
+        squad = pd.DataFrame({
+            "Player_ID": [1, 2, 3], "Team": ["LIV"] * 3, "Position": ["M"] * 3,
+            "Points": [5.0, 5.0, None],
+            "FFP_Starting_Predicted": [5.0] * 3, "FFP_Start": [80, 80, 70],
+        })
+        projection_sources._ROTOWIRE_CLUB_COVERAGE.clear()
+        out = blend_fixture_projections(squad.copy(), None)
+        assert out.loc[2, "Start_Pct"] == 1.0
+
+    def test_a_warm_memo_reaches_a_squad_sized_frame(self):
+        import pandas as pd
+        from scripts.common import projection_sources
+        from scripts.common.analytics import blend_fixture_projections
+
+        squad = pd.DataFrame({
+            "Player_ID": [1, 2, 3], "Team": ["LIV"] * 3, "Position": ["M"] * 3,
+            "Points": [5.0, 5.0, None],
+            "FFP_Starting_Predicted": [5.0] * 3, "FFP_Start": [80, 80, 70],
+        })
+        projection_sources._ROTOWIRE_CLUB_COVERAGE.clear()
+        projection_sources._ROTOWIRE_CLUB_COVERAGE.update({"LIV": 11})
+        try:
+            out = blend_fixture_projections(squad.copy(), None)
+            assert out.loc[2, "Start_Pct"] < 0.70
+        finally:
+            projection_sources._ROTOWIRE_CLUB_COVERAGE.clear()

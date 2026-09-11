@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from scripts.common.projection_engine import (
+    blend_aligned,
     build_projections,
     attach_projections,
     DEFAULT_OMITTED_STARTS,
@@ -236,6 +237,66 @@ class TestRotowireOmission:
         pool = _covered_pool().drop(columns=["Team"])
         out = self._run(pool, _covered_sources(omitted_ffp_start=0.70))
         assert out.loc[9, "Start_Pct"] == pytest.approx(0.70)
+
+    def test_coverage_comes_from_the_source_table_not_the_frame(self):
+        """The frame is usually a 15-player squad, which can never show coverage.
+
+        Counting Rotowire-priced players *within the frame* is only meaningful
+        when the frame is the whole pool. A Classic squad holds two or three
+        players per club, so the threshold was unreachable and the penalty
+        silently did nothing on every per-squad page -- Fixture Projections, the
+        lineup cards, Team Analysis. It looked correct because it was measured
+        against a 652-row pool.
+        """
+        pool = pd.DataFrame({
+            "Player_ID": [1, 2, 3],
+            "Player": ["A", "B", "C"],
+            "Team": ["LIV"] * 3,
+            "Position": ["M"] * 3,
+        })
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player_ID": [1, 2], "Proj_Start": [5.0, 5.0]})
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL,
+                   {"Player_ID": [1, 2, 3], "Proj_Start": [5.0] * 3,
+                    "Start_Pct": [0.80, 0.80, 0.70]})
+
+        # Two priced players in the frame: not enough to conclude anything.
+        assert self._run(pool, (rw, ffp)).loc[3, "Start_Pct"] == pytest.approx(0.70)
+
+        # Rotowire published 11 at LIV, which the frame simply cannot see.
+        idx = pd.Index([1, 2, 3], name="Player_ID")
+        out = blend_aligned(
+            index=idx,
+            per_source_raw={"rotowire": pd.Series([5.0, 5.0, np.nan], index=idx),
+                            "ffp": pd.Series([5.0, 5.0, 5.0], index=idx)},
+            per_source_basis={"rotowire": BASIS_CONDITIONAL, "ffp": BASIS_CONDITIONAL},
+            per_source_startpct={"ffp": pd.Series([0.80, 0.80, 0.70], index=idx)},
+            starters_only={"rotowire"},
+            positions=pd.Series(["M"] * 3, index=idx),
+            teams=pd.Series(["LIV"] * 3, index=idx),
+            weights={"rotowire": 0.6, "ffp": 0.4},
+            source_club_coverage={"rotowire": {"LIV": 11}},
+        )
+        assert out.loc[3, "Start_Pct"] == pytest.approx(
+            0.6 * DEFAULT_OMITTED_STARTS["M"] + 0.4 * 0.70)
+
+    def test_build_projections_derives_coverage_from_the_source_itself(self):
+        """A source carrying Team labels needs no help from the caller."""
+        pool = pd.DataFrame({
+            "Player_ID": list(range(1, 8)),
+            "Player": [f"P{i}" for i in range(1, 8)],
+            "Team": ["LIV"] * 7,
+            "Position": ["M"] * 7,
+        })
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player_ID": list(range(1, 7)), "Team": ["LIV"] * 6,
+                   "Proj_Start": [5.0] * 6})
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL,
+                   {"Player_ID": list(range(1, 8)), "Proj_Start": [5.0] * 7,
+                    "Start_Pct": [0.80] * 6 + [0.70]})
+        out = build_projections([rw, ffp], gameweek=3, pool=pool,
+                                weights={"rotowire": 0.6, "ffp": 0.4})
+        assert out.loc[7, "Start_Pct"] < 0.70
 
     def test_the_implied_value_is_recorded_for_the_harness(self):
         out = self._run(_covered_pool(), _covered_sources())
