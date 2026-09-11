@@ -731,6 +731,24 @@ class TestCheckResolvedSquad:
     def test_healthy_squad_is_silent(self):
         assert check_resolved_squad(self._good(), self._bootstrap()) == []
 
+    def test_a_chip_from_another_gameweek_is_an_error(self):
+        """A wildcard played in GW3 rendered as "Active Chip" throughout GW4."""
+        issues = check_resolved_squad(
+            self._good(source_gw=3, target_gw=4, is_stale=True,
+                       active_chip="wildcard"),
+            self._bootstrap())
+        chip = [i for i in issues if "wildcard" in i.message]
+        assert len(chip) == 1 and chip[0].severity == "error"
+
+    def test_a_chip_on_the_target_gameweek_is_fine(self):
+        assert check_resolved_squad(
+            self._good(active_chip="bboost"), self._bootstrap()) == []
+
+    def test_a_stale_squad_with_no_chip_only_warns(self):
+        issues = check_resolved_squad(
+            self._good(source_gw=3, target_gw=4, is_stale=True), self._bootstrap())
+        assert [i.severity for i in issues] == ["warning"]
+
     def test_missing_resolution_is_an_error(self):
         issues = check_resolved_squad(None)
         assert [i.severity for i in issues] == ["error"]

@@ -671,6 +671,25 @@ unauthenticated path is therefore the default, and the H2H opponent calls and
 the league leaderboard loop can never reach for a credential on someone else's
 behalf.
 
+**An active chip belongs to the gameweek its picks belong to.** FPL publishes
+no chip for a gameweek whose deadline has not passed -- the provenance string
+says exactly that -- so a last-deadline squad carries *last* gameweek's chip.
+Passed straight through, a wildcard played in GW3 had the Transfers page
+announcing "Active Chip: Wildcard" for all of GW4, and a spent Bench Boost would
+have scored the current bench. `active_chip` is now None unless `source_gw ==
+target_gw`; the past one stays on `source_chip`, and `check_resolved_squad()`
+errors on the mismatch.
+
+**Chip *availability* means playable this gameweek.** Wildcard and Bench Boost
+have two uses, one per half-season, and "you own one somewhere this season" is a
+different question: with the first wildcard played in GW3, GW4 listed Wildcard
+under Chips Available because slot 2 exists -- it does not open until GW20. The
+Chip Strategy advisor gates on the same flag, so it could recommend a rebuild
+sixteen weeks before it could be actioned. `_parse_chip_status()` scopes both to
+the current half and reports the rest in `available_later`, rendered as a muted
+"Wildcard · GW20" pill -- dropping it silently would read as "your wildcard is
+gone".
+
 **`is_stale` and `provenance` are the point, not a nicety.** Between gameweeks
 without a credential, the last-deadline squad is the only available answer —
 what must never happen again is it being presented as current. The banner

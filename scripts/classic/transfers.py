@@ -452,13 +452,27 @@ def _get_availability_indicator(chance: Optional[int], news: str) -> str:
         return "✓"
 
 
+# First gameweek in which a double-use chip's second slot may be played.
+CHIP_SLOT2_FIRST_GW = 20
+
+
 def _parse_chip_status(history: dict, current_gw: int) -> dict:
     """Parse chip usage and availability from team history.
 
-    Both Wildcard and Bench Boost are now double-use chips:
+    Both Wildcard and Bench Boost are double-use chips:
       - Slot 1: used before GW20 (event < 20)
       - Slot 2: used in GW20+ (event >= 20)
     Free Hit and Triple Captain remain single-use.
+
+    **"Available" means playable this gameweek, not owned somewhere in the
+    season.** The two are different for a double-use chip and conflating them
+    listed "Wildcard" under Chips Available at GW4 for a manager who had played
+    it in GW3 -- the second slot exists, but not until GW20. The Chip Strategy
+    advisor reads the same flag, so it was also capable of recommending a
+    wildcard rebuild that could not be actioned for sixteen weeks.
+
+    Chips whose next slot opens later are reported separately in
+    ``available_later``, since "you have no wildcard" would be just as wrong.
     """
     chips_used = history.get("chips", []) if history else []
 
@@ -472,18 +486,24 @@ def _parse_chip_status(history: dict, current_gw: int) -> dict:
         elif name in used:
             used[name] = event
 
-    def _double_chip_available(events: list) -> bool:
-        slot1_used = any(e < 20 for e in events)
-        slot2_used = any(e >= 20 for e in events)
-        return not slot1_used or not slot2_used
+    def _playable_now(events: list) -> bool:
+        """Is this double-use chip's *current* slot still unused?"""
+        if current_gw < CHIP_SLOT2_FIRST_GW:
+            return not any(e < CHIP_SLOT2_FIRST_GW for e in events)
+        return not any(e >= CHIP_SLOT2_FIRST_GW for e in events)
 
-    wildcard_1_used = any(e < 20 for e in used["wildcard"])
-    wildcard_2_used = any(e >= 20 for e in used["wildcard"])
-    wildcard_available = _double_chip_available(used["wildcard"])
+    def _playable_later(events: list) -> bool:
+        """Second slot still to come, but not before GW20."""
+        return (current_gw < CHIP_SLOT2_FIRST_GW
+                and not any(e >= CHIP_SLOT2_FIRST_GW for e in events))
 
-    bboost_1_used = any(e < 20 for e in used["bboost"])
-    bboost_2_used = any(e >= 20 for e in used["bboost"])
-    bboost_available = _double_chip_available(used["bboost"])
+    wildcard_1_used = any(e < CHIP_SLOT2_FIRST_GW for e in used["wildcard"])
+    wildcard_2_used = any(e >= CHIP_SLOT2_FIRST_GW for e in used["wildcard"])
+    wildcard_available = _playable_now(used["wildcard"])
+
+    bboost_1_used = any(e < CHIP_SLOT2_FIRST_GW for e in used["bboost"])
+    bboost_2_used = any(e >= CHIP_SLOT2_FIRST_GW for e in used["bboost"])
+    bboost_available = _playable_now(used["bboost"])
 
     available = []
     if wildcard_available:
@@ -495,9 +515,19 @@ def _parse_chip_status(history: dict, current_gw: int) -> dict:
     if used["3xc"] is None:
         available.append("3xc")
 
+    # Owned, but not yet playable: the second slot of a double-use chip whose
+    # first slot is spent. Listing it as available is wrong; dropping it
+    # silently reads as "that chip is gone".
+    available_later = [
+        chip for chip, events in (("wildcard", used["wildcard"]), ("bboost", used["bboost"]))
+        if chip not in available and _playable_later(events)
+    ]
+
     return {
         "used": used,
         "available": available,
+        "available_later": available_later,
+        "slot2_first_gw": CHIP_SLOT2_FIRST_GW,
         "wildcard_1_used": wildcard_1_used,
         "wildcard_2_used": wildcard_2_used,
         "wildcard_available": wildcard_available,
@@ -673,14 +703,23 @@ def _render_transfer_status_panel(bank: int, squad_value: int, free_transfers: i
     else:
         active_val, active_color, active_sub = "None Active", "#6b7280", ""
 
-    # Available chips card (with pill badges)
+    # Available chips card (with pill badges). A chip whose next slot does not
+    # open until GW20 is shown muted and dated rather than as available now.
     avail = chip_status.get("available", [])
-    if avail:
+    later = chip_status.get("available_later", [])
+    slot2_gw = chip_status.get("slot2_first_gw", 20)
+    if avail or later:
         badges = "".join(
             f'<span style="background:{chip_colors.get(c, "#444")};color:#fff;'
             f'padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:bold;margin:2px;">'
             f'{chip_names.get(c, c)}</span>'
             for c in avail
+        )
+        badges += "".join(
+            f'<span style="background:#2d2d2d;color:#9ca3af;border:1px dashed #4b5563;'
+            f'padding:2px 8px;border-radius:10px;font-size:0.72em;margin:2px;">'
+            f'{chip_names.get(c, c)} &middot; GW{slot2_gw}</span>'
+            for c in later
         )
         chips_card = (
             f'<div style="border:1px solid #333;border-radius:10px;padding:14px;'

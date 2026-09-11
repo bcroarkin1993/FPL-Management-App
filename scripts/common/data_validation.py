@@ -1339,6 +1339,20 @@ def check_resolved_squad(resolution: Optional[dict],
             "presenting it as current.",
         ))
 
+    source_gw = resolution.get("source_gw")
+    target_gw = resolution.get("target_gw")
+    if (resolution.get("active_chip") and source_gw is not None
+            and target_gw is not None and source_gw != target_gw):
+        issues.append(Issue(
+            check, "error",
+            "Resolved squad reports '%s' active for GW%s, but its picks are "
+            "GW%s's." % (resolution.get("active_chip"), target_gw, source_gw),
+            "A chip belongs to the gameweek its picks belong to. FPL publishes "
+            "no chip for a gameweek whose deadline has not passed, so this is "
+            "last gameweek's chip being presented as this one's — which also "
+            "makes a past Bench Boost score the current bench.",
+        ))
+
     return issues
 
 

@@ -84,7 +84,12 @@ class SquadResolution:
     """
 
     picks: List[dict] = field(default_factory=list)
+    # The chip active for `target_gw`, or None. NOT the chip that was active in
+    # whatever gameweek the picks came from -- see `source_chip`.
     active_chip: Optional[str] = None
+    # The chip active in `source_gw`, whenever that differs. Kept so a caller
+    # that wants to say "you wildcarded last week" still can.
+    source_chip: Optional[str] = None
     entry_history: Dict[str, Any] = field(default_factory=dict)
     source: str = SOURCE_PICKS
     source_gw: Optional[int] = None
@@ -312,6 +317,7 @@ def resolve_classic_squad(
             return SquadResolution(
                 picks=payload["picks"],
                 active_chip=payload.get("active_chip"),
+                source_chip=payload.get("active_chip"),
                 entry_history=payload.get("entry_history", {}),
                 source=SOURCE_MY_TEAM,
                 source_gw=target_gw,
@@ -395,9 +401,18 @@ def resolve_classic_squad(
     else:
         provenance = f"Squad as registered for GW{source_gw}."
 
+    # An active chip belongs to the gameweek its picks belong to. FPL publishes
+    # no chip for a gameweek whose deadline has not passed -- the provenance
+    # string above says exactly that -- so a last-deadline squad carries *last*
+    # gameweek's chip. Passed straight through, a wildcard played in GW3 had the
+    # Transfers page announcing "Active Chip: Wildcard" all through GW4, and
+    # would have had a GW3 Bench Boost scoring GW4's bench.
+    source_chip = picks_data.get("active_chip")
+
     return SquadResolution(
         picks=picks_data.get("picks", []),
-        active_chip=picks_data.get("active_chip"),
+        active_chip=source_chip if source_gw == target_gw else None,
+        source_chip=source_chip,
         entry_history=picks_data.get("entry_history", {}),
         source=source,
         source_gw=source_gw,

@@ -168,6 +168,47 @@ class TestFreeHitSkip:
 
 # ── Staleness ─────────────────────────────────────────────────────────────────
 
+class TestActiveChip:
+    """A chip belongs to the gameweek its picks belong to.
+
+    Reported from the app: a wildcard played in GW3 had the Transfers page
+    announcing "Active Chip: Wildcard" all through GW4. FPL publishes no chip
+    for a gameweek whose deadline has not passed, so a last-deadline squad
+    carries *last* gameweek's chip -- and passing it through unchanged would
+    also have a spent Bench Boost scoring the current bench.
+    """
+
+    def test_a_past_gameweeks_chip_is_not_reported_as_active(self, env):
+        played = _picks(PRE_WILDCARD)
+        played["active_chip"] = "wildcard"
+        res = _resolve(picks_by_gw={2: played})
+
+        assert res.source_gw == 2 and res.target_gw == 3
+        assert res.active_chip is None, "GW2's wildcard is not active in GW3"
+        assert res.as_picks_data()["active_chip"] is None
+
+    def test_the_past_chip_is_still_available_to_callers(self, env):
+        played = _picks(PRE_WILDCARD)
+        played["active_chip"] = "wildcard"
+        res = _resolve(picks_by_gw={2: played})
+        assert res.source_chip == "wildcard"
+
+    def test_a_chip_on_the_target_gameweek_is_active(self, env):
+        played = _picks(PRE_WILDCARD)
+        played["active_chip"] = "bboost"
+        res = _resolve(picks_by_gw={3: played})
+
+        assert res.source_gw == res.target_gw == 3
+        assert res.active_chip == "bboost"
+
+    def test_authenticated_chip_is_always_current(self, env):
+        live = _picks(POST_WILDCARD)
+        live["active_chip"] = "3xc"
+        res = _resolve(has_auth=True, my_team=live, auth_status=STATUS_OK)
+        assert res.active_chip == "3xc"
+        assert res.source_chip == "3xc"
+
+
 class TestStaleness:
     def test_stale_between_gameweeks(self, env):
         res = _resolve()
