@@ -62,6 +62,27 @@ from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings, 
 
 POSITION_LABEL_TO_CODE = {"GK": "G", "DEF": "D", "MID": "M", "FWD": "F"}
 
+
+def _filter_by_position(df, labels):
+    """Rows at the selected positions. Empty selection means empty board.
+
+    Frames on this page carry either the short codes analytics groups on
+    (``G/D/M/F``) or the long ones the Draft API publishes (``GK/DEF/MID/FWD``),
+    depending on which merge produced them, so both are accepted. Matching only
+    one silently drops every row -- the same mismatch that once had every team
+    in the Power Rankings scoring exactly 50.
+    """
+    if df is None or df.empty or "Position" not in df.columns:
+        return df
+    wanted = {POSITION_LABEL_TO_CODE[l] for l in (labels or []) if l in POSITION_LABEL_TO_CODE}
+    if not wanted:
+        return df.iloc[0:0]
+    if len(wanted) == len(POSITION_LABEL_TO_CODE):
+        return df
+    pos = df["Position"].astype(str).str.upper().str.strip()
+    pos = pos.map(lambda p: POSITION_LABEL_TO_CODE.get(p, p))
+    return df[pos.isin(wanted)]
+
 # "Best per position" is the compact default: the single strongest move at each
 # position, which is the shape the page shipped with. The rest scan the whole
 # roster against the whole available pool.
@@ -2488,24 +2509,51 @@ def show_waiver_wire_page():
         )
 
     st.subheader("Available Players (ranked)")
-    _n_locked_shown = int((_display_avail.get("Status", pd.Series(dtype=str)).str.startswith("🔒")).sum()) \
-        if "Status" in _display_avail.columns else 0
-    if _n_locked_shown:
-        st.caption(
-            f"🔒 {_n_locked_shown} of these players are locked — recently dropped or added, "
-            "so they cannot be picked up until the next waiver deadline. They are ranked "
-            "here for waiver planning but are never proposed as transfers."
-        )
-    display_cols_avail = ["Player", "Team", "Position", "Status", "Proj", "Proj_Src", "Form", "AvgFDRNextN", "Season_Points", "1GW", "ROS", "Transfer Score"]
-    display_cols_avail = [c for c in display_cols_avail if c in _display_avail.columns]
-    render_styled_table(
-        _display_avail[display_cols_avail].reset_index(drop=True).rename(
-            columns={"Proj": "Proj Pts", "Proj_Src": "Src"}),
-        col_formats={"Proj Pts": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}",
-                     "1GW": "{:.2f}", "ROS": "{:.2f}", "Transfer Score": "{:.2f}"},
-        positive_color_cols=["1GW", "ROS", "Transfer Score"],
-        max_height=500,
+    _avail_pos_labels = st.multiselect(
+        "Positions",
+        options=list(POSITION_LABEL_TO_CODE.keys()),
+        default=list(POSITION_LABEL_TO_CODE.keys()),
+        key="waiver_avail_positions",
+        help="Narrow the board to the positions you are actually shopping for. "
+             "Ranking is unaffected — these are the same scores, filtered.",
     )
+    _total_avail = len(_display_avail)
+    _display_avail = _filter_by_position(_display_avail, _avail_pos_labels)
+
+    if _display_avail.empty:
+        st.info(
+            "No available players at "
+            f"{', '.join(_avail_pos_labels) if _avail_pos_labels else 'the selected positions'}."
+            if _avail_pos_labels else "Select at least one position to see the board."
+        )
+    else:
+        # Counted after filtering: a caption reporting the locked players in the
+        # whole pool while the table shows one position is a different number
+        # from the one on screen.
+        _n_locked_shown = int(
+            _display_avail.get("Status", pd.Series(dtype=str)).str.startswith("🔒").sum()
+        ) if "Status" in _display_avail.columns else 0
+        _shown = (f"Showing {len(_display_avail)} of {_total_avail} available players."
+                  if len(_display_avail) != _total_avail else
+                  f"{_total_avail} available players.")
+        if _n_locked_shown:
+            _shown += (
+                f" 🔒 {_n_locked_shown} are locked — recently dropped or added, so they "
+                "cannot be picked up until the next waiver deadline. They are ranked here "
+                "for waiver planning but are never proposed as transfers."
+            )
+        st.caption(_shown)
+
+        display_cols_avail = ["Player", "Team", "Position", "Status", "Proj", "Proj_Src", "Form", "AvgFDRNextN", "Season_Points", "1GW", "ROS", "Transfer Score"]
+        display_cols_avail = [c for c in display_cols_avail if c in _display_avail.columns]
+        render_styled_table(
+            _display_avail[display_cols_avail].reset_index(drop=True).rename(
+                columns={"Proj": "Proj Pts", "Proj_Src": "Src"}),
+            col_formats={"Proj Pts": "{:.1f}", "Form": "{:.1f}", "AvgFDRNextN": "{:.1f}",
+                         "1GW": "{:.2f}", "ROS": "{:.2f}", "Transfer Score": "{:.2f}"},
+            positive_color_cols=["1GW", "ROS", "Transfer Score"],
+            max_height=500,
+        )
 
     # ---------------------------
     # TRANSFER ACTIVITY SECTION
