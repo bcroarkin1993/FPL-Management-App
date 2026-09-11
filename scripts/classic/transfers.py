@@ -1693,9 +1693,6 @@ def show_classic_transfers_page():
     # Status panel — shown before filters so users see FT count immediately
     _render_transfer_status_panel(bank, squad_value, free_transfers, chip_status, active_chip)
 
-    # Pending transfer logger — lets user manually log pre-deadline transfers
-    _render_log_transfer_ui(team_id, current_gw, picks, elements_by_id, extra_local)
-
     # Controls
     with st.expander("Filters", expanded=True):
         col_a, col_b, col_c = st.columns(3)
@@ -1924,6 +1921,11 @@ def show_classic_transfers_page():
             _render_multi_transfer_plan(multi_plan, free_transfers=free_transfers)
 
     st.markdown("---")
+
+    # Pending transfer logger — lets user manually log pre-deadline transfers.
+    # Sits after the suggestions and before the squad: you read the advice, log
+    # the move you made on it, and the squad below is what the log produces.
+    _render_log_transfer_ui(team_id, current_gw, picks, elements_by_id, extra_local)
 
     # ---------------------------
     # SQUAD ANALYSIS SECTION (with depth card)
