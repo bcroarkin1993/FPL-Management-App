@@ -273,6 +273,44 @@ expected to start. The engine encodes that as a positional floor on `Start_Pct`
 (`config.ROTOWIRE_START_FLOORS`, DEF highest because a defender who starts plays
 90 minutes) rather than dropping the source.
 
+That signal runs **both ways**, and for a year only one direction was used. A
+player Rotowire *omitted* simply failed the `present` mask, the weights
+renormalised over the sources that priced him, and FFP's start probability stood
+alone at 100% weight — Rotowire's opinion was not down-weighted, it was
+discarded. Scored on the GW3 snapshot: players Rotowire listed started **90.5%**
+of the time, players it omitted **4.2%**. Of the omitted players the engine gave
+≥80% start probability, **0 of 16 started** — Joe Gomez, Dan Burn, three backup
+keepers, all 0 minutes, projected 2.34 points each.
+
+`config.ROTOWIRE_OMITTED_START` (`{G 0.02, D 0.12, M 0.12, F 0.05}` — the
+observed rates roughly doubled) is what the silence implies. Four properties are
+load-bearing:
+
+- **Presence clips, absence blends.** Deriving the listed side as a blend too was
+  tried and is worse: bias on the 220 listed players moves +0.058 → −0.314,
+  because the floors are already calibrated against a 90.5% start rate. Absence
+  blends because a *cap* flattens an FFP-90% player and an FFP-20% player onto
+  one number, discarding the only remaining opinion about which might play. The
+  share is renormalised the same way the points blend is.
+- **It can only lower.** An omission is never evidence a player *will* start, so
+  a player FFP already rates below the implied value keeps FFP's number.
+- **It is gated on club coverage, not the fixture list** (`ROTOWIRE_MIN_CLUB_COVERAGE`).
+  A club Rotowire priced nobody at is blank, unpublished, or a wholesale matching
+  failure, and none of those is a lineup call. Without team labels the penalty is
+  not applied at all — and note `_pool_col()` returns an *all-None Series*, not
+  None, when the pool has no `Team` column, so `is not None` is not the test:
+  grouping those on `str(None)` puts every player in one trivially-"covered"
+  bucket and fires the penalty on exactly the frames carrying no evidence for it.
+- **Calibrated on bias, not MAE.** A cohort that mostly scores zero always
+  rewards projecting zero, so MAE alone drives the constant to 0. Replaying GW3:
+  omitted-cohort bias +0.129 → −0.097, their MAE 0.655 → 0.497, listed players
+  byte-identical, overall MAE 1.211 → 1.106.
+
+`Start_Pct__rotowire` is now written for every player — implied value if omitted,
+floor if listed — so the snapshots record the *decision* and the accuracy harness
+can score it rather than only its effect. One gameweek is what this is fitted on;
+Phase 4 is where it should be settled.
+
 **FPL's `ep_next` is a declared source, not a substitute.** It was already in
 the app: `classic/transfers.py` wrote it straight into `Projected_Points` — the
 Rotowire slot — whenever Rotowire had not published, so it took Rotowire's 60%

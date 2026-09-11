@@ -175,6 +175,31 @@ PROJECTION_SOURCE_WEIGHTS = _parse_projection_weights(
 # late for two points" outcome the way there is for MID/FWD.
 ROTOWIRE_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.68, "F": 0.65}
 
+# The other half of the same signal. Rotowire publishes ~11 players per club --
+# its expected XI -- so a player it *omits* from a club it covered is a lineup
+# call, not a missing value. Measured on the GW3 snapshot: players it listed
+# started 90.5% of the time, players it omitted 4.2% (G 0.0%, D 6.2%, M 6.2%,
+# F 1.8% -- keepers do not rotate, which is why G is near zero).
+#
+# These are blended with the other sources' start probabilities rather than
+# clipped, so FFP still orders the omitted players among themselves: a cap
+# flattens an FFP-90% player and an FFP-20% player onto the same number.
+# Calibrated on bias, not MAE -- a cohort that mostly scores zero always
+# rewards projecting zero, so MAE alone drives this constant to 0. Replaying
+# GW3 through the engine, bias on the omitted cohort moves +0.129 -> -0.097 and
+# their MAE 0.655 -> 0.497, with the 220 listed players untouched. The values
+# are the observed start rates roughly doubled, which is deliberate: they are
+# one gameweek's measurement, and an unmatched name inside a covered club is
+# indistinguishable from a benched one. Loosening further (D/M 0.22) trades a
+# better bias for a worse MAE; the accuracy harness is what should settle it.
+ROTOWIRE_OMITTED_START = {"G": 0.02, "D": 0.12, "M": 0.12, "F": 0.05}
+
+# How many players Rotowire must price at a club before its silence about one
+# of them means anything. Observed: exactly 11 per club, all 20 clubs. A club
+# below this is blank, unpublished, or a wholesale matching failure -- and
+# "unknown" is then the honest answer, not "benched".
+ROTOWIRE_MIN_CLUB_COVERAGE = 5
+
 # ----- Fantasy Football Pundit -----
 # Env overrides for FFP's addresses. Rotowire has had four of these for a while
 # and FFP had none, so an FFP endpoint change could only be fixed by editing

@@ -13,6 +13,7 @@ import pytest
 from scripts.common.projection_engine import (
     build_projections,
     attach_projections,
+    DEFAULT_OMITTED_STARTS,
     DEFAULT_START_FLOORS,
 )
 from scripts.common.projection_sources import (
@@ -128,8 +129,8 @@ class TestStartProbability:
         # in exactly one place now.
         assert out.loc[4, "Start_Pct"] == pytest.approx(DEFAULT_START_FLOORS["M"])
 
-    def test_rotowire_absence_lowers_start_rather_than_dropping_the_player(self):
-        """Rotowire lists only expected starters, so absence is information."""
+    def test_rotowire_presence_floors_the_start_probability(self):
+        """Rotowire lists only expected starters, so presence is information."""
         rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
                   {"Player": ["Erling Haaland"], "Team": ["MCI"],
                    "Position": ["F"], "Proj_Start": [10.0]})
@@ -138,10 +139,119 @@ class TestStartProbability:
                     "Start_Pct": [0.30, 0.30]})
         out = build_projections([rw, ffp], gameweek=3, pool=_pool(),
                                 weights={"rotowire": 0.6, "ffp": 0.4})
-        # Haaland: Rotowire prices him, so his 30% is floored to the FWD floor.
         assert out.loc[1, "Start_Pct"] == pytest.approx(DEFAULT_START_FLOORS["F"])
-        # Cole Palmer: Rotowire does not, so FFP's 30% stands.
+        # Cole Palmer is omitted, but Rotowire priced nobody else at CHE, so
+        # there is no evidence it covered the club. FFP's 30% stands.
         assert out.loc[4, "Start_Pct"] == pytest.approx(0.30)
+
+
+def _covered_pool(club="CHE", n=8, position="M"):
+    """A club Rotowire has clearly covered, plus one omitted player at it."""
+    return pd.DataFrame({
+        "Player_ID": list(range(1, n + 2)),
+        "Player": [f"Player {i}" for i in range(1, n + 2)],
+        "Team": [club] * (n + 1),
+        "Position": [position] * (n + 1),
+    })
+
+
+def _covered_sources(n=8, omitted_ffp_start=0.70, position="M"):
+    """Rotowire prices players 1..n; player n+1 is omitted but priced by FFP."""
+    rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+              {"Player_ID": list(range(1, n + 1)),
+               "Proj_Start": [5.0] * n})
+    ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL,
+               {"Player_ID": list(range(1, n + 2)),
+                "Proj_Start": [5.0] * (n + 1),
+                "Start_Pct": [0.80] * n + [omitted_ffp_start]})
+    return rw, ffp
+
+
+class TestRotowireOmission:
+    """Absence from a covered club is a lineup call, not a missing value.
+
+    Measured on the GW3 snapshot: players Rotowire listed started 90.5% of the
+    time, players it omitted 4.2%. The engine used to renormalise Rotowire's
+    weight away and let FFP's start probability stand alone, so a player FFP
+    rated at 70% kept 70% -- and of the omitted players the engine gave >=80%,
+    none at all started.
+    """
+
+    def _run(self, pool, sources, **kw):
+        return build_projections(list(sources), gameweek=3, pool=pool,
+                                 weights={"rotowire": 0.6, "ffp": 0.4}, **kw)
+
+    def test_an_omitted_player_at_a_covered_club_is_discounted(self):
+        out = self._run(_covered_pool(), _covered_sources(omitted_ffp_start=0.70))
+        # 0.6 * implied(M) + 0.4 * 0.70
+        expected = 0.6 * DEFAULT_OMITTED_STARTS["M"] + 0.4 * 0.70
+        assert out.loc[9, "Start_Pct"] == pytest.approx(expected)
+        assert out.loc[9, "Start_Pct"] < 0.70
+
+    def test_listed_players_are_untouched(self):
+        """Re-deriving the listed side as a blend was measured and is worse."""
+        out = self._run(_covered_pool(), _covered_sources())
+        assert out.loc[1, "Start_Pct"] == pytest.approx(0.80)
+
+    def test_it_can_only_lower(self):
+        """An omission is never evidence that a player *will* start."""
+        out = self._run(_covered_pool(), _covered_sources(omitted_ffp_start=0.03))
+        assert out.loc[9, "Start_Pct"] == pytest.approx(0.03)
+
+    def test_ffp_still_orders_the_omitted_players(self):
+        """The reason this blends instead of capping.
+
+        A cap flattens an FFP-90% player and an FFP-20% player onto one number,
+        discarding the only opinion left about which of them might play.
+        """
+        pool = _covered_pool(n=8)
+        pool = pd.concat([pool, pd.DataFrame({
+            "Player_ID": [10], "Player": ["Player 10"], "Team": ["CHE"],
+            "Position": ["M"]})], ignore_index=True)
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player_ID": list(range(1, 9)), "Proj_Start": [5.0] * 8})
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL,
+                   {"Player_ID": list(range(1, 11)),
+                    "Proj_Start": [5.0] * 10,
+                    "Start_Pct": [0.80] * 8 + [0.90, 0.20]})
+        out = self._run(pool, (rw, ffp))
+        assert out.loc[9, "Start_Pct"] > out.loc[10, "Start_Pct"]
+        assert out.loc[9, "Start_Pct"] - out.loc[10, "Start_Pct"] == pytest.approx(
+            0.4 * (0.90 - 0.20))
+
+    def test_a_goalkeeper_is_discounted_hardest(self):
+        """Keepers do not rotate: 0 of 51 omitted GKs started in GW3."""
+        gk = self._run(_covered_pool(position="G"),
+                       _covered_sources(position="G", omitted_ffp_start=0.70))
+        mid = self._run(_covered_pool(position="M"),
+                        _covered_sources(position="M", omitted_ffp_start=0.70))
+        assert gk.loc[9, "Start_Pct"] < mid.loc[9, "Start_Pct"]
+
+    def test_an_uncovered_club_is_not_punished(self):
+        """Below the coverage threshold, silence is an outage, not a lineup."""
+        out = self._run(_covered_pool(n=3), _covered_sources(n=3, omitted_ffp_start=0.70))
+        assert out.loc[4, "Start_Pct"] == pytest.approx(0.70)
+
+    def test_without_team_labels_it_fails_open(self):
+        pool = _covered_pool().drop(columns=["Team"])
+        out = self._run(pool, _covered_sources(omitted_ffp_start=0.70))
+        assert out.loc[9, "Start_Pct"] == pytest.approx(0.70)
+
+    def test_the_implied_value_is_recorded_for_the_harness(self):
+        out = self._run(_covered_pool(), _covered_sources())
+        assert out.loc[9, "Start_Pct__rotowire"] == pytest.approx(
+            DEFAULT_OMITTED_STARTS["M"])
+        assert out.loc[1, "Start_Pct__rotowire"] == pytest.approx(
+            DEFAULT_START_FLOORS["M"])
+
+    def test_with_no_other_start_opinion_the_implied_value_stands_alone(self):
+        """start_pct would otherwise be the bare 1.0 default, which is not an opinion."""
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player_ID": list(range(1, 9)), "Proj_Start": [5.0] * 8})
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL,
+                   {"Player_ID": list(range(1, 10)), "Proj_Start": [5.0] * 9})
+        out = self._run(_covered_pool(), (rw, ffp))
+        assert out.loc[9, "Start_Pct"] == pytest.approx(DEFAULT_OMITTED_STARTS["M"])
 
 
 class TestGameweekGate:

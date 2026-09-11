@@ -380,6 +380,10 @@ def compute_player_scores(
         starters_only={"rotowire"},
         positions=(result["Position"] if "Position" in result.columns
                    else pd.Series("M", index=result.index)),
+        # Club coverage is how the engine tells "Rotowire left him out of the
+        # XI" from "Rotowire has nothing for this club at all". Without it the
+        # omission penalty cannot be applied safely, so it is not applied.
+        teams=(result["Team"] if "Team" in result.columns else None),
         chance_of_playing=result.get("chance_of_playing_next_round"),
         status=result.get("status"),
         extra=result,

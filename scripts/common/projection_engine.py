@@ -72,6 +72,16 @@ DEFAULT_WEIGHTS = {"rotowire": 0.6, "ffp": 0.4, "fpl_ep": 0.0, "odds": 0.0}
 #: is no "came on late for two points" outcome the way there is for MID/FWD.
 DEFAULT_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.68, "F": 0.65}
 
+#: The other half of the same signal: what a starters-only source's *silence*
+#: about a player implies, when it covered his club. Measured on the GW3
+#: snapshot -- Rotowire-listed players started 90.5% of the time, omitted ones
+#: 4.2% (G 0.0%, D 6.2%, M 6.2%, F 1.8%).
+DEFAULT_OMITTED_STARTS = {"G": 0.02, "D": 0.12, "M": 0.12, "F": 0.05}
+
+#: Players a starters-only source must price at a club before its silence about
+#: one of them is evidence of anything.
+DEFAULT_MIN_CLUB_COVERAGE = 5
+
 #: Divisor floor when recovering a conditional value from an unconditional one.
 START_RECOVERY_FLOOR = 0.05
 
@@ -96,6 +106,28 @@ def _start_floors() -> Dict[str, float]:
     except Exception:                       # pragma: no cover
         pass
     return dict(DEFAULT_START_FLOORS)
+
+
+def _omitted_starts() -> Dict[str, float]:
+    try:
+        import config
+        f = getattr(config, "ROTOWIRE_OMITTED_START", None)
+        if isinstance(f, dict) and f:
+            return dict(f)
+    except Exception:                       # pragma: no cover
+        pass
+    return dict(DEFAULT_OMITTED_STARTS)
+
+
+def _min_club_coverage() -> int:
+    try:
+        import config
+        n = getattr(config, "ROTOWIRE_MIN_CLUB_COVERAGE", None)
+        if n:
+            return int(n)
+    except Exception:                       # pragma: no cover
+        pass
+    return DEFAULT_MIN_CLUB_COVERAGE
 
 
 def _resolve_ids(source: SourceResult, pool: pd.DataFrame) -> pd.Series:
@@ -337,13 +369,85 @@ def blend_aligned(
     # Rotowire's presence as a confidence signal: it lists only expected
     # starters, so a player it prices gets a positional floor on start
     # probability. This is why `covers` is part of the source contract.
+    #
+    # ...and its *absence* is the same call in the other direction. Rotowire
+    # publishes ~11 players per club, so a player missing from a club it covered
+    # is being predicted not to start; the blend simply renormalised its weight
+    # away and let FFP's start probability stand alone. Measured on the GW3
+    # snapshot: listed players started 90.5% of the time, omitted ones 4.2% --
+    # and of the omitted players this engine gave >=80% start probability, 0 of
+    # 16 started (Joe Gomez, Dan Burn, three backup keepers).
+    #
+    # Two asymmetries here are deliberate and measured, not oversights:
+    #
+    #   * Presence CLIPS, absence BLENDS. Re-deriving the listed side as a blend
+    #     too was tried and is worse -- bias on the 220 listed players moves from
+    #     +0.058 to -0.314, because the floors are already well calibrated
+    #     against a 90.5% observed start rate. They are left untouched here. Absence blends because a cap
+    #     flattens an FFP-90% player and an FFP-20% player onto one number,
+    #     discarding the only opinion left about which of them might play.
+    #   * The blend can only ever LOWER. An omission is never evidence that a
+    #     player *will* start, so a player FFP already rates below the implied
+    #     value keeps FFP's number.
+    omitted_starts = _omitted_starts()
+    min_coverage = _min_club_coverage()
     for name in starters_only:
         if name not in per_source_raw:
             continue
-        priced = per_source_raw[name].reindex(index).gt(0)
+        priced = per_source_raw[name].reindex(index).gt(0).fillna(False)
         for pos_code, floor_val in floors.items():
             mask = priced & (positions == pos_code)
             start_pct[mask] = start_pct[mask].clip(lower=floor_val)
+
+        # Club coverage, not the fixture list: a club this source priced nobody
+        # at is blank, unpublished, or a wholesale matching failure, and none of
+        # those is a lineup call. Without team labels there is no way to tell,
+        # so the penalty is simply not applied -- fail open, like the Projected
+        # Lineups gameweek filter.
+        if teams is None:
+            continue
+        club = teams.reindex(index)
+        # `_pool_col` returns an all-None Series rather than None when the pool
+        # has no Team column, so "is not None" is not the test. Grouping those
+        # on str(None) would put every player in one 20-club bucket, which is
+        # trivially "covered" -- the penalty would then fire on exactly the
+        # frames that carry no evidence for it.
+        if club.isna().all():
+            continue
+        known_club = club.notna()
+        covered = (priced.groupby(club.astype(str)).transform("sum")
+                   .ge(min_coverage) & known_club)
+        implied = positions.map(omitted_starts).astype("float64")
+        target = covered & ~priced & implied.notna()
+        if not target.any():
+            continue
+
+        # Weight share, renormalised the way the points blend is: this source
+        # against the other weighted ones. Where no other source expressed a
+        # start probability at all, there is nothing to blend with and the
+        # implied value stands alone -- start_pct would be the bare 1.0 default,
+        # which is an absence of opinion rather than one.
+        w_self = float(weights.get(name, 0.0))
+        w_rest = sum(float(w) for n, w in weights.items() if n != name and float(w) > 0)
+        share = w_self / (w_self + w_rest) if (w_self + w_rest) > 0 else 1.0
+
+        has_other = pd.Series(False, index=index)
+        for other, sp in per_source_startpct.items():
+            if other != name:
+                has_other |= sp.reindex(index).notna()
+        if chance_of_playing is not None:
+            has_other |= pd.to_numeric(
+                chance_of_playing.reindex(index), errors="coerce").notna()
+        eff_share = pd.Series(share, index=index).where(has_other, 1.0)
+
+        blended = eff_share * implied + (1.0 - eff_share) * start_pct
+        start_pct = start_pct.where(~target, np.minimum(start_pct, blended))
+
+        # Record what this source implied, so the accuracy harness can score the
+        # decision rather than only its effect.
+        out[f"Start_Pct__{name}"] = implied.where(target).fillna(
+            positions.map(floors).astype("float64").where(priced))
+
     out["Start_Pct"] = start_pct
 
     # --- Basis conversion ---------------------------------------------------
