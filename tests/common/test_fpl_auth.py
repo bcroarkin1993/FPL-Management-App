@@ -167,7 +167,27 @@ class TestNormaliseMyTeam:
     def test_bank_and_value_move_into_entry_history(self):
         out = normalise_my_team(self._raw())
         assert out["entry_history"] == {
-            "value": 1006, "bank": 15, "event_transfers": 2, "event_transfers_cost": 4}
+            "value": 1006, "bank": 15, "event_transfers": 2,
+            "event_transfers_cost": 4, "event_transfers_limit": 1}
+
+    def test_the_free_transfer_limit_is_carried_through(self):
+        """FPL states it outright here; everything else has to reconstruct it."""
+        raw = self._raw()
+        raw["transfers"]["limit"] = 4
+        assert normalise_my_team(raw)["entry_history"]["event_transfers_limit"] == 4
+
+    def test_an_absent_limit_is_omitted_rather_than_zeroed(self):
+        """It is null while a chip grants unlimited transfers.
+
+        A 0 there would read as "no free transfers" and put the page on a hit
+        warning during a wildcard.
+        """
+        raw = self._raw()
+        raw["transfers"]["limit"] = None
+        assert "event_transfers_limit" not in normalise_my_team(raw)["entry_history"]
+
+        del raw["transfers"]["limit"]
+        assert "event_transfers_limit" not in normalise_my_team(raw)["entry_history"]
 
     def test_captain_gets_a_doubled_multiplier(self):
         out = normalise_my_team(self._raw())

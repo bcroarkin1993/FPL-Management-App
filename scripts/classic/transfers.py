@@ -537,37 +537,74 @@ def _parse_chip_status(history: dict, current_gw: int) -> dict:
     }
 
 
+# FPL caps accumulated free transfers. A rules constant: update it if FPL does.
+MAX_BANKED_FREE_TRANSFERS = 5
+
+
 def _compute_free_transfers(history: dict, entry_history: dict, current_gw: int,
                              fh_gws: Optional[set] = None) -> int:
-    """Compute free transfers available this gameweek.
+    """Free transfers available this gameweek.
 
-    FPL rules: 1 FT per GW, bank 1 extra if 0 transfers last GW (max 2 banked).
-    Free Hit GWs are excluded — they don't consume or bank FTs.
+    **Prefer the number FPL states.** The authenticated `my-team` payload
+    carries `transfers.limit`, which is this answer with no reconstruction at
+    all; `normalise_my_team()` forwards it as `event_transfers_limit`. It is
+    absent while a chip grants unlimited transfers, so a missing key means
+    "reconstruct", never "zero".
+
+    Otherwise replay the season: one free transfer per gameweek, unused ones
+    accumulating to `MAX_BANKED_FREE_TRANSFERS`. Three things this replaces:
+
+    - It **stopped at the first gameweek back**, so the answer could never
+      exceed 2. A manager who sat out three gameweeks was told they had 2 free
+      transfers when they had 4, and every third transfer looked like a -4 hit.
+    - The "already took a hit this week" guard tested
+      `event_transfers_cost < 0`. FPL publishes that cost as a **positive**
+      number -- this page renders it as `f"-{transfer_cost} pts"` -- so the
+      guard never once fired.
+    - Chip gameweeks are skipped. A wildcard registers a dozen transfers in
+      `event_transfers`, which read as a fortnight of spending and wiped the
+      bank; Free Hit was already excluded, Wildcard was not.
+
+    The replay still understates when a gameweek spent *some* of a larger bank,
+    because the history records transfers made but never the limit they were
+    made against. Understating is the safe direction -- it warns of a hit that
+    turns out to be free -- and the authenticated path has no such gap.
     """
+    limit = (entry_history or {}).get("event_transfers_limit")
+    if limit is not None:
+        return max(0, int(limit))
+
     if not history:
         return 1
 
-    if fh_gws is None:
-        fh_gws = set()
+    unlimited_gws = set(fh_gws or ())
+    for chip in history.get("chips", []) or []:
+        if chip.get("name") in ("freehit", "wildcard") and chip.get("event") is not None:
+            unlimited_gws.add(chip["event"])
 
-    gw_history = history.get("current", [])
+    entries = sorted(
+        (e for e in (history.get("current") or []) if e.get("event") is not None),
+        key=lambda e: e["event"],
+    )
 
-    # Check if a hit was taken this GW already
-    transfer_cost = entry_history.get("event_transfers_cost", 0)
-    if transfer_cost and transfer_cost < 0:
-        return 0
-
-    # Walk backwards through completed GWs, skipping Free Hit GWs.
-    # FH GWs are recorded with high event_transfers counts but those don't
-    # affect the normal FT bank — we need the last non-FH GW.
-    for gw_entry in reversed(gw_history):
-        if gw_entry.get("event") in fh_gws:
+    available = 1
+    made_this_gw = 0
+    for entry in entries:
+        gw = entry["event"]
+        if gw > current_gw:
+            break
+        if gw in unlimited_gws:
             continue
-        if gw_entry.get("event_transfers", 1) == 0:
-            return 2  # Banked a FT last non-FH GW
-        break  # Made transfers last non-FH GW → 1 FT this GW
+        made = int(entry.get("event_transfers", 0) or 0)
+        if gw == current_gw:
+            # Read the current gameweek from history, not from entry_history:
+            # between deadlines the latter belongs to the *last* gameweek's
+            # picks, and subtracting its transfers would charge them twice.
+            made_this_gw = made
+            break
+        available = min(MAX_BANKED_FREE_TRANSFERS, max(0, available - made) + 1)
 
-    return 1
+    return max(0, available - made_this_gw)
 
 
 def _blended_proj(row) -> float:
@@ -688,8 +725,9 @@ def _render_transfer_status_panel(bank: int, squad_value: int, free_transfers: i
         )
 
     # Free transfer card
-    if free_transfers == 2:
-        ft_val, ft_color, ft_sub = "2 FTs Banked", "#4ecca3", "Both transfers are free"
+    if free_transfers >= 2:
+        ft_val, ft_color, ft_sub = (f"{free_transfers} FTs Banked", "#4ecca3",
+                                    "All free this gameweek")
     elif free_transfers == 1:
         ft_val, ft_color, ft_sub = "1 Free Transfer", "#00ff87", "Next costs &minus;4 pts"
     else:

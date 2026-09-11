@@ -671,6 +671,25 @@ unauthenticated path is therefore the default, and the H2H opponent calls and
 the league leaderboard loop can never reach for a credential on someone else's
 behalf.
 
+**Free transfers: prefer the number FPL states.** The authenticated `my-team`
+payload carries `transfers.limit`, which is the answer outright;
+`normalise_my_team()` forwards it as `event_transfers_limit`, and
+`_compute_free_transfers()` returns it when present. It is null while a chip
+grants unlimited transfers, so a missing key means "reconstruct", never "zero".
+
+The unauthenticated replay -- one FT per gameweek, unused ones accumulating to
+`MAX_BANKED_FREE_TRANSFERS` -- replaces one that stopped at the first gameweek
+back and so could never return more than 2. A manager who sat out three
+gameweeks was told they had 2, and every third transfer was labelled a -4 hit
+that FPL would not have charged. Two smaller faults went with it: the "already
+took a hit" guard tested `event_transfers_cost < 0`, but FPL publishes that cost
+as a **positive** number (the page itself renders `f"-{cost} pts"`), so it never
+fired; and a wildcard's dozen registered transfers read as real spending and
+wiped the bank, Free Hit having been excluded but Wildcard not. The replay still
+understates when a gameweek spent part of a larger bank -- history records
+transfers made, never the limit they were made against -- which is the safe
+direction, and the authenticated path has no such gap.
+
 **An active chip belongs to the gameweek its picks belong to.** FPL publishes
 no chip for a gameweek whose deadline has not passed -- the provenance string
 says exactly that -- so a last-deadline squad carries *last* gameweek's chip.

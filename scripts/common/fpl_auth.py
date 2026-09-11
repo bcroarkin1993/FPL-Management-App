@@ -269,15 +269,24 @@ def normalise_my_team(raw: dict) -> dict:
         })
 
     transfers = raw.get("transfers") or {}
+    entry_history = {
+        "value": transfers.get("value", 0),
+        "bank": transfers.get("bank", 0),
+        "event_transfers": transfers.get("made", 0),
+        "event_transfers_cost": transfers.get("cost", 0),
+    }
+    # FPL states the free-transfer count outright on this payload. Everything
+    # else has to reconstruct it by replaying the season's transfer history and
+    # knowing the banking rules; this is the same number without the guesswork.
+    # It is absent (or null) while a chip grants unlimited transfers, so a
+    # missing key means "reconstruct", never "zero".
+    if transfers.get("limit") is not None:
+        entry_history["event_transfers_limit"] = transfers["limit"]
+
     return {
         "picks": picks_out,
         "active_chip": active_chip,
-        "entry_history": {
-            "value": transfers.get("value", 0),
-            "bank": transfers.get("bank", 0),
-            "event_transfers": transfers.get("made", 0),
-            "event_transfers_cost": transfers.get("cost", 0),
-        },
+        "entry_history": entry_history,
         "chips": raw.get("chips") or [],
         "_source": "my_team",
     }
