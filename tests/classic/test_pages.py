@@ -27,6 +27,59 @@ def _empty_ffp_feed():
     return FFPFeed(pd.DataFrame(), None, None, "none", "unavailable in tests")
 
 
+_SQUAD_SHAPE = [1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4]  # 2 GK, 5 DEF, 5 MID, 3 FWD
+
+
+def _synthetic_bootstrap(n_teams: int = 4, per_position: int = 6) -> dict:
+    """A bootstrap big enough for the page to build real tables from."""
+    teams = [{"id": t, "name": f"Team {t}", "short_name": f"T{t}"}
+             for t in range(1, n_teams + 1)]
+    elements, pid = [], 1
+    for team in teams:
+        for element_type in (1, 2, 3, 4):
+            for n in range(per_position):
+                elements.append({
+                    "id": pid,
+                    "web_name": f"P{pid}",
+                    "first_name": "First",
+                    "second_name": f"Player{pid}",
+                    "team": team["id"],
+                    "element_type": element_type,
+                    "now_cost": 45 + (pid % 8) * 5,
+                    "form": round(1.0 + (pid % 5) * 0.5, 1),
+                    "points_per_game": round(2.0 + (pid % 4) * 0.5, 1),
+                    "total_points": 20 + pid,
+                    "selected_by_percent": float(pid % 30),
+                    "transfers_in_event": pid * 100,
+                    "transfers_out_event": pid * 50,
+                    "cost_change_event": 0,
+                    "ep_next": round(2.0 + (pid % 6) * 0.4, 1),
+                    "minutes": 900,
+                    "starts": 10,
+                    "news": "",
+                    "status": "a",
+                    "chance_of_playing_next_round": None,
+                })
+                pid += 1
+    return {"elements": elements, "teams": teams, "events": []}
+
+
+def _squad_elements(bootstrap: dict) -> list:
+    """Fifteen players in a legal 2/5/5/3 shape, at most 3 per club."""
+    by_type = {}
+    for e in bootstrap["elements"]:
+        by_type.setdefault(e["element_type"], []).append(e)
+    picked, used = [], {}
+    for element_type in _SQUAD_SHAPE:
+        for candidate in by_type[element_type]:
+            if candidate in picked or used.get(candidate["team"], 0) >= 3:
+                continue
+            picked.append(candidate)
+            used[candidate["team"]] = used.get(candidate["team"], 0) + 1
+            break
+    return picked
+
+
 
 
 class TestClassicHomePage:
@@ -111,6 +164,63 @@ class TestClassicTransfersPage:
              patch("scripts.classic.transfers._save_pending_file"):
             from scripts.classic.transfers import show_classic_transfers_page
             show_classic_transfers_page()
+
+
+    def test_renders_squad_and_target_tables(self, mock_all_utils):
+        """A populated squad must render, not KeyError on a display column.
+
+        The smoke test above runs with an empty bootstrap, so it returns before
+        any table is built -- which is how a display list left asking for
+        ``Projected_Points`` after the blend migration renamed the column to
+        ``Proj`` reached the app as a KeyError on load. This test is the one
+        that reaches the render, for the squad table and both target tables.
+        """
+        bootstrap = _synthetic_bootstrap()
+        picks = [
+            {"element": e["id"], "position": i + 1, "multiplier": 1 if i < 11 else 0,
+             "is_captain": i == 0, "is_vice_captain": i == 1}
+            for i, e in enumerate(_squad_elements(bootstrap))
+        ]
+        resolution = SquadResolution(
+            picks=picks,
+            entry_history={"bank": 5, "value": 1000, "event_transfers": 1,
+                           "event_transfers_cost": 0},
+            source_gw=24, target_gw=25, provenance="test fixture",
+        )
+
+        def _slider(label, *args, **kwargs):
+            # Return the widget's own default rather than conftest's flat 0,
+            # which would set Max Price to £0.0m and empty the target tables.
+            if len(args) >= 3:
+                return args[2]
+            return kwargs.get("value", 1)
+
+        with patch("scripts.classic.transfers.get_classic_bootstrap_static", return_value=bootstrap), \
+             patch("scripts.classic.transfers.get_classic_team_picks", return_value=None), \
+             patch("scripts.classic.transfers.get_classic_team_history", return_value={"chips": []}), \
+             patch("scripts.classic.transfers.get_entry_details", return_value={"name": "Test", "id": 1}), \
+             patch("scripts.classic.transfers.get_current_gameweek", return_value=25), \
+             patch("scripts.classic.transfers.get_rotowire_player_projections", return_value=pd.DataFrame()), \
+             patch("scripts.classic.transfers.get_rotowire_season_rankings", return_value=pd.DataFrame()), \
+             patch("scripts.classic.transfers.get_classic_transfers", return_value=[]), \
+             patch("scripts.classic.transfers.position_converter", side_effect=lambda x: {1: "G", 2: "D", 3: "M", 4: "F"}.get(x, "M")), \
+             patch("scripts.classic.transfers.show_api_error"), \
+             patch("scripts.classic.transfers.compute_healthy_form", return_value=5.0), \
+             patch("scripts.classic.transfers.get_ffp_feed", return_value=_empty_ffp_feed()), \
+             patch("scripts.classic.transfers.compute_positional_depth", return_value={}), \
+             patch("scripts.classic.transfers.fetch_my_team"), \
+             patch("scripts.classic.transfers.resolve_classic_squad", return_value=resolution), \
+             patch("scripts.classic.transfers.purge_cache_prefix"), \
+             patch("scripts.classic.transfers._save_pending_file"), \
+             patch("streamlit.slider", side_effect=_slider), \
+             patch("scripts.common.styled_tables.st.markdown") as mock_table_html:
+            from scripts.classic.transfers import show_classic_transfers_page
+            show_classic_transfers_page()
+
+        # The blended projection and its provenance must actually reach the page.
+        rendered = " ".join(str(c.args[0]) for c in mock_table_html.call_args_list if c.args)
+        assert "Proj Pts" in rendered, "squad/target tables rendered without the blended projection"
+        assert "Src" in rendered, "projection provenance column is missing"
 
 
 class TestFreeHitPage:

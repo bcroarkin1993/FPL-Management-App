@@ -1900,7 +1900,7 @@ def show_classic_transfers_page():
     # Format display columns — use HealthyForm if available
     form_display_col = "HealthyForm" if "HealthyForm" in squad_display.columns else "form"
     display_cols = ["Player", "Team", "Position", "Pos_Rank", "now_cost", form_display_col, "total_points",
-                    "Projected_Points", "AvgFDR", "1GW", "ROS", "Keep Score", "Status"]
+                    "Proj", "Proj_Src", "AvgFDR", "1GW", "ROS", "Keep Score", "Status"]
     display_cols = [c for c in display_cols if c in squad_display.columns]
     squad_show = squad_display[display_cols].copy()
     squad_show["Price"] = squad_show["now_cost"].apply(lambda x: f"£{x/10:.1f}m")
@@ -1912,7 +1912,8 @@ def show_classic_transfers_page():
     # "Src" says which sources produced it, so a number resting on FFP alone --
     # or on FPL's own expected points because Rotowire has not published -- is
     # visible rather than indistinguishable from a fully-corroborated one.
-    squad_show["Proj"] = squad_show["Proj"].fillna("-")
+    if "Proj" in squad_show.columns:
+        squad_show["Proj"] = squad_show["Proj"].fillna("-")
 
     # Rename for display
     squad_show = squad_show.rename(columns={
@@ -1924,10 +1925,13 @@ def show_classic_transfers_page():
         "AvgFDR": "Avg FDR",
     })
 
+    squad_final_cols = ["Player", "Team", "Position", "Pos Rank", "Price", "Form", "Season Pts",
+                        "Proj Pts", "Src", "Avg FDR", "1GW", "ROS", "Keep Score", "Status"]
+    squad_final_cols = [c for c in squad_final_cols if c in squad_show.columns]
     render_styled_table(
-        squad_show[["Player", "Team", "Position", "Pos Rank", "Price", "Form", "Season Pts",
-                    "Proj Pts", "Src", "Avg FDR", "1GW", "ROS", "Keep Score", "Status"]],
-        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}", "Keep Score": "{:.3f}"},
+        squad_show[squad_final_cols],
+        col_formats={"Proj Pts": "{:.1f}", "Form": "{:.1f}", "Avg FDR": "{:.2f}",
+                     "1GW": "{:.3f}", "ROS": "{:.3f}", "Keep Score": "{:.3f}"},
         positive_color_cols=["1GW", "ROS", "Keep Score"],
     )
 
@@ -1967,7 +1971,7 @@ def show_classic_transfers_page():
     target_form_col = "HealthyForm" if "HealthyForm" in top_targets.columns else "form"
     target_display_cols = [
         "Player", "Team", "Position", "now_cost", "Price_Change", "Rush", target_form_col,
-        "total_points", "Projected_Points", "selected_by_percent",
+        "total_points", "Proj", "Proj_Src", "selected_by_percent",
         "AvgFDR", "1GW", "ROS", "Transfer Score", "Status"
     ]
     target_display_cols = [c for c in target_display_cols if c in top_targets.columns]
@@ -1978,7 +1982,8 @@ def show_classic_transfers_page():
     for sc in ["1GW", "ROS", "Transfer Score"]:
         if sc in targets_show.columns:
             targets_show[sc] = targets_show[sc].round(3)
-    targets_show["Projected_Points"] = targets_show["Projected_Points"].fillna("-")
+    if "Proj" in targets_show.columns:
+        targets_show["Proj"] = targets_show["Proj"].fillna("-")
     targets_show["Ownership"] = targets_show["selected_by_percent"].apply(lambda x: f"{x:.1f}%")
 
     # Rename for display
@@ -1997,7 +2002,8 @@ def show_classic_transfers_page():
     display_cols_final = [c for c in display_cols_final if c in targets_show.columns]
     render_styled_table(
         targets_show[display_cols_final],
-        col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}", "Transfer Score": "{:.3f}"},
+        col_formats={"Proj Pts": "{:.1f}", "Form": "{:.1f}", "Avg FDR": "{:.2f}",
+                     "1GW": "{:.3f}", "ROS": "{:.3f}", "Transfer Score": "{:.3f}"},
         positive_color_cols=["1GW", "ROS", "Transfer Score"],
         max_height=500,
     )
@@ -2030,7 +2036,7 @@ def show_classic_transfers_page():
 
             # Format for display
             pos_cols = ["Player", "Team", "now_cost", "form", "total_points",
-                        "Projected_Points", "selected_by_percent", "AvgFDR",
+                        "Proj", "Proj_Src", "selected_by_percent", "AvgFDR",
                         "1GW", "ROS", "Transfer Score"]
             pos_cols = [c for c in pos_cols if c in pos_targets.columns]
             pos_show = pos_targets[pos_cols].copy()
@@ -2040,7 +2046,8 @@ def show_classic_transfers_page():
             for sc in ["1GW", "ROS", "Transfer Score"]:
                 if sc in pos_show.columns:
                     pos_show[sc] = pos_show[sc].round(3)
-            pos_show["Projected_Points"] = pos_show["Projected_Points"].fillna("-")
+            if "Proj" in pos_show.columns:
+                pos_show["Proj"] = pos_show["Proj"].fillna("-")
             pos_show["Own%"] = pos_show["selected_by_percent"].apply(lambda x: f"{x:.1f}%")
 
             pos_display_cols = ["Player", "Team", "Price", "form", "total_points",
@@ -2053,7 +2060,8 @@ def show_classic_transfers_page():
             })
             render_styled_table(
                 pos_display,
-                col_formats={"Form": "{:.1f}", "Avg FDR": "{:.2f}", "1GW": "{:.3f}", "ROS": "{:.3f}", "Transfer Score": "{:.3f}"},
+                col_formats={"Proj Pts": "{:.1f}", "Form": "{:.1f}", "Avg FDR": "{:.2f}",
+                             "1GW": "{:.3f}", "ROS": "{:.3f}", "Transfer Score": "{:.3f}"},
                 positive_color_cols=["1GW", "ROS", "Transfer Score"],
             )
 
