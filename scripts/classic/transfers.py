@@ -599,7 +599,14 @@ def _format_price_trend(cost_change_event: int, transfers_in_event: int,
 
 
 def _compute_hit_verdict(ep_delta: float, is_hit: bool) -> dict:
-    """Determine whether a transfer is worth a -4 hit based on FPL expected points delta."""
+    """Determine whether a transfer is worth a -4 hit based on FPL expected points delta.
+
+    ``display_str`` answers only the question the verdict cannot: what the move
+    is worth *after* the hit. A free transfer has no hit to net off, so it gets
+    no number here -- the card already prints the delta, and pairing a green
+    "FREE" with a bare "-3.0 pts net (free)" read as though making the transfer
+    cost three points rather than as the projection difference it is.
+    """
     net_gain = ep_delta - 4.0 if is_hit else ep_delta
 
     if not is_hit:
@@ -615,9 +622,11 @@ def _compute_hit_verdict(ep_delta: float, is_hit: bool) -> dict:
         verdict = "NO"
         verdict_color = "#f87171"
 
-    sign = "+" if net_gain >= 0 else ""
-    hit_label = " (hit)" if is_hit else " (free)"
-    display_str = f"{sign}{net_gain:.1f} pts net{hit_label}"
+    if is_hit:
+        sign = "+" if net_gain >= 0 else "&minus;"
+        display_str = f"{sign}{abs(net_gain):.1f} xPts after the &minus;4 hit"
+    else:
+        display_str = ""
 
     return {
         "net_gain": net_gain,
@@ -1437,18 +1446,29 @@ def _build_hit_verdict_row(s: dict) -> str:
     ep_add = s.get("ep_next_add", 0)
     ep_drop = s.get("ep_next_drop", 0)
     ep_delta = s.get("ep_delta", 0)
-    sign = "+" if ep_delta >= 0 else ""
     color = verdict_data["verdict_color"]
     verdict = verdict_data["verdict"]
     display = verdict_data["display_str"]
+
+    # Spell the comparison out and colour it by direction. "in" minus "out" as
+    # a bare signed number, sitting beside a green FREE badge, was read as the
+    # cost of making the transfer rather than as the gap between two players.
+    if ep_delta >= 0:
+        delta_text = f"<b style=\"color:#4ecca3;\">+{ep_delta:.1f} xPts</b>"
+    else:
+        delta_text = f"<b style=\"color:#f87171;\">&minus;{abs(ep_delta):.1f} xPts</b>"
+    breakdown = (
+        f'{s.get("add_player", "in")} {ep_add:.1f} vs '
+        f'{s.get("drop_player", "out")} {ep_drop:.1f} &rarr; {delta_text} this GW'
+    )
+
+    badge_text = f"{verdict} &nbsp; {display}" if display else verdict
     return (
         f'<div style="display:flex;justify-content:space-between;align-items:center;'
         f'margin-top:6px;padding-top:6px;border-top:1px solid #2d2d2d;">'
-        f'<span style="color:#9ca3af;font-size:0.78em;">'
-        f'FPL xPts: {ep_add:.1f} &minus; {ep_drop:.1f} = <b style="color:#e0e0e0;">{sign}{ep_delta:.1f}</b>'
-        f'</span>'
+        f'<span style="color:#9ca3af;font-size:0.78em;">FPL xPts: {breakdown}</span>'
         f'<span style="background:{color};color:#0d1117;padding:2px 10px;border-radius:10px;'
-        f'font-size:0.78em;font-weight:bold;">{verdict} &nbsp; {display}</span>'
+        f'font-size:0.78em;font-weight:bold;">{badge_text}</span>'
         f'</div>'
     )
 
@@ -1488,6 +1508,13 @@ def _render_transfer_suggestions(suggestions: List[Dict], free_transfers: int = 
         return
 
     st.subheader("Transfer Suggestions")
+    # A move can be recommended while projecting fewer points this week, and
+    # without this line that reads as the page contradicting itself.
+    st.caption(
+        "FPL xPts compares the two players over this gameweek alone, using FPL's own "
+        "expected points. Suggestions weigh rest-of-season value too, so a move can be "
+        "worth making even when it projects fewer points this week."
+    )
 
     for s in suggestions:
         # Urgency badge
