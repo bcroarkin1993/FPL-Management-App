@@ -9,7 +9,7 @@ club taken to four players.
 import pandas as pd
 import pytest
 
-from scripts.classic.transfers import _build_multi_transfer_plan
+from scripts.classic.transfers import _blended_proj, _build_multi_transfer_plan
 
 
 def _outlay(plan):
@@ -197,3 +197,44 @@ class TestDegradesQuietly:
         squad = _base_squad().drop(columns=["Keep Score"])
         available = pd.DataFrame([_avail_row(101, "D", "ARS", 45, 0.95)])
         assert _build_multi_transfer_plan(squad, available, bank=10) == []
+
+
+class TestCardProjectionIsTheBlend:
+    """Cards print the blend, not the raw Rotowire column the blend is built from.
+
+    Both numbers are individually plausible, so a card showing Rotowire's "if he
+    starts" figure under the same "Proj" label the tables use for expected
+    points is invisible -- it just reads as the app disagreeing with itself.
+    """
+
+    def test_blend_wins_over_raw_rotowire(self):
+        row = pd.Series({"Proj": 4.2, "Projected_Points": 6.1})
+        assert _blended_proj(row) == 4.2
+
+    def test_falls_back_to_rotowire_when_unblended(self):
+        assert _blended_proj(pd.Series({"Projected_Points": 6.1})) == 6.1
+
+    def test_missing_everything_is_nan_not_a_crash(self):
+        assert pd.isna(_blended_proj(pd.Series({"Player": "x"})))
+
+    def test_nan_blend_falls_through(self):
+        row = pd.Series({"Proj": float("nan"), "Projected_Points": 6.1})
+        assert _blended_proj(row) == 6.1
+
+    def test_plan_card_shows_the_blend(self):
+        squad = _base_squad()
+        available = pd.DataFrame([
+            _avail_row(101, "D", "ARS", 45, 0.95),
+            _avail_row(102, "D", "BOU", 45, 0.90),
+            _avail_row(103, "M", "CHE", 55, 0.85),
+        ])
+        # Rotowire says 6.0 (it assumes he starts); the blend prices the
+        # rotation risk in and says 4.2. The card must show 4.2.
+        available["Proj"] = 4.2
+
+        plan = _build_multi_transfer_plan(squad, available, bank=100)
+
+        assert plan
+        assert all(leg["add_proj_pts"] == "4.2" for leg in plan), (
+            f"cards show {[leg['add_proj_pts'] for leg in plan]}, not the blend"
+        )

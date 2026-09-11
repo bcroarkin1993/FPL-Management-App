@@ -1019,6 +1019,16 @@ affordable. ~0.1s against a 600-player pool.
 Single-transfer suggestions stay individually budgeted (`bank + selling_price`
 per drop): they are alternatives, ranked, and only one of them gets made.
 
+**Cards render the blend, via `_blended_proj()`.** Every "Proj" on this page --
+the suggestion cards, both legs of the plan, and the comparison tool's
+"Projected points change" -- read `Projected_Points`, which is Rotowire's raw
+"points if he starts", while the tables a few hundred pixels below showed the
+engine's expected points under the same label. Nothing distinguished them: both
+numbers are plausible, and the difference is exactly the rotation risk the
+blend exists to price. The same helper backs the shortlist of players worth an
+element-summary fetch, which previously fell back to bootstrap order on any
+gameweek Rotowire had not published.
+
 **`_effective_proj` column**: `compute_player_scores()` retains `_effective_proj` (blended_proj × start_likelihood) in its output. Consumers (Waiver Wire suggestion engine, card rendering) rely on it for GW projection display and sanity checking. Do not drop it from the result.
 
 **FFP name matching goes through `ReferenceMatcher`.** `merge_ffp_single_gw_data()`,

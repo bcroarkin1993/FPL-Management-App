@@ -539,6 +539,22 @@ def _compute_free_transfers(history: dict, entry_history: dict, current_gw: int,
     return 1
 
 
+def _blended_proj(row) -> float:
+    """Expected points for one row, preferring the engine's blend.
+
+    Suggestion cards printed `Projected_Points` -- Rotowire's raw "if he starts"
+    number -- under the same "Proj" label the tables use for the blend, so the
+    same player read two different ways a few hundred pixels apart. `Proj` is
+    the blend across every source that priced him, with start likelihood already
+    applied; Rotowire alone is the fallback for a frame built before the blend.
+    """
+    for col in ("Proj", "Projected_Points"):
+        value = pd.to_numeric(row.get(col), errors="coerce")
+        if pd.notna(value):
+            return float(value)
+    return float("nan")
+
+
 def _ownership_badge(pct: float) -> str:
     """Return HTML ownership badge for template (>20%) or differential (<5%) players."""
     pct = float(pct or 0)
@@ -880,7 +896,7 @@ def _plan_card(drop_row, add_row, pos_labels: Dict, depth_map: Optional[Dict],
     pos = drop_row["Position"]
     add_form_col = "HealthyForm" if "HealthyForm" in add_row.index else "form"
     drop_form_col = "HealthyForm" if "HealthyForm" in drop_row.index else "form"
-    proj = pd.to_numeric(add_row.get("Projected_Points"), errors="coerce")
+    proj = _blended_proj(add_row)
     return {
         "position": pos_labels.get(pos, pos),
         "score_diff": float(add_row.get("Transfer Score", 0)) - float(drop_row.get("Keep Score", 0)),
@@ -1270,8 +1286,8 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         form_diff = float(add_row.get(add_form_col, 0) or 0) - float(drop_row.get(drop_form_col, 0) or 0)
         if form_diff > 0:
             reasons.append(f"+{form_diff:.1f} form improvement")
-        proj_add = pd.to_numeric(add_row.get("Projected_Points"), errors="coerce")
-        proj_drop = pd.to_numeric(drop_row.get("Projected_Points"), errors="coerce")
+        proj_add = _blended_proj(add_row)
+        proj_drop = _blended_proj(drop_row)
         if pd.notna(proj_add) and pd.notna(proj_drop) and proj_add > proj_drop:
             reasons.append(f"+{proj_add - proj_drop:.1f} projected points")
         add_multi = float(add_row.get("MultiGW_Proj", 0) or 0)
@@ -1861,7 +1877,17 @@ def show_classic_transfers_page():
     ].copy()
 
     # Compute healthy form for top transfer candidates (selective — not all 600+ players)
-    top_candidates = available.nlargest(50, "Projected_Points", keep="all") if "Projected_Points" in available.columns and available["Projected_Points"].notna().any() else available.head(50)
+    # Which 50 players are worth an element-summary fetch each. Ranked on the
+    # blend rather than Rotowire alone: when Rotowire has not published, that
+    # column is entirely NaN and this fell back to bootstrap order, spending the
+    # whole budget of fetches on whoever happened to be first.
+    _proj_rank_col = next(
+        (c for c in ("Proj", "Projected_Points")
+         if c in available.columns and available[c].notna().any()),
+        None,
+    )
+    top_candidates = (available.nlargest(50, _proj_rank_col, keep="all")
+                      if _proj_rank_col else available.head(50))
     for idx in top_candidates.index:
         pid = available.at[idx, "Player_ID"]
         if pd.notna(pid):
@@ -2195,8 +2221,10 @@ def show_classic_transfers_page():
                     form_diff = in_player["form"] - out_player["form"]
                     st.caption(f"Form change: {'+' if form_diff >= 0 else ''}{form_diff:.1f}")
 
-                    if pd.notna(in_player["Projected_Points"]) and pd.notna(out_player.get("Projected_Points")):
-                        proj_diff = in_player["Projected_Points"] - out_player.get("Projected_Points", 0)
+                    proj_in = _blended_proj(in_player)
+                    proj_out = _blended_proj(out_player)
+                    if pd.notna(proj_in) and pd.notna(proj_out):
+                        proj_diff = proj_in - proj_out
                         st.caption(f"Projected points change: {'+' if proj_diff >= 0 else ''}{proj_diff:.1f}")
 
     st.markdown("---")
