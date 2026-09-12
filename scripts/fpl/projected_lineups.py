@@ -1,5 +1,6 @@
 from bs4 import BeautifulSoup
 from collections import defaultdict
+from typing import NamedTuple
 import config
 import pandas as pd
 import plotly.graph_objects as go
@@ -104,48 +105,70 @@ def _matchup_is_in_gameweek(home_team, away_team, fixture_pairs) -> bool:
     return (home, away) in fixture_pairs
 
 
-def scrape_rotowire_lineups(url, gameweek=None):
+LINEUP_COLUMNS = ['Team', 'Position', 'Player', 'MatchupIndex']
+
+
+class LineupScrape(NamedTuple):
+    """One pass over Rotowire's lineups page.
+
+    ``players`` and ``matchups`` share a single ``MatchupIndex`` space by
+    construction, which is the whole point of returning them together.
     """
-    Scrapes the Rotowire Soccer Lineups page to extract the projected lineups for all matchups,
-    excluding players listed in the Injuries section.
+
+    players: pd.DataFrame
+    matchups: list
+
+
+def scrape_lineups(url, gameweek=None) -> LineupScrape:
+    """Scrape Rotowire's lineups page once: the players and the matchup list.
+
+    **These must come from the same filtered pass.** Rotowire's page carries
+    whatever matches it has lineups for, which runs past the gameweek the app is
+    showing -- so both are filtered against the real fixture list, and
+    ``MatchupIndex`` is assigned only to matchups that survive, keeping it
+    contiguous. The renderer pairs home and away by that index, so a gap would
+    leave a matchup showing one side.
+
+    They used to be two functions doing two separate fetches, and only one of
+    them filtered. That put a next-gameweek fixture in the dropdown (observed:
+    "Brentford v Chelsea" under a GW4 heading) and, worse, gave the two sides
+    different index spaces: the players were numbered 0..9 after filtering while
+    the dropdown was numbered 0..10 before it. The stray fixture happened to
+    sort last both times, so the indices coincided and nothing looked wrong --
+    but Rotowire orders by kickoff, and a next-week fixture appearing anywhere
+    earlier would have rendered every subsequent matchup's players under the
+    wrong clubs. Every value on screen would still have been individually
+    plausible.
 
     Parameters:
     - url (str): The URL of the Rotowire lineups page.
     - gameweek (int, optional): restrict to matchups belonging to this gameweek.
-      Rotowire lists whatever it has lineups for, which runs past the current
-      week; without this a later gameweek's fixture renders under this one's
-      heading. Defaults to ``config.CURRENT_GAMEWEEK``; pass ``0`` to disable.
-
-    Returns:
-    - DataFrame containing the team names, player names, positions, and matchup index.
+      Defaults to ``config.CURRENT_GAMEWEEK``; pass ``0`` to disable.
     """
-    # Send a request to the Rotowire lineups page
     try:
         page = requests.get(url, timeout=30)
     except Exception as e:
         _logger.warning("Failed to fetch Rotowire lineups from %s: %s", url, e)
-        return pd.DataFrame(columns=['Team', 'Position', 'Player', 'MatchupIndex'])
+        return LineupScrape(pd.DataFrame(columns=LINEUP_COLUMNS), [])
     soup = BeautifulSoup(page.content, 'html.parser')
-
-    # Initialize an empty list to store match data
-    all_players = []
 
     if gameweek is None:
         gameweek = config.CURRENT_GAMEWEEK
     fixture_pairs = _gameweek_fixture_pairs(gameweek) if gameweek else set()
 
-    # Find all lineup sections (home and away matchups)
+    # Matchups are read off the same `lineup__main` sections the players come
+    # from, via find_previous, rather than from the parallel `lineup__matchup`
+    # divs. They are 1:1 today, but deriving both from one iteration means they
+    # cannot drift apart -- and a matchup with no lineup section could otherwise
+    # reach the dropdown and render an empty card.
     lineup_sections = soup.find_all('div', class_='lineup__main')
 
-    # Iterate through each section to extract team and player data.
-    # MatchupIndex is assigned *after* the gameweek filter so the indices stay
-    # contiguous -- the renderer pairs home and away by this index, and a gap
-    # would leave a matchup with only one side.
+    all_players = []
+    matchups = []
     matchup_index = 0
     skipped_other_gw = 0
     for section in lineup_sections:
         try:
-            # Extract home and away team names
             home_team = section.find_previous('div', class_='lineup__mteam is-home').text.strip()
             away_team = section.find_previous('div', class_='lineup__mteam is-visit').text.strip()
 
@@ -157,8 +180,8 @@ def scrape_rotowire_lineups(url, gameweek=None):
             home_players = extract_players(section, 'home', home_team, matchup_index)
             away_players = extract_players(section, 'visit', away_team, matchup_index)
 
-            # Add players to the list
             all_players.extend(home_players + away_players)
+            matchups.append((home_team, away_team, matchup_index))
             matchup_index += 1
 
         except AttributeError as e:
@@ -167,41 +190,25 @@ def scrape_rotowire_lineups(url, gameweek=None):
     if skipped_other_gw:
         _logger.info("Projected Lineups: skipped %d matchup(s) outside GW%s",
                      skipped_other_gw, gameweek)
+    if not matchups and lineup_sections:
+        _logger.warning("Rotowire: found %d lineup sections but parsed no matchups",
+                        len(lineup_sections))
 
-    # Convert the data to a pandas DataFrame
-    lineups_df = pd.DataFrame(all_players, columns=['Team', 'Position', 'Player', 'MatchupIndex'])
+    return LineupScrape(pd.DataFrame(all_players, columns=LINEUP_COLUMNS), matchups)
 
-    return lineups_df
 
-def scrape_matchups(url):
+def scrape_rotowire_lineups(url, gameweek=None):
+    """The players half of :func:`scrape_lineups`. See it for the filtering rules."""
+    return scrape_lineups(url, gameweek).players
+
+
+def scrape_matchups(url, gameweek=None):
+    """The matchup half of :func:`scrape_lineups`: ``(home, away, index)`` tuples.
+
+    Note the ``gameweek`` parameter, which this deliberately did not have: an
+    unfiltered matchup list is what put a next-gameweek fixture in the dropdown.
     """
-    Scrapes the matchups from the Rotowire page.
-
-    Returns:
-    - List of tuples: (home_team, away_team, matchup_index)
-    """
-    try:
-        page = requests.get(url, timeout=30)
-    except Exception as e:
-        _logger.warning("Failed to fetch Rotowire matchups from %s: %s", url, e)
-        return []
-    soup = BeautifulSoup(page.content, 'html.parser')
-    matchups_section = soup.find_all('div', class_='lineup__matchup')
-
-    matchups = []
-    for idx, matchup in enumerate(matchups_section):
-        try:
-            home_team = matchup.find('div', class_='lineup__mteam is-home').text.strip()
-            away_team = matchup.find('div', class_='lineup__mteam is-visit').text.strip()
-            matchups.append((home_team, away_team, idx))
-        except AttributeError as e:
-            _logger.warning("Error parsing matchup (HTML structure may have changed): %s", e)
-            continue
-
-    if not matchups and matchups_section:
-        _logger.warning("Rotowire: Found %d matchup sections but failed to parse any", len(matchups_section))
-
-    return matchups
+    return scrape_lineups(url, gameweek).matchups
 
 
 def get_player_data_map():
@@ -764,15 +771,13 @@ def show_projected_lineups():
     st.title(f"Projected Lineups — GW {config.CURRENT_GAMEWEEK}")
     st.write("View projected starting lineups with player form and availability status.")
 
-    # Scrape the EPL matchups from Rotowire
-    matchups = scrape_matchups(config.ROTOWIRE_LINEUPS_URL)
+    # One fetch for both, so the matchup list and the player frame cannot
+    # disagree about which fixture an index refers to.
+    lineups_df, matchups = scrape_lineups(config.ROTOWIRE_LINEUPS_URL)
 
     if not matchups:
         st.warning("No matchups available. Rotowire may not have published lineups yet.")
         return
-
-    # Fetch lineup data once for overview + drill-down
-    lineups_df = scrape_rotowire_lineups(config.ROTOWIRE_LINEUPS_URL)
 
     # -- Overview cards: all matchups at a glance --
     if not lineups_df.empty:

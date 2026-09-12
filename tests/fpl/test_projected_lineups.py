@@ -105,3 +105,93 @@ class TestScrapeFiltersByGameweek:
              patch.object(pl, "extract_players", side_effect=_extract):
             df = pl.scrape_rotowire_lineups("https://example.com/lineups", gameweek=0)
         assert sorted(df["MatchupIndex"].unique()) == [0, 1, 2]
+
+
+class TestMatchupsShareTheIndexSpace:
+    """The matchup list and the player frame must be one filtered pass.
+
+    They were two functions doing two separate fetches and only one of them
+    filtered, so the dropdown carried a next-gameweek fixture ("Brentford v
+    Chelsea" under a GW4 heading) *and* the two halves were numbered
+    differently: players 0..N-1 after filtering, matchups 0..N before it.
+
+    Note where the stray fixture sits in ``_HTML`` -- second of three. That is
+    the case that matters. Live, it happened to sort last, so the two index
+    spaces coincided and the only symptom was one empty extra card. One
+    position earlier and every subsequent matchup renders another club's
+    players, with every name on screen still perfectly plausible.
+    """
+
+    def _scrape(self, gameweek=4):
+        resp = MagicMock()
+        resp.content = _HTML.encode("utf-8")
+
+        def _extract(section, side, team, idx):
+            return [(team, "M", f"{team} player", idx)]
+
+        with patch.object(pl.requests, "get", return_value=resp) as get, \
+             patch.object(pl, "_gameweek_fixture_pairs", return_value=GW4_PAIRS), \
+             patch.object(pl, "extract_players", side_effect=_extract):
+            return pl.scrape_lineups("https://example.com/lineups", gameweek), get
+
+    def test_matchups_exclude_the_later_gameweek(self):
+        scrape, _ = self._scrape()
+        pairs = [(h, a) for h, a, _ in scrape.matchups]
+        assert ("Brentford", "Chelsea") not in pairs
+        assert pairs == [("Chelsea", "Hull City"), ("Liverpool", "Fulham")]
+
+    def test_matchup_indices_are_contiguous(self):
+        scrape, _ = self._scrape()
+        assert [i for _, _, i in scrape.matchups] == [0, 1]
+
+    def test_every_index_holds_exactly_its_own_two_clubs(self):
+        """The assertion that would have caught the desync: for each matchup,
+        the players filed under its index are that fixture's two clubs."""
+        scrape, _ = self._scrape()
+        for home, away, idx in scrape.matchups:
+            teams = set(scrape.players.loc[
+                scrape.players["MatchupIndex"] == idx, "Team"])
+            assert teams == {home, away}, (
+                "index %d is labelled %s v %s but holds %s"
+                % (idx, home, away, sorted(teams)))
+
+    def test_the_page_is_fetched_once(self):
+        """Two fetches of the same page is not just waste -- Rotowire can
+        publish between them, which is a second way the halves can disagree."""
+        _, get = self._scrape()
+        assert get.call_count == 1
+
+    def test_scrape_matchups_filters_by_gameweek(self):
+        """It had no gameweek parameter at all, which is how the stray fixture
+        reached the dropdown."""
+        resp = MagicMock()
+        resp.content = _HTML.encode("utf-8")
+        with patch.object(pl.requests, "get", return_value=resp), \
+             patch.object(pl, "_gameweek_fixture_pairs", return_value=GW4_PAIRS), \
+             patch.object(pl, "extract_players", side_effect=lambda *a: []):
+            matchups = pl.scrape_matchups("https://example.com/lineups", gameweek=4)
+        assert [(h, a) for h, a, _ in matchups] == [
+            ("Chelsea", "Hull City"), ("Liverpool", "Fulham")]
+
+    def test_the_two_wrappers_agree_with_the_single_pass(self):
+        scrape, _ = self._scrape()
+        resp = MagicMock()
+        resp.content = _HTML.encode("utf-8")
+
+        def _extract(section, side, team, idx):
+            return [(team, "M", f"{team} player", idx)]
+
+        with patch.object(pl.requests, "get", return_value=resp), \
+             patch.object(pl, "_gameweek_fixture_pairs", return_value=GW4_PAIRS), \
+             patch.object(pl, "extract_players", side_effect=_extract):
+            df = pl.scrape_rotowire_lineups("https://example.com/lineups", gameweek=4)
+            matchups = pl.scrape_matchups("https://example.com/lineups", gameweek=4)
+        assert df.equals(scrape.players)
+        assert matchups == scrape.matchups
+
+    def test_a_failed_fetch_returns_both_halves_empty(self):
+        with patch.object(pl.requests, "get", side_effect=RuntimeError("down")):
+            scrape = pl.scrape_lineups("https://example.com/lineups", gameweek=4)
+        assert scrape.players.empty
+        assert list(scrape.players.columns) == pl.LINEUP_COLUMNS
+        assert scrape.matchups == []

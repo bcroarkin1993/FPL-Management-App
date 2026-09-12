@@ -649,7 +649,21 @@ rendered under a GW4 heading. Brentford were playing Bournemouth that week.
 
 Matchups are now matched as ordered `(home, away)` pairs against the real
 fixture list for the gameweek, the same technique `resolve_ffp_gameweek()` uses.
-Two details are load-bearing:
+
+**Both halves come from one pass: `scrape_lineups()` returns the player frame
+and the matchup list together**, and `scrape_rotowire_lineups()` /
+`scrape_matchups()` are thin wrappers over it. The filter originally went into
+the players half only, while `scrape_matchups()` did its own second fetch with
+no gameweek argument at all — so the dropdown and the overview cards still
+carried the extra fixture (GW5's "Brentford v Chelsea" was still listed under
+GW4 two days later), and the two halves were numbered in *different index
+spaces*: players `0..N-1` after filtering, matchups `0..N` before it. Live, the
+stray fixture sorted last both times, so the indices coincided and the only
+symptom was one empty card. One position earlier and every subsequent matchup
+renders another club's players — with every name on screen still plausible. The
+test HTML deliberately puts the stray fixture second of three for that reason.
+
+Two further details are load-bearing:
 
 - **It fails open.** An unresolvable club label, or an unreadable fixture list,
   keeps the matchup. Showing one extra match is an annoyance; silently dropping
