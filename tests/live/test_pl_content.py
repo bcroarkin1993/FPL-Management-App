@@ -103,6 +103,36 @@ def test_xi_graphics_are_published_for_both_sides(lineups):
         "probably broken" % sorted(missing))
 
 
+def test_xi_graphic_urls_actually_serve_an_image(lineups):
+    """A well-formed URL is not a working one.
+
+    ``onDemandUrl`` is a resizer endpoint that answers 400 unless a width is
+    given, so the first version of this shipped 20 URLs that all parsed, all
+    looked right, and all failed in the browser -- the only visible symptom
+    being the img alt text. Asserting the URL exists could never catch that;
+    only fetching one can.
+    """
+    if not lineups.ok:
+        pytest.skip("PL has not published GW%s yet" % config.CURRENT_GAMEWEEK)
+    if not lineups.graphics:
+        pytest.skip("no graphics published")
+
+    import requests
+
+    failures = []
+    for code, url in sorted(lineups.graphics.items())[:4]:
+        try:
+            resp = requests.get(url, timeout=20, stream=True)
+        except requests.RequestException as exc:
+            pytest.skip("PL image CDN unreachable: %s" % exc)
+        content_type = resp.headers.get("content-type", "")
+        resp.close()
+        if resp.status_code != 200 or not content_type.startswith("image/"):
+            failures.append("%s -> %s %s (%s)"
+                            % (code, resp.status_code, content_type, url))
+    assert not failures, "PL XI graphics do not load:\n  " + "\n  ".join(failures)
+
+
 # =============================================================================
 # The injury table
 # =============================================================================

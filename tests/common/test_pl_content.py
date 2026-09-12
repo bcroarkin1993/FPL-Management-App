@@ -161,6 +161,33 @@ def _photo(title, url="https://example.test/x.png"):
     return {"title": title, "onDemandUrl": url}
 
 
+def test_on_demand_url_gets_a_width():
+    """onDemandUrl is a resizer, not a file: bare it answers 400 'At least one
+    of width or height parameters must be specified'. Without this the page
+    renders 20 broken images whose only symptom is the alt text."""
+    url = pl_content._graphic_url({"onDemandUrl": "https://x/a.png"})
+    assert url == "https://x/a.png?width=%d" % pl_content.GRAPHIC_WIDTH
+
+
+def test_on_demand_url_with_existing_query_keeps_it():
+    url = pl_content._graphic_url({"onDemandUrl": "https://x/a.png?v=2"})
+    assert url == "https://x/a.png?v=2&width=%d" % pl_content.GRAPHIC_WIDTH
+
+
+def test_image_url_is_the_fallback_and_needs_no_parameters():
+    """imageUrl is a plain file; adding a width to it would be wrong."""
+    assert pl_content._graphic_url({"imageUrl": "https://x/b.png"}) == "https://x/b.png"
+    assert pl_content._graphic_url({}) is None
+
+
+def test_resolved_graphics_carry_a_width(monkeypatch):
+    monkeypatch.setattr(pl_content, "fetch_photo",
+                        lambda pid, **kw: _photo("Aston Villa Matchweek 4 line up",
+                                                 "https://x/avl.png"))
+    out = pl_content._resolve_graphics((("AVL", ""),), [["1", "2"]], 4, 20)
+    assert all("width=" in url for url in out.values())
+
+
 def test_graphics_map_to_clubs_and_verify_against_the_photo_title(monkeypatch):
     photos = {
         "1": _photo("Aston Villa Matchweek 4 line up", "https://x/avl.png"),
@@ -169,7 +196,9 @@ def test_graphics_map_to_clubs_and_verify_against_the_photo_title(monkeypatch):
     monkeypatch.setattr(pl_content, "fetch_photo",
                         lambda pid, **kw: photos.get(str(pid)))
     out = pl_content._resolve_graphics((("AVL", "NFO"),), [["1", "2"]], 4, 20)
-    assert out == {"AVL": "https://x/avl.png", "NFO": "https://x/nfo.png"}
+    width = pl_content.GRAPHIC_WIDTH
+    assert out == {"AVL": "https://x/avl.png?width=%d" % width,
+                   "NFO": "https://x/nfo.png?width=%d" % width}
 
 
 def test_graphic_titled_for_another_club_is_dropped(monkeypatch):

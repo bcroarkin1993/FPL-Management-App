@@ -71,6 +71,11 @@ _GW_VOTE_THRESHOLD = 0.60
 #: A club label longer than this is prose that happened to be bold, not a label.
 _MAX_CLUB_LABEL = 30
 
+#: Width requested from the PL's image resizer. The XI graphics sit two to a row
+#: in a Streamlit column, so this is roughly 2x the rendered width for retina.
+#: It is also required, not an optimisation -- see :func:`_graphic_url`.
+GRAPHIC_WIDTH = 760
+
 _MATCHWEEK_RE = re.compile(r"Matchweek\s+(\d+)", re.I)
 _FIXTURE_HEADING_RE = re.compile(r"^(.+?)\s+v\s+(.+?)\s+predicted line-ups\s*$", re.I)
 
@@ -427,7 +432,7 @@ def _resolve_graphics(fixtures, media_by_fixture, gameweek, timeout) -> Dict[str
     for (code, media_id), photo in zip(jobs, photos):
         if not photo:
             continue
-        image = photo.get("onDemandUrl") or photo.get("imageUrl")
+        image = _graphic_url(photo)
         if not image:
             continue
         claimed = _club_from_photo_title(photo.get("title"))
@@ -442,6 +447,25 @@ def _resolve_graphics(fixtures, media_by_fixture, gameweek, timeout) -> Dict[str
             continue
         out[code] = image
     return out
+
+
+def _graphic_url(photo: dict) -> Optional[str]:
+    """A URL the browser can actually load.
+
+    ``onDemandUrl`` is a *resizer* endpoint, not a file: fetched bare it answers
+    ``400 Bad parameter: At least one of width or height parameters must be
+    specified``. Taken at face value it produced a page of broken images whose
+    only symptom was the alt text -- every URL well-formed, every one a 400.
+
+    With a width it serves a ~45KB JPEG where ``imageUrl`` serves the 552KB
+    original, so it is still the one to prefer; ``imageUrl`` is the fallback and
+    is a plain file that needs no parameters.
+    """
+    on_demand = photo.get("onDemandUrl")
+    if on_demand:
+        joiner = "&" if "?" in on_demand else "?"
+        return "%s%swidth=%d" % (on_demand, joiner, GRAPHIC_WIDTH)
+    return photo.get("imageUrl") or None
 
 
 def _club_from_photo_title(title: Optional[str]) -> Optional[str]:

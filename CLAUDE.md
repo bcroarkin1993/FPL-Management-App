@@ -724,6 +724,15 @@ than rendered. Showing one club's XI under another club's name is worse than
 showing nothing. This is why `TEAM_FULL_TO_SHORT` needs `"Nottm Forest"` — no
 apostrophe, and only in the graphic titles.
 
+**`onDemandUrl` is a resizer, not a file.** Fetched bare it answers `400 Bad
+parameter: At least one of width or height parameters must be specified`, so
+taking it at face value renders a page of broken images whose only symptom is
+the `<img>` alt text — every URL well-formed, every one a 400. `_graphic_url()`
+appends `?width=GRAPHIC_WIDTH`, which is also 12x lighter (a 45KB JPEG against
+the 552KB original); `imageUrl` is the plain-file fallback and must *not* get a
+width. A live test fetches several of the URLs, because asserting that a URL
+exists can never catch this — only loading one can.
+
 **The injury table is a watchlist, not ground truth, and lags in both
 directions.** Measured 2026-09-11: 83 players across all 20 clubs, 81 matched to
 the FPL pool (97.6%), and 11 that the PL called injured while FPL's bootstrap
