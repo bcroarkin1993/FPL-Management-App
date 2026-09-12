@@ -1,0 +1,1332 @@
+{
+ "hub": {
+  "items": [
+   {
+    "response": {
+     "id": 4509803,
+     "title": "Injury News - Arsenal"
+    }
+   },
+   {
+    "response": {
+     "id": 4509804,
+     "title": "Injury News - Aston Villa"
+    }
+   },
+   {
+    "response": {
+     "id": 4509805,
+     "title": "Injury News - Bournemouth"
+    }
+   },
+   {
+    "response": {
+     "id": 4509806,
+     "title": "Injury News - Brentford"
+    }
+   },
+   {
+    "response": {
+     "id": 4509807,
+     "title": "Injury News - Brighton & Hove Albion"
+    }
+   },
+   {
+    "response": {
+     "id": 4509809,
+     "title": "Injury News - Chelsea"
+    }
+   },
+   {
+    "response": {
+     "id": 4509808,
+     "title": "Injury News - Coventry City"
+    }
+   },
+   {
+    "response": {
+     "id": 4509810,
+     "title": "Injury News - Crystal Palace"
+    }
+   },
+   {
+    "response": {
+     "id": 4509812,
+     "title": "Injury News - Everton"
+    }
+   },
+   {
+    "response": {
+     "id": 4509813,
+     "title": "Injury News - Fulham"
+    }
+   },
+   {
+    "response": {
+     "id": 4509822,
+     "title": "Injury News - Hull City"
+    }
+   },
+   {
+    "response": {
+     "id": 4509823,
+     "title": "Injury News - Ipswich Town"
+    }
+   },
+   {
+    "response": {
+     "id": 4509814,
+     "title": "Injury News - Leeds United"
+    }
+   },
+   {
+    "response": {
+     "id": 4509815,
+     "title": "Injury News - Liverpool"
+    }
+   },
+   {
+    "response": {
+     "id": 4509816,
+     "title": "Injury News - Manchester City"
+    }
+   },
+   {
+    "response": {
+     "id": 4509817,
+     "title": "Injury News - Manchester United"
+    }
+   },
+   {
+    "response": {
+     "id": 4509818,
+     "title": "Injury News - Newcastle United"
+    }
+   },
+   {
+    "response": {
+     "id": 4509819,
+     "title": "Injury News - Nottingham Forest"
+    }
+   },
+   {
+    "response": {
+     "id": 4509820,
+     "title": "Injury News - Sunderland"
+    }
+   },
+   {
+    "response": {
+     "id": 4509821,
+     "title": "Injury News - Tottenham Hotspur"
+    }
+   }
+  ]
+ },
+ "clubs": {
+  "4509803": {
+   "id": 4509803,
+   "title": "Injury News - Arsenal",
+   "items": [
+    {
+     "response": {
+      "title": "Ben White",
+      "description": "Knock",
+      "date": "2026-03-14T18:13:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.arsenal.com/news/artetas-update-on-white-mosquera-and-timber-axoYv8N7qYHf",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Cristhian Mosquera",
+      "description": "Muscle",
+      "date": "2026-08-31T20:52:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.arsenal.com/news/artetas-update-on-white-mosquera-and-timber-axoYv8N7qYHf",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "William Saliba",
+      "description": "Back",
+      "date": "2026-03-14T18:13:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.arsenal.com/news/arteta-delivers-update-on-timber-mosquera-and-saliba-aJhiV6J1zaCz",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Jurrien Timber",
+      "description": "Groin",
+      "date": "2026-03-14T18:13:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.arsenal.com/news/artetas-update-on-white-mosquera-and-timber-axoYv8N7qYHf",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509804": {
+   "id": 4509804,
+   "title": "Injury News - Aston Villa",
+   "items": [
+    {
+     "response": {
+      "title": "Leon Goretzka",
+      "description": "-",
+      "date": "2026-09-07T20:54:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.avfc.co.uk/news/2026/september/07/prematch-club-brugge-team-news/",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Brian Madjo",
+      "description": "-",
+      "date": "2026-08-20T10:03:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.avfc.co.uk/news/2026/september/04/prematch-team-news-for-hull-clash/",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Amadou Onana",
+      "description": "ACL",
+      "date": "2026-08-20T10:04:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.avfc.co.uk/news/2026/september/04/prematch-team-news-for-hull-clash/",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Johan Manzambi",
+      "description": "Knee",
+      "date": "2026-08-20T10:03:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.avfc.co.uk/news/2026/september/04/prematch-team-news-for-hull-clash/",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509805": {
+   "id": 4509805,
+   "title": "Injury News - Bournemouth",
+   "items": [
+    {
+     "response": {
+      "title": "Julian Araujo",
+      "description": "Thigh",
+      "date": "2026-08-06T08:42:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.afcb.co.uk/news/2026/september/10/injury-news--updates-on-/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Junior Kroupi",
+      "description": "Foot",
+      "date": "2026-04-06T10:48:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.afcb.co.uk/news/2026/september/10/injury-news--updates-on-/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Amine Adli",
+      "description": "Calf",
+      "date": "2026-08-20T10:08:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.afcb.co.uk/news/2026/september/10/injury-news--updates-on-/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Veljko Milosavljevic",
+      "description": "Quad",
+      "date": "2026-08-20T10:08:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.afcb.co.uk/news/2026/september/10/injury-news--updates-on-/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": false
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509806": {
+   "id": 4509806,
+   "title": "Injury News - Brentford",
+   "items": [
+    {
+     "response": {
+      "title": "Nathan Collins",
+      "description": "Calf",
+      "date": "2026-02-06T14:12:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brentfordfc.com/en/news/article/first-team-bournemouth-v-brentford-premier-league-keith-andrews-squad-news-update-nathan-collins",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Mathias Jensen",
+      "description": "-",
+      "date": "2026-01-19T12:31:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brentfordfc.com/en/news/article/first-team-bournemouth-v-brentford-premier-league-keith-andrews-squad-news-update-nathan-collins",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Sepp van den Berg",
+      "description": "Groin",
+      "date": "2026-08-21T14:08:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brentfordfc.com/en/news/article/first-team-brentford-v-sunderland-premier-league-team-news-mathias-jensen",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Antoni Milambo",
+      "description": "Knee",
+      "date": "2026-01-19T12:30:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brentfordfc.com/en/news/article/first-team-brentford-v-sunderland-premier-league-team-news-mathias-jensen",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Josh Dasilva",
+      "description": "Hamstring",
+      "date": "2026-01-19T12:31:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brentfordfc.com/en/news/article/first-team-brentford-v-sunderland-premier-league-team-news-mathias-jensen",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509807": {
+   "id": 4509807,
+   "title": "Injury News - Brighton & Hove Albion",
+   "items": [
+    {
+     "response": {
+      "title": "Georginio Rutter",
+      "description": "-",
+      "date": "2026-05-09T15:15:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brightonandhovealbion.com/media-video/coventry-v-albion-or-huerzeler-pre-match-press-conference?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Mats Wieffer",
+      "description": "-",
+      "date": "2026-04-18T16:51:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brightonandhovealbion.com/media-article/mft-match-preview-bha-leeds-united-pl-september-2026",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Femi Azeez",
+      "description": "-",
+      "date": "2026-05-09T15:15:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brightonandhovealbion.com/media-video/coventry-v-albion-or-huerzeler-pre-match-press-conference?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Jack Hinshelwood",
+      "description": "-",
+      "date": "2026-08-24T10:22:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brightonandhovealbion.com/media-video/chelsea-v-brighton-or-huerzeler-pre-match-press-conference",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Yankuba Minteh",
+      "description": "-",
+      "date": "2026-01-19T12:43:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brightonandhovealbion.com/media-article/mft-match-preview-bha-aston-villa-pl-august-2026?srsltid=AfmBOoqkIA4q3x1aQGB2FR2YEaEKA5ynZgxdfNU7jGBzRZAVXeFV4xh3?utm_source=premier-league-web&utm_medium=referral&utm_campaign=pl-referral-always-on&utm_term=injuries&utm_content=club-injury-article?utm_source=premier-league-web&utm_medium=referral&utm_campaign=pl-referral-always-on&utm_term=injuries&utm_content=club-injury-article",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Kaoru Mitoma",
+      "description": "Hamstring",
+      "date": "2026-05-09T15:15:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brightonandhovealbion.com/media-video/coventry-v-albion-or-huerzeler-pre-match-press-conference?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Stefanos Tzimas",
+      "description": "Knee",
+      "date": "2026-01-19T12:43:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brightonandhovealbion.com/media-article/mft-match-preview-bha-aston-villa-pl-august-2026?srsltid=AfmBOoqkIA4q3x1aQGB2FR2YEaEKA5ynZgxdfNU7jGBzRZAVXeFV4xh3?utm_source=premier-league-web&utm_medium=referral&utm_campaign=pl-referral-always-on&utm_term=injuries&utm_content=club-injury-article?utm_source=premier-league-web&utm_medium=referral&utm_campaign=pl-referral-always-on&utm_term=injuries&utm_content=club-injury-article",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Evan Ferguson",
+      "description": "Ankle",
+      "date": "2026-08-20T10:30:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.brightonandhovealbion.com/media-article/fabian-hurzeler-reflects-on-a-successful-training-camp?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509809": {
+   "id": 4509809,
+   "title": "Injury News - Chelsea",
+   "items": [
+    {
+     "response": {
+      "title": "Levi Colwill",
+      "description": "-",
+      "date": "2026-08-30T14:43:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.chelseafc.com/en/news/article/xabi-alonso-confirms-chelsea-team-news-for-leeds-visit",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Moises Caicedo",
+      "description": "-",
+      "date": "2026-08-30T14:43:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.chelseafc.com/en/news/article/xabi-alonso-confirms-chelsea-team-news-for-leeds-visit",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Jordan Henderson",
+      "description": "Arm",
+      "date": "2026-08-19T09:54:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.chelseafc.com/en/news/article/xabi-alonso-confirms-chelsea-team-news-for-leeds-visit",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Marco Palestra",
+      "description": "-",
+      "date": "2026-08-19T09:54:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.chelseafc.com/en/news/article/xabi-alonso-confirms-chelsea-team-news-for-leeds-visit",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509808": {
+   "id": 4509808,
+   "title": "Injury News - Coventry City",
+   "items": [
+    {
+     "response": {
+      "title": "Haji Wright",
+      "description": "Quad",
+      "date": "2026-08-19T15:39:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.ccfc.co.uk/news/2026/august/19/head-coach-frank-lampard-provides-an-update-on-haji-wright/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Kaine Kesler-Hayden",
+      "description": "Hamstring",
+      "date": "2026-09-07T18:20:00Z",
+      "links": []
+     }
+    },
+    {
+     "response": {
+      "title": "Luke Woolfenden",
+      "description": "Knee",
+      "date": "2026-09-07T18:20:00Z",
+      "links": []
+     }
+    }
+   ]
+  },
+  "4509810": {
+   "id": 4509810,
+   "title": "Injury News - Crystal Palace",
+   "items": [
+    {
+     "response": {
+      "title": "Jean-Philippe Mateta",
+      "description": "Muscle",
+      "date": "2026-08-22T15:35:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.cpfc.co.uk/news/first-team/team-news-sage-updates-on-doucoure-ahead-of-ipswich-visit/",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Chadi Riad",
+      "description": "-",
+      "date": "2026-08-22T15:35:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.cpfc.co.uk/news/first-team/press-conference-team-news-crystal-palace-manchester-city-august-2026/",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Ismaila Sarr",
+      "description": "Groin",
+      "date": "2026-08-22T15:35:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.cpfc.co.uk/news/first-team/team-news-sage-updates-on-doucoure-ahead-of-ipswich-visit/",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Cheick Doucoure",
+      "description": "",
+      "date": "2026-08-22T15:35:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.cpfc.co.uk/news/first-team/team-news-sage-updates-on-doucoure-ahead-of-ipswich-visit/",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509812": {
+   "id": 4509812,
+   "title": "Injury News - Everton",
+   "items": [
+    {
+     "response": {
+      "title": "Christian Norgaard",
+      "description": "-",
+      "date": "2026-01-19T13:25:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.evertonfc.com/news/2026/august/28/everton-team-news-for-bournemouth-trip/",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "James Garner",
+      "description": "-",
+      "date": "2026-01-19T13:25:00Z",
+      "links": []
+     }
+    }
+   ]
+  },
+  "4509813": {
+   "id": 4509813,
+   "title": "Injury News - Fulham",
+   "items": [
+    {
+     "response": {
+      "title": "Tom Cairney",
+      "description": "Knee",
+      "date": "2026-03-14T18:13:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.fulhamfc.com/news/2026/august/21/team-news-joachim-andersen-tom-cairney-absent-for-chelsea/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Jonah Kusi-Asare",
+      "description": "Knee",
+      "date": "2026-05-23T19:20:00Z",
+      "links": []
+     }
+    },
+    {
+     "response": {
+      "title": "Luc De Fougerolles",
+      "description": "-",
+      "date": "2026-09-07T18:28:00Z",
+      "links": []
+     }
+    }
+   ]
+  },
+  "4509822": {
+   "id": 4509822,
+   "title": "Injury News - Hull City",
+   "items": [
+    {
+     "response": {
+      "title": "Matt Crooks",
+      "description": "Thigh",
+      "date": "2026-09-07T18:30:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.wearehullcity.co.uk/news/2026/august/29/team-news-coventry-city-a/",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Charlie Hughes",
+      "description": "Groin",
+      "date": "2026-08-19T09:28:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.wearehullcity.co.uk/news/2026/august/21/match-preview-manchester-united-h/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Eliot Matazo",
+      "description": "ACL",
+      "date": "2026-08-19T09:28:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.wearehullcity.co.uk/news/2026/april/27/matazo-suffers-second-acl-injury/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Jack Butland",
+      "description": "Arm",
+      "date": "2026-08-19T09:28:00Z",
+      "links": []
+     }
+    },
+    {
+     "response": {
+      "title": "Oscar Zambrano",
+      "description": "Thigh",
+      "date": "2026-08-19T09:28:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.wearehullcity.co.uk/news/2026/august/21/match-preview-manchester-united-h/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Darko Gyabi",
+      "description": "Thigh",
+      "date": "2026-08-19T09:28:00Z",
+      "links": []
+     }
+    },
+    {
+     "response": {
+      "title": "Matty Jacob",
+      "description": "Hip",
+      "date": "2026-08-21T09:44:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.wearehullcity.co.uk/news/2026/august/21/match-preview-manchester-united-h/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509823": {
+   "id": 4509823,
+   "title": "Injury News - Ipswich Town",
+   "items": [
+    {
+     "response": {
+      "title": "Jack Taylor",
+      "description": "Knee",
+      "date": "2026-08-20T10:30:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.itfc.co.uk/news/2026/may/12/midfield-duo-undergo-surgery/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Azor Matusiwa",
+      "description": "Muscle",
+      "date": "2026-08-20T10:30:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.itfc.co.uk/news/2026/may/12/midfield-duo-undergo-surgery/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Jaden Philogene",
+      "description": "Ankle",
+      "date": "2026-09-07T18:34:00Z",
+      "links": []
+     }
+    }
+   ]
+  },
+  "4509814": {
+   "id": 4509814,
+   "title": "Injury News - Leeds United",
+   "items": [
+    {
+     "response": {
+      "title": "Joe Rodon",
+      "description": "Hamstring",
+      "date": "2026-08-30T13:37:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.leedsunited.com/en/news/daniel-farke-provides-update-on-duos-fitness-ahead-of-newcastle?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Daniel James",
+      "description": "-",
+      "date": "2026-01-19T13:17:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.leedsunited.com/en/news/daniel-farke-provides-fitness-update-ahead-of-chelsea-clash-cup",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Mateo Joseph",
+      "description": "Knee",
+      "date": "2026-08-20T10:19:00Z",
+      "links": []
+     }
+    },
+    {
+     "response": {
+      "title": "Ilia Gruev",
+      "description": "Knee",
+      "date": "2026-04-26T08:19:00Z",
+      "links": []
+     }
+    }
+   ]
+  },
+  "4509815": {
+   "id": 4509815,
+   "title": "Injury News - Liverpool",
+   "items": [
+    {
+     "response": {
+      "title": "Cody Gakpo",
+      "description": "Adductor",
+      "date": "2026-01-19T13:50:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.liverpoolfc.com/news/cody-gakpo-injury-update",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Conor Bradley",
+      "description": "Knee",
+      "date": "2026-01-19T13:53:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.liverpoolfc.com/news/liverpool-v-atletico-madrid-team-news-0",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Federico Chiesa",
+      "description": "-",
+      "date": "2026-01-19T13:53:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.liverpoolfc.com/news/liverpool-v-atletico-madrid-team-news-0",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Hugo Ekitike",
+      "description": "Achilles",
+      "date": "2026-03-19T00:15:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.liverpoolfc.com/news/liverpool-v-atletico-madrid-team-news-0",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Joe Gomez",
+      "description": "Muscular",
+      "date": "2026-03-19T00:15:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.liverpoolfc.com/news/liverpool-v-atletico-madrid-team-news-0",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Vitezslav Jaros",
+      "description": "Knee",
+      "date": "2026-03-19T00:15:00Z",
+      "links": []
+     }
+    },
+    {
+     "response": {
+      "title": "Giovanni Leoni",
+      "description": "ACL",
+      "date": "2026-01-19T13:50:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.liverpoolfc.com/news/injury-news-iraola-provides-update-gomez-leoni-chiesa-bradley-and-ekitike",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509816": {
+   "id": 4509816,
+   "title": "Injury News - Manchester City",
+   "items": [
+    {
+     "response": {
+      "title": "Nico O'Reilly",
+      "description": "Back",
+      "date": "2026-04-12T16:54:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.mancity.com/news/mens/enzo-maresca-manchester-united-v-city-team-news-update-63924715",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Jeremy Doku",
+      "description": "Calf",
+      "date": "2026-01-19T14:07:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.mancity.com/news/mens/enzo-maresca-manchester-united-v-city-team-news-update-63924715",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509817": {
+   "id": 4509817,
+   "title": "Injury News - Manchester United",
+   "items": [
+    {
+     "response": {
+      "title": "Luke Shaw",
+      "description": "Cramp",
+      "date": "2026-01-19T12:43:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.manutd.com/en/news/team-news-for-the-199th-manchester-derby",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Carlos Baleba",
+      "description": "-",
+      "date": "2026-01-19T12:43:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.manutd.com/en/news/team-news-united-v-sabah?t=y&utm_source=twitter&utm_medium=story&utm_campaign=club_news",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Amad",
+      "description": "Knock",
+      "date": "2026-04-06T10:48:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.manutd.com/en/news/team-news-united-v-sabah?t=y&utm_source=twitter&utm_medium=story&utm_campaign=club_news",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Matthijs de Ligt",
+      "description": "Back",
+      "date": "2026-03-19T14:13:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.manutd.com/en/news/everton-v-united-whats-the-team-news-6-sept",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Manuel Ugarte",
+      "description": "Knee",
+      "date": "2026-03-19T14:13:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.manutd.com/en/news/team-news-united-v-sabah?t=y&utm_source=twitter&utm_medium=story&utm_campaign=club_news",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Tom Heaton",
+      "description": "Hamstring",
+      "date": "2026-03-19T14:13:00Z",
+      "links": []
+     }
+    }
+   ]
+  },
+  "4509818": {
+   "id": 4509818,
+   "title": "Injury News - Newcastle United",
+   "items": [
+    {
+     "response": {
+      "title": "Amar Dedic",
+      "description": "Hamstring",
+      "date": "2026-09-09T12:10:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.newcastleunited.com/en/video/1002532",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Fernandez-Pardo",
+      "description": "-",
+      "date": "2026-09-09T12:10:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.newcastleunited.com/en/news/matthias-jaissles-team-news-update-fernandez-pardo-and-hall-latest-ahead-of-leeds-trip?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Joelinton",
+      "description": "",
+      "date": "2026-03-14T18:13:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.newcastleunited.com/en/news/matthias-jaissles-team-news-update-livramento-and-joelinton-latest-ahead-of-reds-test?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Dan Burn",
+      "description": "Ankle",
+      "date": "2026-03-14T18:13:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.newcastleunited.com/en/news/confimed-line-up-opening-day-debuts-for-hornicek-dedic-and-steur-against-liverpool",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Ewan Jaouen",
+      "description": "Ankle",
+      "date": "2026-03-14T18:13:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.newcastleunited.com/en/video/1001979",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "William Osula",
+      "description": "Foot",
+      "date": "2026-01-19T14:17:00Z",
+      "links": []
+     }
+    }
+   ]
+  },
+  "4509819": {
+   "id": 4509819,
+   "title": "Injury News - Nottingham Forest",
+   "items": [
+    {
+     "response": {
+      "title": "Nicolo Savona",
+      "description": "Knee",
+      "date": "2026-02-09T09:29:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.nottinghamforest.co.uk/news/2026/september/10/team-news-for-aston-villa-clash/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509820": {
+   "id": 4509820,
+   "title": "Injury News - Sunderland",
+   "items": [
+    {
+     "response": {
+      "title": "Habib Diarra",
+      "description": "Hamstring",
+      "date": "2026-01-19T14:44:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.safc.com/news/2026/september/10/le-bris-on-mundle-and-diarra-injuries/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Romaine Mundle",
+      "description": "Knee",
+      "date": "2026-01-19T14:44:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.safc.com/news/2026/september/10/le-bris-on-mundle-and-diarra-injuries/?utm_source=premier_league&utm_medium=referral&utm_campaign=fantasy&utm_content=injuries-flag",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "4509821": {
+   "id": 4509821,
+   "title": "Injury News - Tottenham Hotspur",
+   "items": [
+    {
+     "response": {
+      "title": "James Maddison",
+      "description": "Knock",
+      "date": "2026-01-19T14:44:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.tottenhamhotspur.com/news/1088415/team-news-maddison-out-savio-available-for-forest-clash",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Xavi Simons",
+      "description": "Knee",
+      "date": "2026-04-25T17:43:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.tottenhamhotspur.com/news/1088415/team-news-maddison-out-savio-available-for-forest-clash",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Wilson Odobert",
+      "description": "ACL",
+      "date": "2026-02-12T14:13:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.tottenhamhotspur.com/news/1088415/team-news-maddison-out-savio-available-for-forest-clash",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    },
+    {
+     "response": {
+      "title": "Dejan Kulusevski",
+      "description": "Knee",
+      "date": "2026-01-19T14:43:00Z",
+      "links": [
+       {
+        "promoUrl": "https://www.tottenhamhotspur.com/news/1088415/team-news-maddison-out-savio-available-for-forest-clash",
+        "linkText": "Details",
+        "external": true
+       }
+      ]
+     }
+    }
+   ]
+  }
+ }
+}

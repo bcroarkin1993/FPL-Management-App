@@ -2,7 +2,10 @@
 import requests
 import pandas as pd
 import streamlit as st
+from scripts.common.error_helpers import get_logger
 from scripts.common.styled_tables import render_styled_table
+
+_logger = get_logger("fpl_app.injuries")
 
 # FPL element_type -> position letter
 _POS_LETTER = {1:"G", 2:"D", 3:"M", 4:"F"}
@@ -68,6 +71,68 @@ def get_fpl_availability_df() -> pd.DataFrame:
     df["Position"] = df["Position"].astype("string")
     return df
 
+def _attach_pl_injuries(df: pd.DataFrame) -> pd.DataFrame:
+    """Join premierleague.com's official injury table onto the FPL frame.
+
+    Returns the frame unchanged on any failure -- the PL feed is extra
+    information, never a dependency of this page.
+    """
+    # Imported lazily so an import-time failure in the PL feed cannot take the
+    # Availability page with it.
+    try:
+        from scripts.common import pl_content
+        from scripts.common.scraping import get_pl_injuries
+
+        injuries = get_pl_injuries()
+        if injuries is None or injuries.empty:
+            return df
+        matched = pl_content.attach_pl_injuries(pl_content.add_display_names(df), injuries)
+        if matched.empty:
+            return df
+        return df.merge(matched, on="Player_ID", how="left")
+    except Exception as exc:                # never take the page down
+        _logger.warning("PL injury feed unavailable: %s", exc)
+        return df
+
+
+def _render_pl_disagreements(df: pd.DataFrame):
+    """Players the PL reports carrying a knock that FPL still rates available.
+
+    This is the reason the PL feed is worth having: the two desks update
+    independently, so each catches the other lagging. It is deliberately framed
+    as a disagreement rather than a correction -- **neither source overrides the
+    other**. Measured on 2026-09-11 the PL table still listed Nico O'Reilly with
+    a back problem on the same day the PL's own article quoted his manager
+    saying he was "100 per cent available", so the PL side lags too.
+    """
+    if "PL_Injury" not in df.columns:
+        return
+
+    flagged = df[
+        df["PL_Player"].notna()
+        & (df["Status"] == "a")
+        & (df["PlayPct"].fillna(100) >= 100)
+    ]
+    if flagged.empty:
+        return
+
+    with st.expander(
+        "⚠️ Premier League reports a knock, FPL rates them available (%d)"
+        % len(flagged),
+        expanded=False,
+    ):
+        st.caption(
+            "premierleague.com's injury desk and FPL's bootstrap update "
+            "independently, so a player can appear on one and not the other. "
+            "This is a watchlist, not a correction — the PL table can lag FPL "
+            "just as easily as lead it."
+        )
+        show = flagged[["Player", "Team", "Position", "PL_Injury"]].copy()
+        show["PL_Injury"] = show["PL_Injury"].replace("", "Unspecified")
+        show = show.rename(columns={"PL_Injury": "PL Injury"})
+        render_styled_table(show, max_height=340)
+
+
 def render_injuries_tab(key_prefix: str = "inj"):
     """The availability table: filters plus one styled table.
 
@@ -80,6 +145,9 @@ def render_injuries_tab(key_prefix: str = "inj"):
     if df.empty:
         st.warning("No data from FPL. Try again in a bit.")
         return
+
+    df = _attach_pl_injuries(df)
+    _render_pl_disagreements(df)
 
     # Filters on page (not sidebar)
     c1, c2, c3 = st.columns(3)
@@ -96,8 +164,15 @@ def render_injuries_tab(key_prefix: str = "inj"):
         show = show[show["Position"].isin(pos_sel)]
     show = show[show["PlayPct"].fillna(0) >= min_play]
 
-    # Nice view
-    show = show[["Player","Web_Name","Team","Position","PlayPct","StatusBucket","News","News_Added"]].copy()
+    # Nice view. "PL Injury" is the Premier League's own injury-type taxonomy
+    # (ACL, Achilles, Hamstring...), which FPL's free-text News does not carry
+    # reliably. Absent when the PL feed is unavailable, so it is opt-in here.
+    cols = ["Player","Web_Name","Team","Position","PlayPct","StatusBucket","News","News_Added"]
+    if "PL_Injury" in show.columns:
+        show = show.rename(columns={"PL_Injury": "PL Injury"})
+        show["PL Injury"] = show["PL Injury"].fillna("")
+        cols.insert(6, "PL Injury")
+    show = show[cols].copy()
     show["PlayPct"] = show["PlayPct"].round(0).astype("Int64")
 
     render_styled_table(

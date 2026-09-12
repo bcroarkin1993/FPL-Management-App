@@ -39,6 +39,7 @@ __all__ = [
     "check_transfer_windows",
     "check_transfer_odds",
     "check_ffp_feed",
+    "check_pl_content",
     "check_resolved_squad",
     "format_issues",
     "raise_on_error",
@@ -1464,5 +1465,144 @@ def check_blended_projections(df: Optional[pd.DataFrame],
                 "Escaping that range means the weights are wrong, or a source "
                 "was converted to the wrong basis before blending.",
             ))
+
+    return issues
+
+
+# =============================================================================
+# PREMIER LEAGUE CONTENT
+# =============================================================================
+
+#: The league has 20 clubs, so a healthy predicted-lineups article carries 20
+#: team-news paragraphs. Two missing is a spelling change; four is the
+#: ``<strong>``-wraps-the-whole-paragraph trap regressing (see
+#: ``pl_content._club_label_and_body``), which drops clubs silently.
+MIN_PL_CLUBS_WITH_NEWS = 18
+
+#: 20 clubs x roughly one to eight injuries each. Far fewer than this means the
+#: hub listed clubs but their playlists came back empty.
+MIN_PL_INJURY_ROWS = 20
+MIN_PL_INJURY_CLUBS = 15
+
+#: Measured live 2026-09-11: 81 of 83 matched (97.6%), the two misses being
+#: players absent from the FPL pool entirely. A drop to 85% means the club
+#: scoping or the token-subset fallback broke, not that the PL changed staff.
+MIN_PL_INJURY_MATCH_RATE = 0.85
+
+#: An edition older than this is last week's article being shown as this week's.
+MAX_PL_ARTICLE_AGE_DAYS = 10
+
+
+def check_pl_content(lineups=None,
+                     injuries: Optional[pd.DataFrame] = None,
+                     matched_rows: Optional[int] = None,
+                     expected_gw: Optional[int] = None,
+                     age_days: Optional[float] = None) -> List[Issue]:
+    """Is the Premier League content feed the shape we think it is?
+
+    Nothing here feeds the projection engine, so a failure costs information
+    rather than correctness -- but it costs it *invisibly*. A broken parse
+    renders a page identical to a working one, just with four clubs quietly
+    missing, which is precisely how the ``<strong>`` trap shipped undetected in
+    the first hand-written version of this parser.
+
+    ``lineups`` is a ``pl_content.PLLineups``; it is duck-typed so this module
+    stays free of that import (and of any import that reaches Streamlit).
+    """
+    check = "pl_content"
+    issues: List[Issue] = []
+
+    if lineups is not None:
+        club_news = dict(getattr(lineups, "club_news", {}) or {})
+        fixtures = tuple(getattr(lineups, "fixtures", ()) or ())
+        graphics = dict(getattr(lineups, "graphics", {}) or {})
+        unresolved = tuple(getattr(lineups, "unresolved_labels", ()) or ())
+        gameweek = getattr(lineups, "gameweek", None)
+
+        if unresolved:
+            issues.append(Issue(check, "error",
+                "PL club labels did not resolve: %s" % ", ".join(unresolved),
+                "Add them to TEAM_FULL_TO_SHORT. Matching and gameweek voting are "
+                "both scoped by club, so an unmapped label is not cosmetic -- it "
+                "drops that club's team news and its XI graphic."))
+
+        if not fixtures:
+            issues.append(Issue(check, "error",
+                "PL article carried no fixture headings",
+                "parse_predicted_lineups() found no '<Club> v <Club> predicted "
+                "line-ups' <h5>. The CMS template has probably changed."))
+
+        if len(club_news) < MIN_PL_CLUBS_WITH_NEWS:
+            issues.append(Issue(check, "error",
+                "only %d of 20 clubs carried team news" % len(club_news),
+                "Suspect the <strong> label parse. For four clubs the <strong> "
+                "wraps the entire paragraph rather than just 'Club:', and taking "
+                "strong.get_text() whole silently yields 16 clubs."))
+
+        if fixtures and graphics and len(graphics) != 2 * len(fixtures):
+            issues.append(Issue(check, "warning",
+                "%d XI graphics for %d fixtures (expected %d)"
+                % (len(graphics), len(fixtures), 2 * len(fixtures)),
+                "A graphic is dropped when its photo title names a different "
+                "club or matchweek than the slot it sits in. That guard is "
+                "working as intended, but a wholesale mismatch means the "
+                "document order assumption has broken."))
+
+        if gameweek is None:
+            issues.append(Issue(check, "error",
+                "PL article states no usable matchweek (%s)"
+                % (getattr(lineups, "note", "") or "no note"),
+                "The title carries 'Matchweek N' and the fixtures vote "
+                "independently. Both failing, or disagreeing, means the edition "
+                "cannot prove which week it describes -- do not render it."))
+        elif expected_gw is not None and int(gameweek) != int(expected_gw):
+            issues.append(Issue(check, "error",
+                "PL article is for MW%d but GW%d is being shown"
+                % (int(gameweek), int(expected_gw)),
+                "Showing last week's predicted XI under this week's heading is "
+                "the failure the matchweek gate exists to prevent."))
+
+        if age_days is not None and age_days > MAX_PL_ARTICLE_AGE_DAYS:
+            issues.append(Issue(check, "warning",
+                "PL article was last updated %.1f days ago" % float(age_days),
+                "The PL revises this through Friday as press conferences land. "
+                "A stale edition is usually a gameweek that has already passed."))
+
+    if injuries is not None:
+        if getattr(injuries, "empty", True):
+            issues.append(Issue(check, "error",
+                "PL injury table is empty",
+                "One hub request plus one per club. An empty result renders a "
+                "page identical to a working one, just with no PL column."))
+        else:
+            clubs = injuries["Club"].nunique() if "Club" in injuries.columns else 0
+            if clubs < MIN_PL_INJURY_CLUBS:
+                issues.append(Issue(check, "error",
+                    "PL injuries cover only %d clubs" % clubs,
+                    "The hub listed clubs but their playlists returned nothing. "
+                    "Check the per-club playlist ids under PL_INJURY_PLAYLIST_ID."))
+            if len(injuries) < MIN_PL_INJURY_ROWS:
+                issues.append(Issue(check, "warning",
+                    "only %d PL injury rows" % len(injuries),
+                    "Plausible in a quiet week, but usually means most club "
+                    "playlists came back empty."))
+            if "Team" in injuries.columns:
+                unmapped = injuries.loc[injuries["Team"].isna(), "Club"].unique().tolist()
+                if unmapped:
+                    issues.append(Issue(check, "error",
+                        "PL injury club labels did not resolve: %s"
+                        % ", ".join(str(c) for c in unmapped),
+                        "Matching is scoped by club, so an unmapped label means "
+                        "none of that club's injuries can ever match."))
+
+            if matched_rows is not None and len(injuries):
+                rate = float(matched_rows) / float(len(injuries))
+                if rate < MIN_PL_INJURY_MATCH_RATE:
+                    issues.append(Issue(check, "error",
+                        "only %.0f%% of PL injuries matched the FPL pool (%d of %d)"
+                        % (rate * 100, int(matched_rows), len(injuries)),
+                        "Measured at 97.6%% live. A collapse points at the "
+                        "club-scoped key or the token-subset fallback, not at "
+                        "the feed."))
 
     return issues

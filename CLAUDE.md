@@ -74,6 +74,7 @@ The Odds API ────────────┘
 | `rotowire.com/soccer/` | Player projections, EPL lineups, article publish times |
 | `fantasyfootballpundit.com` | Points predictions, goal/assist odds, clean sheet odds (site payload; see "Fantasy Football Pundit feed") |
 | `api.the-odds-api.com` | Match betting odds (h2h, BTTS, totals) |
+| `api.premierleague.com/content/` | Official predicted-XI graphics, per-club team news, injury table (see "Premier League content") |
 
 ### Player Matching
 
@@ -676,6 +677,85 @@ form, and none of those three were in `TEAM_FULL_TO_SHORT`. Since an unmapped
 label disables the filter for that matchup (fail-open), the missing aliases
 would have quietly let the extra fixture back in. A test pins every label the
 page currently publishes.
+
+### Premier League content — their predicted XIs are pictures
+
+`scripts/common/pl_content.py` (pure), cached in `scraping.py` as
+`get_pl_predicted_lineups()` / `get_pl_injuries()`.
+
+premierleague.com publishes a weekly *"Predicted line-ups for every Premier
+League team in Matchweek N"*. **The XIs in it are PNG graphics, not text** —
+each fixture carries two `photo-gallery` widgets resolving to images titled
+"Aston Villa Matchweek 4 line up". The article's *words* are editorial team
+news. So there is no XI to parse without OCR, and none is parsed: the graphics
+are rendered as images and the prose as prose. **Nothing here feeds the
+projection engine** — no `Start_Pct`, no `Proj`, no weight. It is information,
+introduced the way `fpl_ep` was, and Phase 4 is where it could earn more.
+
+What made it worth wiring anyway is that `api.premierleague.com/content/` is
+public and keyless:
+
+| Asset | Endpoint |
+|---|---|
+| Article discovery | `text/EN?tagIds=14349` — `franchise:predicted-line-ups`, newest first |
+| Article body | `text/EN/{id}?detail=DETAILED` |
+| XI graphics | `photo/EN/{id}?detail=DETAILED` |
+| Injury table | `playlist/EN/4509826`, plus one playlist per club |
+
+**The article is discovered, never pinned.** Each title states "Matchweek N", so
+unlike `ROTOWIRE_GW1_URL` there is nothing to update weekly. It proves its week
+*twice*: the title states it and the ordered `(home, away)` `<h5>` pairs vote
+against the real fixture list, the same technique as `resolve_ffp_gameweek()`.
+When the two disagree `gameweek` is None and the section does not render —
+"cannot tell" must never be reported as a gameweek, and last week's XI under
+this week's heading is the whole failure the gate exists for.
+
+**The club label is the text before the first colon *inside* the `<strong>`.**
+For 16 of 20 clubs the markup is `<p><strong>Chelsea: </strong>prose</p>`; for
+Bournemouth, Liverpool, Coventry and Leeds the `<strong>` wraps the *entire
+paragraph*. `strong.get_text()` whole therefore yields 16 clubs and drops four,
+silently, with every remaining value correct. Those four are named in the tests
+because that is the only thing that will notice.
+
+**Graphics: position proposes, the photo title confirms.** Media ids arrive in
+document order, two per fixture, home then away — but the photo carries its own
+club and matchweek in its title, and a pair that disagrees is dropped rather
+than rendered. Showing one club's XI under another club's name is worse than
+showing nothing. This is why `TEAM_FULL_TO_SHORT` needs `"Nottm Forest"` — no
+apostrophe, and only in the graphic titles.
+
+**The injury table is a watchlist, not ground truth, and lags in both
+directions.** Measured 2026-09-11: 83 players across all 20 clubs, 81 matched to
+the FPL pool (97.6%), and 11 that the PL called injured while FPL's bootstrap
+rated them fully available. But on that same day the PL table still listed Nico
+O'Reilly with a back problem while the PL's *own article* quoted his manager
+saying he was "100 per cent available". So the Availability page renders the two
+side by side under "PL reports a knock, FPL rates them available" and neither
+overrides the other.
+
+**Its `date` field is a CMS authoring date, not an injury date** — 46 of 83 rows
+were over 60 days old and 20 shared the single value `2026-01-19`. It is carried
+as `Item_Date` and deliberately never rendered: a stale date under an "as of"
+label is a confident claim the data does not support. A live test pins the
+observation, so if the field ever becomes per-injury the failure is the prompt
+to revisit.
+
+**Matching cannot use `ReferenceMatcher`.** The PL publishes a name and a club
+and no position, and every tier below the first two is position-scoped — with
+`position=None` they are all skipped, leaving an exact `(name, team)` key that
+misses the players FPL files under a full legal name. This is the exception
+`attach_odds` is already documented for, and it uses the same two rules: a key
+is kept only when it resolves to exactly one player, and the fallback is a
+**token subset either direction, never a bare surname**. Scoping every lookup to
+the club the PL filed the player under makes both far safer than league-wide —
+the candidate set is ~25. `add_display_names()` matters here: the PL writes the
+common name ("Cody Gakpo"), which is what `to_display_name()` produces and what
+the bootstrap's legal name usually is not.
+
+Risk accepted: this depends on the PL's CMS, as FFP depends on their frontend.
+Every failure degrades to the page as it was before the feature existed —
+`tests/live/test_pl_content.py` fails on a payload that changes shape, loses
+clubs, or states the wrong matchweek.
 
 ### Player Display Names
 

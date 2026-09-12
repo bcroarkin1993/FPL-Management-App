@@ -208,6 +208,36 @@ ROTOWIRE_MIN_CLUB_COVERAGE = 5
 FFP_POINTS_PREDICTOR_URL = os.getenv("FFP_POINTS_PREDICTOR_URL", "")
 FFP_SHEET_URL = os.getenv("FFP_SHEET_URL", "")
 
+
+def _env_int(name: str, default: int = 0) -> int:
+    """Read an integer env var, tolerating a key that is present but empty.
+
+    `int(os.getenv(NAME, "0"))` looks safe and is not: the default only applies
+    when the key is *absent*, so a `NAME=` line with nothing after it reaches
+    int("") and raises. That fires on the unlocked-settings fallback path only,
+    which is the least convenient moment to discover it.
+    """
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return int(default)
+
+
+# ----- Premier League content API -----
+# premierleague.com's own CMS, public and keyless. It carries the weekly
+# predicted-lineups article (whose XIs are PNG graphics, not text) and the
+# official per-club injury table -- see scripts/common/pl_content.py.
+#
+# The article is *discovered* by tag rather than pinned per gameweek: the tag
+# listing returns every edition newest-first and each title states "Matchweek N",
+# so unlike ROTOWIRE_GW1_URL this needs no maintenance each week.
+PL_CONTENT_API_BASE = os.getenv("PL_CONTENT_API_BASE", "https://api.premierleague.com")
+PL_PREDICTED_LINEUPS_TAG = _env_int("PL_PREDICTED_LINEUPS_TAG", 14349)   # franchise:predicted-line-ups
+PL_INJURY_PLAYLIST_ID = _env_int("PL_INJURY_PLAYLIST_ID", 4509826)      # "Injury News - Hub"
+
 # ----- Notifications / Discord -----
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
@@ -296,17 +326,6 @@ def refresh_league_settings():
     league_settings.json. Call this after saving via the League Setup page."""
     global _LEAGUE_SETTINGS_CACHE
     _LEAGUE_SETTINGS_CACHE = None
-
-
-def _env_int(name: str) -> int:
-    """Read an integer env var, tolerating a key that is present but empty.
-
-    `int(os.getenv(NAME, "0"))` looks safe and is not: the default only applies
-    when the key is *absent*, so a `NAME=` line with nothing after it reaches
-    int("") and raises. That fires on the unlocked-settings fallback path only,
-    which is the least convenient moment to discover it.
-    """
-    return int(os.getenv(name, "0") or 0)
 
 
 def _resolve_draft_league_id():

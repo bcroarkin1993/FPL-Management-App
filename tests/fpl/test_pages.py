@@ -36,6 +36,57 @@ class TestProjectedLineupsPage:
             from scripts.fpl.projected_lineups import show_projected_lineups
             show_projected_lineups()
 
+    @staticmethod
+    def _lineups(gameweek):
+        from scripts.common.pl_content import PLLineups
+        from datetime import datetime, timezone
+        return PLLineups(
+            gameweek=gameweek, article_id=1, url="https://example.test/a",
+            title="Predicted line-ups ... Matchweek %s" % gameweek,
+            updated=datetime(2026, 9, 11, 17, 0, tzinfo=timezone.utc),
+            fixtures=(("AVL", "NFO"),),
+            club_news={"AVL": "Villa news.", "NFO": "Forest news."},
+            graphics={"AVL": "https://example.test/avl.png",
+                      "NFO": "https://example.test/nfo.png"},
+        )
+
+    def test_pl_section_renders_for_the_current_gameweek(self, mock_all_utils):
+        import config
+        from scripts.fpl import projected_lineups as pl_page
+        with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
+                   return_value=self._lineups(config.CURRENT_GAMEWEEK)), \
+             patch("scripts.fpl.projected_lineups.st.image") as image:
+            pl_page._render_pl_section("Aston Villa", "Nottingham Forest")
+        assert image.call_count == 2
+
+    def test_pl_section_is_gated_on_the_matchweek(self, mock_all_utils):
+        """Last week's predicted XI under this week's heading is the failure
+        the gate exists to prevent."""
+        import config
+        from scripts.fpl import projected_lineups as pl_page
+        with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
+                   return_value=self._lineups(config.CURRENT_GAMEWEEK - 1)), \
+             patch("scripts.fpl.projected_lineups.st.image") as image:
+            pl_page._render_pl_section("Aston Villa", "Nottingham Forest")
+        assert image.call_count == 0
+
+    def test_pl_section_skips_a_fixture_the_pl_does_not_carry(self, mock_all_utils):
+        import config
+        from scripts.fpl import projected_lineups as pl_page
+        with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
+                   return_value=self._lineups(config.CURRENT_GAMEWEEK)), \
+             patch("scripts.fpl.projected_lineups.st.image") as image:
+            pl_page._render_pl_section("Chelsea", "Hull City")
+        assert image.call_count == 0
+
+    def test_pl_section_survives_a_dead_feed(self, mock_all_utils):
+        from scripts.fpl import projected_lineups as pl_page
+        with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
+                   side_effect=RuntimeError("PL API down")), \
+             patch("scripts.fpl.projected_lineups.st.image") as image:
+            pl_page._render_pl_section("Aston Villa", "Nottingham Forest")
+        assert image.call_count == 0
+
 
 class TestPlayerStatisticsPage:
     def test_smoke(self, mock_all_utils):
@@ -56,12 +107,58 @@ _AVAIL_COLS = ["Player_ID", "Player", "Web_Name", "Team", "Position",
                "Status", "PlayPct", "StatusBucket", "News", "News_Added"]
 
 
+def _populated_avail():
+    return pd.DataFrame([
+        {"Player_ID": 1, "Player": "Cody Gakpo", "Web_Name": "Gakpo", "Team": "LIV",
+         "Position": "M", "Status": "a", "PlayPct": 100.0,
+         "StatusBucket": "Available", "News": "", "News_Added": ""},
+        {"Player_ID": 2, "Player": "Mohamed Salah", "Web_Name": "M.Salah", "Team": "LIV",
+         "Position": "M", "Status": "a", "PlayPct": 100.0,
+         "StatusBucket": "Available", "News": "", "News_Added": ""},
+    ], columns=_AVAIL_COLS)
+
+
+def _pl_injuries():
+    from scripts.common.pl_content import INJURY_COLUMNS
+    return pd.DataFrame([
+        {"Club": "Liverpool", "Team": "LIV", "Player": "Cody Gakpo",
+         "Injury": "Adductor", "Link": "https://example.test/a", "Item_Date": "2026-01-19"},
+    ], columns=INJURY_COLUMNS)
+
+
 class TestInjuriesPage:
     def test_smoke(self, mock_all_utils):
         empty_avail = pd.DataFrame(columns=_AVAIL_COLS)
         with patch("scripts.fpl.injuries.get_fpl_availability_df", return_value=empty_avail):
             from scripts.fpl.injuries import show_injuries_page
             show_injuries_page()
+
+    def test_renders_pl_injury_column(self, mock_all_utils):
+        """The PL injury feed reaches the table and the disagreement panel."""
+        with patch("scripts.fpl.injuries.get_fpl_availability_df",
+                   return_value=_populated_avail()), \
+             patch("scripts.common.scraping.get_pl_injuries", return_value=_pl_injuries()):
+            from scripts.fpl.injuries import _attach_pl_injuries, render_injuries_tab
+            merged = _attach_pl_injuries(_populated_avail())
+            assert "PL_Injury" in merged.columns
+            assert merged.loc[merged["Player_ID"] == 1, "PL_Injury"].iloc[0] == "Adductor"
+            # Salah has no PL entry and must stay unannotated rather than
+            # inheriting his team-mate's row.
+            assert pd.isna(merged.loc[merged["Player_ID"] == 2, "PL_Player"].iloc[0])
+            render_injuries_tab(key_prefix="test_pl")
+
+    def test_survives_a_dead_pl_feed(self, mock_all_utils):
+        """The PL table is extra information, never a dependency: a failure
+        must leave the page exactly as it was before the feature existed."""
+        with patch("scripts.fpl.injuries.get_fpl_availability_df",
+                   return_value=_populated_avail()), \
+             patch("scripts.common.scraping.get_pl_injuries",
+                   side_effect=RuntimeError("PL API down")):
+            from scripts.fpl.injuries import _attach_pl_injuries, render_injuries_tab
+            merged = _attach_pl_injuries(_populated_avail())
+            assert "PL_Injury" not in merged.columns
+            assert len(merged) == 2
+            render_injuries_tab(key_prefix="test_pl_dead")
 
 
 class TestAvailabilityPage:

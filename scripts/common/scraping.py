@@ -23,6 +23,7 @@ import config
 from scripts.common.error_helpers import get_logger
 from scripts.common.text_helpers import TZ_ET, format_last_updated
 from scripts.common import ffp_feed
+from scripts.common import pl_content
 from scripts.common import projection_sources
 
 _logger = get_logger("fpl_app.scraping")
@@ -518,6 +519,32 @@ def get_ffp_clean_sheet_odds() -> Optional[pd.DataFrame]:
     team_df = team_df.sort_values('CS Prob %', ascending=False)
 
     return team_df.reset_index(drop=True)
+
+
+# =============================================================================
+# PREMIER LEAGUE CONTENT API
+# =============================================================================
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_pl_predicted_lineups(gameweek: Optional[int] = None) -> pl_content.PLLineups:
+    """The PL's weekly predicted-lineups article, parsed (cached).
+
+    15 minutes, because the article is revised through Friday and Saturday
+    morning as press conferences land -- that freshness is most of why it is
+    worth showing next to Rotowire's XI.
+    """
+    return pl_content.get_predicted_lineups(gameweek)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_pl_injuries() -> pd.DataFrame:
+    """The PL's official per-club injury table (cached).
+
+    A *watchlist of reported knocks*, not ground truth: it can lag FPL's
+    bootstrap in both directions, so render it beside the FPL view rather than
+    over it. See ``scripts/common/pl_content.py``.
+    """
+    return pl_content.fetch_pl_injuries()
 
 
 # =============================================================================

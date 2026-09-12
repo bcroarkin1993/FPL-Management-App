@@ -68,6 +68,9 @@ TEAM_FULL_TO_SHORT = {
     # Fantasy Football Pundit's spelling. Missing it sent all 28 Forest rows
     # past the (name, team) tiers and into the loose fallbacks.
     "Notts Forest": "NFO",
+    # premierleague.com's XI graphics are titled "Nottm Forest Matchweek 4 line
+    # up" -- no apostrophe. An unmapped label there drops that club's graphic.
+    "Nottm Forest": "NFO",
 }
 
 # Position mappings (various formats -> G/D/M/F)

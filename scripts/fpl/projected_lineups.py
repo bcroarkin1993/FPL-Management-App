@@ -8,9 +8,14 @@ import streamlit as st
 from scripts.common.error_helpers import get_logger
 from scripts.fpl.injuries import get_fpl_availability_df
 from scripts.common.utils import get_classic_bootstrap_static
-from scripts.common.text_helpers import TEAM_FULL_TO_SHORT, compact_html
+from scripts.common.text_helpers import (
+    TEAM_FULL_TO_SHORT,
+    compact_html,
+    format_last_updated,
+)
 from scripts.common.fixture_helpers import _bootstrap_teams_df
 from scripts.common.player_matching import canonical_normalize
+from scripts.common.scraping import get_pl_predicted_lineups
 
 _logger = get_logger("fpl_app.projected_lineups")
 
@@ -686,6 +691,73 @@ def _build_lineup_card_html(home_team, away_team, home_players, away_players):
     """
 
 
+def _render_pl_section(home_team, away_team):
+    """The PL's own predicted XI graphics and team news for one fixture.
+
+    A second opinion beside Rotowire's XI, and the freshest team news available
+    -- the PL writes it after the Friday press conferences, later than
+    Rotowire's weekly article.
+
+    The XIs are PNG graphics rather than text, so they are rendered as images
+    and nothing here feeds a projection. Everything fails open: the PL section
+    simply does not appear if the feed is unavailable or is for another week.
+    """
+    try:
+        pl = get_pl_predicted_lineups(config.CURRENT_GAMEWEEK)
+    except Exception as exc:                # never take the page down
+        _logger.warning("PL predicted lineups unavailable: %s", exc)
+        return
+
+    if not pl.ok:
+        if pl.note:
+            st.caption("Premier League predicted line-ups: %s" % pl.note)
+        return
+
+    # The matchweek gate. The article proves its own week twice -- the title
+    # states it and the fixtures vote on it -- and pl.gameweek is None when
+    # those disagree. Showing last week's XI under this week's heading is the
+    # whole failure this prevents.
+    if pl.gameweek != config.CURRENT_GAMEWEEK:
+        st.caption(
+            "Premier League has not published Matchweek %s predicted line-ups yet."
+            % config.CURRENT_GAMEWEEK
+        )
+        return
+
+    home_code = TEAM_FULL_TO_SHORT.get(home_team)
+    away_code = TEAM_FULL_TO_SHORT.get(away_team)
+    if not home_code or not away_code:
+        return
+    if (home_code, away_code) not in pl.fixtures:
+        return                            # PL does not carry this fixture
+
+    st.markdown("---")
+    header = "##### Premier League — official predicted XI"
+    if pl.url:
+        header += "  ·  [article](%s)" % pl.url
+    st.markdown(header)
+    if pl.updated:
+        st.caption("Updated %s" % format_last_updated(pl.updated))
+
+    graphic_cols = st.columns(2)
+    for column, team, code in ((graphic_cols[0], home_team, home_code),
+                               (graphic_cols[1], away_team, away_code)):
+        image = pl.graphics.get(code)
+        with column:
+            if image:
+                st.image(image, use_container_width=True, caption=team)
+            else:
+                st.caption("%s — no graphic published" % team)
+
+    news = [(team, pl.club_news.get(code))
+            for team, code in ((home_team, home_code), (away_team, away_code))]
+    if any(text for _, text in news):
+        with st.expander("Premier League team news", expanded=False):
+            for team, text in news:
+                if text:
+                    st.markdown("**%s** — %s" % (team, text))
+
+
 def show_projected_lineups():
     st.title(f"Projected Lineups — GW {config.CURRENT_GAMEWEEK}")
     st.write("View projected starting lineups with player form and availability status.")
@@ -776,5 +848,7 @@ def show_projected_lineups():
                 st.markdown(cards_html, unsafe_allow_html=True)
             else:
                 st.info("No lineup data available for this team.")
+
+        _render_pl_section(home_team, away_team)
 
 
