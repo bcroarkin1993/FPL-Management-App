@@ -745,7 +745,9 @@ def _render_pl_section(home_team, away_team):
         image = pl.graphics.get(code)
         with column:
             if image:
-                st.image(image, use_container_width=True, caption=team)
+                # use_column_width, not use_container_width: st.image only
+                # gained the latter in Streamlit 1.40 and this app pins 1.38.
+                st.image(image, use_column_width=True, caption=team)
             else:
                 st.caption("%s — no graphic published" % team)
 

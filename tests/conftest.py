@@ -193,7 +193,12 @@ def mock_streamlit():
     active_patches = []
 
     for func_name in display_funcs:
-        p = patch(f"streamlit.{func_name}", new_callable=MagicMock)
+        # autospec, not a bare MagicMock: a bare mock accepts *any* keyword, so
+        # a call that the installed Streamlit would reject sails through every
+        # smoke test and fails in the browser instead. That is exactly how
+        # `st.image(..., use_container_width=True)` shipped -- the argument only
+        # exists in Streamlit 1.40+ and this app pins 1.38.
+        p = patch(f"streamlit.{func_name}", autospec=True)
         active_patches.append(p)
         patches[func_name] = p.start()
 

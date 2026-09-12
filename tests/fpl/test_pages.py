@@ -55,7 +55,7 @@ class TestProjectedLineupsPage:
         from scripts.fpl import projected_lineups as pl_page
         with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
                    return_value=self._lineups(config.CURRENT_GAMEWEEK)), \
-             patch("scripts.fpl.projected_lineups.st.image") as image:
+             patch("scripts.fpl.projected_lineups.st.image", autospec=True) as image:
             pl_page._render_pl_section("Aston Villa", "Nottingham Forest")
         assert image.call_count == 2
 
@@ -66,7 +66,7 @@ class TestProjectedLineupsPage:
         from scripts.fpl import projected_lineups as pl_page
         with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
                    return_value=self._lineups(config.CURRENT_GAMEWEEK - 1)), \
-             patch("scripts.fpl.projected_lineups.st.image") as image:
+             patch("scripts.fpl.projected_lineups.st.image", autospec=True) as image:
             pl_page._render_pl_section("Aston Villa", "Nottingham Forest")
         assert image.call_count == 0
 
@@ -75,7 +75,7 @@ class TestProjectedLineupsPage:
         from scripts.fpl import projected_lineups as pl_page
         with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
                    return_value=self._lineups(config.CURRENT_GAMEWEEK)), \
-             patch("scripts.fpl.projected_lineups.st.image") as image:
+             patch("scripts.fpl.projected_lineups.st.image", autospec=True) as image:
             pl_page._render_pl_section("Chelsea", "Hull City")
         assert image.call_count == 0
 
@@ -83,7 +83,7 @@ class TestProjectedLineupsPage:
         from scripts.fpl import projected_lineups as pl_page
         with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
                    side_effect=RuntimeError("PL API down")), \
-             patch("scripts.fpl.projected_lineups.st.image") as image:
+             patch("scripts.fpl.projected_lineups.st.image", autospec=True) as image:
             pl_page._render_pl_section("Aston Villa", "Nottingham Forest")
         assert image.call_count == 0
 
