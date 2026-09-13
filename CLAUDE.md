@@ -1716,6 +1716,27 @@ at-risk *fraction* check. Confirmed departures score 1.0 by construction, and th
 Availability tracker deliberately lists them — judged against the whole frame it
 failed at 82% while working perfectly.
 
+**"Empty" is three different things, and saying which is the whole job.**
+`fetch_odds_index_with_status()` returns `(frame, status, note)` with status one
+of `ok` / `unreachable` / `not_odds_page` / `shape_changed`; `fetch_odds_index()`
+is the app-facing wrapper that just returns the frame, so no page can be taken
+down by a dead feed.
+
+The distinction exists because conflating two of them cost real debugging time.
+On 2026-09-13 the live suite failed with "the page is server-rendered, so an
+empty parse means its shape changed" — and the shape had not changed. The site
+had served something that was not the odds page for one request; the very next
+request parsed 57 rows. A test that reports weather as a code defect is exactly
+what the `tests/live/` contract exists to prevent, so `_looks_like_odds_page()`
+now checks for the page's own furniture (`hotTransfers`, `Next Club Odds`, an
+`/odds/` anchor) before the absence of records is allowed to mean anything.
+The live fixture skips on `not_odds_page` and still fails hard on
+`shape_changed`, which is the case that really is a defect.
+
+`odds_feeds._get()` also had **no retry**, alone among the app's feeds, so a
+single bad response emptied the odds board for a whole page load. It now retries
+three times with backoff, matching `ffp_feed._get` and `pl_content._get`.
+
 
 ## Team Strength Model — Draft Power Rankings
 

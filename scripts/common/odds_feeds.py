@@ -38,6 +38,7 @@ Both pages are server-rendered, so nothing here needs a browser:
 import logging
 import re
 import threading
+import time
 import unicodedata
 
 import pandas as pd
@@ -79,10 +80,31 @@ def _session():
     return _SESSION
 
 
-def _get(url, timeout=15):
-    resp = _session().get(url, timeout=timeout)
-    resp.raise_for_status()
-    return resp.text
+DEFAULT_ATTEMPTS = 3
+
+
+def _get(url, timeout=15, attempts=DEFAULT_ATTEMPTS):
+    """GET with a short backoff, matching ``ffp_feed._get``.
+
+    This had no retry at all, alone among the app's feeds, and a single bad
+    response was enough to empty the odds board for a whole page load. Observed
+    2026-09-13: the live suite reported the index as "reachable but empty" --
+    the signature of a changed page shape -- while the parser was in fact
+    perfectly healthy and returned 57 rows on the very next request.
+    """
+    delay = 0.5
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = _session().get(url, timeout=timeout)
+            resp.raise_for_status()
+            return resp.text
+        except Exception as exc:
+            if attempt == attempts:
+                raise
+            _logger.info("Odds: retrying %s (attempt %d/%d): %s",
+                         url, attempt, attempts, exc)
+            time.sleep(delay)
+            delay *= 2
 
 
 def player_slug(name):
@@ -175,27 +197,75 @@ def _parse_index(html_text):
     return rows
 
 
+#: Stable furniture of the real ``/odds`` page, in both the payload and the
+#: visible markup. Their absence means we were served *something else* -- an
+#: edge-cached shell, an interstitial, an error page -- which is a different
+#: problem from the payload having changed shape, and wants a different answer.
+_ODDS_PAGE_MARKERS = ("hotTransfers", "Next Club Odds", 'href="/odds/')
+
+#: `status` values from :func:`fetch_odds_index_with_status`.
+ODDS_OK = "ok"
+ODDS_UNREACHABLE = "unreachable"
+ODDS_NOT_ODDS_PAGE = "not_odds_page"
+ODDS_SHAPE_CHANGED = "shape_changed"
+
+
+def _looks_like_odds_page(html_text):
+    return any(marker in (html_text or "") for marker in _ODDS_PAGE_MARKERS)
+
+
+def fetch_odds_index_with_status(timeout=15):
+    """``(frame, status, note)`` -- the index plus *why* it is empty.
+
+    The distinction is the point. An empty frame can mean the payload changed
+    shape, which is a real defect needing a code change, or it can mean the site
+    handed us a page that is not the odds page at all, which is weather. Those
+    want opposite responses, and conflating them cost real time on 2026-09-13:
+    the live suite failed asserting "the page is server-rendered, so an empty
+    parse means its shape changed", and the shape had not changed -- the very
+    next request parsed 57 rows.
+
+    Same reasoning as ``get_ffp_feed`` reporting ``provenance="none"`` with a
+    reason rather than a bare ``None``.
+    """
+    try:
+        html_text = _get(ODDS_INDEX_URL, timeout=timeout)
+    except Exception as exc:
+        _logger.warning("Odds index fetch failed: %s", exc)
+        return _empty(ODDS_INDEX_COLUMNS), ODDS_UNREACHABLE, str(exc)
+
+    if not _looks_like_odds_page(html_text):
+        note = ("response carried none of %s (%d bytes) -- this is not the odds "
+                "page" % (list(_ODDS_PAGE_MARKERS), len(html_text or "")))
+        _logger.warning("Odds index: %s", note)
+        return _empty(ODDS_INDEX_COLUMNS), ODDS_NOT_ODDS_PAGE, note
+
+    try:
+        rows = _parse_index(html_text)
+    except Exception as exc:
+        _logger.warning("Odds index parse failed: %s", exc)
+        return _empty(ODDS_INDEX_COLUMNS), ODDS_SHAPE_CHANGED, str(exc)
+
+    if not rows:
+        note = ("the odds page was served (%d bytes) but neither the JSON "
+                "payload nor the ticker fallback matched" % len(html_text or ""))
+        _logger.warning("Odds index: %s", note)
+        return _empty(ODDS_INDEX_COLUMNS), ODDS_SHAPE_CHANGED, note
+
+    return pd.DataFrame(rows, columns=ODDS_INDEX_COLUMNS), ODDS_OK, ""
+
+
 def fetch_odds_index(timeout=15):
     """Every player with a live next-club market, one request.
 
     Columns: ``ODDS_INDEX_COLUMNS``.  ``Updated`` is ``None`` -- the index
     publishes no timestamp, so consumers fall back to
     ``ODDS_ASSUMED_AGE_DAYS`` rather than treating it as fresh.
+
+    Always returns a frame; :func:`fetch_odds_index_with_status` is the same
+    call for callers that need to know why an empty one is empty.
     """
-    try:
-        html_text = _get(ODDS_INDEX_URL, timeout=timeout)
-    except Exception as exc:
-        _logger.warning("Odds index fetch failed: %s", exc)
-        return _empty(ODDS_INDEX_COLUMNS)
-    try:
-        rows = _parse_index(html_text)
-    except Exception as exc:
-        _logger.warning("Odds index parse failed: %s", exc)
-        return _empty(ODDS_INDEX_COLUMNS)
-    if not rows:
-        _logger.warning("Odds index returned no rows -- page shape may have changed")
-        return _empty(ODDS_INDEX_COLUMNS)
-    return pd.DataFrame(rows, columns=ODDS_INDEX_COLUMNS)
+    return fetch_odds_index_with_status(timeout=timeout)[0]
 
 
 def fetch_odds_slugs(timeout=15):

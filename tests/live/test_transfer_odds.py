@@ -23,13 +23,32 @@ from .conftest import skip_if_unreachable
 
 @pytest.fixture(scope="module")
 def odds_index():
-    from scripts.common.odds_feeds import fetch_odds_index
-    df = skip_if_unreachable(fetch_odds_index, "footballtransfers.co.uk odds index")
-    if df is None or df.empty:
+    """The live index, or a skip when the site did not serve us the odds page.
+
+    An empty frame used to fail outright, on the reasoning that a
+    server-rendered page cannot parse to nothing unless its shape changed. That
+    is true only when the thing we parsed *was* the odds page. Observed
+    2026-09-13: this failed with exactly that message while the parser was
+    healthy -- the next request returned 57 rows -- because the site had handed
+    back something else for one request. A test that reports weather as a code
+    defect is the failure mode the contract at the top of this directory exists
+    to prevent, so the two cases are now told apart at the source.
+    """
+    from scripts.common import odds_feeds
+
+    result = skip_if_unreachable(odds_feeds.fetch_odds_index_with_status,
+                                 "footballtransfers.co.uk odds index")
+    df, status, note = result
+
+    if status == odds_feeds.ODDS_UNREACHABLE:
+        pytest.skip("odds index unreachable: %s" % note)
+    if status == odds_feeds.ODDS_NOT_ODDS_PAGE:
+        pytest.skip("odds index did not serve the odds page: %s" % note)
+    if status == odds_feeds.ODDS_SHAPE_CHANGED or df is None or df.empty:
         pytest.fail(
-            "The odds index reachable but empty. The page is server-rendered, so "
-            "an empty parse means its shape changed -- see odds_feeds._parse_index, "
-            "which reads the RSC JSON payload with a ticker-anchor fallback."
+            "The odds page was served but parsed to nothing, so its shape has "
+            "changed -- see odds_feeds._parse_index, which reads the RSC JSON "
+            "payload with a ticker-anchor fallback. Detail: %s" % note
         )
     return df
 
