@@ -7,6 +7,7 @@ GW4 heading as though Brentford were playing Chelsea that week. They were
 playing Bournemouth.
 """
 
+import re
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -195,3 +196,169 @@ class TestMatchupsShareTheIndexSpace:
         assert scrape.players.empty
         assert list(scrape.players.columns) == pl.LINEUP_COLUMNS
         assert scrape.matchups == []
+
+
+# ---------------------------------------------------------------------------
+# Player stats lookup
+# ---------------------------------------------------------------------------
+
+def _element(pid, first, second, web, team, etype, **over):
+    e = {"id": pid, "first_name": first, "second_name": second, "web_name": web,
+         "team": team, "element_type": etype, "form": "1.0", "points_per_game": "1.0",
+         "total_points": 10, "minutes": 90, "starts": 1, "goals_scored": 0,
+         "assists": 0, "clean_sheets": 0, "chance_of_playing_this_round": None,
+         "status": "a", "news": ""}
+    e.update(over)
+    return e
+
+
+# Team ids: 1 CHE, 2 IPS, 3 MUN, 4 LEE
+_BOOTSTRAP = {
+    "teams": [{"id": 1, "short_name": "CHE"}, {"id": 2, "short_name": "IPS"},
+              {"id": 3, "short_name": "MUN"}, {"id": 4, "short_name": "LEE"}],
+    "elements": [
+        # The collision this whole rewrite exists for: an elite midfielder and a
+        # backup keeper at different clubs, sharing a surname.
+        _element(1, "Cole", "Palmer", "Palmer", 1, 3, form="6.5", total_points=26),
+        _element(2, "Alex", "Palmer", "Palmer", 2, 1, form="0.0", total_points=0),
+        # Registered a midfielder, listed by Rotowire as a forward.
+        _element(3, "Matheus", "Santos Carneiro da Cunha", "M.Cunha", 3, 3),
+        # Two Wilsons at one club. FPL disambiguates them by web_name, which
+        # is what the exact-web_name tier is for.
+        _element(4, "Harry", "Wilson", "Wilson", 4, 3),
+        _element(5, "Ben", "Wilson", "B.Wilson", 4, 2),
+        # Two Fergusons at one club whose web_names are *both* initialled, so
+        # a bare "Ferguson" matches neither exactly and reaches the last-word
+        # tier, where it is genuinely ambiguous.
+        _element(6, "Evan", "Ferguson", "E.Ferguson", 4, 3),
+        _element(7, "Lewis", "Ferguson", "L.Ferguson", 4, 3),
+        # Same club, same surname, *different* registered positions -- here the
+        # position scoping is what separates them.
+        _element(9, "Tom", "Doyle", "T.Doyle", 4, 2),
+        _element(10, "Sam", "Doyle", "S.Doyle", 4, 4),
+        _element(8, "Joao", "Palhinha", "Palhinha", 1, 3),
+    ],
+}
+
+_AVAIL = pd.DataFrame([
+    {"Player_ID": 1, "PlayPct": 100.0, "StatusBucket": "Available", "News": ""},
+    {"Player_ID": 2, "PlayPct": 0.0, "StatusBucket": "Out", "News": "Knee injury"},
+])
+
+
+@pytest.fixture
+def index():
+    with patch.object(pl, "get_classic_bootstrap_static", return_value=_BOOTSTRAP), \
+         patch.object(pl, "get_fpl_availability_df", return_value=_AVAIL):
+        return pl.build_player_index()
+
+
+class TestPlayerIndexLookup:
+    """The matcher this replaced was a six-stage ladder, every stage of which
+    was team- and position-agnostic, over a dict that also keyed players by
+    bare surname and by web_name. Measured live: 24 surnames and 17 web_names
+    were ambiguous league-wide (51 and 36 players), and a plain dict keeps
+    whichever the bootstrap happened to list last.
+    """
+
+    def test_a_shared_surname_resolves_by_club(self, index):
+        """Cole Palmer's form must not appear on Alex Palmer's card."""
+        cole = index.lookup("Palmer", "Chelsea", "AMC")
+        alex = index.lookup("Palmer", "Ipswich Town", "GK")
+        assert cole["team"] == "CHE" and cole["total_points"] == 26
+        assert alex["team"] == "IPS" and alex["total_points"] == 0
+
+    def test_availability_rides_along_with_the_right_player(self, index):
+        assert index.lookup("Palmer", "Ipswich Town", "GK")["status_bucket"] == "Out"
+        assert index.lookup("Palmer", "Chelsea", "AMC")["status_bucket"] == "Available"
+
+    def test_rotowire_role_may_disagree_with_the_registered_position(self, index):
+        """Rotowire publishes a tactical role, FPL a registered position. Five
+        of 66 starters differed in one gameweek -- wing-backs listed in
+        midfield, Cunha listed as a forward. Position is a hint, not a filter."""
+        assert index.lookup("Matheus Cunha", "Manchester United", "FW")["team"] == "MUN"
+
+    def test_a_web_name_disambiguates_same_club_namesakes(self, index):
+        """Two Wilsons at Leeds, and FPL names one of them "Wilson" precisely
+        to tell them apart. The exact-web_name tier should take it."""
+        assert index.lookup("Wilson", "Leeds United", "MC")["team"] == "LEE"
+
+    def test_a_genuinely_ambiguous_name_resolves_to_nothing(self, index):
+        """Two Fergusons at Leeds, neither of whom FPL calls plain "Ferguson",
+        so the query reaches the last-word tier and matches both. A coin flip
+        is worse than a blank card."""
+        assert index.lookup("Ferguson", "Leeds United", "MC") == {}
+
+    def test_ambiguity_survives_the_all_positions_retry(self, index):
+        """The retry widens the search; it must not turn a tie into a winner.
+        Both Fergusons are midfielders, so no position separates them and every
+        pass must come back empty."""
+        for code in ("MC", "FW", "GK", "DC"):
+            assert index.lookup("Ferguson", "Leeds United", code) == {}, code
+
+    def test_position_separates_same_club_namesakes(self, index):
+        """Two Doyles at Leeds, one a defender and one a forward. Scoping by
+        position is what makes each resolvable at all."""
+        assert index.lookup("Doyle", "Leeds United", "DC")["team"] == "LEE"
+        assert index.lookup("Doyle", "Leeds United", "FW")["team"] == "LEE"
+        # ...and they must be different players, not the same one twice.
+        assert (index.lookup("Doyle", "Leeds United", "DC")
+                is not index.lookup("Doyle", "Leeds United", "FW"))
+
+    def test_an_abbreviated_initial_with_no_space_still_resolves(self, index):
+        """Rotowire writes "J.Palhinha"; canonical_normalize deletes the dot
+        rather than splitting on it, collapsing the name to one meaningless
+        token unless the space is restored first."""
+        assert index.lookup("J.Palhinha", "Chelsea", "MC")["team"] == "CHE"
+
+    def test_an_unmapped_club_fails_closed(self, index):
+        """Without a club only whole-name tiers are safe, and a card showing
+        the wrong player is worse than one showing no stats."""
+        assert index.lookup("Cole Palmer", "Chelsea FC Football Club", "AMC") == {}
+
+    def test_a_player_absent_from_fpl_returns_nothing(self, index):
+        """Rotowire lists players who have left the league. They must come back
+        empty, not attach to the nearest surname."""
+        assert index.lookup("F. Kadioglu", "Chelsea", "DR") == {}
+
+    def test_lookup_is_scoped_even_for_a_unique_surname(self, index):
+        """Cunha exists only at MUN, but asking for him at Chelsea must still
+        miss -- uniqueness in the pool is not a licence to cross clubs."""
+        assert index.lookup("Matheus Cunha", "Chelsea", "FW") == {}
+
+
+class TestPlayerIndexDegradation:
+    def test_an_empty_bootstrap_yields_the_empty_index(self):
+        with patch.object(pl, "get_classic_bootstrap_static", return_value={}):
+            assert pl.build_player_index() is pl.EMPTY_PLAYER_INDEX
+
+    def test_a_failing_bootstrap_does_not_raise(self):
+        with patch.object(pl, "get_classic_bootstrap_static",
+                          side_effect=RuntimeError("FPL down")):
+            assert pl.build_player_index() is pl.EMPTY_PLAYER_INDEX
+
+    def test_the_empty_index_looks_up_to_nothing(self):
+        assert pl.EMPTY_PLAYER_INDEX.lookup("Cole Palmer", "Chelsea", "AMC") == {}
+
+    def test_missing_availability_still_builds_the_index(self):
+        """Availability is an enhancement; losing it must not lose the stats."""
+        with patch.object(pl, "get_classic_bootstrap_static", return_value=_BOOTSTRAP), \
+             patch.object(pl, "get_fpl_availability_df",
+                          side_effect=RuntimeError("bootstrap down")):
+            idx = pl.build_player_index()
+        assert idx.lookup("Palmer", "Chelsea", "AMC")["total_points"] == 26
+
+
+class TestTacticalPositionMap:
+    def test_every_code_the_field_can_draw_is_mapped(self):
+        """plot_soccer_field's position_mapping is the set of codes Rotowire
+        publishes. One missing here silently drops position scoping for it."""
+        import inspect
+        source = inspect.getsource(pl.plot_soccer_field)
+        drawn = set(re.findall(r"'([A-Z]{2,3})':\s*\(", source))
+        assert drawn, "could not read position_mapping out of plot_soccer_field"
+        missing = drawn - set(pl.ROTOWIRE_TACTICAL_TO_POSITION)
+        assert not missing, "unmapped tactical codes: %s" % sorted(missing)
+
+    def test_codes_map_to_the_apps_position_scheme(self):
+        assert set(pl.ROTOWIRE_TACTICAL_TO_POSITION.values()) <= {"G", "D", "M", "F"}

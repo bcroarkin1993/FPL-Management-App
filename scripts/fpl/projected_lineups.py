@@ -1,6 +1,7 @@
 from bs4 import BeautifulSoup
 from collections import defaultdict
 from typing import NamedTuple
+import re
 import config
 import pandas as pd
 import plotly.graph_objects as go
@@ -13,9 +14,10 @@ from scripts.common.text_helpers import (
     TEAM_FULL_TO_SHORT,
     compact_html,
     format_last_updated,
+    to_display_name,
 )
 from scripts.common.fixture_helpers import _bootstrap_teams_df
-from scripts.common.player_matching import canonical_normalize
+from scripts.common.name_matching import ReferenceMatcher
 from scripts.common.scraping import get_pl_predicted_lineups
 
 _logger = get_logger("fpl_app.projected_lineups")
@@ -211,58 +213,152 @@ def scrape_matchups(url, gameweek=None):
     return scrape_lineups(url, gameweek).matchups
 
 
-def get_player_data_map():
-    """
-    Fetches player data from FPL API and creates a lookup map by player name.
-    Uses multiple keys (web_name, full_name, normalized versions) for better matching.
+#: Rotowire publishes a tactical *role* on the lineups page; FPL registers a
+#: position. They legitimately disagree -- a wing-back is "DMC" to Rotowire and
+#: a DEF to FPL -- which is why position is a hint here and never a filter.
+ROTOWIRE_TACTICAL_TO_POSITION = {
+    'GK': 'G',
+    'DL': 'D', 'DC': 'D', 'DR': 'D',
+    'DML': 'M', 'DMC': 'M', 'DMR': 'M',
+    'ML': 'M', 'MC': 'M', 'MR': 'M',
+    'AML': 'M', 'AMC': 'M', 'AMR': 'M',
+    'FL': 'F', 'FWL': 'F', 'FC': 'F', 'FW': 'F', 'FWR': 'F', 'FR': 'F',
+}
 
-    Returns:
-    - dict: {player_name: {form, points_per_game, chance_of_playing, status, news, ...}}
-    """
-    player_map = {}
-    norm_to_data = {}  # Normalized name -> player data (for fuzzy lookup)
+_POS_LETTERS = ('G', 'D', 'M', 'F')
+_ELEMENT_TYPE_TO_POSITION = {1: 'G', 2: 'D', 3: 'M', 4: 'F'}
 
+#: "J.Palhinha" -> "J. Palhinha". Rotowire abbreviates a first name with no
+#: space after the dot, and canonical_normalize *deletes* the dot rather than
+#: splitting on it, so the whole thing collapses to the single token
+#: "jpalhinha" and every token-based tier misses. With the space restored the
+#: last-word tier sees "palhinha" and resolves it inside the club.
+_ABBREV_INITIAL_RE = re.compile(r'^([A-Za-z])\.(?=\S)')
+
+
+def _expand_abbreviated_initial(name):
+    return _ABBREV_INITIAL_RE.sub(r'\1. ', str(name or ''))
+
+
+class PlayerIndex(NamedTuple):
+    """FPL player stats, resolvable from a Rotowire lineup name.
+
+    ``stats`` is keyed on the reference pool's index label, so a resolved match
+    is a row lookup rather than a second name-keyed dict.
+    """
+
+    matcher: object = None
+    pool: object = None
+    stats: dict = {}
+
+    def lookup(self, player_name, team, position=None) -> dict:
+        """Stats for one Rotowire lineup entry, or ``{}`` when unresolved.
+
+        ``team`` is Rotowire's long club label and ``position`` its tactical
+        code; both are resolved here so no caller has to.
+
+        **Every lookup is scoped to the club.** The hand-rolled matcher this
+        replaces was a six-stage ladder that was team- *and* position-agnostic
+        at every stage, over a dict that additionally keyed players by bare
+        surname and by ``web_name``. Both are ambiguous league-wide -- measured
+        live, 24 surnames and 17 web_names collided, 51 and 36 players -- and a
+        plain dict silently keeps whichever the bootstrap listed last. "Palmer"
+        was one of them: Cole Palmer (CHE, elite MID) and Alex Palmer (IPS, GK),
+        the exact pairing that already caused this bug once elsewhere in the
+        app. The card would show one player's form, injury and news under the
+        other's name, and every value on it would look perfectly ordinary.
+        """
+        if self.matcher is None or not len(self.stats):
+            return {}
+
+        team_code = TEAM_FULL_TO_SHORT.get(str(team or '').strip())
+        if not team_code:
+            # Without a club the only safe tiers are exact whole-name ones, and
+            # a wrong card is worse than a bare one. Fail closed.
+            _logger.info("Projected Lineups: unmapped club label %r", team)
+            return {}
+
+        name = _expand_abbreviated_initial(player_name)
+        tactical = ROTOWIRE_TACTICAL_TO_POSITION.get(str(position or '').strip().upper())
+
+        hit = self.matcher.match(name, team_code, tactical)
+        if hit is None:
+            # Rotowire's role and FPL's registered position disagree often
+            # enough to matter -- measured on one gameweek, 5 of 66 starters
+            # (Cunha listed as a forward and registered as a midfielder,
+            # wing-backs listed in midfield). Retrying across all four keeps
+            # them, and stays safe because a name that resolves to two
+            # different players still resolves to none.
+            hits = {self.matcher.match(name, team_code, p) for p in _POS_LETTERS}
+            hits.discard(None)
+            if len(hits) != 1:
+                return {}
+            hit = hits.pop()
+
+        # Residual risk, stated rather than papered over: two players at one
+        # club sharing a surname that FPL registers in different positions are
+        # separated by the position scoping, so a Rotowire role that disagrees
+        # with FPL's registration could pick the other one. That needs all four
+        # of those things at once, and the alternative -- ignoring position --
+        # makes every such pair unresolvable and loses the wing-backs too.
+
+        return self.stats.get(hit, {})
+
+
+EMPTY_PLAYER_INDEX = PlayerIndex()
+
+
+def build_player_index() -> PlayerIndex:
+    """Build the FPL reference pool and its matcher for the lineups page.
+
+    Returns :data:`EMPTY_PLAYER_INDEX` on any failure -- the stats are an
+    enhancement to the lineup cards, not a prerequisite for drawing them.
+    """
     try:
-        # Get availability data
-        avail_df = get_fpl_availability_df()
-        avail_lookup = {}
-        if not avail_df.empty:
-            for _, row in avail_df.iterrows():
-                web_name = row.get('Web_Name', '')
-                if web_name:
-                    avail_lookup[web_name] = {
-                        'play_pct': row.get('PlayPct', 100),
-                        'status_bucket': row.get('StatusBucket', 'Available'),
-                        'news': row.get('News', '')
-                    }
-
-        # Get bootstrap data for form and other stats
         bootstrap = get_classic_bootstrap_static()
         if not bootstrap:
-            return player_map
+            return EMPTY_PLAYER_INDEX
 
         elements = bootstrap.get('elements', [])
         teams = {t['id']: t['short_name'] for t in bootstrap.get('teams', [])}
 
-        for elem in elements:
-            web_name = elem.get('web_name', '')
-            first_name = elem.get('first_name', '')
-            second_name = elem.get('second_name', '')
-            full_name = f"{first_name} {second_name}".strip()
+        # Availability is keyed on the element id, not the name: this frame and
+        # the bootstrap are the same source, so there is nothing to match.
+        avail_lookup = {}
+        try:
+            avail_df = get_fpl_availability_df()
+            if not avail_df.empty:
+                for row in avail_df.itertuples(index=False):
+                    avail_lookup[getattr(row, 'Player_ID', None)] = {
+                        'play_pct': getattr(row, 'PlayPct', 100),
+                        'status_bucket': getattr(row, 'StatusBucket', 'Available'),
+                        'news': getattr(row, 'News', ''),
+                    }
+        except Exception as e:
+            _logger.warning("Availability data unavailable for lineups: %s", e)
 
+        rows, stats = [], {}
+        for idx, elem in enumerate(elements):
+            web_name = elem.get('web_name', '')
             if not web_name:
                 continue
+            first_name = elem.get('first_name', '')
+            second_name = elem.get('second_name', '')
 
-            # Build player data
-            starts = elem.get('starts', 0) or 0
-            minutes = elem.get('minutes', 0) or 0
+            rows.append({
+                'Player': f"{first_name} {second_name}".strip(),
+                'Web_Name': web_name,
+                'Display_Name': to_display_name(first_name, second_name, web_name),
+                'Team': teams.get(elem.get('team'), ''),
+                'Position': _ELEMENT_TYPE_TO_POSITION.get(elem.get('element_type'), ''),
+            })
 
             pdata = {
                 'form': float(elem.get('form', 0) or 0),
                 'points_per_game': float(elem.get('points_per_game', 0) or 0),
                 'total_points': elem.get('total_points', 0),
-                'minutes': minutes,
-                'starts': starts,
+                'minutes': elem.get('minutes', 0) or 0,
+                'starts': elem.get('starts', 0) or 0,
                 'goals_scored': elem.get('goals_scored', 0),
                 'assists': elem.get('assists', 0),
                 'clean_sheets': elem.get('clean_sheets', 0),
@@ -273,114 +369,19 @@ def get_player_data_map():
                 'play_pct': 100,
                 'status_bucket': 'Available',
             }
+            pdata.update(avail_lookup.get(elem.get('id'), {}))
+            stats[len(rows) - 1] = pdata
 
-            # Merge availability data
-            if web_name in avail_lookup:
-                pdata.update(avail_lookup[web_name])
+        if not rows:
+            return EMPTY_PLAYER_INDEX
 
-            # Store under multiple keys for better matching
-            player_map[web_name] = pdata
-            if full_name and full_name != web_name:
-                player_map[full_name] = pdata
-            if second_name and second_name != web_name:
-                player_map[second_name] = pdata
-
-            # Store normalized version for fuzzy lookup
-            norm_key = canonical_normalize(full_name)
-            if norm_key:
-                norm_to_data[norm_key] = pdata
-
-        # Store the normalized lookup for use in matching
-        player_map['_norm_lookup'] = norm_to_data
+        pool = pd.DataFrame(rows)
+        return PlayerIndex(matcher=ReferenceMatcher(pool), pool=pool, stats=stats)
 
     except Exception as e:
-        _logger.warning("Failed to fetch player data for lineup enhancement: %s", e)
+        _logger.warning("Failed to build player index for lineup enhancement: %s", e)
+        return EMPTY_PLAYER_INDEX
 
-    return player_map
-
-
-def lookup_player_data(player_name, player_data_map):
-    """
-    Look up player data with fallback to normalized name matching.
-    Handles cases where Rotowire uses:
-    - Shortened names: 'Bruno Fernandes' -> 'Bruno Borges Fernandes'
-    - Abbreviated names: 'R. Sanchez' -> 'Robert Sanchez', 'J. Palhinha' -> 'João Palhinha'
-    - Single names: 'Alisson' -> 'Alisson Becker'
-    """
-    import re
-
-    # Direct lookup
-    if player_name in player_data_map:
-        return player_data_map[player_name]
-
-    # Try normalized lookup (exact match)
-    norm_lookup = player_data_map.get('_norm_lookup', {})
-    norm_name = canonical_normalize(player_name)
-    if norm_name in norm_lookup:
-        return norm_lookup[norm_name]
-
-    # Handle abbreviated first names like "R. Sanchez", "J. Palhinha", "J.Palhinha"
-    # Patterns: "X. LastName" or "X.LastName"
-    abbrev_match = re.match(r'^([A-Z])\.[\s]?(.+)$', player_name)
-    if abbrev_match:
-        first_initial = abbrev_match.group(1).lower()
-        last_name = abbrev_match.group(2)
-        norm_last = canonical_normalize(last_name)
-
-        # Search for players whose first name starts with the initial and name contains last name
-        for key, value in norm_lookup.items():
-            key_parts = key.split()
-            if len(key_parts) >= 2:
-                # Match if first name starts with initial and last name appears anywhere in key
-                if key_parts[0].startswith(first_initial) and norm_last in key:
-                    return value
-
-        # Also try direct last name match in player_map
-        if last_name in player_data_map:
-            return player_data_map[last_name]
-
-    # Try partial normalized match for multi-word names
-    # e.g., "raul jimenez" should match "raul jimenez rodriguez"
-    if norm_name and len(norm_name.split()) >= 2:
-        norm_parts = norm_name.split()
-        first_word = norm_parts[0]
-        last_word = norm_parts[-1]
-
-        for key, value in norm_lookup.items():
-            key_parts = key.split()
-            if len(key_parts) >= 2:
-                # Match if first word matches AND last word appears anywhere in key
-                if key_parts[0] == first_word and last_word in key_parts:
-                    return value
-
-    # Single word name matching (e.g., "Alisson" -> "alisson becker", "Rodri" -> "rodrigo rodri hernandez")
-    if norm_name and len(norm_name.split()) == 1:
-        # First try matching first word
-        for key, value in norm_lookup.items():
-            key_parts = key.split()
-            if len(key_parts) >= 1 and key_parts[0] == norm_name:
-                return value
-        # Then try matching anywhere in the name (for nicknames like "Rodri")
-        for key, value in norm_lookup.items():
-            if norm_name in key.split():
-                return value
-
-    # For multi-word names, try abbreviated first initial + last name (e.g., "Santi Bueno" -> "S.Bueno")
-    parts = player_name.split()
-    if len(parts) >= 2:
-        first_initial = parts[0][0].upper()
-        last_name = parts[-1]
-        abbrev_key = f"{first_initial}.{last_name}"
-        if abbrev_key in player_data_map:
-            return player_data_map[abbrev_key]
-
-    # Try partial match on last name only (for single-name lookups like "Casemiro")
-    if len(parts) >= 1:
-        last_name = parts[-1]
-        if last_name in player_data_map:
-            return player_data_map[last_name]
-
-    return {}
 
 
 def get_availability_color(status_bucket, play_pct=None):
@@ -408,7 +409,7 @@ def get_form_color(form):
     else:
         return '#e74c3c'  # Red - poor
 
-def plot_soccer_field(player_df, team_name, player_data_map=None):
+def plot_soccer_field(player_df, team_name, player_index=None):
     """
     Plots players on a soccer field based on their positions for a specific team.
     Enhanced with player form and availability indicators.
@@ -416,10 +417,10 @@ def plot_soccer_field(player_df, team_name, player_data_map=None):
     Parameters:
     - player_df (pd.DataFrame): A DataFrame containing 'Position' and 'Player' columns.
     - team_name (str): The name of the team, displayed as the title above the field.
-    - player_data_map (dict): Optional player data for form/availability enhancement.
+    - player_index (PlayerIndex): Optional FPL stats for form/availability enhancement.
     """
-    if player_data_map is None:
-        player_data_map = {}
+    if player_index is None:
+        player_index = EMPTY_PLAYER_INDEX
 
     # Map Rotowire team names to TEAM_COLORS keys
     team_name_map = {
@@ -483,8 +484,10 @@ def plot_soccer_field(player_df, team_name, player_data_map=None):
                 elif i == 2:
                     x += 2.0
 
-            # Get player data for enhanced display
-            pdata = lookup_player_data(player_name, player_data_map)
+            # Get player data for enhanced display. team_name is this frame's
+            # club and `position` the tactical slot being drawn, so the lookup
+            # is scoped to the club it belongs to.
+            pdata = player_index.lookup(player_name, team_name, position)
             form = pdata.get('form', 0)
             status_bucket = pdata.get('status_bucket', 'Available')
             play_pct = pdata.get('play_pct', 100)
@@ -584,14 +587,14 @@ def plot_soccer_field(player_df, team_name, player_data_map=None):
 
     return fig
 
-def render_player_cards_html(player_df, player_data_map):
+def render_player_cards_html(player_df, player_index):
     """Renders all player cards as a single HTML block."""
     cards = []
 
     for _, row in player_df.iterrows():
         player_name = row['Player']
         position = row['Position']
-        pdata = lookup_player_data(player_name, player_data_map)
+        pdata = player_index.lookup(player_name, row.get('Team'), position)
 
         form = pdata.get('form', 0)
         status_bucket = pdata.get('status_bucket', 'Available')
@@ -814,7 +817,7 @@ def show_projected_lineups():
 
         # Fetch player data for enhancements
         with st.spinner("Loading player data..."):
-            player_data_map = get_player_data_map()
+            player_index = build_player_index()
 
         # Add legend for start likelihood colors (shown as border color on field)
         st.markdown("""
@@ -832,26 +835,26 @@ def show_projected_lineups():
 
         with col1:
             st.subheader(f"{home_team}")
-            home_fig = plot_soccer_field(home_team_df, home_team, player_data_map)
+            home_fig = plot_soccer_field(home_team_df, home_team, player_index)
             st.plotly_chart(home_fig, use_container_width=True, key=f"home_{matchup_index}")
 
             # Enhanced player list
             st.markdown("##### Squad Details")
             if not home_team_df.empty:
-                cards_html = render_player_cards_html(home_team_df, player_data_map)
+                cards_html = render_player_cards_html(home_team_df, player_index)
                 st.markdown(cards_html, unsafe_allow_html=True)
             else:
                 st.info("No lineup data available for this team.")
 
         with col2:
             st.subheader(f"{away_team}")
-            away_fig = plot_soccer_field(away_team_df, away_team, player_data_map)
+            away_fig = plot_soccer_field(away_team_df, away_team, player_index)
             st.plotly_chart(away_fig, use_container_width=True, key=f"away_{matchup_index}")
 
             # Enhanced player list
             st.markdown("##### Squad Details")
             if not away_team_df.empty:
-                cards_html = render_player_cards_html(away_team_df, player_data_map)
+                cards_html = render_player_cards_html(away_team_df, player_index)
                 st.markdown(cards_html, unsafe_allow_html=True)
             else:
                 st.info("No lineup data available for this team.")

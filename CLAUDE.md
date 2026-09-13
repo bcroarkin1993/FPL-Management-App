@@ -685,6 +685,34 @@ when anyone looks at a projection. `tests/common/test_matchup_wiring.py` walks
 the AST of the pages that render a matchup and fails on a merged frame that
 never reaches `attach_matchups()`.
 
+**Player stats on the lineup cards go through `ReferenceMatcher`, scoped to the
+club.** `build_player_index()` builds the FPL pool once and `PlayerIndex.lookup(
+name, team, tactical_position)` resolves one Rotowire lineup entry against it.
+
+What this replaced was a six-stage hand-rolled ladder, team- *and*
+position-agnostic at every stage, reading a dict that additionally keyed players
+by bare surname and by `web_name`. Measured live: 24 surnames and 17 web_names
+are ambiguous league-wide (51 and 36 players), and a plain dict silently keeps
+whichever the bootstrap listed last. "Palmer" was among them -- Cole Palmer
+(CHE, elite MID) and Alex Palmer (IPS, GK), the same pairing that caused the
+match bug recorded under "Player Matching". The card would show one player's
+form, injury and news under the other's name, every value on it ordinary.
+
+Three things are load-bearing:
+
+- **An unmapped club fails closed**, unlike the matchup filter above, which
+  fails open. Dropping a fixture loses information; a card captioned with one
+  player and filled with another's data is a false statement.
+- **Position is a hint, not a filter.** Rotowire publishes a tactical *role* and
+  FPL a registered position, and they legitimately disagree -- 5 of 66 starters
+  in one gameweek (Cunha listed as a forward, registered as a midfielder;
+  wing-backs listed in midfield). The lookup tries the mapped position first,
+  then retries across all four and accepts only a unique answer, so ambiguity
+  still resolves to no match. Straight position scoping alone lost those five.
+- **`"J.Palhinha"` must have its space restored first.** `canonical_normalize`
+  *deletes* the dot rather than splitting on it, collapsing the name to the
+  single token `"jpalhinha"`, which every token-based tier then misses.
+
 Rotowire's lineups page spells clubs formally -- "AFC Bournemouth", "Brighton &
 Hove Albion", "Newcastle United" -- where every other source uses the short
 form, and none of those three were in `TEAM_FULL_TO_SHORT`. Since an unmapped
@@ -737,6 +765,14 @@ club and matchweek in its title, and a pair that disagrees is dropped rather
 than rendered. Showing one club's XI under another club's name is worse than
 showing nothing. This is why `TEAM_FULL_TO_SHORT` needs `"Nottm Forest"` — no
 apostrophe, and only in the graphic titles.
+
+**The article shrinks as the gameweek runs.** The PL rewrites the edition *in
+place* — same article id — dropping each fixture once it kicks off, and
+retitling from "every Premier League team" to "Premier League teams". Measured:
+10 fixtures and all 20 clubs on the Friday, 3 fixtures and 6 clubs by Saturday
+afternoon. So `check_pl_content()` judges team-news coverage against the
+article's *own* fixture count, never against 20; a flat floor of 18 clubs fails
+every weekend on a feed that is working perfectly.
 
 **`onDemandUrl` is a resizer, not a file.** Fetched bare it answers `400 Bad
 parameter: At least one of width or height parameters must be specified`, so

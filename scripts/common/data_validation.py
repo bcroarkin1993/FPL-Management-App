@@ -1473,11 +1473,19 @@ def check_blended_projections(df: Optional[pd.DataFrame],
 # PREMIER LEAGUE CONTENT
 # =============================================================================
 
-#: The league has 20 clubs, so a healthy predicted-lineups article carries 20
-#: team-news paragraphs. Two missing is a spelling change; four is the
+#: How many clubs may be missing team news before it reads as a parse failure.
+#:
+#: This is measured against the article's *own* fixture count, never against 20.
+#: The PL rewrites the edition in place as the gameweek runs, dropping fixtures
+#: once they kick off: the same article id that carried 10 fixtures and all 20
+#: clubs on the Friday carried 3 fixtures and 6 clubs by Saturday afternoon,
+#: retitled from "every Premier League team" to "Premier League teams". A fixed
+#: floor of 18 fails every weekend on a feed that is working perfectly.
+#:
+#: Two per fixture is the real invariant, and a shortfall is the
 #: ``<strong>``-wraps-the-whole-paragraph trap regressing (see
 #: ``pl_content._club_label_and_body``), which drops clubs silently.
-MIN_PL_CLUBS_WITH_NEWS = 18
+MAX_PL_CLUBS_MISSING_NEWS = 2
 
 #: 20 clubs x roughly one to eight injuries each. Far fewer than this means the
 #: hub listed clubs but their playlists came back empty.
@@ -1532,12 +1540,17 @@ def check_pl_content(lineups=None,
                 "parse_predicted_lineups() found no '<Club> v <Club> predicted "
                 "line-ups' <h5>. The CMS template has probably changed."))
 
-        if len(club_news) < MIN_PL_CLUBS_WITH_NEWS:
+        expected_clubs = 2 * len(fixtures)
+        if fixtures and len(club_news) < expected_clubs - MAX_PL_CLUBS_MISSING_NEWS:
             issues.append(Issue(check, "error",
-                "only %d of 20 clubs carried team news" % len(club_news),
-                "Suspect the <strong> label parse. For four clubs the <strong> "
-                "wraps the entire paragraph rather than just 'Club:', and taking "
-                "strong.get_text() whole silently yields 16 clubs."))
+                "only %d clubs carried team news for %d fixtures (expected %d)"
+                % (len(club_news), len(fixtures), expected_clubs),
+                "Judged against the article's own fixture count, not 20 -- the "
+                "PL drops fixtures from the edition as they kick off. A "
+                "shortfall against its own fixtures points at the <strong> "
+                "label parse: for four clubs the <strong> wraps the entire "
+                "paragraph rather than just 'Club:', and taking "
+                "strong.get_text() whole silently yields 16 of 20."))
 
         if fixtures and graphics and len(graphics) != 2 * len(fixtures):
             issues.append(Issue(check, "warning",

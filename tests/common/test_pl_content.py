@@ -362,6 +362,20 @@ def test_dropped_clubs_are_an_error(lineups):
     assert any(i.severity == "error" and "team news" in i.message for i in issues)
 
 
+def test_a_part_played_gameweek_is_not_an_error(lineups):
+    """The PL rewrites the edition in place as matches kick off, dropping the
+    fixtures already played -- the same article id went from 10 fixtures and 20
+    clubs on the Friday to 3 and 6 by Saturday afternoon. Judged against a flat
+    20 that fails every weekend; judged against its own fixtures it is fine."""
+    trimmed = lineups._replace(
+        fixtures=lineups.fixtures[:3],
+        club_news={c: lineups.club_news[c]
+                   for pair in lineups.fixtures[:3] for c in pair},
+    )
+    issues = check_pl_content(lineups=trimmed, expected_gw=4)
+    assert issues == [], [str(i) for i in issues]
+
+
 def test_unresolved_label_is_an_error(lineups):
     issues = check_pl_content(lineups=lineups._replace(
         unresolved_labels=("Notts County",)), expected_gw=4)
