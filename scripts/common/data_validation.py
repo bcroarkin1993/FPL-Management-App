@@ -1367,6 +1367,13 @@ def check_resolved_squad(resolution: Optional[dict],
 BLEND_BOUNDS_TOLERANCE = 0.01
 
 
+#: A single-gameweek projection above this cannot be right on any basis. Wide
+#: on purpose -- the record haul is ~20 actual points and a *projection* should
+#: never come close, so this is a "that is impossible" bound, not a "that looks
+#: unusual" one. Measured: the live pool's true maximum is ~8.
+MAX_PLAUSIBLE_PROJ_START = 15.0
+
+
 def check_blended_projections(df: Optional[pd.DataFrame],
                               source: str = "projection engine") -> List[Issue]:
     """Assert the engine's output is internally consistent.
@@ -1387,6 +1394,16 @@ def check_blended_projections(df: Optional[pd.DataFrame],
     4. The blend lies within the range of the sources that fed it. A weighted
        mean cannot escape its inputs; if it has, the weights are wrong or a
        source was converted to the wrong basis.
+    5. ``Proj_Start`` is a plausible single-gameweek score at all.
+
+    Check 5 exists because checks 1-4 are all *internal consistency*, and the
+    engine's worst bug to date satisfied every one of them. Un-discounting an
+    unconditional source by the app's resolved start probability rather than the
+    source's own divided FPL's number by Rotowire's pessimism, and then the
+    multiplication back to ``Proj`` undid it exactly: ``Proj == Proj_Start *
+    Start_Pct`` held to the digit while Joao Pedro showed 18.5 points "if he
+    starts". Only the magnitude gave it away -- and ``team_strength`` percentiles
+    ``Proj_Start``, so the inflated number was feeding the Power Rankings.
     """
     issues: List[Issue] = []
     check = "blended_projections"
@@ -1406,6 +1423,21 @@ def check_blended_projections(df: Optional[pd.DataFrame],
 
     proj = pd.to_numeric(df["Proj"], errors="coerce")
     proj_start = pd.to_numeric(df["Proj_Start"], errors="coerce")
+
+    implausible = proj_start.notna() & (proj_start > MAX_PLAUSIBLE_PROJ_START)
+    if implausible.any():
+        worst = proj_start[implausible].max()
+        issues.append(Issue(
+            check, "error",
+            "%d players project above %.0f points if they start (max %.1f)."
+            % (int(implausible.sum()), MAX_PLAUSIBLE_PROJ_START, float(worst)),
+            "No single gameweek projects that high. The usual cause is an "
+            "unconditional source being un-discounted by a start probability it "
+            "never used -- dividing by a small number explodes, and the "
+            "multiplication back to Proj hides it because the identity still "
+            "holds. Check per_source_startpct carries an entry for every "
+            "BASIS_UNCONDITIONAL source.",
+        ))
     start = pd.to_numeric(df.get("Start_Pct"), errors="coerce") if "Start_Pct" in df.columns else None
 
     both = proj.notna() & proj_start.notna()

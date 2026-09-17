@@ -85,6 +85,19 @@ DEFAULT_MIN_CLUB_COVERAGE = 5
 #: Divisor floor when recovering a conditional value from an unconditional one.
 START_RECOVERY_FLOOR = 0.05
 
+#: Smallest start probability the basis conversion will divide by, i.e. the most
+#: an expected-value source may be inflated when converted to "if he starts".
+#:
+#: The conversion assumes the source discounted its number by exactly this start
+#: probability, and that assumption weakens as the probability falls. FPL's
+#: ``ep`` is a model output, not ``chance_of_playing`` times something, so a
+#: player rated 25% with ep 6.1 would recover to 24.4 points -- more than any
+#: gameweek produces. Capping the divisor at 0.5 bounds the inflation at 2x,
+#: which covers the range where the assumption is sound (50-100%) and stops
+#: guessing below it. A player who is genuinely unlikely to start still gets a
+#: low ``Proj``, because ``Start_Pct`` is applied separately and is uncapped.
+BASIS_RECOVERY_FLOOR = 0.5
+
 
 def _weights() -> Dict[str, float]:
     try:
@@ -397,6 +410,12 @@ def blend_aligned(
     #     player *will* start, so a player FFP already rates below the implied
     #     value keeps FFP's number.
     omitted_starts = _omitted_starts()
+    # The start probability as the *sources* see it, before any omission penalty
+    # is folded in. An unconditional source with no stated basis of its own is
+    # recovered against this, not against the penalised value -- see the basis
+    # conversion below for why the difference is load-bearing.
+    start_pct_stated = start_pct.copy()
+
     min_coverage = _min_club_coverage()
     for name in starters_only:
         if name not in per_source_raw:
@@ -473,16 +492,38 @@ def blend_aligned(
     # Every source is put on the conditional basis before blending. An
     # expected-value source averaged straight against if-he-starts sources
     # drags the blend down by exactly the start probability -- the same shape as
-    # the double discount that ran the FFP term ~44% low. A source carrying its
-    # own start probability is un-discounted by that; one that does not uses the
-    # resolved value, never 1.0.
+    # the double discount that ran the FFP term ~44% low.
+    #
+    # A source carrying its own start probability is un-discounted by that. One
+    # that does not falls back to ``start_pct_stated`` -- the resolved value
+    # *before* the omission penalty, never after it.
+    #
+    # That distinction is the whole of this block. The resolved value is the
+    # right basis when it reflects what the sources actually said about the
+    # player: where an expected-value source and an if-he-starts source describe
+    # the same man, dividing by their shared start probability is exactly what
+    # makes them commensurable, and using 1.0 instead understates the blend.
+    #
+    # The omission penalty is a different animal. It is an inference drawn from
+    # a source's *silence*, and folding it in here divides one source's number
+    # by another source's pessimism. Live on 2026-09-17: Joao Pedro, whom FPL
+    # rated 75% to play and Rotowire omitted, resolved to 33%, so FPL's 6.1
+    # expected points became 6.1 / 0.33 = 18.5 "if he starts" -- more than any
+    # single gameweek can produce. Yann Gboho, with no stated doubt at all,
+    # reached 16.7 the same way.
+    #
+    # Nothing caught it because the division is undone by the multiplication
+    # that follows: Proj = Proj_Start x Start_Pct held exactly, both halves
+    # wrong together, so every internal invariant passed. Only Proj_Start was
+    # visibly absurd -- and team_strength percentiles Proj_Start, not Proj.
     per_source_start: Dict[str, pd.Series] = {}
     for name, v in per_source_raw.items():
         v = v.reindex(index)
         if per_source_basis.get(name) == BASIS_UNCONDITIONAL:
             sp = per_source_startpct.get(name)
-            sp = start_pct if sp is None else sp.reindex(index).fillna(start_pct)
-            v = v / sp.clip(lower=START_RECOVERY_FLOOR)
+            sp = (start_pct_stated if sp is None
+                  else sp.reindex(index).fillna(start_pct_stated))
+            v = v / sp.clip(lower=BASIS_RECOVERY_FLOOR)
         per_source_start[name] = v
         out[f"Proj_Start__{name}"] = v
 

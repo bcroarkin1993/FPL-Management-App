@@ -1336,11 +1336,25 @@ def blend_projections_onto(
     # laundered into the Rotowire column. It is unconditional -- FPL's number
     # already prices in the chance of playing -- so the engine un-discounts it
     # before comparing it with anything.
+    #
+    # **It must carry its own start probability**, exactly as
+    # ``projection_sources.fpl_ep_source`` does. Without it the engine
+    # un-discounts FPL's number by the app's *resolved* Start_Pct, which the
+    # Rotowire omission penalty has already pulled down -- so FPL's opinion gets
+    # divided by Rotowire's pessimism. Live, Joao Pedro (75% chance of playing,
+    # omitted by Rotowire, resolved to 33%) came out at 6.1 / 0.33 = 18.5 points
+    # "if he starts". Nothing caught it because Proj = Proj_Start x Start_Pct
+    # still held: dividing and then multiplying by the same wrong number is
+    # self-consistent, and both halves were wrong together.
     fallback_names = []
     if "ep_next" in result.columns:
         ep = numeric_col(result, "ep_next", 0)
         per_source_raw["fpl_ep"] = ep.where(ep.gt(0))
         per_source_basis["fpl_ep"] = projection_engine.BASIS_UNCONDITIONAL
+        ep_chance = _chance_of_playing_col(result)
+        if ep_chance is not None:
+            per_source_startpct["fpl_ep"] = (
+                pd.to_numeric(ep_chance, errors="coerce") / 100.0).clip(0, 1)
         fallback_names.append("fpl_ep")
 
     result = projection_engine.blend_aligned(

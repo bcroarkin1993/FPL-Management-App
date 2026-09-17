@@ -201,3 +201,161 @@ class TestRotowireCoverageMemo:
             assert out.loc[2, "Start_Pct"] < 0.70
         finally:
             projection_sources._ROTOWIRE_CLUB_COVERAGE.clear()
+
+
+class TestUnconditionalBasisRecovery:
+    """An unconditional source is un-discounted by its OWN start probability.
+
+    Joao Pedro, live on 2026-09-17: FPL rated him 75% to play and published 6.1
+    expected points; Rotowire omitted him, so the omission penalty pulled the
+    app's resolved Start_Pct to 0.33. The engine divided 6.1 by 0.33 and showed
+    18.5 points "if he starts" -- more than any single gameweek can produce.
+
+    Every existing invariant passed, which is why it survived: Proj is
+    Proj_Start x Start_Pct, so dividing and then multiplying by the same wrong
+    number is exactly self-consistent. Both halves were wrong together.
+    """
+
+    @staticmethod
+    def _blend(*, source_start=None, resolved_chance=25.0):
+        import pandas as pd
+        from scripts.common import projection_engine as engine
+
+        index = [0]
+        kwargs = dict(
+            index=index,
+            per_source_raw={"xp": pd.Series([6.1], index=index)},
+            per_source_basis={"xp": engine.BASIS_UNCONDITIONAL},
+            positions=pd.Series(["F"], index=index),
+            chance_of_playing=pd.Series([resolved_chance], index=index),
+            fallback_names=["xp"],
+        )
+        if source_start is not None:
+            kwargs["per_source_startpct"] = {
+                "xp": pd.Series([source_start], index=index)}
+        return engine.blend_aligned(**kwargs)
+
+    def test_the_sources_own_start_probability_is_used(self):
+        out = self._blend(source_start=0.75, resolved_chance=25.0)
+        assert out["Proj_Start"].iloc[0] == pytest.approx(6.1 / 0.75, abs=0.01)
+
+    def test_the_resolved_start_probability_is_not_used_to_un_discount(self):
+        """The regression. The resolved value is other sources' opinion; using
+        it here divides one source's number by another's pessimism."""
+        out = self._blend(source_start=0.75, resolved_chance=25.0)
+        assert out["Proj_Start"].iloc[0] != pytest.approx(6.1 / 0.25, abs=0.01)
+
+    def test_the_recovery_is_capped_at_a_two_fold_inflation(self):
+        """A source with no stated basis falls back to the resolved value, but
+        the divisor is floored at BASIS_RECOVERY_FLOOR.
+
+        The conversion assumes the source discounted its number by exactly that
+        probability, and FPL's ep is a model output rather than chance_of_playing
+        times something -- so at 12% the assumption is guesswork and dividing by
+        it would manufacture 50 points from 6.1.
+        """
+        from scripts.common.projection_engine import BASIS_RECOVERY_FLOOR
+        out = self._blend(source_start=None, resolved_chance=12.0)
+        assert out["Proj_Start"].iloc[0] == pytest.approx(
+            6.1 / BASIS_RECOVERY_FLOOR, abs=0.01)
+
+    def test_a_high_stated_probability_is_used_exactly(self):
+        """Inside the range where the assumption holds, nothing is capped."""
+        out = self._blend(source_start=0.75, resolved_chance=75.0)
+        assert out["Proj_Start"].iloc[0] == pytest.approx(6.1 / 0.75, abs=0.01)
+
+    def test_recovery_never_inflates_past_plausibility(self):
+        from scripts.common.data_validation import (MAX_PLAUSIBLE_PROJ_START,
+                                                    check_blended_projections)
+        for chance in (1.0, 5.0, 12.0, 25.0, 50.0):
+            out = self._blend(source_start=None, resolved_chance=chance)
+            assert out["Proj_Start"].iloc[0] <= MAX_PLAUSIBLE_PROJ_START
+            assert not [i for i in check_blended_projections(out)
+                        if i.severity == "error"], chance
+
+    def test_the_identity_still_holds_after_the_fix(self):
+        out = self._blend(source_start=0.75, resolved_chance=25.0)
+        row = out.iloc[0]
+        assert row["Proj"] == pytest.approx(row["Proj_Start"] * row["Start_Pct"],
+                                            abs=0.01)
+
+
+class TestImplausibleProjStartIsCaught:
+    """The check that would have caught it, since the identity could not."""
+
+    def test_an_inflated_conditional_projection_is_an_error(self):
+        import pandas as pd
+        from scripts.common.data_validation import check_blended_projections
+        # Exactly the shape of the live bug: self-consistent, and absurd.
+        df = pd.DataFrame({"Proj": [6.1], "Proj_Start": [18.48], "Start_Pct": [0.33]})
+        issues = check_blended_projections(df)
+        assert any(i.severity == "error" and "if they start" in i.message
+                   for i in issues), [str(i) for i in issues]
+
+    def test_a_normal_blend_raises_nothing(self):
+        import pandas as pd
+        from scripts.common.data_validation import check_blended_projections
+        df = pd.DataFrame({"Proj": [6.45, 2.68], "Proj_Start": [7.16, 8.13],
+                           "Start_Pct": [0.90, 0.33]})
+        assert not [i for i in check_blended_projections(df) if i.severity == "error"]
+
+
+class TestFplEpCarriesItsOwnStartProbability:
+    """The Joao Pedro regression, at the callsite that actually had it.
+
+    ``blend_projections_onto`` declared fpl_ep as BASIS_UNCONDITIONAL but never
+    put its start probability in ``per_source_startpct``, so the engine fell
+    back to the app's resolved value -- which the Rotowire omission penalty had
+    already pushed down. FPL's opinion was divided by Rotowire's pessimism.
+
+    ``build_projections`` passed the same player correctly the whole time, so
+    the two entry points disagreed: 8.13 against 18.48 for the same man.
+    """
+
+    @staticmethod
+    def _pool():
+        """One club, priced by Rotowire except the player under test.
+
+        The club needs enough priced players to clear
+        ROTOWIRE_MIN_CLUB_COVERAGE, or the omission penalty does not fire and
+        the bug cannot reproduce.
+        """
+        import pandas as pd
+        rows = [{"Player_ID": i, "Player": "Priced %d" % i, "Team": "CHE",
+                 "Position": "M", "Points": 4.0, "ep_next": 4.0,
+                 "chance_of_playing_next_round": None, "status": "a"}
+                for i in range(1, 9)]
+        rows.append({"Player_ID": 99, "Player": "Omitted Forward", "Team": "CHE",
+                     "Position": "F", "Points": 0.0, "ep_next": 6.1,
+                     "chance_of_playing_next_round": 75, "status": "d"})
+        return pd.DataFrame(rows)
+
+    def _blended(self):
+        import pandas as pd
+        from scripts.common import analytics
+        from scripts.common.projection_engine import DEFAULT_MIN_CLUB_COVERAGE
+        pool = self._pool()
+        assert (pool["Team"] == "CHE").sum() > DEFAULT_MIN_CLUB_COVERAGE
+        out = analytics.blend_projections_onto(pool, None, expected_gw=5)
+        return out[out["Player_ID"] == 99].iloc[0]
+
+    def test_the_omission_penalty_still_lowers_the_start_probability(self):
+        """Guard on the premise: without this the test proves nothing."""
+        assert self._blended()["Start_Pct"] < 0.75
+
+    def test_points_if_he_starts_stay_plausible(self):
+        from scripts.common.data_validation import MAX_PLAUSIBLE_PROJ_START
+        row = self._blended()
+        assert row["Proj_Start"] <= MAX_PLAUSIBLE_PROJ_START, (
+            "6.1 expected points became %.1f if-he-starts -- FPL's number was "
+            "divided by Rotowire's pessimism" % row["Proj_Start"])
+
+    def test_it_is_un_discounted_by_fpls_own_chance_of_playing(self):
+        row = self._blended()
+        assert row["Proj_Start"] == pytest.approx(6.1 / 0.75, abs=0.05)
+
+    def test_the_whole_frame_passes_the_blend_checks(self):
+        from scripts.common import analytics
+        from scripts.common.data_validation import check_blended_projections
+        out = analytics.blend_projections_onto(self._pool(), None, expected_gw=5)
+        assert not [i for i in check_blended_projections(out) if i.severity == "error"]

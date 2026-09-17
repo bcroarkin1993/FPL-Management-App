@@ -250,6 +250,40 @@ Conversion — `Proj = Proj_Start × Start_Pct` — happens once, inside the eng
 No caller holds a number whose basis it has to remember, which is what caused
 the double discount every previous time.
 
+**Converting *up* — unconditional → conditional — is the direction that bites.**
+It divides, so it can explode, and three rules keep it bounded:
+
+1. **An unconditional source must supply its own `Start_Pct`.** Otherwise the
+   engine falls back to the resolved value, which is every source's opinion
+   combined. `blend_projections_onto` declared `fpl_ep` unconditional and never
+   passed FPL's `chance_of_playing`, so on 2026-09-17 João Pedro — FPL rating
+   him 75% to play, Rotowire omitting him, resolving to 33% — showed
+   `6.1 / 0.33 = 18.5` points *if he starts*. `build_projections` had passed the
+   same player correctly all along, so the two entry points disagreed: 8.13
+   against 18.48 for the same man.
+2. **Recover against the start probability *before* the omission penalty**
+   (`start_pct_stated`). The resolved value is the right basis when it reflects
+   what sources said — where an expected-value source and an if-he-starts source
+   describe the same player, dividing by their shared start probability is
+   exactly what makes them commensurable, and using 1.0 understates the blend
+   (`test_round_trip_never_double_discounts` pins this). The omission penalty is
+   different in kind: an inference drawn from a source's *silence*, which folded
+   in here divides one source's number by another's pessimism.
+3. **The divisor is floored at `BASIS_RECOVERY_FLOOR` (0.5)**, capping inflation
+   at 2×. The conversion assumes the source discounted by exactly that
+   probability, and FPL's `ep` is a model output rather than `chance_of_playing`
+   times something — at 25% the assumption is guesswork and would manufacture
+   24 points from 6.1. A player genuinely unlikely to start still gets a low
+   `Proj`, because `Start_Pct` is applied separately and is uncapped.
+
+**Why nothing caught it:** the division is undone by the multiplication that
+follows, so `Proj == Proj_Start × Start_Pct` held to the digit with both halves
+wrong together, and every internal invariant passed. Only the *magnitude* gave
+it away — which is why `check_blended_projections()` now also asserts
+`Proj_Start <= MAX_PLAUSIBLE_PROJ_START`. Note `team_strength.py` percentiles
+`Proj_Start`, not `Proj`, so the inflated number was feeding Power Rankings
+while the Hub's `Proj` column looked ordinary.
+
 **Output contract** (`CANONICAL_COLUMNS`), plus one `Proj_Start__<source>`
 column per source so the Hub can show what fed the blend:
 
