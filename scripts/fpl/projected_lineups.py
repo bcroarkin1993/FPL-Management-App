@@ -226,6 +226,11 @@ ROTOWIRE_TACTICAL_TO_POSITION = {
 }
 
 _POS_LETTERS = ('G', 'D', 'M', 'F')
+
+#: Coarse fallback start probabilities, used only when the projection
+#: engine has no view of a player.
+_STATUS_BUCKET_START_PCT = {'Out': 0, 'Doubtful': 25,
+                            'Questionable': 50, 'Likely': 75}
 _ELEMENT_TYPE_TO_POSITION = {1: 'G', 2: 'D', 3: 'M', 4: 'F'}
 
 #: "J.Palhinha" -> "J. Palhinha". Rotowire abbreviates a first name with no
@@ -308,6 +313,56 @@ class PlayerIndex(NamedTuple):
 EMPTY_PLAYER_INDEX = PlayerIndex()
 
 
+def _attach_engine_start_pct(pool: pd.DataFrame, stats: dict) -> None:
+    """Add the projection engine's ``Start_Pct`` to each player's stats, in place.
+
+    This page used to compute its own start likelihood from a handful of status
+    buckets and ``starts / 22`` -- a hard-coded season length. At GW5 that put
+    every healthy player on the ``max(80, ...)`` floor, and it drifted upward
+    through the season for no reason but the constant. Goalkeepers showed it
+    worst: all 20 rendered at exactly 80% against the engine's 95%, so the most
+    nailed-on position in the game fell in the "likely" band rather than "very
+    likely". Page and engine agreed on 25 of 206 players.
+
+    The engine already knows the answer -- FFP's start percentage, the Rotowire
+    presence floors, FPL's chance of playing, the omission penalty -- and it is
+    the number every other surface in the app renders. There is no reason for
+    this page to hold a second opinion.
+
+    Failure is silent by design: the heuristic remains as the fallback in
+    :func:`plot_soccer_field`, so a missing projection feed costs colour
+    accuracy rather than the page.
+    """
+    try:
+        from scripts.common.analytics import (blend_projections_onto,
+                                              merge_season_projections)
+        from scripts.common.scraping import (get_ffp_feed,
+                                             get_rotowire_player_projections)
+
+        frame = pool.copy()
+        frame['chance_of_playing_next_round'] = [
+            stats.get(i, {}).get('chance_of_playing') for i in range(len(frame))]
+        frame['status'] = [stats.get(i, {}).get('status', 'a') for i in range(len(frame))]
+
+        rotowire_df = pd.DataFrame()
+        if config.ROTOWIRE_URL:
+            rotowire_df = get_rotowire_player_projections(config.ROTOWIRE_URL)
+        if rotowire_df is not None and not rotowire_df.empty:
+            frame = merge_season_projections(frame, rotowire_df, output_col='Points')
+
+        feed = get_ffp_feed()
+        blended = blend_projections_onto(frame, feed.df if feed.ok else None,
+                                         expected_gw=config.CURRENT_GAMEWEEK)
+        start_pct = pd.to_numeric(blended.get('Start_Pct'), errors='coerce')
+        if start_pct is None:
+            return
+        for i, value in enumerate(start_pct):
+            if pd.notna(value) and i in stats:
+                stats[i]['start_pct_engine'] = float(value) * 100.0
+    except Exception as e:
+        _logger.warning("Could not attach engine start probabilities: %s", e)
+
+
 def build_player_index() -> PlayerIndex:
     """Build the FPL reference pool and its matcher for the lineups page.
 
@@ -346,6 +401,7 @@ def build_player_index() -> PlayerIndex:
             second_name = elem.get('second_name', '')
 
             rows.append({
+                'Player_ID': elem.get('id'),
                 'Player': f"{first_name} {second_name}".strip(),
                 'Web_Name': web_name,
                 'Display_Name': to_display_name(first_name, second_name, web_name),
@@ -376,12 +432,53 @@ def build_player_index() -> PlayerIndex:
             return EMPTY_PLAYER_INDEX
 
         pool = pd.DataFrame(rows)
+        _attach_engine_start_pct(pool, stats)
         return PlayerIndex(matcher=ReferenceMatcher(pool), pool=pool, stats=stats)
 
     except Exception as e:
         _logger.warning("Failed to build player index for lineup enhancement: %s", e)
         return EMPTY_PLAYER_INDEX
 
+
+
+def start_likelihood_pct(pdata: dict) -> float:
+    """How likely is this player to start, as 0-100?
+
+    **The projection engine's ``Start_Pct`` is the answer whenever it is
+    available.** It already combines FFP's start percentage, the Rotowire
+    presence floors, FPL's chance of playing and the omission penalty, and it is
+    the number every other surface in the app renders; a second opinion here
+    only creates two numbers for one question.
+
+    The buckets below are the fallback for a page load where the projection
+    feeds are down. They are deliberately coarse, and one detail matters: the
+    historical rate divides by the gameweeks actually played. It used to divide
+    by a hard-coded 22, which pinned every healthy player to the ``max(80, ...)``
+    floor early in the season and let the figure drift upward as the constant
+    was approached -- movement with no evidence behind it.
+
+    That floor is why goalkeepers were the visible symptom: measured at GW5, all
+    20 starting keepers rendered at exactly 80% against the engine's 95%, so the
+    most nailed-on position in the game sat in the "likely" band rather than
+    "very likely".
+    """
+    engine_start = pdata.get('start_pct_engine')
+    if engine_start is not None:
+        return float(engine_start)
+
+    chance_of_playing = pdata.get('chance_of_playing')
+    if chance_of_playing is not None:
+        return float(chance_of_playing)
+
+    bucket = pdata.get('status_bucket', 'Available')
+    if bucket in _STATUS_BUCKET_START_PCT:
+        return float(_STATUS_BUCKET_START_PCT[bucket])
+
+    starts = pdata.get('starts', 0) or 0
+    if starts > 0:
+        played = max(1, int(config.CURRENT_GAMEWEEK) - 1)
+        return max(80.0, min(100.0, (starts / played) * 100.0))
+    return 80.0   # in Rotowire's XI but no starts yet -- a new signing
 
 
 def get_availability_color(status_bucket, play_pct=None):
@@ -499,28 +596,7 @@ def plot_soccer_field(player_df, team_name, player_index=None):
             starts = pdata.get('starts', 0)
             minutes = pdata.get('minutes', 0)
 
-            # Calculate start likelihood (0-100%)
-            # Base: they're in Rotowire lineup so start at 80%
-            # Adjust based on injury status and historical starts
-            if chance_of_playing is not None:
-                # FPL provides explicit chance
-                start_likelihood = chance_of_playing
-            elif status_bucket == 'Out':
-                start_likelihood = 0
-            elif status_bucket == 'Doubtful':
-                start_likelihood = 25
-            elif status_bucket == 'Questionable':
-                start_likelihood = 50
-            elif status_bucket == 'Likely':
-                start_likelihood = 75
-            else:
-                # Available - use historical start rate if available
-                # Assume ~22 gameweeks so far in the season
-                if starts > 0:
-                    historical_start_rate = min(100, (starts / 22) * 100)
-                    start_likelihood = max(80, historical_start_rate)  # At least 80% if in lineup
-                else:
-                    start_likelihood = 80  # Default for players in Rotowire lineup
+            start_likelihood = start_likelihood_pct(pdata)
 
             # Determine marker appearance based on start likelihood
             # Use opacity to show likelihood (more opaque = more likely to start)

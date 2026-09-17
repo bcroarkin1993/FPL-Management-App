@@ -248,8 +248,15 @@ _AVAIL = pd.DataFrame([
 
 @pytest.fixture
 def index():
+    """A player index built entirely offline.
+
+    ``_attach_engine_start_pct`` is stubbed out because these tests are about
+    *matching*, and leaving it live made every one of them fetch Rotowire and
+    FFP -- two seconds each, over the network, in the offline suite.
+    """
     with patch.object(pl, "get_classic_bootstrap_static", return_value=_BOOTSTRAP), \
-         patch.object(pl, "get_fpl_availability_df", return_value=_AVAIL):
+         patch.object(pl, "get_fpl_availability_df", return_value=_AVAIL), \
+         patch.object(pl, "_attach_engine_start_pct", return_value=None):
         return pl.build_player_index()
 
 
@@ -343,6 +350,7 @@ class TestPlayerIndexDegradation:
     def test_missing_availability_still_builds_the_index(self):
         """Availability is an enhancement; losing it must not lose the stats."""
         with patch.object(pl, "get_classic_bootstrap_static", return_value=_BOOTSTRAP), \
+             patch.object(pl, "_attach_engine_start_pct", return_value=None), \
              patch.object(pl, "get_fpl_availability_df",
                           side_effect=RuntimeError("bootstrap down")):
             idx = pl.build_player_index()
@@ -362,3 +370,74 @@ class TestTacticalPositionMap:
 
     def test_codes_map_to_the_apps_position_scheme(self):
         assert set(pl.ROTOWIRE_TACTICAL_TO_POSITION.values()) <= {"G", "D", "M", "F"}
+
+
+class TestStartLikelihood:
+    """The pitch renders the engine's Start_Pct, not a second opinion.
+
+    Measured at GW5 before this change: all 20 starting goalkeepers showed
+    exactly 80% against the engine's 95%, because the fallback's historical rate
+    divided by a hard-coded 22-gameweek season and lost to the max(80, ...)
+    floor. That put the most nailed-on position in the game in the "likely"
+    colour band rather than "very likely". Page and engine agreed on 25 of 206.
+    """
+
+    def test_the_engine_value_wins(self):
+        pdata = {"start_pct_engine": 95.0, "chance_of_playing": 75,
+                 "status_bucket": "Likely", "starts": 4}
+        assert pl.start_likelihood_pct(pdata) == 95.0
+
+    def test_a_nailed_on_keeper_lands_in_the_very_likely_band(self):
+        """The reported symptom: 80 is "likely", 90+ is "very likely"."""
+        assert pl.start_likelihood_pct({"start_pct_engine": 95.0}) >= 90
+
+    def test_without_the_engine_it_falls_back_to_chance_of_playing(self):
+        assert pl.start_likelihood_pct(
+            {"chance_of_playing": 50, "status_bucket": "Available"}) == 50
+
+    def test_status_buckets_are_the_next_fallback(self):
+        for bucket, expected in (("Out", 0), ("Doubtful", 25),
+                                 ("Questionable", 50), ("Likely", 75)):
+            assert pl.start_likelihood_pct({"status_bucket": bucket}) == expected
+
+    def test_the_historical_rate_uses_gameweeks_played_not_a_constant(self):
+        """`starts / 22` made an ever-present player look like a rotation risk
+        in September and a certainty in February, on identical evidence."""
+        pdata = {"status_bucket": "Available", "starts": 4}
+        with patch.object(pl.config, "CURRENT_GAMEWEEK", 5):
+            early = pl.start_likelihood_pct(pdata)
+        with patch.object(pl.config, "CURRENT_GAMEWEEK", 23):
+            late = pl.start_likelihood_pct({"status_bucket": "Available", "starts": 22})
+        assert early == 100.0, "4 starts from 4 played is an ever-present"
+        assert late == 100.0
+        assert early == late, "the same evidence must not move with the calendar"
+
+    def test_a_rotation_player_is_not_flattered_by_the_floor(self):
+        """2 starts in 10 is a rotation risk, but the 80 floor is deliberate --
+        Rotowire has named him in this XI, which outweighs his history."""
+        with patch.object(pl.config, "CURRENT_GAMEWEEK", 11):
+            assert pl.start_likelihood_pct(
+                {"status_bucket": "Available", "starts": 2}) == 80.0
+
+    def test_a_player_with_no_starts_gets_the_floor(self):
+        assert pl.start_likelihood_pct({"status_bucket": "Available", "starts": 0}) == 80.0
+
+    def test_an_engine_value_of_zero_is_honoured(self):
+        """0.0 is a real answer -- falsy, so easy to lose to a truthiness test."""
+        assert pl.start_likelihood_pct({"start_pct_engine": 0.0, "starts": 10}) == 0.0
+
+
+class TestEngineStartPctAttachment:
+    def test_a_dead_projection_feed_leaves_the_stats_usable(self):
+        """The engine value is an enhancement; losing it must cost colour
+        accuracy, not the page."""
+        pool = pd.DataFrame([{"Player_ID": 1, "Player": "A B", "Web_Name": "B",
+                              "Display_Name": "A B", "Team": "CHE", "Position": "G"}])
+        stats = {0: {"starts": 4, "status": "a", "chance_of_playing": None}}
+        with patch("scripts.common.scraping.get_rotowire_player_projections",
+                   side_effect=RuntimeError("feeds down")), \
+             patch("scripts.common.scraping.get_ffp_feed",
+                   side_effect=RuntimeError("feeds down")):
+            pl._attach_engine_start_pct(pool, stats)
+        assert "start_pct_engine" not in stats[0]
+        assert pl.start_likelihood_pct(stats[0]) > 0

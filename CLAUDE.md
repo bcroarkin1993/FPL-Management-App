@@ -719,6 +719,27 @@ when anyone looks at a projection. `tests/common/test_matchup_wiring.py` walks
 the AST of the pages that render a matchup and fails on a merged frame that
 never reaches `attach_matchups()`.
 
+**Start likelihood on the pitch is the engine's `Start_Pct`.** The page used to
+compute its own from a few status buckets plus `starts / 22` -- a hard-coded
+season length -- which pinned every healthy player to the `max(80, ...)` floor
+early in the season and let the figure drift upward as the constant was
+approached, on no new evidence. Goalkeepers were the visible symptom: measured
+at GW5, all 20 starting keepers rendered at exactly 80% against the engine's
+95%, so the most nailed-on position in the game sat in the "likely" colour band
+rather than "very likely". Page and engine agreed on 25 of 206 players.
+
+`start_likelihood_pct()` now prefers `start_pct_engine`, attached in
+`build_player_index()` via `blend_projections_onto`. The buckets remain as a
+fallback for a page load with the projection feeds down, and the historical rate
+divides by gameweeks actually played. Note this makes `build_player_index()` do
+network I/O, so tests that only exercise *matching* stub
+`_attach_engine_start_pct` -- leaving it live cost two seconds per test.
+
+An unmatched player gets `{}` and falls back to the 80% default rather than a
+wrong number: Rotowire's transliterations do not always agree with FPL's
+("Yarmolyuk" vs "Yarmoliuk"), and the matcher is deliberately not loosened to
+close that gap.
+
 **Player stats on the lineup cards go through `ReferenceMatcher`, scoped to the
 club.** `build_player_index()` builds the FPL pool once and `PlayerIndex.lookup(
 name, team, tactical_position)` resolves one Rotowire lineup entry against it.
