@@ -40,6 +40,7 @@ from scripts.common.fpl_draft_api import (
 from scripts.common.player_matching import canonical_normalize, get_player_registry
 from scripts.common.text_helpers import _strip_accents, to_display_name
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.transfer_sanity import sanity_check_suggestion
 from scripts.common.analytics import (
     compute_player_scores,
     compute_dynamic_alpha,
@@ -1132,78 +1133,13 @@ def _build_rationale(drop: pd.Series, add: pd.Series) -> str:
 
 
 def _sanity_check_suggestion(drop_row: pd.Series, add_row: pd.Series) -> Tuple[bool, str]:
-    """Veto suggestions where ADD is clearly worse than DROP on raw observable metrics.
+    """Veto a swap where ADD is clearly worse than DROP on raw observables.
 
-    Returns (passes, reason_string).
-
-    Injury override: if DROP is seriously injured (status i/s/u or chance < 50%),
-    allow any suggestion — replacing someone who can't play is always valid.
-    The 80% tolerance avoids over-vetoing marginal cases where composite score
-    signals (form, FDR, start consistency) legitimately favor the upgrade.
+    Thin delegate to :mod:`scripts.common.transfer_sanity`, which is now shared
+    with Classic Transfers -- the veto guarded only Draft for as long as it
+    lived here, and a Classic transfer is the one that can cost a -4 hit.
     """
-    drop_status = str(drop_row.get("status", "") or "")
-    drop_chance = pd.to_numeric(drop_row.get("chance_of_playing_next_round"), errors="coerce")
-    seriously_injured = drop_status in ("i", "s", "u") or (
-        pd.notna(drop_chance) and float(drop_chance) < 50
-    )
-    if seriously_injured:
-        return True, "injury override"
-
-    def _f(val) -> float:
-        try:
-            v = float(val)
-            return 0.0 if np.isnan(v) else v
-        except (TypeError, ValueError):
-            return 0.0
-
-    checks: List[Tuple[str, bool]] = []
-
-    # Check 1: GW effective projected points (blended projection × start likelihood).
-    # Use None to distinguish NaN (blank GW / data gap — no information) from 0
-    # (rotation player not expected to start — meaningful signal).
-    # If either side is NaN, skip this check rather than treating NaN as "no projection."
-    def _proj_or_none(row) -> Optional[float]:
-        v = row.get("_effective_proj", 0)
-        try:
-            fv = float(v)
-            return None if np.isnan(fv) else fv
-        except (TypeError, ValueError):
-            return 0.0
-
-    drop_proj = _proj_or_none(drop_row)
-    add_proj = _proj_or_none(add_row)
-    if drop_proj is not None and add_proj is not None:
-        if drop_proj > 0 and add_proj > 0:
-            checks.append(("proj_pts", add_proj >= drop_proj * 0.80))
-        elif drop_proj == 0 and add_proj > 0:
-            checks.append(("proj_pts", True))   # DROP not projected to start → ADD wins
-        elif drop_proj > 0 and add_proj == 0:
-            checks.append(("proj_pts", False))  # ADD not projected to start → DROP wins
-        # both == 0: neither projected to start, skip — no useful signal
-    # if either is None (NaN = blank GW or data gap), skip proj check entirely
-
-    # Check 2: Season points accumulated
-    drop_season = _f(drop_row.get("Season_Points", 0))
-    add_season = _f(add_row.get("Season_Points", 0))
-    if drop_season > 0 and add_season > 0:
-        checks.append(("season_pts", add_season >= drop_season * 0.80))
-
-    # Check 3: Multi-GW projection (FFP 3-week window)
-    drop_mgw = _f(drop_row.get("MultiGW_Proj", 0))
-    add_mgw = _f(add_row.get("MultiGW_Proj", 0))
-    if drop_mgw > 0 and add_mgw > 0:
-        checks.append(("3gw_proj", add_mgw >= drop_mgw * 0.80))
-
-    if not checks:
-        return True, "no data"  # Cannot veto without comparable data
-
-    n_pass = sum(1 for _, ok in checks if ok)
-    passes = n_pass >= (len(checks) + 1) // 2  # majority of available signals
-
-    if not passes:
-        failed = [name for name, ok in checks if not ok]
-        return False, f"ADD worse on: {', '.join(failed)}"
-    return True, "ok"
+    return sanity_check_suggestion(drop_row, add_row)
 
 
 def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef):

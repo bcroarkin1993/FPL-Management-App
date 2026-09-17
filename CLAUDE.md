@@ -1186,6 +1186,43 @@ The name-only fallback keeps a key **only when it resolves to exactly one
 player**. A shared surname would otherwise print Cole Palmer's name on Alex
 Palmer's card — the display-side version of the match bug in "Player Matching".
 
+### Suggestion sanity veto — shared by both formats
+
+`scripts/common/transfer_sanity.py` (pure). `sanity_check_suggestion(drop, add)`
+removes a proposed swap where the incoming player is plainly worse on the raw
+numbers a manager would actually look at — expected points, season points, and
+the 3-gameweek window — needing a **majority of the signals that exist**, with a
+tolerance of 0.80 and a full override when the outgoing player cannot play.
+
+It exists because the score is a blend of percentiles, and a blend can rank a
+player above another while every observable says the opposite. It only ever
+*removes* suggestions.
+
+This lived inside `draft/waiver_wire.py` and guarded only Draft, which is the
+wrong way round: a waiver claim is free, and a Classic transfer can cost a -4
+hit. Both now call the one implementation.
+
+**The columns differ by format, and getting that wrong makes the veto a no-op
+that looks like protection.** Draft frames carry `Season_Points`; Classic frames
+carry `total_points` and never define `Season_Points` at all — `_PROJ_COLS` and
+`_SEASON_COLS` resolve each the same way `compute_player_scores` already does.
+Parameterising the column per caller was rejected for exactly this reason: it
+lets a future page pass nothing and silently disable the gate.
+
+Three rules are load-bearing:
+
+- **Both sides must resolve to the *same* column.** `_effective_proj` has start
+  likelihood applied and `Projected_Points` does not, so comparing one against
+  the other charges a rotation risk to one player only — the basis confusion the
+  projection engine exists to end.
+- **0.0 and "no value" are different claims.** A real 0 means "not expected to
+  start" and counts; a NaN is a blank gameweek or a data gap and is skipped.
+  Merging them vetoes every suggestion involving a blanking club.
+- **No comparable data passes.** A veto that fired on absent columns would
+  suppress every suggestion on a degraded feed. The Classic callsite therefore
+  counts the blind cases and logs a warning when *every* candidate was judged
+  without a single signal — the state that otherwise looks identical to working.
+
 ### Suggestion breadth — Draft Waiver Wire
 
 `_compute_transfer_suggestions()` searches a *window*, not the board: by default
@@ -1930,7 +1967,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Task | Status | Notes |
 |------|--------|-------|
 | Projection accuracy harness | Phases 1-3 of 4 complete | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". Remaining: **Phase 4** fit `PROJECTION_SOURCE_WEIGHTS` from measured accuracy, give `fpl_ep` a real weight, and add an odds-derived source from stored match odds. |
-| Multi-GW Transfer Planner | Completed (polish available) | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. Gaps: only Next3GWs used (Next2/4–6 fetched but ignored); Classic Transfers lacks sanity-check gate that Draft has. |
+| Multi-GW Transfer Planner | Completed (polish available) | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. Gap: only Next3GWs used (Next2/4–6 fetched but ignored). The sanity-check gate is now shared with Classic — see "Suggestion sanity veto". |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
 | Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |
 

@@ -24,8 +24,10 @@ from scripts.common.utils import (
     get_classic_transfers,
     position_converter,
 )
+from scripts.common.error_helpers import get_logger
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import compact_html
+from scripts.common.transfer_sanity import sanity_check_suggestion
 from scripts.common.analytics import (
     compute_player_scores,
     compute_healthy_form,
@@ -49,6 +51,8 @@ from scripts.common.classic_squad import (
     resolve_classic_squad,
     save_pending_file as _save_pending_file,
 )
+
+_logger = get_logger("fpl_app.classic_transfers")
 
 
 # ---------------------------
@@ -1266,6 +1270,12 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
     # target to the player who most needs replacing.
     used_add_ids: set = set()
 
+    # A veto that can see none of its inputs passes everything while looking
+    # exactly like protection. Counted so a frame missing _effective_proj /
+    # total_points / MultiGW_Proj surfaces as a warning rather than as silence.
+    sanity_evaluated = 0
+    sanity_blind = 0
+
     for drop_row in drop_candidates:
         pos = drop_row["Position"]
         drop_id = drop_row["Player_ID"]
@@ -1347,6 +1357,20 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
             min_threshold = max(min_threshold, 0.25)
 
         if score_diff < min_threshold:
+            continue
+
+        # Clearing the score threshold is not enough. Transfer Score is a blend
+        # of percentiles, and it can rank the incoming player higher while every
+        # raw number a manager would look at says the opposite. Draft has vetoed
+        # that since the waiver engine was written; Classic did not, which is
+        # the worse way round -- a waiver claim is free and this can cost a -4.
+        sanity_ok, sanity_reason = sanity_check_suggestion(drop_row, add_row)
+        sanity_evaluated += 1
+        if sanity_reason == "no data":
+            sanity_blind += 1
+        if not sanity_ok:
+            _logger.info("Transfers: vetoed %s -> %s (%s)",
+                         drop_row.get("Player"), add_row.get("Player"), sanity_reason)
             continue
 
         # Availability info
@@ -1458,6 +1482,13 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
             "add_ownership_pct": add_ownership_pct,
             "hit_verdict": hit_verdict,
         })
+
+    if sanity_evaluated and sanity_blind == sanity_evaluated:
+        _logger.warning(
+            "Transfers: the sanity veto saw no comparable metrics on any of %d "
+            "candidate swaps -- it is passing everything. Check the squad frame "
+            "still carries _effective_proj / total_points / MultiGW_Proj.",
+            sanity_evaluated)
 
     return suggestions
 

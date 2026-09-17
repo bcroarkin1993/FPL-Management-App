@@ -842,3 +842,93 @@ class TestClassicSuggestionsDoNotReuseATarget:
         by_drop = {s["drop_player"]: s["add_player"] for s in self._run()}
         if "Middle" in by_drop:
             assert by_drop["Middle"] != "Best Target"
+
+
+class TestClassicSuggestionSanityVeto:
+    """Clearing the score threshold is not enough to be recommended.
+
+    Transfer Score is a blend of percentiles and can rank the incoming player
+    higher while every raw number a manager would look at says the opposite.
+    Draft has vetoed that since its waiver engine was written; Classic did not,
+    which is the worse way round -- a waiver claim is free and a Classic
+    transfer can cost a -4 hit.
+    """
+
+    def _squad(self):
+        import pandas as pd
+        return pd.DataFrame({
+            "Player_ID": [1, 2],
+            "Player": ["Proven Starter", "Anchor"],
+            "Full Name": ["Proven Starter", "Anchor"],
+            "Team": ["AVL", "ARS"],
+            "Team_ID": [1, 4],
+            "Position": ["M", "M"],
+            # Low Keep Score, so the threshold logic wants him gone...
+            "Keep Score": [0.05, 0.95],
+            "now_cost": [50, 60],
+            "selling_price": [50, 60],
+            "squad_position": [1, 2],
+            # ...but every observable says he is the better player.
+            "total_points": [70, 60],
+            "form": [5.0, 6.0],
+            "chance_of_playing_next_round": [None, None],
+            "status": ["a", "a"],
+            "news": ["", ""],
+            "Projected_Points": [6.0, 6.0],
+            "MultiGW_Proj": [18.0, 18.0],
+            "ep_next": [6.0, 6.0],
+            "selected_by_percent": [20.0, 40.0],
+        })
+
+    def _available(self, **over):
+        import pandas as pd
+        row = {
+            "Player_ID": [10],
+            "Player": ["Flattered Punt"],
+            "Full Name": ["Flattered Punt"],
+            "Team": ["CRY"],
+            "Team_ID": [5],
+            "Position": ["M"],
+            "Transfer Score": [0.95],
+            "now_cost": [45],
+            "total_points": [4],
+            "form": [0.5],
+            "chance_of_playing_next_round": [None],
+            "status": ["a"],
+            "news": [""],
+            "Projected_Points": [1.0],
+            "MultiGW_Proj": [3.0],
+            "ep_next": [1.0],
+            "selected_by_percent": [3.0],
+        }
+        row.update({k: [v] for k, v in over.items()})
+        return pd.DataFrame(row)
+
+    def _run(self, available=None):
+        from scripts.classic.transfers import _build_transfer_suggestions
+        return _build_transfer_suggestions(
+            self._squad(), available if available is not None else self._available(),
+            bank=20, top_n=3, free_transfers=3)
+
+    def test_a_suggestion_worse_on_every_observable_is_vetoed(self):
+        adds = [s["add_player"] for s in self._run()]
+        assert "Flattered Punt" not in adds, (
+            "score gap alone recommended a player worse on projection, season "
+            "points and the 3GW window: %s" % adds)
+
+    def test_a_genuinely_better_target_still_gets_through(self):
+        """The veto must only remove indefensible swaps, not all of them."""
+        better = self._available(total_points=90, Projected_Points=8.0,
+                                 MultiGW_Proj=24.0, form=7.0)
+        assert [s["add_player"] for s in self._run(better)] == ["Flattered Punt"]
+
+    def test_an_unavailable_drop_lifts_the_veto(self):
+        """Replacing someone who cannot play is always defensible, even by a
+        statistically worse player."""
+        from scripts.classic.transfers import _build_transfer_suggestions
+        squad = self._squad()
+        squad.loc[0, "status"] = "i"
+        squad.loc[0, "chance_of_playing_next_round"] = 0
+        out = _build_transfer_suggestions(squad, self._available(), bank=20,
+                                          top_n=3, free_transfers=3)
+        assert [s["add_player"] for s in out] == ["Flattered Punt"]
