@@ -559,6 +559,25 @@ match — so the file stays byte-identical and the commit step is a clean no-op.
 `test_projection_archive.py` pins this, including that row order in the input
 frame cannot change the output.
 
+**The capture has to land *near* the deadline, not merely inside the window.**
+GitHub does not honour cron reliably: declared hourly, the snapshot workflow was
+observed running every 2.5-6 hours (mean 4.4), dropping roughly three quarters
+of its schedule. With an 8-hour window that meant typically one run landed
+inside it -- the earliest -- and the file froze there. Measured: GW4 was
+captured 7.8 hours before its deadline and never refreshed, so every source was
+scored on its pre-team-news state rather than on what a manager would have acted
+on. GW3 is worse: a backfill taken 19.3 hours *after* the deadline, which
+`fit_blend_weights()` correctly refuses to fit on at all.
+
+So there are two crons. The hourly one is the safety net that guarantees a
+gameweek is never missed outright; `*/15 9-18 * * *` covers the final hours
+before a deadline. This season's deadlines fall between 10:00 and 18:00 UTC, and
+on every day of the week -- 7 of 38 are midweek -- so the dense schedule is
+daily rather than Fri/Sat. `tests/test_snapshot_schedule.py` pins that the hour
+before each observed deadline hour is densely covered, and fails against the
+single-cron version. Dependencies are pip-cached because the added runs mostly
+do nothing and installation is nearly all of their cost.
+
 **Two workflows now commit to `main`.** `projection-snapshots.yml` is separate
 from `fpl-notifications.yml` on purpose — a snapshot failure must never stop a
 deadline alert going out — but it means either can find the branch moved since

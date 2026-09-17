@@ -10,9 +10,27 @@ name: Projection Snapshots
 # Deliberately a separate workflow from fpl-notifications.yml, not another step
 # in it: a snapshot failure must never stop a deadline alert from going out.
 
+# Two schedules, because GitHub does not honour cron reliably. Declared hourly,
+# this workflow was observed running every 2.5-6 hours (mean 4.4), so roughly
+# three quarters of the runs were dropped. With an 8-hour pre-deadline window
+# that meant typically ONE run landed inside it -- the earliest -- and the
+# stored file froze there: GW4 was captured 7.8 hours before its deadline and
+# never refreshed, so the harness scored every source on its pre-team-news
+# state rather than on what a manager would actually have acted on.
+#
+# The hourly cron stays as the safety net that guarantees a gameweek is never
+# missed outright. The dense one covers the final approach: deadlines this
+# season fall between 10:00 and 18:00 UTC, so 09:00-18:59 brackets the last
+# hours before every one of them. It is every day rather than Fri/Sat because
+# 7 of the 38 deadlines are midweek, and those are the awkward ones to lose.
+#
+# The collector itself exits in seconds outside the capture window (see
+# within_pre_deadline_window), so the added cost is almost entirely dependency
+# installation -- which is why pip is cached below.
 on:
   schedule:
-    - cron: "17 * * * *"     # hourly, off the hour to avoid the top-of-hour crush
+    - cron: "17 * * * *"        # hourly safety net, off the hour to avoid the crush
+    - cron: "*/15 9-18 * * *"   # dense cover for the final hours before a deadline
   workflow_dispatch:
     inputs:
       gameweek:
@@ -38,6 +56,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.9"
+          # The dominant cost of a run that does nothing, and this now runs up
+          # to 64 times a day.
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install requirements
         run: python -m pip install -r requirements.txt
