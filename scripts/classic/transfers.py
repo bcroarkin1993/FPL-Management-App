@@ -24,6 +24,7 @@ from scripts.common.utils import (
     get_classic_transfers,
     position_converter,
 )
+from scripts.common.data_validation import check_free_transfers, format_issues
 from scripts.common.error_helpers import get_logger
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import compact_html
@@ -542,6 +543,8 @@ def _parse_chip_status(history: dict, current_gw: int) -> dict:
 
 
 # FPL caps accumulated free transfers. A rules constant: update it if FPL does.
+# The bootstrap publishes the same number as `game_settings.max_extra_free_transfers`
+# (4 *extra* on top of the base 1); this is that plus one.
 MAX_BANKED_FREE_TRANSFERS = 5
 
 
@@ -550,33 +553,60 @@ def _compute_free_transfers(history: dict, entry_history: dict, current_gw: int,
     """Free transfers available this gameweek.
 
     **Prefer the number FPL states.** The authenticated `my-team` payload
-    carries `transfers.limit`, which is this answer with no reconstruction at
-    all; `normalise_my_team()` forwards it as `event_transfers_limit`. It is
-    absent while a chip grants unlimited transfers, so a missing key means
-    "reconstruct", never "zero".
+    carries `transfers.limit` -- the gameweek's *allowance* -- and
+    `transfers.made`. `normalise_my_team()` forwards them as
+    `event_transfers_limit` and `event_transfers`, and the remaining count is
+    the difference: the payload `{"limit": 1, "made": 2, "cost": 4}` is one
+    free transfer, two made, hence a four-point hit. Returning `limit` alone
+    reported 1 there when the answer was 0. `limit` is absent while a chip
+    grants unlimited transfers, so a missing key means "reconstruct", never
+    "zero".
 
-    Otherwise replay the season: one free transfer per gameweek, unused ones
-    accumulating to `MAX_BANKED_FREE_TRANSFERS`. Three things this replaces:
+    Otherwise replay the season. FPL's rule: one free transfer per gameweek
+    **from GW2** -- there is no transfer allowance before the first deadline,
+    when the squad is being picked -- with unused ones accumulating to
+    `MAX_BANKED_FREE_TRANSFERS`.
+
+    `available` entering each iteration is the limit *for that gameweek*, so
+    the seed is the limit entering the first gameweek in the history, which is
+    zero: the accrual line then gives GW2 exactly one. Seeding it at 1 charged
+    GW1 as a banking gameweek and reported one too many for the rest of the
+    season -- 4 free transfers at GW5 against FPL's 3. Seeding zero rather than
+    special-casing `gw == 1` also handles a manager who joined mid-season,
+    whose first deadline is likewise unlimited: `max(0, 0 - made) + 1 == 1`
+    however many transfers that week registered.
+
+    **A wildcard or free hit week neither spends nor earns a transfer.** The
+    bank is retained across the chip, but "you don't get an extra free transfer
+    in the week you Wildcard" -- so `limit(chip_gw + 1) == limit(chip_gw)`,
+    which is what skipping the gameweek entirely produces. A wildcard also
+    registers a dozen transfers in `event_transfers` that were never charged;
+    subtracting them wiped the bank. Free Hit was excluded here before Wildcard
+    was.
+
+    Three further faults this replaces:
 
     - It **stopped at the first gameweek back**, so the answer could never
-      exceed 2. A manager who sat out three gameweeks was told they had 2 free
-      transfers when they had 4, and every third transfer looked like a -4 hit.
+      exceed 2. A manager who sat out three gameweeks was told they had 2.
     - The "already took a hit this week" guard tested
       `event_transfers_cost < 0`. FPL publishes that cost as a **positive**
       number -- this page renders it as `f"-{transfer_cost} pts"` -- so the
       guard never once fired.
-    - Chip gameweeks are skipped. A wildcard registers a dozen transfers in
-      `event_transfers`, which read as a fortnight of spending and wiped the
-      bank; Free Hit was already excluded, Wildcard was not.
+    - Transfers logged in-app but not yet confirmed by FPL were never counted.
+      That is handled by the caller, which knows whether the squad came from
+      the authenticated payload (where FPL has already counted them).
 
     The replay still understates when a gameweek spent *some* of a larger bank,
     because the history records transfers made but never the limit they were
     made against. Understating is the safe direction -- it warns of a hit that
-    turns out to be free -- and the authenticated path has no such gap.
+    turns out to be free -- and the authenticated path has no such gap. Neither
+    path can see an ad-hoc grant such as the GW16 2025/26 AFCON top-up, which
+    is why the page also offers a manual override.
     """
     limit = (entry_history or {}).get("event_transfers_limit")
     if limit is not None:
-        return max(0, int(limit))
+        made = int((entry_history or {}).get("event_transfers", 0) or 0)
+        return max(0, int(limit) - made)
 
     if not history:
         return 1
@@ -591,7 +621,7 @@ def _compute_free_transfers(history: dict, entry_history: dict, current_gw: int,
         key=lambda e: e["event"],
     )
 
-    available = 1
+    available = 0
     made_this_gw = 0
     for entry in entries:
         gw = entry["event"]
@@ -609,6 +639,66 @@ def _compute_free_transfers(history: dict, entry_history: dict, current_gw: int,
         available = min(MAX_BANKED_FREE_TRANSFERS, max(0, available - made) + 1)
 
     return max(0, available - made_this_gw)
+
+
+def _ft_override_key(team_id, gameweek: int) -> str:
+    """Session key for a manually-stated free-transfer count.
+
+    Scoped to the gameweek as well as the team: an override is an answer to
+    "how many do I have *now*", and carrying last week's answer forward would
+    be a stale number presented as a stated one.
+    """
+    return "ft_override_%s_%s" % (team_id, gameweek)
+
+
+def resolve_free_transfers(history: dict, entry_history: dict, current_gw: int,
+                            fh_gws: Optional[set] = None,
+                            team_id=None, logged_pending: int = 0,
+                            squad_source: str = "", _state=None) -> dict:
+    """How many free transfers are available, and where that number came from.
+
+    Three sources, in precedence order, because each is more trustworthy than
+    the one below it:
+
+    1. **A manual override.** FPL grants transfers this app cannot reconstruct
+       -- the GW16 2025/26 top-up handed everyone extra to absorb AFCON
+       departures -- so a manager who can read the real number on FPL's own
+       site must be able to say so.
+    2. **`limit - made`** from the authenticated `my-team` payload, which is
+       the answer outright.
+    3. **The replay**, which is a reconstruction and the only option without a
+       credential.
+
+    `logged_pending` is subtracted only off the replay. The authenticated
+    payload already counts a logged transfer in `transfers.made`, and
+    `_reconcile_pending_log()` retires the entry -- subtracting again would
+    charge the same move twice. Without that subtraction the panel read
+    "N FTs Banked / All free this gameweek" with transfers already spent.
+
+    Returns a dict with `count`, `source`, `computed` (before any override),
+    and `hits`, the number of logged transfers that exceeded the allowance --
+    which must be reported rather than swallowed by the clamp at zero.
+    """
+    state = st.session_state if _state is None else _state
+
+    computed = _compute_free_transfers(history, entry_history, current_gw,
+                                       fh_gws=fh_gws)
+    stated = (entry_history or {}).get("event_transfers_limit") is not None
+    source = "my_team" if stated else "replay"
+
+    hits = 0
+    if not stated and logged_pending and squad_source != "my_team":
+        hits = max(0, int(logged_pending) - computed)
+        computed = max(0, computed - int(logged_pending))
+
+    count = computed
+    override = state.get(_ft_override_key(team_id, current_gw))
+    if override is not None:
+        count = max(0, int(override))
+        source = "manual"
+
+    return {"count": count, "source": source, "computed": computed,
+            "hits": hits, "logged": int(logged_pending or 0)}
 
 
 def _blended_proj(row) -> float:
@@ -708,8 +798,17 @@ def _compute_hit_verdict(ep_delta: float, is_hit: bool) -> dict:
 
 
 def _render_transfer_status_panel(bank: int, squad_value: int, free_transfers: int,
-                                   chip_status: dict, active_chip: Optional[str]):
-    """Render a top-of-page status panel: free transfers, bank, chips."""
+                                   chip_status: dict, active_chip: Optional[str],
+                                   ft_info: Optional[dict] = None,
+                                   team_id=None, current_gw: Optional[int] = None):
+    """Render a top-of-page status panel: free transfers, bank, chips.
+
+    `ft_info` is `resolve_free_transfers()`'s result. The panel says where the
+    free-transfer number came from, because the three sources are not equally
+    trustworthy -- the replay is a reconstruction that cannot see an ad-hoc
+    grant, and presenting it identically to FPL's own stated number is what let
+    a wrong count go unquestioned.
+    """
     chip_names = {"wildcard": "Wildcard", "bboost": "Bench Boost",
                   "freehit": "Free Hit", "3xc": "Triple Captain"}
     chip_colors = {"wildcard": "#7c3aed", "bboost": "#166534",
@@ -729,6 +828,7 @@ def _render_transfer_status_panel(bank: int, squad_value: int, free_transfers: i
         )
 
     # Free transfer card
+    info = ft_info or {}
     if free_transfers >= 2:
         ft_val, ft_color, ft_sub = (f"{free_transfers} FTs Banked", "#4ecca3",
                                     "All free this gameweek")
@@ -736,6 +836,22 @@ def _render_transfer_status_panel(bank: int, squad_value: int, free_transfers: i
         ft_val, ft_color, ft_sub = "1 Free Transfer", "#00ff87", "Next costs &minus;4 pts"
     else:
         ft_val, ft_color, ft_sub = "0 FTs (Hit GW)", "#f87171", "&minus;4 pts per transfer"
+
+    # Logged transfers beyond the allowance cost 4 points each. That is a real
+    # state, and clamping the count to zero without saying so hides the hit.
+    if info.get("hits"):
+        ft_sub = (f"{info['logged']} logged, {info['logged'] - info['hits']} free "
+                  f"&mdash; &minus;{4 * info['hits']} pts")
+        ft_color = "#f87171"
+    elif info.get("logged"):
+        ft_sub = f"{info['logged']} logged this week &mdash; {ft_sub.lower()}"
+
+    _FT_SOURCE_LABEL = {
+        "manual": "you stated this",
+        "my_team": "from your FPL account",
+        "replay": "reconstructed &mdash; not stated by FPL",
+    }
+    ft_source = info.get("source", "replay")
 
     # Active chip card
     if active_chip:
@@ -789,6 +905,55 @@ def _render_transfer_status_panel(bank: int, squad_value: int, free_transfers: i
                     unsafe_allow_html=True)
     with cols[4]:
         st.markdown(chips_card, unsafe_allow_html=True)
+
+    # Where the number came from, and a way to correct it. The replay cannot
+    # see an ad-hoc grant -- FPL handed every manager extra free transfers
+    # before GW16 of 2025/26 to absorb AFCON departures -- so a manager reading
+    # the real number on FPL's own site has to be able to say so.
+    if ft_info is not None and team_id is not None and current_gw is not None:
+        key = _ft_override_key(team_id, current_gw)
+        label = _FT_SOURCE_LABEL.get(ft_source, ft_source)
+        with st.expander(f"Free transfers: {label}", expanded=False):
+            if ft_source == "replay":
+                st.caption(
+                    "Without an FPL credential this count is replayed from your "
+                    "transfer history: one per gameweek from GW2, banking to "
+                    f"{MAX_BANKED_FREE_TRANSFERS}, with none granted in a "
+                    "wildcard or free hit week. It cannot see a one-off grant, "
+                    "and it understates when a gameweek spent part of a larger "
+                    "bank. Set your credentials on the League Setup page for "
+                    "FPL's own number."
+                )
+            elif ft_source == "my_team":
+                st.caption(
+                    "Taken from your authenticated FPL account: this "
+                    "gameweek's allowance less the transfers you have already "
+                    "made. No reconstruction involved."
+                )
+            else:
+                st.caption(
+                    f"Overriding the computed value of {info.get('computed')}. "
+                    "Clear the box to go back to it."
+                )
+
+            current = st.session_state.get(key)
+            stated = st.number_input(
+                "FPL says I have",
+                min_value=0, max_value=MAX_BANKED_FREE_TRANSFERS,
+                value=int(current) if current is not None else int(free_transfers),
+                step=1, key=f"{key}_input",
+                help="Read the number off FPL's own Transfers page and enter it "
+                     "here if it disagrees.",
+            )
+            c_set, c_clear = st.columns(2)
+            with c_set:
+                if st.button("Use this number", key=f"{key}_set"):
+                    st.session_state[key] = int(stated)
+                    st.rerun()
+            with c_clear:
+                if current is not None and st.button("Clear override", key=f"{key}_clear"):
+                    del st.session_state[key]
+                    st.rerun()
 
     st.markdown("")  # spacing
 
@@ -1823,10 +1988,38 @@ def show_classic_transfers_page():
     # Compute chip status and free transfers (pass fh_gws so FH GWs are
     # excluded from the FT-banking calculation)
     chip_status = _parse_chip_status(history, current_gw)
-    free_transfers = _compute_free_transfers(history, entry_history, current_gw, fh_gws=fh_gws)
+    ft_info = resolve_free_transfers(
+        history, entry_history, current_gw, fh_gws=fh_gws,
+        team_id=team_id, logged_pending=len(extra_local),
+        squad_source=resolution.source,
+    )
+    free_transfers = ft_info["count"]
+
+    # A count that cannot be right gates every hit verdict on the page, so
+    # check it rather than trusting the reconstruction. Logged, not raised:
+    # a page that renders a suspect number with a warning beside it is more
+    # use than one that refuses to render.
+    chip_gws = {c["event"] for c in chips_list
+                if c.get("name") in ("wildcard", "freehit")
+                and c.get("event") is not None}
+    ft_issues = check_free_transfers(
+        free_transfers,
+        gameweek=current_gw,
+        limit=entry_history.get("event_transfers_limit"),
+        made=(entry_history.get("event_transfers")
+              if entry_history.get("event_transfers_limit") is not None else None),
+        status=entry_history.get("event_transfers_status"),
+        chip_gws=chip_gws,
+        logged=ft_info["logged"],
+    )
+    if ft_issues and ft_info["source"] != "manual":
+        _logger.warning("Free-transfer count looks wrong: %s",
+                        format_issues(ft_issues))
 
     # Status panel — shown before filters so users see FT count immediately
-    _render_transfer_status_panel(bank, squad_value, free_transfers, chip_status, active_chip)
+    _render_transfer_status_panel(bank, squad_value, free_transfers, chip_status,
+                                  active_chip, ft_info=ft_info, team_id=team_id,
+                                  current_gw=current_gw)
 
     # Controls
     with st.expander("Filters", expanded=True):

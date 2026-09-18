@@ -26,6 +26,7 @@ from scripts.common.data_validation import (
     raise_on_error,
     check_resolved_squad,
     check_blended_projections,
+    check_free_transfers,
 )
 
 
@@ -865,3 +866,74 @@ class TestCheckBlendedProjections:
     def test_missing_contract_columns_is_an_error(self):
         issues = check_blended_projections(pd.DataFrame({"Points": [5.0]}))
         assert any("missing Proj/Proj_Start" in i.message for i in issues)
+
+
+def _warnings(issues):
+    return [i for i in issues if i.severity == "warning"]
+
+
+class TestCheckFreeTransfers:
+    """The count gates every hit verdict on the Transfers page.
+
+    Reconstructed without a credential, it was one too high all season: the
+    replay seeded the bank at 1 and then credited GW1 as well, which grants
+    nothing. The live symptom was 4 free transfers reported at GW5 against
+    FPL's 3.
+    """
+
+    def test_a_plausible_count_is_silent(self):
+        assert check_free_transfers(3, gameweek=5, chip_gws=[3]) == []
+
+    def test_no_count_at_all_is_an_error(self):
+        assert _errors(check_free_transfers(None))
+
+    def test_a_non_numeric_count_is_an_error(self):
+        assert _errors(check_free_transfers("two"))
+
+    def test_negative_is_an_error(self):
+        """Overspending is a points hit, not a negative balance."""
+        assert _errors(check_free_transfers(-1, gameweek=5))
+
+    def test_above_the_cap_is_an_error(self):
+        assert _errors(check_free_transfers(6, gameweek=20))
+
+    def test_gameweek_one_cannot_have_any(self):
+        """Changes before the first deadline are unlimited, not banked."""
+        assert _errors(check_free_transfers(1, gameweek=1))
+
+    def test_more_than_have_been_awarded_is_an_error(self):
+        """A quiet season reported one high: GW2-GW5 award four, not five."""
+        assert _errors(check_free_transfers(5, gameweek=5))
+        assert check_free_transfers(4, gameweek=5) == []
+
+    def test_a_chip_gameweek_awards_nothing(self):
+        """The live case. A wildcard in GW3 makes 4 at GW5 impossible."""
+        assert _errors(check_free_transfers(4, gameweek=5, chip_gws=[3]))
+
+    def test_the_ceiling_stays_loose_without_the_chip_list(self):
+        """A plausibility check must never cry wolf, so an unknown chip
+        history gets the looser bound rather than a guess."""
+        assert check_free_transfers(4, gameweek=5) == []
+
+    def test_the_ceiling_never_exceeds_the_cap(self):
+        assert check_free_transfers(5, gameweek=30) == []
+
+    def test_a_stated_limit_is_an_allowance_not_a_remainder(self):
+        """limit 1 / made 2 leaves 0; reporting 1 is the bug this catches."""
+        assert _errors(check_free_transfers(1, limit=1, made=2))
+        assert check_free_transfers(0, limit=1, made=2) == []
+
+    def test_fpl_saying_the_next_transfer_costs_contradicts_a_free_one(self):
+        assert _warnings(check_free_transfers(2, gameweek=5, status="cost"))
+
+    def test_fpl_saying_free_contradicts_a_count_of_zero(self):
+        assert _warnings(check_free_transfers(0, gameweek=5, status="free"))
+
+    def test_agreeing_status_is_silent(self):
+        assert check_free_transfers(2, gameweek=5, status="free") == []
+
+    def test_logging_past_the_allowance_warns_rather_than_errors(self):
+        """A legitimate state -- the excess costs 4 points each -- but the
+        page has to say so rather than clamp to zero silently."""
+        issues = check_free_transfers(2, gameweek=5, logged=3)
+        assert _warnings(issues) and not _errors(issues)

@@ -985,24 +985,69 @@ unauthenticated path is therefore the default, and the H2H opponent calls and
 the league leaderboard loop can never reach for a credential on someone else's
 behalf.
 
-**Free transfers: prefer the number FPL states.** The authenticated `my-team`
-payload carries `transfers.limit`, which is the answer outright;
-`normalise_my_team()` forwards it as `event_transfers_limit`, and
-`_compute_free_transfers()` returns it when present. It is null while a chip
+**Free transfers: three sources, and the count is wrong if you skip one.**
+`resolve_free_transfers()` (`classic/transfers.py`) picks between them in
+precedence order -- **manual override -> `my-team` `limit - made` -> replay** --
+and reports which it used, because they are not equally trustworthy and
+presenting a reconstruction identically to FPL's own number is what let a wrong
+count go unquestioned for a season.
+
+**`transfers.limit` is the gameweek's *allowance*, not what remains.** The
+payload `{"limit": 1, "made": 2, "cost": 4}` is one free transfer, two made and
+a four-point hit; returning `limit` alone reported 1 there when the answer was
+0. `normalise_my_team()` forwards both, plus `transfers.status` ("free" /
+"cost"), which is FPL's own answer to "does the next one cost anything" and is
+used as a logged cross-check rather than trusted. `limit` is null while a chip
 grants unlimited transfers, so a missing key means "reconstruct", never "zero".
 
-The unauthenticated replay -- one FT per gameweek, unused ones accumulating to
-`MAX_BANKED_FREE_TRANSFERS` -- replaces one that stopped at the first gameweek
-back and so could never return more than 2. A manager who sat out three
-gameweeks was told they had 2, and every third transfer was labelled a -4 hit
-that FPL would not have charged. Two smaller faults went with it: the "already
-took a hit" guard tested `event_transfers_cost < 0`, but FPL publishes that cost
-as a **positive** number (the page itself renders `f"-{cost} pts"`), so it never
-fired; and a wildcard's dozen registered transfers read as real spending and
-wiped the bank, Free Hit having been excluded but Wildcard not. The replay still
-understates when a gameweek spent part of a larger bank -- history records
-transfers made, never the limit they were made against -- which is the safe
-direction, and the authenticated path has no such gap.
+**The replay's two rules, both of which it once got wrong.** One FT per
+gameweek **from GW2** -- before the first deadline the squad is being picked and
+changes are unlimited, so GW1 grants nothing -- unused ones accumulating to
+`MAX_BANKED_FREE_TRANSFERS` (the bootstrap's `max_extra_free_transfers`, 4, plus
+one). And **a wildcard or free hit week neither spends nor earns one**: the bank
+is retained across the chip, but no extra transfer is granted for that week, so
+skipping the gameweek entirely is exactly right.
+
+`available` entering each iteration is the limit *for that gameweek*, so the
+seed is the limit entering the first gameweek in the history, which is **zero**.
+Seeding it at 1 and then running the accrual for GW1 as well reported one too
+many for the rest of the season -- 4 free transfers at GW5 against FPL's 3, on
+a live account. Seeding zero rather than special-casing `gw == 1` also handles a
+mid-season joiner, whose first deadline is likewise unlimited.
+
+**A logged pending transfer has to be spent.** `apply_pending_transfers()`
+adjusts only the bank, and nothing subtracted the move from the FT count -- so
+logging two in-week left the panel reading "4 FTs Banked / All free this
+gameweek" with two already gone. The subtraction happens on the replay path
+only: `my-team` already counts the move in `transfers.made` and
+`_reconcile_pending_log()` retires the entry, so doing it there would charge it
+twice. Logging past the allowance reports the hit rather than clamping silently
+to zero.
+
+Three faults went with the seed: the replay **stopped at the first gameweek
+back**, so the answer could never exceed 2; the "already took a hit" guard
+tested `event_transfers_cost < 0`, but FPL publishes that cost as a **positive**
+number (the page itself renders `f"-{cost} pts"`), so it never fired; and a
+wildcard's dozen registered transfers read as real spending and wiped the bank,
+Free Hit having been excluded but Wildcard not. The replay still understates
+when a gameweek spent part of a larger bank -- history records transfers made,
+never the limit they were made against -- which is the safe direction, and the
+authenticated path has no such gap.
+
+**No replay can see an ad-hoc grant**, which is why the manual override exists:
+FPL handed every manager extra free transfers before GW16 of 2025/26 to absorb
+AFCON departures. The override is scoped to `(team_id, gameweek)` -- it answers
+"how many do I have *now*", and carrying it forward would be a stale number
+presented as a stated one.
+
+`check_free_transfers()` (`data_validation.py`) is the tripwire. Its ceiling is
+"you cannot hold more than have been awarded" -- one per gameweek from GW2, less
+any chip gameweek, capped -- which catches the seed bug without encoding the
+rules twice. Pass `chip_gws`: without it the bound is the looser `gameweek - 1`,
+which still catches a quiet season reported one high (5 at GW5) but not a season
+with a chip in it (4 at GW5, the actual symptom). A loose bound is the right
+default for a plausibility check, but the tighter one is free when the caller
+has the chip list, and the caller always does.
 
 **An active chip belongs to the gameweek its picks belong to.** FPL publishes
 no chip for a gameweek whose deadline has not passed -- the provenance string

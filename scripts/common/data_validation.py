@@ -41,6 +41,7 @@ __all__ = [
     "check_ffp_feed",
     "check_pl_content",
     "check_resolved_squad",
+    "check_free_transfers",
     "format_issues",
     "raise_on_error",
 ]
@@ -1649,5 +1650,172 @@ def check_pl_content(lineups=None,
                         "Measured at 97.6%% live. A collapse points at the "
                         "club-scoped key or the token-subset fallback, not at "
                         "the feed."))
+
+    return issues
+
+
+# --------------------------------------------------------------------------
+# Free transfers
+# --------------------------------------------------------------------------
+
+# FPL's own cap, published as `game_settings.max_extra_free_transfers` (4 extra
+# above the base 1). Kept here rather than imported so this module stays free of
+# the app's own modules, the way the rest of the file's constants are.
+MAX_FREE_TRANSFERS = 5
+
+
+def check_free_transfers(computed: Optional[int],
+                         *,
+                         gameweek: Optional[int] = None,
+                         limit: Optional[int] = None,
+                         made: Optional[int] = None,
+                         status: Optional[str] = None,
+                         chip_gws: Optional[Sequence[int]] = None,
+                         logged: int = 0) -> List[Issue]:
+    """Is this free-transfer count possible?
+
+    The number gates the whole Transfers page -- the hit verdict on every
+    suggestion card, the "-4 pts" warning, and how many legs the planner is
+    allowed to propose for free. It is reconstructed by replaying the season
+    whenever there is no credential, and a reconstruction that is one too high
+    turns a real -4 into a green "FREE".
+
+    That is not hypothetical: seeding the replay's bank at 1 charged GW1 as a
+    banking gameweek, and the page reported 4 free transfers at GW5 against
+    FPL's 3. The ceiling check below catches it without knowing the rules in
+    any more detail than "you cannot hold more transfers than have been
+    awarded" -- one per gameweek from GW2, and none for a gameweek spent on a
+    wildcard or free hit, since the bank is retained across those but no extra
+    transfer is granted.
+
+    Pass `chip_gws` where it is known. Without it the ceiling is the looser
+    `gameweek - 1`, which still catches a quiet season reported one high (5 at
+    GW5) but not a season with a chip in it (4 at GW5, this account's actual
+    symptom). A loose bound is the right default for a plausibility check --
+    it must never cry wolf -- but the tighter one is free when the caller has
+    the chip list, and the caller always does.
+
+    Args:
+        computed: the count the app arrived at.
+        gameweek: the gameweek it describes, if known.
+        limit: `transfers.limit` from the authenticated payload -- the
+            gameweek's allowance, not what remains.
+        made: `transfers.made` -- transfers already registered this gameweek.
+        status: `transfers.status`, FPL's own "free" / "cost".
+        chip_gws: gameweeks in which a wildcard or free hit was played, which
+            grant no free transfer.
+        logged: transfers logged in-app but not yet confirmed by FPL.
+    """
+    check = "free_transfers"
+    issues: List[Issue] = []
+
+    if computed is None:
+        return [Issue(check, "error", "No free-transfer count was computed.",
+                      "The page cannot price a transfer without one. It should "
+                      "fall back to 1 rather than render nothing.")]
+
+    try:
+        count = int(computed)
+    except (TypeError, ValueError):
+        return [Issue(check, "error",
+                      "Free-transfer count is not a number: %r." % (computed,),
+                      "Something upstream returned a string or NaN where an "
+                      "integer was expected.")]
+
+    if count < 0:
+        issues.append(Issue(
+            check, "error",
+            "Free-transfer count is negative (%d)." % count,
+            "Spending more than the bank holds is a points hit, not a negative "
+            "balance. Clamp at zero and report the hit separately."))
+
+    if count > MAX_FREE_TRANSFERS:
+        issues.append(Issue(
+            check, "error",
+            "Free-transfer count of %d exceeds FPL's cap of %d."
+            % (count, MAX_FREE_TRANSFERS),
+            "The bank stops accumulating at the cap. A higher number means the "
+            "accrual is not applying min(cap, ...), or the cap constant is "
+            "stale -- the bootstrap publishes it as "
+            "game_settings.max_extra_free_transfers, plus one."))
+
+    if gameweek is not None:
+        try:
+            gw = int(gameweek)
+        except (TypeError, ValueError):
+            gw = None
+        if gw is not None:
+            if gw <= 1 and count > 0:
+                issues.append(Issue(
+                    check, "error",
+                    "GW%d reports %d free transfer(s)." % (gw, count),
+                    "There is no transfer allowance before the first deadline "
+                    "-- the squad is being picked, and changes are unlimited. "
+                    "The first free transfer is for GW2."))
+            elif gw > 1:
+                # One per gameweek from GW2 up to and including this one, less
+                # any spent on a transfer chip, and never above the cap.
+                chips_before = len({int(c) for c in (chip_gws or ())
+                                    if 2 <= int(c) <= gw})
+                awarded = min(MAX_FREE_TRANSFERS, max(0, (gw - 1) - chips_before))
+                if count > awarded:
+                    issues.append(Issue(
+                        check, "error",
+                        "GW%d reports %d free transfers, but only %d have been "
+                        "awarded (%d gameweek(s) since GW1%s)."
+                        % (gw, count, awarded, gw - 1,
+                           ", less %d chip gameweek(s)" % chips_before
+                           if chips_before else ""),
+                        "You cannot hold more transfers than have been "
+                        "awarded. The usual cause is the replay crediting GW1, "
+                        "which grants nothing -- seed the bank at 0, not 1. "
+                        "The other is crediting a wildcard week, which retains "
+                        "the bank but adds nothing to it."))
+
+    if limit is not None and made is not None:
+        try:
+            expected = max(0, int(limit) - int(made))
+        except (TypeError, ValueError):
+            expected = None
+        if expected is not None and expected != count:
+            issues.append(Issue(
+                check, "error",
+                "FPL states limit %s and made %s (so %d remain), but the app "
+                "computed %d." % (limit, made, expected, count),
+                "`transfers.limit` is the gameweek's allowance, not what is "
+                "left. Returning it unadjusted reports a free transfer that "
+                "has already been spent."))
+
+    if status is not None:
+        normalised = str(status).strip().lower()
+        if normalised == "cost" and count > 0:
+            issues.append(Issue(
+                check, "warning",
+                "FPL reports the next transfer costs points, but the app says "
+                "%d free transfer(s) remain." % count,
+                "`transfers.status` is FPL's own answer. A disagreement means "
+                "the reading of `limit` is wrong -- investigate before "
+                "trusting the count."))
+        elif normalised == "free" and count == 0:
+            issues.append(Issue(
+                check, "warning",
+                "FPL reports the next transfer is free, but the app says none "
+                "remain.",
+                "Same cross-check as above, in the other direction. "
+                "Understating is the safer error, but it is still an error."))
+
+    if logged:
+        try:
+            n_logged = int(logged)
+        except (TypeError, ValueError):
+            n_logged = 0
+        if n_logged > count:
+            issues.append(Issue(
+                check, "warning",
+                "%d transfer(s) logged in-app against %d free."
+                % (n_logged, count),
+                "The excess costs 4 points each. That is a legitimate state, "
+                "but the page must say so rather than clamping to zero and "
+                "letting the hit go unmentioned."))
 
     return issues
