@@ -23,14 +23,25 @@ from scripts.common.utils import (
     get_classic_transfers,
     position_converter,
 )
-from scripts.common.data_validation import check_free_transfers, format_issues
+from scripts.common.data_validation import (
+    check_free_transfers,
+    check_transfer_plan,
+    format_issues,
+)
 from scripts.common.error_helpers import get_logger
+from scripts.common.optimization import (
+    HIT_COST,
+    diff_squads,
+    pair_transfer_legs,
+    solve_squad_ilp,
+)
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import compact_html
 from scripts.common.transfer_sanity import sanity_check_suggestion
 from scripts.common.analytics import (
     _claim_reference_rows,
     compute_player_scores,
+    numeric_col,
     compute_healthy_form,
     _fetch_element_history,
     compute_positional_depth,
@@ -874,7 +885,9 @@ def _render_transfer_status_panel(bank: int, squad_value: int, free_transfers: i
     _FT_SOURCE_LABEL = {
         "manual": "you stated this",
         "my_team": "from your FPL account",
-        "replay": "reconstructed &mdash; not stated by FPL",
+        # Plain text: this labels an st.expander, which renders markdown, not
+        # HTML -- an entity here reaches the user as literal "&mdash;".
+        "replay": "reconstructed — not stated by FPL",
     }
     ft_source = info.get("source", "replay")
 
@@ -1225,6 +1238,424 @@ def _render_chip_advisor(chip_status: dict, squad_df: pd.DataFrame, current_gw: 
 
         if not avail:
             st.success("All chips used — focus on optimizing weekly transfers.")
+
+
+# =============================================================================
+# TRANSFER PLANNER — the best squad reachable in K transfers
+# =============================================================================
+#
+# What this replaces, `_build_multi_transfer_plan()`, could not propose the move
+# that makes multiple free transfers worth having: sell a premium and a
+# mid-price player, buy a premium somewhere else and a cheaper replacement.
+# Three things stopped it.
+#
+# Its drops came from `squad_df.nsmallest(6, "Keep Score")`, so a premium was
+# never a candidate to sell. Its objective was a sum of positional
+# *percentiles*, which saturate near the top -- Haaland's 213.7 season points
+# against a mid-price midfielder's 178.3 is 0.974 against 0.977, so the premium
+# ranks *lower* -- and invert across positions, since the best of 32 forwards
+# scores 0.969 where the best of 48 midfielders scores 0.979. A points-positive
+# reallocation cannot win a percentile contest. And it was fixed at two legs,
+# gated on having two free transfers, so 3, 4 and 5 banked all got the same
+# answer.
+#
+# The ILP answers the question directly, in expected points, over the whole
+# squad, for every K at once. Measured against a live 659-player pool: ~0.06s a
+# solve, so the whole frontier costs less than half a second.
+
+_W_NOW_KEY = "xfer_plan_w_now_pct"
+_W_NEXT3_KEY = "xfer_plan_w_next3_pct"
+_EXTRA_HITS_KEY = "xfer_plan_extra_hits"
+
+#: Bench players count for something, but only a little. At exactly 0 the solver
+#: is indifferent between bench compositions with the same XI, so it will spend
+#: a transfer rearranging the bench for no modelled gain; `initial_squad.py`
+#: records that at 0.2 it starts buying real players to sit them.
+_PLAN_BENCH_WEIGHT = 0.1
+
+#: How many candidates per position reach the solver. Three overlapping slices
+#: (best, best per pound, cheapest) plus every owned player.
+_PLAN_POOL_TOP = 40
+_PLAN_POOL_VALUE = 15
+_PLAN_POOL_CHEAP = 6
+
+
+def _init_plan_weight_state(_state=None) -> None:
+    state = st.session_state if _state is None else _state
+    state.setdefault(_W_NOW_KEY, 40)
+    state.setdefault(_W_NEXT3_KEY, 60)
+
+
+def _sync_plan_weight_from_now():
+    st.session_state[_W_NEXT3_KEY] = 100 - st.session_state[_W_NOW_KEY]
+
+
+def _sync_plan_weight_from_next3():
+    st.session_state[_W_NOW_KEY] = 100 - st.session_state[_W_NEXT3_KEY]
+
+
+def plan_horizon(w_now: float, w_next3: float) -> float:
+    """Gameweeks the objective is denominated over.
+
+    `Plan_Rate` is points **per gameweek**; a -4 hit is points **once**.
+    Subtracting 4 from a per-gameweek objective asks "does this gain 4 points
+    every week?", which at a 3-gameweek horizon is a 3x too strict test and
+    would essentially never recommend a hit. Multiplying the squad term by this
+    restores the comparison.
+
+    It is a positive constant, so it does not change *which* squad is optimal
+    at a fixed hit count -- only whether the hit is worth paying. The two jobs
+    are separable on purpose: the weights choose the squad, this chooses
+    whether to pay for it.
+    """
+    return w_now * 1.0 + w_next3 * 3.0
+
+
+def build_plan_scores(df: pd.DataFrame, w_now: float, w_next3: float) -> pd.Series:
+    """Expected points per gameweek, blended across the chosen horizon.
+
+    **`Proj_Next3` is a 3-gameweek total that includes the current gameweek**
+    (CLAUDE.md pins this live: `Next2GWsStart == StartingPredicted + GW2` at MAE
+    0.03 against 0.45 for `GW2 + GW3`). So it is divided by 3 to get a rate, and
+    the two weights are not a partition of disjoint windows -- they weigh "only
+    this week matters" against "the next three matter equally".
+
+    **The horizon term is on the wrong basis for a player FFP did not price.**
+    `blend_multi_gw_projections` falls back to `Projected_Points x 3` -- raw
+    Rotowire, a *conditional* "if he starts" number -- and the engine passes it
+    into `Proj_Next3` undiscounted. So for an unmatched player `Proj_Next3 / 3`
+    is roughly `Proj_Start` while `Proj` is the expected value, and weighting
+    the horizon up would systematically reward rotation risks. Same shape as the
+    double-discount bugs the projection engine exists to end.
+
+    Until that is fixed upstream, the horizon term is trusted only where FFP
+    actually matched, and falls back to `Proj` otherwise. That loses fixture
+    information for those players, which is the conservative direction: a flat
+    rate is wrong, an inflated one is worse.
+    """
+    proj = numeric_col(df, "Proj", 0.0).fillna(0.0)
+    next3 = numeric_col(df, "Proj_Next3", np.nan) / 3.0
+
+    ffp_matched = pd.Series(False, index=df.index)
+    for col in ("FFP_Starting_Predicted", "FFP_Predicted"):
+        if col in df.columns:
+            ffp_matched = ffp_matched | df[col].notna()
+
+    next3 = next3.where(ffp_matched & next3.notna(), proj)
+    return (w_now * proj + w_next3 * next3).fillna(0.0)
+
+
+def build_plan_pool(all_players: pd.DataFrame, squad_df: pd.DataFrame,
+                    w_now: float, w_next3: float) -> pd.DataFrame:
+    """Candidates for the solver, in millions, with the owned 15 guaranteed in.
+
+    Built from `all_players`, never from `available`. That frame excludes the
+    owned 15 by construction and is narrowed by the position multiselect and
+    the max-price slider -- display filters. Constraining the optimizer by a
+    display filter gives a plan the user cannot explain, and worse, deselecting
+    a position removes owned players from the pool, which turns the change
+    constraint into "keep 12 of 12": a free rebuild of that position.
+
+    Buy-eligibility is applied to non-owned rows only. An injured player you
+    own must stay sellable.
+    """
+    if all_players is None or all_players.empty or squad_df is None or squad_df.empty:
+        return pd.DataFrame()
+
+    pool = all_players.copy()
+    squad_ids = set(squad_df["Player_ID"])
+    pool["Is_Owned"] = pool["Player_ID"].isin(squad_ids)
+
+    # The bootstrap publishes no selling price, so `all_players` carries
+    # now_cost in that column for everyone. Overwrite it for the 15 we own with
+    # what FPL will actually pay.
+    sell = squad_df.set_index("Player_ID").apply(_selling_price, axis=1)
+    pool["_sell"] = pool["Player_ID"].map(sell)
+    pool["Price"] = pd.to_numeric(pool["now_cost"], errors="coerce") / 10.0
+    pool["Sell_Price"] = np.where(pool["_sell"].notna(),
+                                  pool["_sell"], pool["now_cost"]) / 10.0
+
+    pool["Plan_Score"] = build_plan_scores(pool, w_now, w_next3)
+
+    eligible = (
+        pool["status"].isin(["a", "d"])
+        & (pd.to_numeric(pool["minutes"], errors="coerce").fillna(0) > 0)
+        & (pd.to_numeric(pool["chance_of_playing_next_round"],
+                         errors="coerce").fillna(100) >= 50)
+    )
+    pool = pool[eligible | pool["Is_Owned"]].copy()
+
+    # Trim per position. The value-per-pound and cheapest slices are not
+    # decoration: the optimal plan is often "downgrade the bench keeper to fund
+    # the premium", which a best-N-only pool cannot express.
+    keep_idx = set(pool.index[pool["Is_Owned"]])
+    per_pound = pool["Plan_Score"] / pool["Price"].replace(0, np.nan)
+    for pos in pool["Position"].dropna().unique():
+        at_pos = pool[pool["Position"] == pos]
+        keep_idx |= set(at_pos.nlargest(_PLAN_POOL_TOP, "Plan_Score").index)
+        keep_idx |= set(per_pound.loc[at_pos.index].nlargest(_PLAN_POOL_VALUE).index)
+        keep_idx |= set(at_pos.nsmallest(_PLAN_POOL_CHEAP, "Price").index)
+
+    return pool.loc[sorted(keep_idx)].reset_index(drop=True)
+
+
+def build_transfer_plan(pool: pd.DataFrame, squad_df: pd.DataFrame, bank: int,
+                        free_transfers: int, max_extra_hits: int = 0,
+                        w_now: float = 0.4, w_next3: float = 0.6) -> Optional[Dict]:
+    """Solve every K from 0 upward and return the frontier plus the best plan.
+
+    **K=0 is the baseline**, solved with the identical objective rather than
+    read off the current starting XI. `find_optimal_lineup()` is greedy, has no
+    captain term and no bench term, so comparing against it manufactures a
+    fraction of a point of "gain" for a plan that changes nothing.
+
+    It is also the cheapest feasibility canary: pricing kept players at their
+    selling price makes K=0 feasible by construction, so if it fails the squad
+    is structurally broken -- more than three from a club, a duplicated pick,
+    prices in the wrong units -- and that is worth saying rather than rendering
+    a plan on top of it.
+
+    Solving the whole frontier rather than one K is nearly free and is the more
+    useful answer: on a live squad it read 1 transfer +4.7, 2 +8.9, 3 +11.9,
+    and K=4 and K=5 returned the *same* 3-transfer plan. "Three is the sweet
+    spot, a fourth adds nothing" beats any single number.
+    """
+    if pool is None or pool.empty or squad_df is None or squad_df.empty:
+        return None
+
+    owned = [int(p) for p in squad_df["Player_ID"]]
+    budget = (float(bank or 0) / 10.0) + float(
+        pool.loc[pool["Player_ID"].isin(owned), "Sell_Price"].sum())
+    horizon = plan_horizon(w_now, w_next3)
+    k_max = max(0, int(free_transfers) + int(max_extra_hits))
+
+    def _solve(k):
+        return solve_squad_ilp(
+            pool, budget, score_col="Plan_Score", price_col="Price",
+            formation="auto", bench_weight=_PLAN_BENCH_WEIGHT,
+            # The armband doubles a starter's score, and without it the model
+            # under-prices losing your captain by exactly one more copy of it --
+            # which is the whole question when the plan proposes selling him.
+            captain_score_col="Plan_Score", captain_bonus_weight=1.0,
+            problem_name="FPL_Transfer_Planner",
+            owned_ids=owned, id_col="Player_ID", max_changes=k,
+            sell_price_col="Sell_Price", free_transfers=int(free_transfers),
+            time_limit=20,
+        )
+
+    def _value(totals):
+        """The objective, in points over the horizon, net of any hit."""
+        gross = (totals["starter_score"]
+                 + _PLAN_BENCH_WEIGHT * totals["bench_score"]
+                 + totals.get("captain_score", 0.0))
+        return horizon * gross - HIT_COST * totals.get("hits", 0)
+
+    base_squad, base_totals = _solve(0)
+    if base_squad is None:
+        return {"error": "baseline"}
+
+    base_value = _value(base_totals)
+    frontier, best = [], None
+    for k in range(1, k_max + 1):
+        squad, totals = _solve(k)
+        if squad is None:
+            continue
+        gain = _value(totals) - base_value
+        entry = {"k": k, "squad": squad, "totals": totals, "gain": gain,
+                 "n_changes": totals["n_changes"], "hits": totals.get("hits", 0)}
+        frontier.append(entry)
+        if best is None or gain > best["gain"] + 1e-9:
+            best = entry
+
+    if best is None or best["n_changes"] == 0 or best["gain"] <= 1e-9:
+        return {"hold": True, "frontier": frontier, "horizon": horizon,
+                "baseline": base_value}
+
+    outs, ins = diff_squads(squad_df, best["squad"])
+    # `squad_df` carries selling prices in tenths; the solver worked in millions.
+    outs = outs.copy()
+    outs["Sell_Price"] = outs.apply(_selling_price, axis=1) / 10.0
+    outs["Plan_Score"] = build_plan_scores(outs, w_now, w_next3)
+
+    legs = pair_transfer_legs(outs, ins, score_col="Plan_Score")
+    released = sum(leg["out_price"] for leg in legs)
+    spent = sum(leg["in_price"] for leg in legs)
+    bank_before = float(bank or 0) / 10.0
+
+    return {
+        "legs": legs,
+        "squad_after": best["squad"],
+        "max_changes": best["k"],
+        "free_transfers": int(free_transfers),
+        "hits": int(best["hits"]),
+        "n_changes": int(best["n_changes"]),
+        "bank_before": bank_before,
+        "bank_after": bank_before + released - spent,
+        "released": released,
+        "spent": spent,
+        "gain_net": best["gain"],
+        "horizon_gws": horizon,
+        "frontier": frontier,
+        "baseline": base_value,
+    }
+
+
+def _plan_stat_card(label: str, value: str, accent: str = "#00ff87",
+                    subtitle: str = "") -> str:
+    sub = (f'<div style="color:#aaa;font-size:11px;margin-top:4px;">{subtitle}</div>'
+           if subtitle else "")
+    return compact_html(
+        f'<div style="border:1px solid #333;border-radius:10px;padding:14px;'
+        f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);'
+        f'text-align:center;color:#e0e0e0;height:100%;">'
+        f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+        f'letter-spacing:0.5px;margin-bottom:6px;">{label}</div>'
+        f'<div style="color:{accent};font-size:20px;font-weight:700;">{value}</div>'
+        f'{sub}</div>'
+    )
+
+
+def _plan_leg_rationale(leg: Dict, released: float) -> str:
+    """One line saying what this leg is *for*.
+
+    For a reallocation the plan's value is invisible in any single leg: "sell
+    the premium forward to fund a premium midfielder" renders as one card that
+    looks like a downgrade and one that looks unaffordable, and neither can
+    explain the other. This is the sentence that connects them.
+    """
+    net = leg["net_cost"]
+    delta = leg.get("delta")
+    delta_txt = f"{delta:+.1f} pts/GW" if delta is not None else ""
+    if net < -0.05:
+        return (f"Frees £{-net:.1f}m for the rest of the plan"
+                + (f" at a cost of {delta_txt}" if delta is not None and delta < 0
+                   else (f", and gains {delta_txt}" if delta_txt else "")))
+    if net > 0.05:
+        return f"Upgrade — spends £{net:.1f}m of the £{released:.1f}m released"
+    return f"Straight swap{', ' + delta_txt if delta_txt else ''}"
+
+
+def _render_transfer_plan(plan: Optional[Dict], free_transfers: int,
+                          w_now: float, w_next3: float) -> None:
+    """The planner's output: headline, funding line, legs, frontier."""
+    if not plan:
+        return
+
+    if plan.get("error") == "baseline":
+        st.warning(
+            "Could not price your current squad, so there is nothing to compare "
+            "a plan against. That usually means the squad is illegal as loaded "
+            "— more than three players from one club, or a duplicated pick. "
+            "Check the squad source above, or use Refresh."
+        )
+        return
+
+    horizon = plan.get("horizon_gws", plan_horizon(w_now, w_next3))
+
+    if plan.get("hold"):
+        st.success(
+            f"**Hold your transfer{'s' if free_transfers != 1 else ''}.** No "
+            f"move improves this squad over the next {horizon:.1f} gameweeks at "
+            f"the current split — banking gives you a wider choice next week."
+        )
+        return
+
+    issues = check_transfer_plan(plan, plan.get("squad_after"))
+    blocking = [i for i in issues if i.severity == "error"]
+    if blocking:
+        _logger.error("Transfer plan failed validation: %s", format_issues(issues))
+        st.warning(
+            "A transfer plan was found but did not pass its own sanity checks, "
+            "so it is not being shown. The single-transfer suggestions below "
+            "are unaffected."
+        )
+        return
+    if issues:
+        _logger.warning("Transfer plan: %s", format_issues(issues))
+
+    legs = plan["legs"]
+    hits = plan["hits"]
+    n = len(legs)
+
+    tf_sub = (f"{n - hits} free + {hits} hit" if hits
+              else ("all free" if n else ""))
+    gain = plan["gain_net"]
+    cols = st.columns(4)
+    with cols[0]:
+        st.markdown(_plan_stat_card(
+            "Transfers", str(n), "#4ecca3", tf_sub), unsafe_allow_html=True)
+    with cols[1]:
+        st.markdown(_plan_stat_card(
+            "Net Gain", f"{gain:+.1f} pts",
+            "#00ff87" if gain > 0 else "#f87171",
+            f"over {horizon:.1f} GWs, after any hit"), unsafe_allow_html=True)
+    with cols[2]:
+        st.markdown(_plan_stat_card(
+            "Bank After", f"£{plan['bank_after']:.1f}m", "#e0e0e0",
+            f"from £{plan['bank_before']:.1f}m"), unsafe_allow_html=True)
+    with cols[3]:
+        st.markdown(_plan_stat_card(
+            "Points Hit", f"&minus;{4 * hits} pts" if hits else "None",
+            "#f87171" if hits else "#6b7280",
+            "already netted off above" if hits else "within your free transfers"),
+            unsafe_allow_html=True)
+
+    # The funding line, above the legs: for a reallocation this is the only
+    # place the plan makes sense as a whole.
+    outs = ", ".join(f"{l['out_player']} £{l['out_price']:.1f}m" for l in legs)
+    ins = ", ".join(f"{l['in_player']} £{l['in_price']:.1f}m" for l in legs)
+    st.caption(
+        f"Releases **£{plan['released']:.1f}m** ({outs}) · spends "
+        f"**£{plan['spent']:.1f}m** ({ins}) · bank £{plan['bank_before']:.1f}m → "
+        f"£{plan['bank_after']:.1f}m"
+    )
+
+    for i, leg in enumerate(legs, 1):
+        delta = leg.get("delta")
+        delta_txt = f"{delta:+.1f} pts/GW" if delta is not None else "—"
+        delta_color = "#00ff87" if (delta or 0) >= 0 else "#f87171"
+        # A hit is a property of the plan, not of a leg. Marking the last one is
+        # presentational, so it says so rather than implying this move caused it.
+        hit_badge = ("" if not hits or i != len(legs) else
+                     '<span style="background:#7f1d1d;color:#fecaca;padding:2px 8px;'
+                     'border-radius:10px;font-size:0.72em;font-weight:bold;'
+                     f'margin-left:8px;">HIT &minus;{4 * hits}</span>')
+        st.markdown(compact_html(
+            f'<div style="border:1px solid #333;border-radius:10px;padding:12px 16px;'
+            f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);'
+            f'color:#e0e0e0;margin-bottom:8px;">'
+            f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
+            f'letter-spacing:0.5px;margin-bottom:6px;">'
+            f'Leg {i} of {len(legs)} &middot; {leg["position"]}{hit_badge}</div>'
+            f'<div style="font-size:16px;font-weight:600;">'
+            f'<span style="color:#f87171;">{leg["out_player"]}</span> '
+            f'<span style="color:#9ca3af;">£{leg["out_price"]:.1f}m</span>'
+            f' &nbsp;→&nbsp; '
+            f'<span style="color:#00ff87;">{leg["in_player"]}</span> '
+            f'<span style="color:#9ca3af;">£{leg["in_price"]:.1f}m</span>'
+            f'<span style="float:right;color:{delta_color};font-weight:700;">{delta_txt}</span>'
+            f'</div>'
+            f'<div style="color:#aaa;font-size:12px;margin-top:6px;">'
+            f'{_plan_leg_rationale(leg, plan["released"])}</div>'
+            f'</div>'
+        ), unsafe_allow_html=True)
+
+    frontier = plan.get("frontier") or []
+    if len(frontier) > 1:
+        parts = []
+        seen = set()
+        for e in frontier:
+            if e["n_changes"] in seen:
+                continue
+            seen.add(e["n_changes"])
+            label = f"{e['n_changes']} tf"
+            if e["hits"]:
+                label += f" (−{4 * e['hits']})"
+            parts.append(f"{label} **{e['gain']:+.1f}**")
+        extra = ""
+        if max(e["n_changes"] for e in frontier) < max(e["k"] for e in frontier):
+            extra = " — more transfers than that gain nothing"
+        st.caption("Worth per number of transfers: " + " · ".join(parts) + extra)
 
 
 def _selling_price(row) -> float:
@@ -1712,6 +2143,10 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         suggestions.append({
             "position": pos_labels.get(pos, pos),
             "score_diff": score_diff,
+            # Element ids so the planner's legs can be matched against these
+            # cards without going through names.
+            "drop_id": drop_row.get("Player_ID"),
+            "add_id": add_row.get("Player_ID"),
             "drop_player": drop_row["Player"],
             "drop_full_name": drop_row.get("Full Name") or drop_row["Player"],
             "drop_team": drop_row["Team"],
@@ -1863,6 +2298,39 @@ def _build_trend_ownership_row(s: dict) -> str:
     )
 
 
+def _annotate_suggestions_against_plan(suggestions: List[Dict],
+                                        plan: Optional[Dict]) -> None:
+    """Mark where the cards and the planner agree, and where they do not.
+
+    The two sections answer different questions and optimise different things:
+    the cards rank individual swaps on positional percentiles with a sanity
+    veto, the planner maximises expected points over a set of moves. Both are
+    worth having -- the cards carry urgency, price trends, blank-gameweek
+    reasoning and the veto, none of which the planner models.
+
+    But the same swap appearing twice with a percentile `+0.03` and a points
+    `+2.4` is the app visibly disagreeing with itself, which is the failure
+    `_blended_proj` was written for: the same player read two different ways a
+    few hundred pixels apart. So say which it is.
+    """
+    if not suggestions:
+        return
+    if not plan or not plan.get("legs"):
+        for s in suggestions:
+            s["plan_status"] = None
+        return
+
+    by_out = {leg["out_id"]: leg for leg in plan["legs"]}
+    for s in suggestions:
+        leg = by_out.get(s.get("drop_id"))
+        if leg is None:
+            s["plan_status"] = None
+        elif leg["in_id"] == s.get("add_id"):
+            s["plan_status"] = ("IN PLAN", None)
+        else:
+            s["plan_status"] = ("PLAN DIFFERS", leg["in_player"])
+
+
 def _render_transfer_suggestions(suggestions: List[Dict], free_transfers: int = 1):
     """Render transfer suggestion cards using styled HTML."""
     if not suggestions:
@@ -1897,6 +2365,23 @@ def _render_transfer_suggestions(suggestions: List[Dict], free_transfers: int = 
         elif urgency == "LOW DEPTH":
             urgency_html = ('<span style="background:#ff9800;color:#fff;padding:3px 10px;border-radius:12px;'
                             'font-size:0.8em;font-weight:bold;margin-left:8px;">LOW DEPTH</span>')
+
+        # Where this card and the planner above are talking about the same
+        # drop, say whether they agree -- a silent contradiction is worse than
+        # either answer.
+        plan_status = s.get("plan_status")
+        if plan_status:
+            label, other = plan_status
+            if other:
+                urgency_html += (
+                    '<span style="background:#1e3a5f;color:#93c5fd;padding:3px 10px;'
+                    'border-radius:12px;font-size:0.8em;font-weight:bold;margin-left:8px;">'
+                    f'{label}: {other}</span>')
+            else:
+                urgency_html += (
+                    '<span style="background:#1a472a;color:#4ecca3;padding:3px 10px;'
+                    'border-radius:12px;font-size:0.8em;font-weight:bold;margin-left:8px;">'
+                    f'{label}</span>')
 
         card_html = f"""
         <div style="border: 1px solid #444; border-radius: 10px; padding: 16px; margin-bottom: 12px;
@@ -2325,22 +2810,95 @@ def show_classic_transfers_page():
     available = available.sort_values("Transfer Score", ascending=False)
 
     # ---------------------------
-    # TRANSFER SUGGESTION CARDS
+    # TRANSFER PLANNER
     # ---------------------------
     _render_blank_gw_alert(squad_df, blanking_team_ids, current_gw)
 
+    # Above the suggestion cards: this decides how many transfers you are
+    # spending, and it is the stronger recommendation -- it is denominated in
+    # expected points where the cards below rank on positional percentiles.
+    st.subheader("Transfer Planner")
+    st.caption(
+        "The best squad reachable from yours in a given number of transfers, "
+        "maximising **expected points** — so it can propose selling a premium "
+        "to fund a better one elsewhere, which ranking by percentile cannot."
+    )
+
+    _init_plan_weight_state()
+    c_now, c_next, c_hits = st.columns([2, 2, 2])
+    with c_now:
+        st.slider("This Gameweek %", 0, 100, key=_W_NOW_KEY, step=5,
+                  on_change=_sync_plan_weight_from_now)
+    with c_next:
+        st.slider("Next 3 Gameweeks % (incl. this one)", 0, 100,
+                  key=_W_NEXT3_KEY, step=5, on_change=_sync_plan_weight_from_next3)
+    with c_hits:
+        max_extra_hits = st.slider(
+            "Allow extra transfers (−4 each)", 0, 2, 0, key=_EXTRA_HITS_KEY,
+            help="A hit is only ever proposed when it wins on points after the "
+                 "4 is subtracted.")
+
+    _w_now = st.session_state[_W_NOW_KEY] / 100.0
+    _w_next3 = st.session_state[_W_NEXT3_KEY] / 100.0
+    _horizon = plan_horizon(_w_now, _w_next3)
+    st.caption(
+        f"Split: **{st.session_state[_W_NOW_KEY]}% this gameweek / "
+        f"{st.session_state[_W_NEXT3_KEY]}% next 3 gameweeks** — the two always "
+        f"total 100%, and \"next 3\" includes this one. The split also sets how "
+        f"long a −4 hit has to pay itself back: at this setting, "
+        f"**{_horizon:.1f} gameweeks**."
+    )
+
+    transfer_plan = None
+    if free_transfers + max_extra_hits >= 1:
+        try:
+            with st.spinner("Solving…"):
+                _plan_pool = build_plan_pool(all_players, squad_df, _w_now, _w_next3)
+                transfer_plan = build_transfer_plan(
+                    _plan_pool, squad_df, bank,
+                    free_transfers=free_transfers,
+                    max_extra_hits=max_extra_hits,
+                    w_now=_w_now, w_next3=_w_next3,
+                )
+        except Exception as exc:
+            # A solver failure must not take the page down. Fall back to the
+            # brute-force pair, captioned so a degraded answer is never mistaken
+            # for the real one.
+            _logger.exception("Transfer planner failed: %s", exc)
+            transfer_plan = None
+            if free_transfers >= 2:
+                multi_plan = _build_multi_transfer_plan(
+                    squad_df, available, bank, depth_map=depth_map)
+                if multi_plan:
+                    st.caption(
+                        "⚠️ The optimizer was unavailable, so this is the older "
+                        "percentile-based pair rather than the points-optimal plan."
+                    )
+                    _render_multi_transfer_plan(multi_plan, free_transfers=free_transfers)
+    else:
+        st.info(
+            "You have no free transfers this gameweek. Raise the slider above "
+            "to see what a −4 hit would buy."
+        )
+
+    _render_transfer_plan(transfer_plan, free_transfers, _w_now, _w_next3)
+
+    st.markdown("---")
+
+    # ---------------------------
+    # TRANSFER SUGGESTION CARDS
+    # ---------------------------
+    st.caption(
+        "Individual swaps, ranked by positional percentile and filtered by the "
+        "sanity veto. They answer \"what single move is worth making\"; the "
+        "planner above answers \"what set of moves\"."
+    )
     suggestions = _build_transfer_suggestions(
         squad_df, available, bank, top_n=3, depth_map=depth_map,
         free_transfers=free_transfers, blanking_team_ids=blanking_team_ids,
     )
+    _annotate_suggestions_against_plan(suggestions, transfer_plan)
     _render_transfer_suggestions(suggestions, free_transfers=free_transfers)
-
-    # 2-Transfer Plan (only when both FTs banked)
-    if free_transfers >= 2:
-        multi_plan = _build_multi_transfer_plan(squad_df, available, bank, depth_map=depth_map)
-        if multi_plan:
-            st.markdown("")
-            _render_multi_transfer_plan(multi_plan, free_transfers=free_transfers)
 
     st.markdown("---")
 
