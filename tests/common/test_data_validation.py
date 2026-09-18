@@ -27,6 +27,7 @@ from scripts.common.data_validation import (
     check_resolved_squad,
     check_blended_projections,
     check_free_transfers,
+    check_transfer_plan,
 )
 
 
@@ -937,3 +938,146 @@ class TestCheckFreeTransfers:
         page has to say so rather than clamp to zero silently."""
         issues = check_free_transfers(2, gameweek=5, logged=3)
         assert _warnings(issues) and not _errors(issues)
+
+
+class TestCheckTransferPlan:
+    """A plan is a set of moves made together, so every rule is joint.
+
+    The brute-force planner this validates the replacement for shipped three
+    ways of being individually plausible and collectively impossible: two adds
+    each affordable alone against one pot, two legs naming the same incoming
+    player, and two adds from one club taking it to four.
+    """
+
+    @staticmethod
+    def _good():
+        return {
+            "legs": [
+                {"out_id": 1, "in_id": 101, "out_player": "Haaland",
+                 "in_player": "Wissa", "position": "F",
+                 "out_price": 14.5, "in_price": 7.5, "delta": -1.0},
+                {"out_id": 2, "in_id": 102, "out_player": "Gray",
+                 "in_player": "Salah", "position": "M",
+                 "out_price": 7.0, "in_price": 14.0, "delta": 3.0},
+            ],
+            "max_changes": 2, "free_transfers": 2, "hits": 0,
+            "bank_before": 0.8, "bank_after": 0.8,
+            "gain_net": 2.0, "horizon_gws": 2.2,
+        }
+
+    def test_a_workable_plan_is_silent(self):
+        assert check_transfer_plan(self._good()) == []
+
+    def test_no_plan_is_an_error(self):
+        assert _errors(check_transfer_plan(None))
+        assert _errors(check_transfer_plan({}))
+
+    def test_more_legs_than_allowed_is_an_error(self):
+        """The silent one: an owned player filtered out of the pool grants a
+        transfer the change constraint never counts."""
+        plan = dict(self._good(), max_changes=1)
+        assert _errors(check_transfer_plan(plan))
+
+    def test_the_hit_count_must_match_the_legs(self):
+        plan = dict(self._good(), free_transfers=1)  # 2 legs, 1 free, 0 hits claimed
+        assert _errors(check_transfer_plan(plan))
+
+    def test_selling_the_same_player_twice_is_an_error(self):
+        plan = self._good()
+        plan["legs"][1]["out_id"] = plan["legs"][0]["out_id"]
+        assert _errors(check_transfer_plan(plan))
+
+    def test_buying_the_same_player_twice_is_an_error(self):
+        plan = self._good()
+        plan["legs"][1]["in_id"] = plan["legs"][0]["in_id"]
+        assert _errors(check_transfer_plan(plan))
+
+    def test_selling_and_buying_one_player_is_an_error(self):
+        plan = self._good()
+        plan["legs"][1]["in_id"] = plan["legs"][0]["out_id"]
+        assert _errors(check_transfer_plan(plan))
+
+    def test_a_negative_bank_is_an_error(self):
+        """Both incoming players come out of one pot."""
+        plan = dict(self._good(), bank_after=-0.3)
+        assert _errors(check_transfer_plan(plan))
+
+    def test_bank_arithmetic_must_agree_with_the_legs(self):
+        plan = dict(self._good(), bank_after=5.0)
+        assert _errors(check_transfer_plan(plan))
+
+    def test_a_sequence_that_dips_negative_warns(self):
+        """Affordable as a set, not in that order -- the manager can reorder."""
+        plan = self._good()
+        plan["legs"].reverse()  # buy Salah before selling Haaland
+        issues = check_transfer_plan(plan)
+        assert _warnings(issues) and not _errors(issues)
+
+    def test_a_plan_that_loses_points_is_an_error(self):
+        """Why propose it? The percentile objective could rank a plan well
+        while it lost points, and nothing downstream could tell."""
+        plan = dict(self._good(), gain_net=-0.5)
+        assert _errors(check_transfer_plan(plan))
+
+    def test_an_implausibly_large_gain_warns(self):
+        """The signature of a 3-gameweek total used as a per-gameweek rate."""
+        plan = dict(self._good(), gain_net=60.0)
+        assert _warnings(check_transfer_plan(plan))
+
+    def test_a_horizon_outside_one_to_three_is_an_error(self):
+        assert _errors(check_transfer_plan(dict(self._good(), horizon_gws=4.5)))
+        assert _errors(check_transfer_plan(dict(self._good(), horizon_gws=0.5)))
+
+    def test_prices_in_tenths_are_an_error(self):
+        plan = self._good()
+        plan["legs"][0]["in_price"] = 75.0
+        assert _errors(check_transfer_plan(plan))
+
+    def test_a_non_finite_delta_is_an_error(self):
+        plan = self._good()
+        plan["legs"][0]["delta"] = float("nan")
+        assert _errors(check_transfer_plan(plan))
+
+    def test_a_leg_swapping_across_positions_is_an_error(self):
+        """FPL's squad is fixed at 2/5/5/3, so a forward cannot become a
+        midfielder. Reading one `position` field for both sides made this
+        check compare a list with itself."""
+        plan = self._good()
+        plan["legs"][0]["out_position"] = "F"
+        plan["legs"][0]["in_position"] = "M"
+        plan["legs"][1]["out_position"] = "M"
+        plan["legs"][1]["in_position"] = "M"
+        assert _errors(check_transfer_plan(plan))
+
+    def test_legs_that_stay_within_position_pass(self):
+        plan = self._good()
+        for leg in plan["legs"]:
+            leg["out_position"] = leg["in_position"] = leg["position"]
+        assert check_transfer_plan(plan) == []
+
+    def test_the_resulting_squad_must_be_legal(self):
+        positions = ["G"] * 2 + ["D"] * 5 + ["M"] * 5 + ["F"] * 3
+        squad = pd.DataFrame({
+            "Player_ID": list(range(15)),
+            "Position": positions,
+            "Team": ["T1"] * 5 + ["T%d" % i for i in range(10)],  # 5 from one club
+        })
+        assert _errors(check_transfer_plan(self._good(), squad_after=squad))
+
+    def test_a_legal_resulting_squad_passes(self):
+        positions = ["G"] * 2 + ["D"] * 5 + ["M"] * 5 + ["F"] * 3
+        squad = pd.DataFrame({
+            "Player_ID": list(range(15)),
+            "Position": positions,
+            "Team": ["T%d" % i for i in range(15)],
+        })
+        assert check_transfer_plan(self._good(), squad_after=squad) == []
+
+    def test_a_duplicated_pick_in_the_result_is_an_error(self):
+        positions = ["G"] * 2 + ["D"] * 5 + ["M"] * 5 + ["F"] * 3
+        squad = pd.DataFrame({
+            "Player_ID": [0] + list(range(14)),
+            "Position": positions,
+            "Team": ["T%d" % i for i in range(15)],
+        })
+        assert _errors(check_transfer_plan(self._good(), squad_after=squad))
