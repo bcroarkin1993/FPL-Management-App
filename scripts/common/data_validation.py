@@ -42,6 +42,7 @@ __all__ = [
     "check_pl_content",
     "check_resolved_squad",
     "check_free_transfers",
+    "check_transfer_plan",
     "format_issues",
     "raise_on_error",
 ]
@@ -565,25 +566,14 @@ _MIN_BUDGET_SPEND = 0.95
 _SQUAD_POSITION_QUOTA = {"G": 2, "D": 5, "M": 5, "F": 3}
 
 
-def check_initial_squad(squad_df: Optional[pd.DataFrame], budget: float,
-                        exp_points_col: str = "ExpPts") -> List[Issue]:
-    """Assert an optimized 15-man Classic squad is legal and sensibly priced.
+def _check_squad_legality(squad_df: pd.DataFrame, check: str) -> List[Issue]:
+    """FPL's rulebook applied to a 15-man squad: size, quotas, XI, club limit.
 
-    Beyond the FPL rulebook, this catches a scale-free objective. When the ILP
-    maximizes positional percentiles instead of expected points, percentile has
-    no headroom above ~1.0, so a premium can never repay its price: the solver
-    buys a flat mid-price squad, leaves money in the bank, and puts real money on
-    the bench. Underspend is the visible symptom of that.
+    Shared rather than restated. The same four rules have to hold for a squad
+    an optimizer built and for a squad a transfer plan arrives at, and a second
+    copy is a second thing to drift.
     """
-    check = "initial_squad"
     issues: List[Issue] = []
-
-    if squad_df is None or not isinstance(squad_df, pd.DataFrame) or squad_df.empty:
-        return [Issue(
-            check, "error", "squad is empty",
-            "The ILP returned no solution. Check budget, eligibility filters, "
-            "and that the score column has non-zero values.",
-        )]
 
     if len(squad_df) != 15:
         issues.append(Issue(
@@ -624,6 +614,31 @@ def check_initial_squad(squad_df: Optional[pd.DataFrame], budget: float,
                 "FPL allows at most 3 per club. If the team column contains "
                 "placeholders like '???', unresolved players collide into one bucket.",
             ))
+
+    return issues
+
+
+def check_initial_squad(squad_df: Optional[pd.DataFrame], budget: float,
+                        exp_points_col: str = "ExpPts") -> List[Issue]:
+    """Assert an optimized 15-man Classic squad is legal and sensibly priced.
+
+    Beyond the FPL rulebook, this catches a scale-free objective. When the ILP
+    maximizes positional percentiles instead of expected points, percentile has
+    no headroom above ~1.0, so a premium can never repay its price: the solver
+    buys a flat mid-price squad, leaves money in the bank, and puts real money on
+    the bench. Underspend is the visible symptom of that.
+    """
+    check = "initial_squad"
+    issues: List[Issue] = []
+
+    if squad_df is None or not isinstance(squad_df, pd.DataFrame) or squad_df.empty:
+        return [Issue(
+            check, "error", "squad is empty",
+            "The ILP returned no solution. Check budget, eligibility filters, "
+            "and that the score column has non-zero values.",
+        )]
+
+    issues.extend(_check_squad_legality(squad_df, check))
 
     if "Price" in squad_df.columns and budget:
         cost = float(pd.to_numeric(squad_df["Price"], errors="coerce").sum())
@@ -1817,5 +1832,213 @@ def check_free_transfers(computed: Optional[int],
                 "The excess costs 4 points each. That is a legitimate state, "
                 "but the page must say so rather than clamping to zero and "
                 "letting the hit go unmentioned."))
+
+    return issues
+
+
+# --------------------------------------------------------------------------
+# Multi-transfer plans
+# --------------------------------------------------------------------------
+
+#: A transfer moves one player for another, so a leg is worth a point or two a
+#: gameweek, not a hatful. Above roughly this per transfer per gameweek the
+#: objective has been scaled wrong -- the usual way being a 3-gameweek total
+#: used as a per-gameweek rate, or the horizon multiplier applied twice.
+_MAX_PLAUSIBLE_GAIN_PER_TRANSFER_PER_GW = 4.0
+
+#: Above this a "price" is in tenths, not millions.
+_MAX_PLAUSIBLE_PLAYER_PRICE = 30.0
+
+
+def check_transfer_plan(plan: Optional[dict],
+                        squad_after: Optional[pd.DataFrame] = None) -> List[Issue]:
+    """Is this multi-transfer plan one a manager could actually make?
+
+    A plan is proposed as a set of moves made together, so every rule is joint.
+    The brute-force version this validates replacements for shipped three
+    separate ways of being individually plausible and collectively impossible:
+    two adds each affordable alone against one pot, two legs naming the same
+    incoming player, and two adds from one club taking it to four.
+
+    The gain check is the one that matters most. The old objective was a sum of
+    positional *percentiles*, which saturate near the top and invert across
+    positions -- so a plan could rank well while losing points, and nothing
+    downstream could tell. A plan that does not gain points has no business
+    being recommended, and that is an error, not a warning.
+
+    `plan` carries `legs` (each with `out_id`, `in_id`, `out_player`,
+    `in_player`, `position`, `out_price`, `in_price`), `max_changes`,
+    `free_transfers`, `hits`, `bank_before`, `bank_after`, `gain_net` and
+    `horizon_gws`.
+    """
+    check = "transfer_plan"
+    issues: List[Issue] = []
+
+    if not plan:
+        return [Issue(check, "error", "No transfer plan to check.",
+                      "An empty plan must not reach the renderer as a plan; "
+                      "'hold your free transfer' is a different answer.")]
+
+    legs = plan.get("legs") or []
+    max_changes = plan.get("max_changes")
+    free_transfers = plan.get("free_transfers")
+    hits = plan.get("hits")
+
+    if max_changes is not None and len(legs) > int(max_changes):
+        issues.append(Issue(
+            check, "error",
+            "Plan uses %d transfers but was limited to %d."
+            % (len(legs), max_changes),
+            "The change constraint counts kept players out of 15, so an owned "
+            "player filtered out of the candidate pool grants a transfer that "
+            "is never counted. The symptom is silent -- every leg looks fine."))
+
+    if hits is not None and free_transfers is not None:
+        expected = max(0, len(legs) - int(free_transfers))
+        if int(hits) != expected:
+            issues.append(Issue(
+                check, "error",
+                "Plan reports %d hit(s) for %d transfers against %d free; "
+                "expected %d." % (hits, len(legs), free_transfers, expected),
+                "The cost shown to the user and the cost in the objective have "
+                "to be the same number, or the plan was chosen against a price "
+                "it is not charged."))
+
+    out_ids = [leg.get("out_id") for leg in legs]
+    in_ids = [leg.get("in_id") for leg in legs]
+
+    if len(set(out_ids)) != len(out_ids):
+        issues.append(Issue(
+            check, "error", "The same player is sold twice.",
+            "The out/in pairing is not a bijection -- check the squad diff."))
+    if len(set(in_ids)) != len(in_ids):
+        issues.append(Issue(
+            check, "error", "The same player is bought twice.",
+            "Two legs naming one incoming player is a plan that cannot be "
+            "submitted. This is what claiming a target per drop, with no "
+            "shared record of what was claimed, produces."))
+
+    both = set(out_ids) & set(in_ids)
+    if both:
+        issues.append(Issue(
+            check, "error",
+            "Player(s) both sold and bought in one plan: %s" % sorted(both),
+            "Structurally impossible out of the ILP, where a player is one "
+            "variable -- so this means the diff is wrong, most likely a "
+            "duplicated pick in the squad it started from."))
+
+    # Read both sides. Comparing `leg["position"]` against itself is a check
+    # that can never fail, which is worse than no check.
+    out_pos = sorted(str(leg.get("out_position", leg.get("position"))) for leg in legs)
+    in_pos = sorted(str(leg.get("in_position", leg.get("position"))) for leg in legs)
+    if out_pos != in_pos:
+        issues.append(Issue(
+            check, "error",
+            "Positions sold (%s) do not match positions bought (%s)."
+            % (", ".join(out_pos), ", ".join(in_pos)),
+            "FPL's squad is fixed at 2/5/5/3, so the two multisets must be "
+            "equal. A mismatch means the position quotas did not bind, and the "
+            "resulting squad cannot be registered."))
+
+    for leg in legs:
+        for side in ("out_price", "in_price"):
+            price = leg.get(side)
+            if price is not None and float(price) > _MAX_PLAUSIBLE_PLAYER_PRICE:
+                issues.append(Issue(
+                    check, "error",
+                    "%s of %.1f for %s is not a price in millions."
+                    % (side, float(price), leg.get("out_player") or leg.get("in_player")),
+                    "Prices are in tenths somewhere upstream. The budget "
+                    "comparison and the 4.5 cheap-bench threshold both assume "
+                    "millions."))
+        delta = leg.get("delta")
+        if delta is not None and not math.isfinite(float(delta)):
+            issues.append(Issue(
+                check, "error",
+                "Leg %s -> %s has a non-finite points delta."
+                % (leg.get("out_player"), leg.get("in_player")),
+                "A missing projection became NaN rather than zero, so this "
+                "player was effectively chosen at random."))
+
+    bank_after = plan.get("bank_after")
+    if bank_after is not None and float(bank_after) < -1e-6:
+        issues.append(Issue(
+            check, "error",
+            "Plan leaves £%.1fm in the bank." % float(bank_after),
+            "Both incoming players come out of one pot -- bank plus *both* "
+            "selling prices. Testing each add against the whole pot "
+            "independently proposes pairs that are each affordable alone."))
+
+    bank_before = plan.get("bank_before")
+    if bank_before is not None and bank_after is not None and legs:
+        expected = float(bank_before) + sum(
+            float(leg.get("out_price", 0) or 0) - float(leg.get("in_price", 0) or 0)
+            for leg in legs)
+        if abs(expected - float(bank_after)) > 0.05:
+            issues.append(Issue(
+                check, "error",
+                "Bank arithmetic disagrees: £%.1fm stated, £%.1fm implied by "
+                "the legs." % (float(bank_after), expected),
+                "The funding line and the plan are describing different "
+                "moves."))
+
+        # Staged one at a time in FPL's own UI, the running bank must hold up.
+        running = float(bank_before)
+        for leg in legs:
+            running += float(leg.get("out_price", 0) or 0) - float(leg.get("in_price", 0) or 0)
+            if running < -1e-6:
+                issues.append(Issue(
+                    check, "warning",
+                    "Bank goes negative at leg %s -> %s in the order given."
+                    % (leg.get("out_player"), leg.get("in_player")),
+                    "Affordable as a set but not in this sequence. Order the "
+                    "legs by net cost ascending so the money-freeing ones come "
+                    "first; a manager can also just reorder them."))
+                break
+
+    horizon = plan.get("horizon_gws")
+    if horizon is not None and not (1.0 - 1e-6 <= float(horizon) <= 3.0 + 1e-6):
+        issues.append(Issue(
+            check, "error",
+            "Horizon of %.2f gameweeks is outside 1-3." % float(horizon),
+            "It is a convex combination of a 1-gameweek and a 3-gameweek view, "
+            "so outside that range the weights do not sum to 1."))
+
+    gain = plan.get("gain_net")
+    if gain is not None and legs:
+        gain = float(gain)
+        if gain <= 0:
+            issues.append(Issue(
+                check, "error",
+                "Plan spends %d transfer(s) to gain %.2f points."
+                % (len(legs), gain),
+                "Why propose it? Either the objective is degenerate -- an "
+                "all-NaN score column, or percentiles that saturate so a "
+                "points-positive move cannot win -- or the baseline it is "
+                "measured against is not the same objective."))
+        elif horizon is not None:
+            ceiling = (_MAX_PLAUSIBLE_GAIN_PER_TRANSFER_PER_GW
+                       * float(horizon) * max(1, len(legs)))
+            if gain > ceiling:
+                issues.append(Issue(
+                    check, "warning",
+                    "Plan claims %.1f points from %d transfer(s) over %.1f "
+                    "gameweeks." % (gain, len(legs), float(horizon)),
+                    "That is more than a transfer can plausibly be worth. The "
+                    "usual cause is a 3-gameweek total used as a per-gameweek "
+                    "rate, or the horizon multiplier applied twice."))
+
+    if squad_after is not None and isinstance(squad_after, pd.DataFrame) \
+            and not squad_after.empty:
+        issues.extend(_check_squad_legality(squad_after, check))
+        if "Player_ID" in squad_after.columns:
+            dup = squad_after["Player_ID"].duplicated()
+            if dup.any():
+                issues.append(Issue(
+                    check, "error",
+                    "Resulting squad contains the same player twice: %s"
+                    % sorted(squad_after.loc[dup, "Player_ID"].tolist()),
+                    "The signature of a transfer replayed onto a squad that "
+                    "had already had it applied."))
 
     return issues

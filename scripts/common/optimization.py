@@ -483,6 +483,11 @@ def pair_transfer_legs(outs: pd.DataFrame, ins: pd.DataFrame,
             in_price = float(i.get(in_price_col, 0) or 0)
             legs.append({
                 "position": pos,
+                # Both sides carried separately so a validator can assert they
+                # agree. A single `position` field makes that check compare a
+                # list with itself.
+                "out_position": o.get(position_col),
+                "in_position": i.get(position_col),
                 "out_id": o.get(id_col), "out_player": o.get(name_col),
                 "out_price": out_price,
                 "in_id": i.get(id_col), "in_player": i.get(name_col),
