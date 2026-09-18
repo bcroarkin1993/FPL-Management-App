@@ -275,13 +275,25 @@ def normalise_my_team(raw: dict) -> dict:
         "event_transfers": transfers.get("made", 0),
         "event_transfers_cost": transfers.get("cost", 0),
     }
-    # FPL states the free-transfer count outright on this payload. Everything
-    # else has to reconstruct it by replaying the season's transfer history and
-    # knowing the banking rules; this is the same number without the guesswork.
-    # It is absent (or null) while a chip grants unlimited transfers, so a
-    # missing key means "reconstruct", never "zero".
+    # FPL states the free-transfer allowance outright on this payload.
+    # Everything else has to reconstruct it by replaying the season's transfer
+    # history and knowing the banking rules; this is the same number without
+    # the guesswork. It is absent (or null) while a chip grants unlimited
+    # transfers, so a missing key means "reconstruct", never "zero".
+    #
+    # `limit` is the gameweek's *allowance*, not what is left: the payload
+    # `{"limit": 1, "made": 2, "cost": 4}` is one free transfer, two made and a
+    # four-point hit. The remaining count is `limit - made`, computed by
+    # `_compute_free_transfers()`.
     if transfers.get("limit") is not None:
         entry_history["event_transfers_limit"] = transfers["limit"]
+
+    # `status` is FPL's own answer to "does the next transfer cost anything?"
+    # ("free" / "cost"). It is carried so the reading of `limit` above can be
+    # cross-checked against it rather than trusted -- a disagreement means the
+    # semantics changed, and a log line is how we find that out.
+    if transfers.get("status") is not None:
+        entry_history["event_transfers_status"] = transfers["status"]
 
     return {
         "picks": picks_out,
