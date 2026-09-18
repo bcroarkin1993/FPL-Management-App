@@ -1331,6 +1331,63 @@ available the conditional value is recovered by dividing the start rate back
 out. `tests/live/` pins the relationship so a change at FFP surfaces as a
 failure rather than a quiet re-scaling.
 
+### Classic Transfers — the page rebuilds itself on every keystroke
+
+`scripts/classic/transfers.py`. Streamlit reruns the whole page function on any
+widget interaction, so anything expensive at page scope is paid again for every
+dropdown change -- and the in-week transfer logger sits behind two dropdowns.
+It locked up between clicks.
+
+**`_add_projections()` was matching more players than there were rows to
+match.** It scanned the whole projections frame per player, scored every row
+with `fuzz.ratio` and accepted any hit at **60**, with team and position
+contributing a +15 nudge rather than scoping the search -- and nothing stopped
+one reference row being claimed twice. Measured live against a 659-player pool
+and Rotowire's 220 rows: **323 players held a projection, 172 of them another
+player's**. David Raya (ARS, GK) shared a row with Rayan, Allan and Gray;
+Ødegaard with Merino, Martinelli and Nørgaard; eight goalkeepers shared one row
+between them. `Projected_Points` feeds `_blended_proj()`, the suggestion cards
+and the sanity veto, so real players were scored on other players' numbers --
+silently, because every value involved was plausible.
+
+It now goes through `_claim_reference_rows()` like every other cross-source
+merge in the app (see "Player Matching"): 220 of 220 rows matched, none shared,
+Raya corrected from 4.57 to his own 4.14, and **5.91s → 0.05s**. Of the 107
+players who lost a projection, 105 had been sharing a value with someone else;
+the rest are Rotowire omissions, which is the "not expected to start" signal and
+the correct answer. Four were *gained* -- Alisson ("A.Becker"), Isak, Enzo, Ajer
+-- full legal names the fuzzy ladder never reached.
+
+The matcher wants the full legal name in `Player` and the short form in
+`Web_Name`; this page's frames carry them the other way round, under `Full Name`
+and `Player`. Probe with a renamed copy rather than renaming the frame, which
+every merge on the page keys on.
+
+**FDR is a property of the club.** `df["Team_ID"].apply(_avg_fdr_for_team)` ran
+the lookup ~700 times -- each a `dropna`, an `astype`, a filter, a `.copy()` and
+an `iterrows()` over the fixture table -- to produce twenty distinct answers.
+`_avg_fdr_by_team()` computes the twenty and `.map()`s them: **1.77s → 0.07s**.
+That also makes `_build_all_players_df()` cheap enough that caching it is not
+worth the cost of hashing the bootstrap dict.
+
+**The logging form.** Both selectboxes now live in an `st.form`, so nothing runs
+until submit. That costs the ability to narrow the incoming list to the outgoing
+player's position -- a form cannot react to its own widgets -- so the list
+carries every position with the position in the label and the match is checked
+on submit. One clear error after submit beats a full page rebuild per click.
+
+`_validate_pending_transfer()` checks what FPL would: positions match, the
+player is not already owned, three per club counted *after* the outgoing player
+has left, and `bank + selling price >= cost`. `_add_pending_local()` stored
+whatever it was handed, so a mis-click was persisted as fact and surfaced much
+later as `check_resolved_squad()` reporting an illegal squad.
+
+Two smaller things: the "transfer not applied" branch dumped element ids, the
+source gameweek and the entire squad into the UI -- diagnostics for whoever
+debugs this, not for the user, so they go to the log; and `_sync_pending_local()`
+rewrote `.fpl_pending_transfers.json` on every page load whether or not anything
+had cleared.
+
 ### Waiver Wire names come from the bootstrap, not the frame
 
 Every frame on that page carries whichever name its source publishes — the Draft
