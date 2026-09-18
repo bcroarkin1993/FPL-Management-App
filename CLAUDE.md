@@ -1331,6 +1331,117 @@ available the conditional value is recovered by dividing the start rate back
 out. `tests/live/` pins the relationship so a change at FFP surfaces as a
 failure rather than a quiet re-scaling.
 
+### Multi-Transfer Planner — the best squad reachable in K transfers
+
+`build_plan_pool()` / `build_transfer_plan()` (`classic/transfers.py`), on
+`solve_squad_ilp()`'s transfer mode (`optimization.py`, pure).
+
+**The objective is expected points, not percentiles — the same lesson as
+"Initial Squad Model", for the same reason.** `_build_multi_transfer_plan()`
+summed `Transfer Score - Keep Score`, which are positional percentiles. They
+saturate near the top (Haaland's 213.7 season points against a mid-price
+midfielder's 178.3 is 0.974 against 0.977, so the premium ranks *lower*) and
+invert across positions (best of 32 forwards 0.969, best of 48 midfielders
+0.979). A points-positive reallocation cannot win a percentile contest.
+
+Two more limits went with it. Drops came from
+`squad_df.nsmallest(6, "Keep Score")`, so a premium was never a candidate to
+sell -- on the worked example the drop pool is six bench fillers and the
+function returns *nothing at all*. And it was fixed at two legs behind a
+`free_transfers >= 2` gate, so 3, 4 and 5 banked all got the same answer.
+
+Together those made the move that justifies banking transfers unreachable: sell
+a premium forward and a mid-price midfielder, buy a premium midfielder and a
+cheaper forward. Each leg looks like a downgrade; the pair gains points.
+`TestWhatTheOldPlannerCouldNotDo` pins the contrast rather than only asserting
+the new behaviour.
+
+**The frontier, not a single K.** Every K from 0 is solved. K=0 is the
+*baseline*, computed with the identical objective -- `find_optimal_lineup()` is
+greedy and has no captain or bench term, so comparing against it manufactures a
+fraction of a point of gain for a plan that changes nothing. It is also the
+feasibility canary: pricing kept players at their selling price makes K=0
+feasible by construction, so a failure there means the squad is illegal as
+loaded. ~0.06s a solve against a 659-player pool, so the whole frontier is under
+half a second, and it answers the more useful question -- measured live: 1
+transfer +3.6, 2 +6.9, 3 +8.7, and a 4th gains nothing.
+
+**`H_eff` is why a hit is ever recommended.** `Plan_Rate` is points **per
+gameweek**; a -4 hit is points **once**. Subtracting 4 from a per-gameweek
+objective asks "does this gain 4 points every week?" -- a 3x too strict test at
+a 3-gameweek horizon, which would never take a hit. The squad term is
+multiplied by `plan_horizon()` (`w_now x 1 + w_next3 x 3`). It is a positive
+constant, so it does not change *which* squad is optimal at a fixed hit count:
+the weights choose the squad, the horizon chooses whether to pay for it. The
+page states it outright -- "at this setting, a -4 has 2.2 gameweeks to pay
+itself back".
+
+**`Proj_Next3` includes the current gameweek**, per "Fantasy Football Pundit
+feed", so it is divided by 3 for a rate and the two sliders are not disjoint
+windows. And **it is on the wrong basis for a player FFP did not price**:
+`blend_multi_gw_projections` falls back to `Projected_Points x 3`, raw Rotowire,
+a *conditional* "if he starts" number, which the engine passes through
+undiscounted. So `Proj_Next3 / 3` is roughly `Proj_Start` for those players
+while `Proj` is the expected value, and weighting the horizon up would
+systematically reward rotation risks -- the same shape as `de9563a`. Until it
+is fixed upstream (emit a `MultiGW_Src` provenance column and start-discount the
+non-FFP values, which would also fix the Draft ROS score), `build_plan_scores()`
+trusts the horizon term only where FFP matched and falls back to `Proj`
+otherwise. A flat rate is wrong; an inflated one is worse.
+
+**Four things inside the ILP are load-bearing:**
+
+- **The change constraint counts kept players out of `SQUAD_SIZE`**, never
+  `len(owned_in_pool)`. An owned player missing from the pool would otherwise
+  buy a transfer that is never counted, silently -- so a missing owner raises.
+- **The pre-filter exempts owned players.** It drops `score <= 0`, and the
+  engine writes `Proj = 0.0` for an unpriced player while a blank-gameweek club
+  is zeroed outright, so a £9m injured midfielder disappeared from his own
+  squad. One dropped owner makes his sale free; two make K=1 infeasible with no
+  explanation. Scoped to transfer mode, or Free Hit / Wildcard / Initial Squad
+  would build something different.
+- **An owned player costs his *selling* price to keep.** At the market rate,
+  keeping your own squad becomes infeasible the moment prices rise above what
+  you paid. Note the public `picks` endpoint publishes **no `selling_price`** --
+  only `my-team` does -- so unauthenticated it degrades to `now_cost`, which
+  overstates funds. `entry_history.value` is not the fix: it is a snapshot from
+  the last completed gameweek, measured £1.0m adrift of live prices.
+- **The pool comes from `all_players`, never `available`.** That frame is
+  narrowed by the position multiselect and price slider -- display filters --
+  and excludes the owned 15 by construction. Deselect a position and its owned
+  players leave the pool, turning the constraint into "keep 12 of 12": a free
+  rebuild. Buy-eligibility applies to non-owned rows only, so an injured player
+  you own stays sellable.
+
+`bench_weight=0.1`, not 0: at exactly 0 the solver is indifferent between bench
+compositions with the same XI and will spend a transfer rearranging it for no
+modelled gain. The captain mechanic is on, because without it the model
+under-prices losing your captain by exactly one more copy of his score -- which
+is the whole question when the plan proposes selling him.
+
+**Legs are paired by price within position, then ordered by net cost.** The
+position multisets always match (both squads satisfy 2/5/5/3), so any bijection
+is legal and the choice is presentational. Price pairing puts the released money
+beside the money spent; ordering money-freeing legs first keeps the running bank
+non-negative as the moves are staged in FPL's own UI. **The funding line sits
+above the legs** because for a reallocation the plan's value is invisible in any
+single one of them.
+
+The single-transfer cards stay, above/below annotated `IN PLAN` or
+`PLAN DIFFERS` -- they carry the sanity veto, urgency, price trends and
+blank-gameweek reasoning that the planner does not model, but the same swap
+showing a percentile `+0.03` and a points `+2.4` is the app visibly disagreeing
+with itself. `_build_multi_transfer_plan()` is kept as the fallback when the
+solver is unavailable, captioned so a degraded answer is not mistaken for the
+real one; its docstring encodes three real bugs and its tests are that
+regression suite.
+
+`check_transfer_plan()` (`data_validation.py`) is the tripwire. The
+load-bearing check is `gain_net <= 0` as an **error** -- a plan that loses
+points has no business being recommended, and the percentile objective could
+produce one while ranking well. Next to it, `len(legs) > max_changes` catches
+the filtered-owner bug, whose symptom is otherwise silent.
+
 ### Classic Transfers — the page rebuilds itself on every keystroke
 
 `scripts/classic/transfers.py`. Streamlit reruns the whole page function on any
