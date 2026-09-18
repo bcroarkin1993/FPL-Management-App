@@ -11,7 +11,6 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
-from fuzzywuzzy import fuzz
 
 from scripts.common.error_helpers import show_api_error
 from scripts.common.utils import (
@@ -30,6 +29,7 @@ from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import compact_html
 from scripts.common.transfer_sanity import sanity_check_suggestion
 from scripts.common.analytics import (
+    _claim_reference_rows,
     compute_player_scores,
     compute_healthy_form,
     _fetch_element_history,
@@ -42,7 +42,6 @@ from scripts.common.analytics import (
     blend_projections_onto,
 )
 from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings, render_ffp_status
-from scripts.common.player_matching import canonical_normalize
 from scripts.common.cache import purge_cache_prefix
 from scripts.common.fpl_auth import fetch_my_team
 from scripts.common.classic_squad import (
@@ -137,8 +136,12 @@ def _sync_pending_local(team_id, api_transfers: list, _state=None) -> list:
         if not (t.get("team_id") == team_id
                 and (t.get("element_out"), t.get("element_in"), t.get("event", 0)) in confirmed)
     ]
+    # Only write when something actually cleared. This runs on every page load,
+    # and rewriting the file unconditionally meant every rerun touched disk to
+    # store what was already there.
+    changed = len(updated) != len(state.get(_PENDING_KEY, []))
     state[_PENDING_KEY] = updated
-    if _state is None:
+    if _state is None and changed:
         _save_pending_file(updated)
     return _get_pending_local(team_id, state)
 
@@ -224,6 +227,23 @@ def _avg_fdr_for_team(team_id: int, current_gw: int, n_weeks: int) -> Optional[f
     return float(np.mean(fdr_values)) if fdr_values else None
 
 
+def _avg_fdr_by_team(current_gw: int, n_weeks: int) -> Dict[int, Optional[float]]:
+    """`_avg_fdr_for_team` for every club at once.
+
+    FDR is a property of the club, and there are twenty of them. Mapping the
+    per-player call over a ~700-row frame ran `_get_team_fixtures` seven
+    hundred times -- each doing a `dropna`, an `astype`, a boolean filter, a
+    `.copy()` and an `iterrows()` over the whole fixture table -- to produce
+    twenty distinct answers.
+    """
+    fixtures = _load_future_fixtures()
+    if fixtures.empty:
+        return {}
+    team_ids = set(pd.to_numeric(fixtures.get("team_h"), errors="coerce").dropna().astype(int))
+    team_ids |= set(pd.to_numeric(fixtures.get("team_a"), errors="coerce").dropna().astype(int))
+    return {t: _avg_fdr_for_team(t, current_gw, n_weeks) for t in team_ids}
+
+
 def _get_fdr_color(fdr: float) -> str:
     """Get background color for FDR value."""
     if fdr is None:
@@ -240,43 +260,74 @@ def _get_fdr_color(fdr: float) -> str:
         return "#dc3545"  # Red - hard
 
 
-# Rotowire uses verbose position labels; FPL uses single chars. Normalize before comparing.
-_RW_POS_TO_FPL = {"GK": "G", "GKP": "G", "DEF": "D", "MID": "M", "FWD": "F",
-                   "F": "F", "D": "D", "M": "M", "G": "G"}
+def _add_projections(df: pd.DataFrame, projections_df: pd.DataFrame) -> pd.DataFrame:
+    """Attach Rotowire's weekly `Points` and `Pos Rank` to a player frame.
 
+    Goes through `_claim_reference_rows()` -- the shared tiered matcher -- for
+    the reasons CLAUDE.md's "Player Matching" section gives, and this callsite
+    was the last one in the app that did not.
 
-def _lookup_projection(player_name: str, team: str, position: str, projections_df: pd.DataFrame) -> dict:
-    """Look up projection for a player using fuzzy matching with canonical normalization."""
+    What it replaces was a hand-rolled ladder that scanned the whole
+    projections frame per player, scored every row with `fuzz.ratio` and
+    accepted any hit at **60**, with team and position contributing a +15 nudge
+    rather than scoping the search. Two consequences, measured live against a
+    659-player pool and Rotowire's 220 rows:
+
+    * **It matched more players than there were rows to match.** 323 players
+      were given a projection from a 220-row table: 172 of them were wearing
+      another player's numbers, because nothing stopped one reference row being
+      claimed over and over. David Raya (ARS, GK) shared a row with Rayan,
+      Allan and Gray; Ødegaard with Merino, Martinelli and Nørgaard; eight
+      goalkeepers shared one row between them. Every value on screen was
+      plausible.
+    * **It cost ~6 seconds per page load**, twice -- once for the squad and
+      once for the pool -- which is most of why logging a transfer froze: with
+      no `st.form`, every dropdown change paid it again.
+
+    `_claim_reference_rows` scopes every tier below the first two by position
+    and team, and gives one reference row to at most one player, resolving
+    contention in favour of the stronger tier.
+    """
     if projections_df is None or projections_df.empty:
-        return {"Points": None, "Pos Rank": None}
+        df["Projected_Points"] = None
+        df["Pos_Rank"] = None
+        return df
 
-    norm_target = canonical_normalize(player_name)
-    best_match = None
-    best_score = 0
+    # The matcher expects the full legal name in `Player` and the short form in
+    # `Web_Name`; this page's frames carry them the other way round, under
+    # `Full Name` and `Player`. Probe with the names it expects rather than
+    # renaming the real frame, which every merge on this page keys on.
+    probe = pd.DataFrame({
+        "Player": df["Full Name"] if "Full Name" in df.columns else df["Player"],
+        "Web_Name": df["Player"],
+        "Team": df.get("Team"),
+        "Position": df.get("Position"),
+    }, index=df.index)
 
-    for _, row in projections_df.iterrows():
-        proj_name_raw = str(row.get("Player", ""))
-        proj_team = str(row.get("Team", ""))
-        proj_pos = _RW_POS_TO_FPL.get(str(row.get("Position", "")).upper(), str(row.get("Position", "")))
+    stats: Dict = {}
+    mapping = _claim_reference_rows(
+        probe, projections_df,
+        name_col="Player", ref_name_col="Player",
+        ref_team_col="Team" if "Team" in projections_df.columns else None,
+        source_name="Rotowire weekly (classic transfers)",
+        stats=stats,
+    )
+    if stats:
+        _logger.info("Rotowire weekly: matched %s of %s rows (%.0f%%)",
+                     stats.get("matched"), stats.get("total"),
+                     100 * stats.get("rate", 0.0))
 
-        norm_proj = canonical_normalize(proj_name_raw)
-        score = fuzz.ratio(norm_target, norm_proj)
+    points = pd.Series(index=df.index, dtype="float64")
+    ranks = pd.Series(index=df.index, dtype="object")
+    for player_idx, ref_idx in mapping.items():
+        points.at[player_idx] = pd.to_numeric(
+            projections_df.at[ref_idx, "Points"], errors="coerce")
+        if "Pos Rank" in projections_df.columns:
+            ranks.at[player_idx] = projections_df.at[ref_idx, "Pos Rank"]
 
-        # Boost if team and position both match (now using normalized position)
-        if proj_team == team and proj_pos == position:
-            score += 15
-
-        if score > best_score and score >= 60:
-            best_score = score
-            best_match = row
-
-    if best_match is not None:
-        return {
-            "Points": best_match.get("Points"),
-            "Pos Rank": best_match.get("Pos Rank", "N/A"),
-        }
-
-    return {"Points": None, "Pos Rank": None}
+    df["Projected_Points"] = points
+    df["Pos_Rank"] = ranks
+    return df
 
 
 def _build_all_players_df(bootstrap: dict, current_gw: int, n_weeks: int) -> pd.DataFrame:
@@ -316,8 +367,8 @@ def _build_all_players_df(bootstrap: dict, current_gw: int, n_weeks: int) -> pd.
 
     df = pd.DataFrame(rows)
 
-    # Add average FDR for next n weeks
-    df["AvgFDR"] = df["Team_ID"].apply(lambda t: _avg_fdr_for_team(t, current_gw, n_weeks))
+    # Add average FDR for next n weeks. Twenty clubs, not seven hundred players.
+    df["AvgFDR"] = df["Team_ID"].map(_avg_fdr_by_team(current_gw, n_weeks))
 
     return df
 
@@ -358,32 +409,6 @@ def _build_squad_df(picks: list, bootstrap: dict, entry_history: dict) -> pd.Dat
         })
 
     return pd.DataFrame(rows)
-
-
-def _add_projections(df: pd.DataFrame, projections_df: pd.DataFrame) -> pd.DataFrame:
-    """Add Rotowire projections to a DataFrame."""
-    if projections_df is None or projections_df.empty:
-        df["Projected_Points"] = None
-        df["Pos_Rank"] = None
-        return df
-
-    proj_points = []
-    proj_ranks = []
-
-    for _, row in df.iterrows():
-        proj = _lookup_projection(
-            row["Player"],
-            row["Team"],
-            row["Position"],
-            projections_df
-        )
-        proj_points.append(proj["Points"])
-        proj_ranks.append(proj["Pos Rank"])
-
-    df["Projected_Points"] = proj_points
-    df["Pos_Rank"] = proj_ranks
-    return df
-
 
 
 def _compute_transfer_score(df: pd.DataFrame,
@@ -958,15 +983,71 @@ def _render_transfer_status_panel(bank: int, squad_value: int, free_transfers: i
     st.markdown("")  # spacing
 
 
+def _validate_pending_transfer(out_el: dict, in_el: dict, picks: list,
+                                elements_by_id: dict, bank: int) -> Optional[str]:
+    """Why this swap could not have been made, or None if it could.
+
+    `_add_pending_local()` stored whatever it was handed, so a mis-click was
+    persisted as fact and the resolved squad went on to fail
+    `check_resolved_squad()` -- a validation error about an illegal squad,
+    several steps removed from the typo that caused it. Checking at the point
+    of entry says what is actually wrong.
+    """
+    if not out_el or not in_el:
+        return "Could not identify one of those players."
+    if int(in_el.get("id", -1)) == int(out_el.get("id", -2)):
+        return "That is the same player on both sides."
+
+    if in_el.get("element_type") != out_el.get("element_type"):
+        pos_map = {1: "goalkeeper", 2: "defender", 3: "midfielder", 4: "forward"}
+        return ("A transfer replaces like with like: %s is a %s, %s is a %s."
+                % (out_el.get("web_name", "?"),
+                   pos_map.get(out_el.get("element_type"), "?"),
+                   in_el.get("web_name", "?"),
+                   pos_map.get(in_el.get("element_type"), "?")))
+
+    squad_ids = {p["element"] for p in picks}
+    if int(in_el.get("id", -1)) in squad_ids:
+        return "%s is already in your squad." % in_el.get("web_name", "That player")
+
+    # Three per club, counted after the outgoing player has left.
+    in_team = in_el.get("team")
+    same_club = sum(1 for p in picks
+                    if p["element"] != out_el.get("id")
+                    and elements_by_id.get(p["element"], {}).get("team") == in_team)
+    if same_club >= 3:
+        return ("That would be a fourth player from the same club, which FPL "
+                "does not allow.")
+
+    funds = int(bank or 0) + int(out_el.get("now_cost", 0) or 0)
+    cost = int(in_el.get("now_cost", 0) or 0)
+    if cost > funds:
+        return ("%s costs £%.1fm and you would have £%.1fm to spend."
+                % (in_el.get("web_name", "That player"), cost / 10, funds / 10))
+    return None
+
+
 def _render_log_transfer_ui(team_id: int, current_gw: int,
                               picks: list, elements_by_id: dict,
-                              local_pending: list) -> None:
+                              local_pending: list, bank: int = 0) -> None:
     """Expander UI to log a pending transfer before FPL's API confirms it.
 
     FPL's /api/entry/{id}/transfers/ only includes confirmed (post-deadline)
     transfers. Transfers made before the deadline won't appear until the GW
     kicks off. This UI lets the user manually log such transfers so the app
     can immediately reflect the correct squad.
+
+    **The selectboxes live in an `st.form`.** Outside one, every dropdown
+    change reruns the whole page -- and this page rebuilds a ~700-player pool
+    and re-runs its projection merges on every rerun, so picking two players
+    paid that cost three or four times over and the UI locked up between
+    clicks. Inside a form, nothing runs until submit.
+
+    That costs the ability to narrow the incoming list to the outgoing
+    player's position, since a form cannot react to its own widgets. So the
+    list carries every position with the position in the label, and the match
+    is checked on submit by `_validate_pending_transfer()` -- one clear error
+    after submit beats a full page rebuild per click.
     """
     pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
@@ -1019,46 +1100,54 @@ def _render_log_transfer_ui(team_id: int, current_gw: int,
             st.warning("Squad not loaded — reload the page.")
             return
 
-        out_idx = st.selectbox(
-            "Player Out (sorted worst → best xPts)",
-            range(len(squad_options)),
-            format_func=lambda i: squad_options[i]["label"],
-            key="pending_out",
-        )
-        out_option = squad_options[out_idx]
-        out_pos_type = out_option["element_type"]
-
-        # ── Player In: same position, sorted by price desc ───────────────────
+        # Every position, because a form cannot narrow this list in response to
+        # the Player Out choice. The position is in the label and the match is
+        # checked on submit.
         in_candidates = [
             e for e in elements_by_id.values()
-            if e.get("element_type") == out_pos_type and int(e["id"]) not in squad_ids
+            if int(e["id"]) not in squad_ids
         ]
-        in_candidates.sort(key=lambda e: e.get("now_cost", 0), reverse=True)
+        in_candidates.sort(
+            key=lambda e: (e.get("element_type", 9), -int(e.get("now_cost", 0) or 0)))
 
-        in_labels = [
-            f"{e['web_name']} (£{e.get('now_cost',0)/10:.1f}m)"
-            for e in in_candidates
-        ]
-        if not in_labels:
-            st.warning("No candidates found for this position.")
+        if not in_candidates:
+            st.warning("No candidates found.")
             return
 
-        in_idx = st.selectbox(
-            f"Player In ({pos_map.get(out_pos_type, '?')} — type to search)",
-            range(len(in_labels)),
-            format_func=lambda i: in_labels[i],
-            key="pending_in",
-        )
-        in_candidate = in_candidates[in_idx]
+        in_labels = [
+            f"{e['web_name']} ({pos_map.get(e.get('element_type'), '?')}, "
+            f"£{e.get('now_cost',0)/10:.1f}m)"
+            for e in in_candidates
+        ]
 
-        st.caption(
-            f"**Logged transfer:** {out_option['label'].split(',')[0].split('(')[0].strip()} "
-            f"→ {in_candidate.get('web_name', '?')} "
-            f"(£{in_candidate.get('now_cost',0)/10:.1f}m)"
-        )
+        with st.form("log_pending_transfer"):
+            out_idx = st.selectbox(
+                "Player Out (sorted worst → best xPts)",
+                range(len(squad_options)),
+                format_func=lambda i: squad_options[i]["label"],
+                key="pending_out",
+            )
+            in_idx = st.selectbox(
+                "Player In (type to search — must match the position above)",
+                range(len(in_labels)),
+                format_func=lambda i: in_labels[i],
+                key="pending_in",
+            )
+            submitted = st.form_submit_button("✅ Confirm & Apply Transfer",
+                                               type="primary")
 
-        if st.button("✅ Confirm & Apply Transfer", type="primary"):
-            out_name = out_option["label"].split("(")[0].strip()
+        if submitted:
+            out_option   = squad_options[out_idx]
+            in_candidate = in_candidates[in_idx]
+            out_el = elements_by_id.get(out_option["id"], {})
+
+            problem = _validate_pending_transfer(
+                out_el, in_candidate, picks, elements_by_id, bank)
+            if problem:
+                st.error(problem)
+                return
+
+            out_name = out_el.get("web_name", str(out_option["id"]))
             in_name  = in_candidate.get("web_name", "?")
             _add_pending_local(
                 team_id=team_id,
@@ -2065,19 +2154,24 @@ def show_classic_transfers_page():
                 out_name = out_el.get("web_name", str(t["element_out"]))
                 in_name  = in_el.get("web_name",  str(t["element_in"]))
                 if t["element_out"] in current_ids:
-                    st.error(
-                        f"⚠️ Transfer not applied: **{out_name}** is still in your squad "
-                        f"even though you logged **{out_name} → {in_name}**. "
-                        f"element_out={t['element_out']}, element_in={t['element_in']}, "
-                        f"event={t['event']}, picks_source_gw={picks_source_gw}, "
-                        f"fh_gws={fh_gws}. "
-                        f"Squad IDs: {sorted(current_ids)}"
+                    # The diagnostic detail (element ids, source gameweek, the
+                    # whole squad) goes to the log, not the page -- it is for
+                    # whoever debugs this, and it told the user nothing they
+                    # could act on.
+                    _logger.error(
+                        "Pending transfer not applied: element_out=%s element_in=%s "
+                        "event=%s picks_source_gw=%s fh_gws=%s squad=%s",
+                        t["element_out"], t["element_in"], t["event"],
+                        picks_source_gw, fh_gws, sorted(current_ids))
+                    st.warning(
+                        f"⚠️ **{out_name}** is still in your squad even though you "
+                        f"logged **{out_name} → {in_name}**. Remove and re-log the "
+                        f"transfer, or use Refresh to reload the squad from FPL."
                     )
                 elif t["element_in"] in current_ids:
                     st.success(f"✅ {out_name} → {in_name} applied successfully.")
-        squad_df["AvgFDR"] = squad_df["Team_ID"].apply(
-            lambda t: _avg_fdr_for_team(t, current_gw, fdr_weeks)
-        )
+        squad_df["AvgFDR"] = squad_df["Team_ID"].map(
+            _avg_fdr_by_team(current_gw, fdr_weeks))
 
         # Load projections
         projections_df = None
@@ -2253,7 +2347,8 @@ def show_classic_transfers_page():
     # Pending transfer logger — lets user manually log pre-deadline transfers.
     # Sits after the suggestions and before the squad: you read the advice, log
     # the move you made on it, and the squad below is what the log produces.
-    _render_log_transfer_ui(team_id, current_gw, picks, elements_by_id, extra_local)
+    _render_log_transfer_ui(team_id, current_gw, picks, elements_by_id, extra_local,
+                            bank=bank)
 
     # ---------------------------
     # SQUAD ANALYSIS SECTION (with depth card)
