@@ -97,12 +97,25 @@ class TestPlanScores:
         assert build_plan_scores(df, 1.0, 0.0).iloc[0] == pytest.approx(5.0)
         assert build_plan_scores(df, 0.0, 1.0).iloc[0] == pytest.approx(7.0)
 
-    def test_an_unmatched_ffp_player_falls_back_to_the_gameweek_projection(self):
-        """`blend_multi_gw_projections` falls back to Rotowire x 3, which is a
-        *conditional* "if he starts" number. Used as a rate it would inflate
-        every rotation risk; falling back to Proj loses fixture information
-        instead, which is the conservative direction."""
+    def test_the_horizon_term_is_taken_as_given(self):
+        """Correcting `Proj_Next3`'s basis is the engine's job, not this
+        function's.
+
+        This used to trust the horizon term only where FFP had matched and fall
+        back to `Proj` otherwise -- a workaround for the fallbacks reaching
+        `Proj_Next3` on a conditional basis. That is fixed upstream now (see
+        `per_source_next3_basis`), so a player Rotowire priced but FFP did not
+        keeps his fixture information instead of collapsing to a flat rate.
+        Re-introducing the workaround here would double-count the correction.
+        """
         df = pd.DataFrame([_player(1, "M", "T1", 7.0, 2.0, next3=18.0, ffp=False)])
+        assert build_plan_scores(df, 0.0, 1.0).iloc[0] == pytest.approx(6.0)
+
+    def test_a_missing_horizon_value_falls_back_to_the_gameweek_projection(self):
+        """No multi-gameweek number at all is different from a low one: it
+        means nothing published a window for him, not that the window is bad."""
+        df = pd.DataFrame([_player(1, "M", "T1", 7.0, 2.0)])
+        df["Proj_Next3"] = np.nan
         assert build_plan_scores(df, 0.0, 1.0).iloc[0] == pytest.approx(2.0)
 
     def test_a_missing_projection_scores_zero_rather_than_nan(self):

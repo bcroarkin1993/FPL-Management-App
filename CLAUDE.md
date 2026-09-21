@@ -1378,16 +1378,13 @@ itself back".
 
 **`Proj_Next3` includes the current gameweek**, per "Fantasy Football Pundit
 feed", so it is divided by 3 for a rate and the two sliders are not disjoint
-windows. And **it is on the wrong basis for a player FFP did not price**:
-`blend_multi_gw_projections` falls back to `Projected_Points x 3`, raw Rotowire,
-a *conditional* "if he starts" number, which the engine passes through
-undiscounted. So `Proj_Next3 / 3` is roughly `Proj_Start` for those players
-while `Proj` is the expected value, and weighting the horizon up would
-systematically reward rotation risks -- the same shape as `de9563a`. Until it
-is fixed upstream (emit a `MultiGW_Src` provenance column and start-discount the
-non-FFP values, which would also fix the Draft ROS score), `build_plan_scores()`
-trusts the horizon term only where FFP matched and falls back to `Proj`
-otherwise. A flat rate is wrong; an inflated one is worse.
+windows. Setting that rate beside `Proj` is only meaningful because the two
+share a basis, which they did not until the engine started converting the
+multi-gameweek term as well -- see "A multi-gameweek total has a basis too".
+`build_plan_scores()` carried a workaround for that (trust the horizon term
+only where FFP matched, else fall back to `Proj`); it is gone, so a player
+Rotowire priced but FFP did not keeps his fixture information rather than
+collapsing to a flat rate. Re-introducing it would double-count the correction.
 
 **Four things inside the ILP are load-bearing:**
 
