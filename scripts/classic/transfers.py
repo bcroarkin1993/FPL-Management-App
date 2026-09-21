@@ -1320,28 +1320,22 @@ def build_plan_scores(df: pd.DataFrame, w_now: float, w_next3: float) -> pd.Seri
     the two weights are not a partition of disjoint windows -- they weigh "only
     this week matters" against "the next three matter equally".
 
-    **The horizon term is on the wrong basis for a player FFP did not price.**
-    `blend_multi_gw_projections` falls back to `Projected_Points x 3` -- raw
-    Rotowire, a *conditional* "if he starts" number -- and the engine passes it
-    into `Proj_Next3` undiscounted. So for an unmatched player `Proj_Next3 / 3`
-    is roughly `Proj_Start` while `Proj` is the expected value, and weighting
-    the horizon up would systematically reward rotation risks. Same shape as the
-    double-discount bugs the projection engine exists to end.
+    Dividing it by 3 and setting the result beside `Proj` is only meaningful
+    because the two now share a basis. They did not: the fallbacks behind
+    `MultiGW_Proj` are conditional and reached `Proj_Next3` undiscounted, so an
+    unmatched player's horizon rate was roughly his `Proj_Start` while his
+    `Proj` was the expected value -- a median 10.6x inflation that weighting
+    the horizon up would have turned into a systematic bias toward rotation
+    risks. The conversion now happens in the engine, where every other basis
+    change does; see "Projection Engine" in CLAUDE.md.
 
-    Until that is fixed upstream, the horizon term is trusted only where FFP
-    actually matched, and falls back to `Proj` otherwise. That loses fixture
-    information for those players, which is the conservative direction: a flat
-    rate is wrong, an inflated one is worse.
+    This function carried a workaround for that -- trusting the horizon term
+    only where FFP matched, and falling back to `Proj` otherwise. It is gone,
+    so a player Rotowire priced but FFP did not keeps his fixture information
+    instead of collapsing to a flat rate.
     """
     proj = numeric_col(df, "Proj", 0.0).fillna(0.0)
-    next3 = numeric_col(df, "Proj_Next3", np.nan) / 3.0
-
-    ffp_matched = pd.Series(False, index=df.index)
-    for col in ("FFP_Starting_Predicted", "FFP_Predicted"):
-        if col in df.columns:
-            ffp_matched = ffp_matched | df[col].notna()
-
-    next3 = next3.where(ffp_matched & next3.notna(), proj)
+    next3 = (numeric_col(df, "Proj_Next3", np.nan) / 3.0).fillna(proj)
     return (w_now * proj + w_next3 * next3).fillna(0.0)
 
 
