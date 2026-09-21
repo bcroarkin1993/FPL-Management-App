@@ -265,6 +265,7 @@ def build_projections(
     per_source_basis: Dict[str, str] = {}
     per_source_startpct: Dict[str, pd.Series] = {}
     per_source_next3: Dict[str, pd.Series] = {}
+    per_source_next3_basis: Dict[str, str] = {}
 
     for s in usable:
         resolved = _resolve_ids(s, pool)
@@ -295,6 +296,11 @@ def build_projections(
 
         if "Proj_Next3" in df.columns:
             per_source_next3[s.name] = grouped["Proj_Next3"].sum(min_count=1).reindex(out.index)
+            # A multi-gameweek total is on whatever basis the source publishes
+            # in, exactly as its single-gameweek number is. Declaring it here
+            # keeps this entry point and `blend_projections_onto` converting
+            # the same way -- they are asserted to agree.
+            per_source_next3_basis[s.name] = s.basis
 
     return blend_aligned(
         index=out.index,
@@ -302,6 +308,7 @@ def build_projections(
         per_source_basis=per_source_basis,
         per_source_startpct=per_source_startpct,
         per_source_next3=per_source_next3,
+        per_source_next3_basis=per_source_next3_basis,
         starters_only={s.name for s in usable if s.covers == COVERS_STARTERS},
         source_club_coverage={
             s.name: {str(k): int(v) for k, v in s.df["Team"].value_counts().items()}
@@ -335,6 +342,7 @@ def blend_aligned(
     per_source_basis: Dict[str, str],
     per_source_startpct: Optional[Dict[str, pd.Series]] = None,
     per_source_next3: Optional[Dict[str, pd.Series]] = None,
+    per_source_next3_basis: Optional[Dict[str, str]] = None,
     starters_only: Optional[set] = None,
     positions: Optional[pd.Series] = None,
     teams: Optional[pd.Series] = None,
@@ -364,6 +372,7 @@ def blend_aligned(
     source_club_coverage = dict(source_club_coverage or {})
     per_source_startpct = dict(per_source_startpct or {})
     per_source_next3 = dict(per_source_next3 or {})
+    per_source_next3_basis = dict(per_source_next3_basis or {})
     starters_only = set(starters_only or ())
 
     out = extra if extra is not None else pd.DataFrame(index=index)
@@ -636,10 +645,31 @@ def blend_aligned(
     out.loc[unpriced & (club_known | unavailable), ["Proj", "Proj_Start"]] = 0.0
 
     # --- Multi-gameweek -----------------------------------------------------
+    #
+    # A multi-gameweek total has a basis exactly as a single-gameweek one does,
+    # and it must match `Proj`'s -- the two are read side by side, and any
+    # consumer dividing `Proj_Next3` by 3 to get a rate is comparing it against
+    # `Proj` directly.
+    #
+    # FFP's `Next3GWs` is already start-adjusted, so it is unconditional and
+    # needs nothing. The fallbacks are not: `blend_multi_gw_projections` fills
+    # unmatched players with Rotowire's `Projected_Points x 3`, which is
+    # "points if he starts", or `points_per_game x 3`, which averages only the
+    # matches he actually featured in. Passed through undiscounted those read
+    # as expected value, so a player projected 0.36 points this week carried a
+    # 6.00/gameweek horizon rate -- a 16.7x inflation, and systematically
+    # biased toward exactly the fringe players who should rank lowest.
+    #
+    # Converting *down* is multiplication, so unlike the conditional recovery
+    # above it cannot explode and needs no floor.
     next3 = pd.Series(np.nan, index=index, dtype="float64")
     for name in ("ffp", "rotowire", "fpl_ep"):
-        if name in per_source_next3:
-            next3 = next3.fillna(per_source_next3[name].reindex(index))
+        if name not in per_source_next3:
+            continue
+        values = per_source_next3[name].reindex(index)
+        if per_source_next3_basis.get(name, BASIS_UNCONDITIONAL) == BASIS_CONDITIONAL:
+            values = values * start_pct
+        next3 = next3.fillna(values)
     out["Proj_Next3"] = next3
 
     out["Proj_GW"] = gameweek

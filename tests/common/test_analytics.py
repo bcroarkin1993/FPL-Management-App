@@ -15,6 +15,10 @@ from scripts.common.analytics import (
     compute_positional_depth,
     compute_transfer_urgency,
     blend_multi_gw_projections,
+    MULTIGW_CONDITIONAL_SRCS,
+    MULTIGW_SRC_FFP,
+    MULTIGW_SRC_PPG,
+    MULTIGW_SRC_SINGLE_X3,
     blend_fixture_projections,
     positional_percentile,
     positional_rank,
@@ -297,6 +301,70 @@ class TestComputeTransferUrgency:
 # =============================================================================
 # TestBlendMultiGWProjections
 # =============================================================================
+
+class TestMultiGWProvenance:
+    """Which of the three paths produced each value, and why it matters.
+
+    They are not on the same basis. FFP's `Next3GWs` is start-adjusted, so it
+    is expected points. Rotowire's `Projected_Points` is "points if he starts",
+    and `points_per_game` averages only the matches a player featured in --
+    both conditional. Handing the whole mixed column to the engine as one
+    source labelled "ffp" meant the two fallbacks were read as expected value
+    and passed through undiscounted.
+
+    Measured live: 59 players carried a horizon rate a median 10.6x their
+    expected points. Since the horizon term is 30-40% of the Draft ROS score,
+    that promoted exactly the fringe players who should rank lowest.
+    """
+
+    def test_an_ffp_match_is_labelled_ffp(self):
+        player_df = pd.DataFrame({"Player": ["Salah"], "Team": ["LIV"], "Points": [8.0]})
+        ffp_df = pd.DataFrame({"Name": ["Salah"], "Team": ["Liverpool"],
+                               "Next3GWs": [22.0]})
+        result = blend_multi_gw_projections(player_df, ffp_df)
+        assert result.loc[0, "MultiGW_Src"] == MULTIGW_SRC_FFP
+
+    def test_the_single_gameweek_fallback_is_labelled_as_such(self):
+        player_df = pd.DataFrame({"Player": ["Nobody"], "Team": ["LIV"], "Points": [3.0]})
+        result = blend_multi_gw_projections(player_df, None)
+        assert result.loc[0, "MultiGW_Proj"] == 9.0
+        assert result.loc[0, "MultiGW_Src"] == MULTIGW_SRC_SINGLE_X3
+
+    def test_the_points_per_game_fallback_is_labelled_separately(self):
+        """Second fallback: no single-gameweek projection, but a career
+        average to fall back on."""
+        player_df = pd.DataFrame({"Player": ["Nobody"], "Team": ["LIV"],
+                                  "Points": [0.0], "points_per_game": [2.0]})
+        result = blend_multi_gw_projections(player_df, None)
+        assert result.loc[0, "MultiGW_Proj"] == 6.0
+        assert result.loc[0, "MultiGW_Src"] == MULTIGW_SRC_PPG
+
+    def test_a_player_with_nothing_at_all_is_unlabelled(self):
+        """No value, so no basis to declare -- the engine must not discount a
+        zero into looking like a considered projection."""
+        player_df = pd.DataFrame({"Player": ["Nobody"], "Team": ["LIV"], "Points": [0.0]})
+        result = blend_multi_gw_projections(player_df, None)
+        assert pd.isna(result.loc[0, "MultiGW_Src"]) or result.loc[0, "MultiGW_Src"] is None
+
+    def test_both_fallbacks_are_flagged_as_needing_a_discount(self):
+        assert MULTIGW_SRC_SINGLE_X3 in MULTIGW_CONDITIONAL_SRCS
+        assert MULTIGW_SRC_PPG in MULTIGW_CONDITIONAL_SRCS
+        assert MULTIGW_SRC_FFP not in MULTIGW_CONDITIONAL_SRCS
+
+    def test_a_mixed_frame_carries_all_three(self):
+        """The realistic case, and the reason a single label was wrong."""
+        player_df = pd.DataFrame({
+            "Player": ["Salah", "Fringe", "Reserve"],
+            "Team": ["LIV", "LIV", "LIV"],
+            "Points": [8.0, 3.0, 0.0],
+            "points_per_game": [7.0, 1.0, 2.0],
+        })
+        ffp_df = pd.DataFrame({"Name": ["Salah"], "Team": ["Liverpool"],
+                               "Next3GWs": [22.0]})
+        result = blend_multi_gw_projections(player_df, ffp_df)
+        assert list(result["MultiGW_Src"]) == [
+            MULTIGW_SRC_FFP, MULTIGW_SRC_SINGLE_X3, MULTIGW_SRC_PPG]
+
 
 class TestBlendMultiGWProjections:
     """Tests for blend_multi_gw_projections."""

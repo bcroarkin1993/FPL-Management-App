@@ -569,3 +569,124 @@ class TestUnpricedPlayersAreNotNeutral:
         out = build_projections([self._source()], gameweek=4,
                                 pool=pool, weights={"ffp": 1.0})
         assert out.loc[4, "Proj"] == 0.0
+
+
+class TestMultiGameweekBasis:
+    """`Proj_Next3` has a basis too, and it must match `Proj`'s.
+
+    The two are read side by side, and any consumer dividing `Proj_Next3` by 3
+    to get a per-gameweek rate is comparing it directly against `Proj`. They
+    were not on the same basis: `blend_multi_gw_projections` fills players FFP
+    did not price with Rotowire's `Projected_Points x 3` -- "points if he
+    starts" -- or `points_per_game x 3`, which averages only the matches a
+    player actually featured in. Both reached `Proj_Next3` undiscounted.
+
+    Measured live before the fix: 59 players carried a horizon rate a median
+    **10.6x** their expected points, worst case 16.7x. A defender projected
+    0.36 points for the gameweek read 6.00 a gameweek over the window -- and
+    since the horizon term is 30-40% of the Draft ROS score, that
+    systematically promoted exactly the fringe players who should rank lowest.
+    """
+
+    def test_a_conditional_multi_gameweek_total_is_start_discounted(self):
+        # Start probability comes from FFP, as it does in production -- the
+        # engine never reads a Rotowire start_pct, since Rotowire is binary and
+        # is handled through the positional floors instead.
+        out = blend_aligned(
+            index=pd.Index([1]),
+            per_source_raw={"ffp": pd.Series([10.0], index=[1])},
+            per_source_basis={"ffp": BASIS_CONDITIONAL},
+            per_source_startpct={"ffp": pd.Series([0.5], index=[1])},
+            per_source_next3={"rotowire": pd.Series([30.0], index=[1])},
+            per_source_next3_basis={"rotowire": BASIS_CONDITIONAL},
+            weights={"ffp": 1.0},
+        )
+        assert out.loc[1, "Proj_Next3"] == pytest.approx(15.0)
+
+    def test_an_unconditional_total_is_left_alone(self):
+        """FFP's Next3GWs is already start-adjusted."""
+        out = blend_aligned(
+            index=pd.Index([1]),
+            per_source_raw={"ffp": pd.Series([10.0], index=[1])},
+            per_source_basis={"ffp": BASIS_CONDITIONAL},
+            per_source_startpct={"ffp": pd.Series([0.5], index=[1])},
+            per_source_next3={"ffp": pd.Series([18.0], index=[1])},
+            per_source_next3_basis={"ffp": BASIS_UNCONDITIONAL},
+            weights={"ffp": 1.0},
+        )
+        assert out.loc[1, "Proj_Next3"] == pytest.approx(18.0)
+
+    def test_an_undeclared_basis_is_treated_as_unconditional(self):
+        """The historical default. Every existing caller passed no basis at
+        all, and FFP -- the source they were all carrying -- is unconditional,
+        so this is the behaviour-preserving assumption."""
+        out = blend_aligned(
+            index=pd.Index([1]),
+            per_source_raw={"ffp": pd.Series([10.0], index=[1])},
+            per_source_basis={"ffp": BASIS_CONDITIONAL},
+            per_source_startpct={"ffp": pd.Series([0.5], index=[1])},
+            per_source_next3={"ffp": pd.Series([18.0], index=[1])},
+            weights={"ffp": 1.0},
+        )
+        assert out.loc[1, "Proj_Next3"] == pytest.approx(18.0)
+
+    def test_the_horizon_rate_matches_expected_points_for_a_flat_projection(self):
+        """A conditional source whose 3-gameweek total is exactly 3x its
+        gameweek number must produce a rate equal to `Proj`. Before the fix it
+        produced `Proj_Start` -- the whole defect, in one assertion."""
+        out = blend_aligned(
+            index=pd.Index([1]),
+            per_source_raw={"ffp": pd.Series([4.0], index=[1])},
+            per_source_basis={"ffp": BASIS_CONDITIONAL},
+            per_source_startpct={"ffp": pd.Series([0.25], index=[1])},
+            per_source_next3={"rotowire": pd.Series([12.0], index=[1])},
+            per_source_next3_basis={"rotowire": BASIS_CONDITIONAL},
+            weights={"ffp": 1.0},
+        )
+        assert out.loc[1, "Proj"] == pytest.approx(1.0)
+        assert out.loc[1, "Proj_Next3"] / 3 == pytest.approx(out.loc[1, "Proj"])
+
+    def test_converting_down_cannot_inflate(self):
+        """Unlike the conditional recovery, this direction multiplies by a
+        number in [0,1], so it needs no floor and can never explode."""
+        for start in (0.01, 0.5, 1.0):
+            out = blend_aligned(
+                index=pd.Index([1]),
+                per_source_raw={"ffp": pd.Series([8.0], index=[1])},
+                per_source_basis={"ffp": BASIS_CONDITIONAL},
+                per_source_startpct={"ffp": pd.Series([start], index=[1])},
+                per_source_next3={"rotowire": pd.Series([24.0], index=[1])},
+                per_source_next3_basis={"rotowire": BASIS_CONDITIONAL},
+                weights={"ffp": 1.0},
+            )
+            assert out.loc[1, "Proj_Next3"] <= 24.0 + 1e-9
+
+    def test_ffp_takes_precedence_over_the_fallback(self):
+        """Both halves of the split column are supplied; FFP must win where it
+        has a value, which is the order the engine reads them in."""
+        out = blend_aligned(
+            index=pd.Index([1, 2]),
+            per_source_raw={"ffp": pd.Series([10.0, 10.0], index=[1, 2])},
+            per_source_basis={"ffp": BASIS_CONDITIONAL},
+            per_source_startpct={"ffp": pd.Series([0.5, 0.5], index=[1, 2])},
+            per_source_next3={
+                "ffp": pd.Series([18.0, np.nan], index=[1, 2]),
+                "rotowire": pd.Series([np.nan, 30.0], index=[1, 2]),
+            },
+            per_source_next3_basis={
+                "ffp": BASIS_UNCONDITIONAL, "rotowire": BASIS_CONDITIONAL},
+            weights={"ffp": 1.0},
+        )
+        assert out.loc[1, "Proj_Next3"] == pytest.approx(18.0)   # FFP, untouched
+        assert out.loc[2, "Proj_Next3"] == pytest.approx(15.0)   # fallback, discounted
+
+    def test_a_source_declares_one_basis_for_both_its_numbers(self):
+        """Through `build_projections`, the other entry point. The two are
+        asserted to agree, so they must convert the same way."""
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL,
+                   {"Player_ID": [1], "Proj_Start": [10.0], "Start_Pct": [0.5],
+                    "Proj_Next3": [30.0]})
+        out = build_projections([ffp], gameweek=3, pool=_pool(),
+                                weights={"ffp": 1.0})
+        assert out.loc[1, "Proj"] == pytest.approx(5.0)
+        assert out.loc[1, "Proj_Next3"] == pytest.approx(15.0)

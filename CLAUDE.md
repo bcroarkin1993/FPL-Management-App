@@ -409,6 +409,46 @@ as "drop him". Keying on club coverage rather than the fixture list also makes
 it degrade correctly when a source is down: if the feeds carry nothing for
 anyone, nobody is zeroed on the strength of data that is absent.
 
+**A multi-gameweek total has a basis too, and it must match `Proj`'s.** The two
+are read side by side, and any consumer dividing `Proj_Next3` by 3 to get a rate
+compares it directly against `Proj`. They were not on the same basis.
+
+`blend_multi_gw_projections()` writes `MultiGW_Proj` down three paths: FFP's
+`Next3GWs`, which is start-adjusted and so is expected points; the caller's
+single-gameweek column x 3; and `points_per_game` x 3. The last two are
+**conditional** -- Rotowire publishes "points if he starts", and
+`points_per_game` averages only the matches a player actually featured in --
+and the whole mixed column was handed to the engine as one source labelled
+`ffp`, so both fallbacks were read as expected value and passed through
+undiscounted.
+
+Measured live on 2026-09-21: **59 players carried a horizon rate a median 10.6x
+their expected points**, worst case 16.7x. Mfuni, projected 0.36 points for the
+gameweek, read 6.00 a gameweek over the window. The bias is systematic and runs
+one way -- it promotes exactly the fringe players who should rank lowest, since
+those are the ones whose conditional and unconditional numbers diverge most.
+
+`MULTIGW_SRC_*` records which path produced each value and
+`per_source_next3_basis` declares it, so the conversion happens in the engine
+with the rest. Converting *down* is multiplication by a number in [0,1], so
+unlike the conditional recovery above it cannot explode and needs no floor.
+After the fix the median ratio is 1.00x and FFP-matched players are untouched.
+
+The first fallback is named `single_x3` for the *operation*, not a source,
+because the caller picks the column: the Classic page passes Rotowire's
+`Projected_Points` and the Draft reference pool passes `points_per_game`
+(`waiver_wire.py:2317`). Both are conditional, which is all the basis flag
+needs, but calling it "rotowire" would be false on half the callsites.
+
+**This does not reach the Draft ROS score**, which is a separate problem.
+`compute_player_scores()` percentiles the raw `MultiGW_Proj` column directly and
+never reads `Proj_Next3`, so the conversion above does not touch it. It is also
+messier than a basis fix alone would settle: the frame being scored carries
+FFP and Rotowire-derived values while its reference pool (`fpl_stats`) is
+`points_per_game`-derived throughout, so the percentile compares two differently
+based populations before any of this. Worth its own investigation rather than a
+bolt-on.
+
 **Validation.** `check_blended_projections()` asserts `Proj <= Proj_Start`,
 `Proj == Proj_Start × Start_Pct`, `Start_Pct ∈ [0,1]`, and that the blend lies
 inside the range of its own sources. `check_source_scale_agreement()` — written

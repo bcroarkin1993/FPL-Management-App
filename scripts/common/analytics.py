@@ -1034,11 +1034,32 @@ def _claim_ffp_rows(player_df, ffp, name_col, source_name, stats=None,
     return claims
 
 
+#: Which path produced a ``MultiGW_Proj`` value. They are not on the same
+#: basis: FFP's ``Next3GWs`` is start-adjusted and so is expected points, while
+#: both fallbacks are conditional. Recording the path is what lets the
+#: projection engine convert them to a common basis instead of reading all
+#: three as expected value.
+#:
+#: The first fallback is named for the *operation*, not a source, because the
+#: caller chooses the column: the Classic page passes Rotowire's
+#: ``Projected_Points`` ("points if he starts") and the Draft reference pool
+#: passes ``points_per_game`` (an average over the matches he featured in).
+#: Both are conditional, which is the only thing the basis flag needs to know,
+#: but calling it "rotowire" would be a false claim on half the callsites.
+MULTIGW_SRC_FFP = "ffp"
+MULTIGW_SRC_SINGLE_X3 = "single_x3"
+MULTIGW_SRC_PPG = "ppg_x3"
+
+#: The two that need start-discounting before they can sit beside ``Proj``.
+MULTIGW_CONDITIONAL_SRCS = (MULTIGW_SRC_SINGLE_X3, MULTIGW_SRC_PPG)
+
+
 def blend_multi_gw_projections(
     player_df: pd.DataFrame,
     ffp_df: Optional[pd.DataFrame],
     single_gw_col: str = "Points",
     output_col: str = "MultiGW_Proj",
+    src_col: str = "MultiGW_Src",
     remaining_gws: int = 3,
     stats: Optional[dict] = None,
     expected_gw=_GW_AUTO,
@@ -1072,14 +1093,23 @@ def blend_multi_gw_projections(
 
     # Fallback: single_gw * min(3, remaining_gws).
     # Cap at remaining_gws so we don't project 3× a single-GW value when only 1 GW is left.
+    #
+    # `src_col` records *which* of the three paths produced each value, because
+    # they are not on the same basis and a consumer cannot tell by looking.
+    # FFP's Next3GWs is start-adjusted, so it is expected points. Rotowire's
+    # Projected_Points is "points if he starts", and points_per_game averages
+    # only the matches a player actually featured in -- both are conditional,
+    # and passed through undiscounted they read as expected value.
     fallback_mult = min(3, max(1, remaining_gws))
     single_vals = numeric_col(result, single_gw_col, 0)
     result[output_col] = single_vals * fallback_mult
+    result[src_col] = np.where(single_vals.gt(0), MULTIGW_SRC_SINGLE_X3, None)
     # Second fallback: players with 0 single-GW proj (e.g. name merge failed) but valid ppg
     if "points_per_game" in result.columns:
         ppg = pd.to_numeric(result["points_per_game"], errors="coerce").fillna(0)
         zero_mask = result[output_col].eq(0) & ppg.gt(0)
         result.loc[zero_mask, output_col] = ppg[zero_mask] * fallback_mult
+        result.loc[zero_mask, src_col] = MULTIGW_SRC_PPG
 
     if ffp_df is None or ffp_df.empty or name_col is None:
         return result
@@ -1105,6 +1135,7 @@ def blend_multi_gw_projections(
     claims = _claim_ffp_rows(result, ffp, name_col, "FFP Next3GWs", stats)
     for idx, ref_idx in claims.items():
         result.at[idx, output_col] = ffp.at[ref_idx, "Next3GWs"]
+        result.at[idx, src_col] = MULTIGW_SRC_FFP
 
     issues = check_merge_match_rate(len(claims), len(ffp), "FFP Next3GWs -> %s" % output_col,
                                     input_rows=len(result))
@@ -1317,6 +1348,7 @@ def blend_projections_onto(
     per_source_basis = {"rotowire": projection_engine.BASIS_CONDITIONAL}
     per_source_startpct = {}
     per_source_next3 = {}
+    per_source_next3_basis = {}
 
     if ffp_df is not None and not ffp_df.empty:
         result = merge_ffp_single_gw_data(result, ffp_df, expected_gw=expected_gw)
@@ -1330,7 +1362,27 @@ def blend_projections_onto(
         )
         per_source_basis["ffp"] = projection_engine.BASIS_CONDITIONAL
         if "MultiGW_Proj" in result.columns:
-            per_source_next3["ffp"] = numeric_col(result, "MultiGW_Proj", np.nan)
+            # `MultiGW_Proj` is a *mixture*: FFP where it matched the player,
+            # and Rotowire x 3 or points_per_game x 3 where it did not. Handing
+            # the whole column over as "ffp" labelled two conditional fallbacks
+            # as an unconditional source, so the engine passed them through
+            # undiscounted. Split it by the provenance column and let each half
+            # declare what it actually is.
+            mgw = numeric_col(result, "MultiGW_Proj", np.nan)
+            src = result.get("MultiGW_Src")
+            if src is None:
+                per_source_next3["ffp"] = mgw
+                per_source_next3_basis["ffp"] = projection_engine.BASIS_UNCONDITIONAL
+            else:
+                is_ffp = src.eq(MULTIGW_SRC_FFP)
+                per_source_next3["ffp"] = mgw.where(is_ffp)
+                per_source_next3_basis["ffp"] = projection_engine.BASIS_UNCONDITIONAL
+                # Labelled `rotowire` because that is where the fallback's
+                # numbers come from, and the engine reads it after `ffp` --
+                # which is the precedence we want, FFP first.
+                per_source_next3["rotowire"] = mgw.where(
+                    src.isin(MULTIGW_CONDITIONAL_SRCS))
+                per_source_next3_basis["rotowire"] = projection_engine.BASIS_CONDITIONAL
 
     # FPL's own expected points, as a declared fallback rather than a value
     # laundered into the Rotowire column. It is unconditional -- FPL's number
@@ -1363,6 +1415,7 @@ def blend_projections_onto(
         per_source_basis=per_source_basis,
         per_source_startpct=per_source_startpct,
         per_source_next3=per_source_next3,
+        per_source_next3_basis=per_source_next3_basis,
         starters_only={"rotowire"},
         source_club_coverage=_rotowire_club_coverage(),
         fallback_names=fallback_names,
