@@ -129,9 +129,45 @@ class TestTradeAnalyzerPage:
                 pass  # May call st.stop() on empty data
 
 
+_DRAFT_HELPER_BOOTSTRAP = {
+    "elements": [
+        {"id": 1, "first_name": "Test", "second_name": "Keeper1", "team": 1, "element_type": 1,
+         "chance_of_playing_next_round": 100, "news": "", "total_points": 50, "form": "3.0"},
+        {"id": 2, "first_name": "Test", "second_name": "Keeper2", "team": 2, "element_type": 1,
+         "chance_of_playing_next_round": 100, "news": "", "total_points": 40, "form": "2.5"},
+        {"id": 3, "first_name": "Test", "second_name": "Defender1", "team": 1, "element_type": 2,
+         "chance_of_playing_next_round": 100, "news": "", "total_points": 60, "form": "4.0"},
+        {"id": 4, "first_name": "Test", "second_name": "Defender2", "team": 2, "element_type": 2,
+         "chance_of_playing_next_round": 100, "news": "", "total_points": 55, "form": "3.5"},
+        {"id": 5, "first_name": "Test", "second_name": "Midfielder1", "team": 1, "element_type": 3,
+         "chance_of_playing_next_round": 100, "news": "", "total_points": 70, "form": "5.0"},
+        {"id": 6, "first_name": "Test", "second_name": "Midfielder2", "team": 2, "element_type": 3,
+         "chance_of_playing_next_round": 100, "news": "", "total_points": 65, "form": "4.5"},
+        {"id": 7, "first_name": "Test", "second_name": "Forward1", "team": 1, "element_type": 4,
+         "chance_of_playing_next_round": 100, "news": "", "total_points": 80, "form": "6.0"},
+        {"id": 8, "first_name": "Test", "second_name": "Forward2", "team": 2, "element_type": 4,
+         "chance_of_playing_next_round": 100, "news": "", "total_points": 75, "form": "5.5"},
+    ],
+    "teams": [
+        {"id": 1, "short_name": "AAA"},
+        {"id": 2, "short_name": "BBB"},
+    ],
+    "events": [],
+}
+
+
 class TestDraftHelperPage:
     def test_smoke(self, mock_all_utils):
-        with patch("scripts.draft.draft_helper.get_rotowire_season_rankings", return_value=pd.DataFrame()):
+        fdr_avg = pd.Series({"AAA": 2.5, "BBB": 3.5})
+        with patch("scripts.draft.draft_helper.get_rotowire_season_rankings", return_value=pd.DataFrame()), \
+             patch("scripts.draft.draft_helper.get_classic_bootstrap_static", return_value=_DRAFT_HELPER_BOOTSTRAP), \
+             patch("scripts.draft.draft_helper.get_rotowire_player_projections", return_value=pd.DataFrame()), \
+             patch("scripts.draft.draft_helper.get_ffp_projections_data", return_value=pd.DataFrame()), \
+             patch("scripts.draft.draft_helper.get_fixture_difficulty_grid",
+                   return_value=(pd.DataFrame(), pd.DataFrame(), fdr_avg)), \
+             patch("scripts.draft.draft_helper.get_league_entries", return_value={1: "Team A", 2: "Team B"}), \
+             patch("scripts.draft.draft_helper.get_starting_team_composition", return_value={}), \
+             patch("scripts.draft.draft_helper.get_current_gameweek", return_value=1):
             from scripts.draft.draft_helper import show_draft_helper_page
             show_draft_helper_page()
 

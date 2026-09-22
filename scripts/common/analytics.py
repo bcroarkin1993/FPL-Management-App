@@ -17,7 +17,7 @@ import streamlit as st
 import config
 from scripts.common.error_helpers import get_logger
 from scripts.common.player_matching import canonical_normalize
-from scripts.common.text_helpers import TEAM_FULL_TO_SHORT
+from scripts.common.text_helpers import POS_MAP_TO_RW, TEAM_FULL_TO_SHORT
 
 _logger = get_logger("fpl_app.analytics")
 
@@ -841,20 +841,29 @@ def blend_multi_gw_projections(
         _logger.info("FFP Next3GWs not ready (all zero) — using fallback projections")
         return result
 
+    has_position = "Position" in ffp_df.columns and "Position" in result.columns
+
     # Build lookup from FFP data: (normalized_name, team_short) -> Next3GWs
-    ffp = ffp_df[["Name", "Team", "Next3GWs"]].dropna(subset=["Next3GWs"]).copy()
+    ffp = ffp_df[["Name", "Team", "Next3GWs"] + (["Position"] if has_position else [])].dropna(subset=["Next3GWs"]).copy()
     ffp["__norm"] = ffp["Name"].apply(canonical_normalize)
     ffp["__team_short"] = ffp["Team"].replace(TEAM_FULL_TO_SHORT)
     ffp["Next3GWs"] = pd.to_numeric(ffp["Next3GWs"], errors="coerce")
+    # FFP uses GK/DEF/MID/FWD; normalize to the app's G/D/M/F scheme.
+    ffp["__pos"] = ffp["Position"].map(POS_MAP_TO_RW).fillna("") if has_position else ""
 
     # Build lookup dicts (individual zeros still skipped as defense-in-depth)
     lookup = {}          # (norm_name, team_short) -> Next3GWs  [primary]
     lookup_short = {}    # (last_word_of_norm, team_short)       [secondary]
-    lookup_name = {}     # norm_name only                        [tertiary — team-agnostic]
-    lookup_lastword = {} # last_word only                        [quaternary — last resort]
+    # Tertiary/quaternary tiers are team-agnostic, so a shared surname (e.g.
+    # "Palmer" — Cole Palmer, MID, CHE vs. Alex Palmer, GK, IPS) could
+    # otherwise cross-match two unrelated players. Position is required to
+    # corroborate these team-agnostic tiers.
+    lookup_name = {}     # (norm_name, position) -> Next3GWs      [tertiary — team-agnostic]
+    lookup_lastword = {} # (last_word, position) -> Next3GWs      [quaternary — last resort]
     for _, row in ffp.iterrows():
         key = (row["__norm"], str(row["__team_short"]))
         val = row["Next3GWs"]
+        pos = row["__pos"]
         if pd.notna(val) and val > 0:
             lookup[key] = val
             last_word = row["__norm"].split()[-1] if row["__norm"] else ""
@@ -862,17 +871,22 @@ def blend_multi_gw_projections(
                 short_key = (last_word, str(row["__team_short"]))
                 if short_key not in lookup_short:
                     lookup_short[short_key] = val
-            if row["__norm"] and row["__norm"] not in lookup_name:
-                lookup_name[row["__norm"]] = val
+            if row["__norm"]:
+                name_key = (row["__norm"], pos)
+                if name_key not in lookup_name:
+                    lookup_name[name_key] = val
             # Also store reversed token order to catch "family given" → "given family" variants
             # (e.g. FFP "Tanaka Ao" ↔ FPL "Ao Tanaka" for Japanese players).
             norm_tokens = row["__norm"].split()
             if len(norm_tokens) > 1:
                 norm_reversed = " ".join(reversed(norm_tokens))
-                if norm_reversed not in lookup_name:
-                    lookup_name[norm_reversed] = val
-            if last_word and last_word not in lookup_lastword:
-                lookup_lastword[last_word] = val
+                reversed_key = (norm_reversed, pos)
+                if reversed_key not in lookup_name:
+                    lookup_name[reversed_key] = val
+            if last_word:
+                lastword_key = (last_word, pos)
+                if lastword_key not in lookup_lastword:
+                    lookup_lastword[lastword_key] = val
 
     if not lookup:
         return result
@@ -880,11 +894,13 @@ def blend_multi_gw_projections(
     # Match players
     result["__norm"] = result[name_col].apply(canonical_normalize)
     team_col = "Team" if "Team" in result.columns else None
+    pos_col = "Position" if has_position else None
 
     for idx in result.index:
         norm_name = result.at[idx, "__norm"]
         team_short = str(result.at[idx, team_col]) if team_col else ""
         team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
+        position = str(result.at[idx, pos_col]) if pos_col else ""
         last_word = norm_name.split()[-1] if norm_name else ""
 
         key = (norm_name, team_short)
@@ -892,13 +908,72 @@ def blend_multi_gw_projections(
             result.at[idx, output_col] = lookup[key]
         elif last_word and (last_word, team_short) in lookup_short:
             result.at[idx, output_col] = lookup_short[(last_word, team_short)]
-        elif norm_name and norm_name in lookup_name:
-            result.at[idx, output_col] = lookup_name[norm_name]
-        elif last_word and last_word in lookup_lastword:
-            result.at[idx, output_col] = lookup_lastword[last_word]
+        elif norm_name and (norm_name, position) in lookup_name:
+            result.at[idx, output_col] = lookup_name[(norm_name, position)]
+        elif last_word and (last_word, position) in lookup_lastword:
+            result.at[idx, output_col] = lookup_lastword[(last_word, position)]
 
     result.drop(columns=["__norm"], inplace=True, errors="ignore")
     return result
+
+
+def _resolve_by_token_subset(query_norm: str, query_team: str, query_position: str, candidates: list):
+    """Last-resort name match: query's tokens are a subset of a candidate's
+    tokens, or vice versa.
+
+    Handles FPL bootstrap's full legal names vs. the shorter football-common
+    names Rotowire/FFP use — e.g. FPL "Bruno Guimarães Rodriguez Moura" vs.
+    Rotowire "Bruno Guimaraes" (last *word* of the bootstrap name is "Moura",
+    the mother's surname, which the exact/last-word tiers above never see;
+    but Rotowire's full token set {"bruno","guimaraes"} is a subset of
+    bootstrap's {"bruno","guimaraes","rodriguez","moura"}). Also handles
+    single-name players like "Richarlison" vs. "Richarlison de Andrade".
+
+    Only used when the exact/last-word/name-only tiers all miss. Same-team
+    matches are preferred; a cross-team match is only used if it's the
+    single unambiguous hit AND position also matches (when both are known)
+    — team alone isn't a strong enough guard for common surnames (e.g. a
+    same-team "Palmer" fallback would still need position corroboration in
+    principle; cross-team is the higher-risk case this specifically guards).
+
+    Args:
+        query_norm: Normalized name to resolve.
+        query_team: Team short code for the query.
+        query_position: Position code (G/D/M/F) for the query, or "" if unknown.
+        candidates: List of (norm_name, team_short, position, value) tuples.
+
+    Returns:
+        The matched value, or None if no unambiguous match is found.
+    """
+    if not query_norm:
+        return None
+    q_tokens = set(query_norm.split())
+
+    def _is_subset_match(cand_norm: str) -> bool:
+        c_tokens = set(cand_norm.split())
+        if not c_tokens:
+            return False
+        return q_tokens.issubset(c_tokens) or c_tokens.issubset(q_tokens)
+
+    def _position_ok(cand_position: str) -> bool:
+        return not query_position or not cand_position or cand_position == query_position
+
+    same_team = [
+        v for (n, t, pos, v) in candidates
+        if t == query_team and _is_subset_match(n) and _position_ok(pos)
+    ]
+    if len(same_team) == 1:
+        return same_team[0]
+    if len(same_team) > 1:
+        return None  # Ambiguous — don't guess.
+
+    any_team = [
+        v for (n, t, pos, v) in candidates
+        if _is_subset_match(n) and _position_ok(pos)
+    ]
+    if len(any_team) == 1:
+        return any_team[0]
+    return None
 
 
 def merge_season_projections(
@@ -908,8 +983,19 @@ def merge_season_projections(
 ) -> pd.DataFrame:
     """Merge Rotowire season-long projected points onto a player DataFrame.
 
-    Matches by normalized name + team short code.
+    Matches using the same 4-level fallback as merge_ffp_single_gw_data():
+    (1) exact (norm_name, team_short), (2) (last_word, team_short),
+    (3) norm_name only, (4) last_word only. A single-level exact match misses
+    players whose FPL bootstrap name includes a full legal surname Rotowire
+    doesn't use (e.g. FPL "Bruno Borges Fernandes" vs Rotowire "Bruno
+    Fernandes") — the fallback chain catches these the same way FFP matching
+    already does.
     Unmatched players get NaN (callers should handle fallback).
+
+    Also populates a "_display_name" column with Rotowire's own (shorter,
+    more readable) Player string wherever a match was found — callers that
+    want a nicer display name than the input DataFrame's full legal name can
+    read this column; it's additive and safe to ignore otherwise.
 
     Args:
         player_df: DataFrame with player names and Team column.
@@ -917,10 +1003,11 @@ def merge_season_projections(
         output_col: Column name for the merged season projection.
 
     Returns:
-        player_df with output_col added.
+        player_df with output_col and "_display_name" added.
     """
     result = player_df.copy()
     result[output_col] = np.nan
+    result["_display_name"] = None
 
     if season_rankings_df is None or season_rankings_df.empty:
         return result
@@ -932,32 +1019,81 @@ def merge_season_projections(
     if name_col is None:
         return result
 
-    # Build lookup: (normalized_name, team_short) -> Points
-    sr = season_rankings_df[["Player", "Team", "Points"]].dropna(subset=["Points"]).copy()
+    has_position = "Position" in season_rankings_df.columns and "Position" in result.columns
+
+    sr = season_rankings_df[["Player", "Team", "Points"] + (["Position"] if has_position else [])].dropna(subset=["Points"]).copy()
     sr["__norm"] = sr["Player"].apply(canonical_normalize)
     sr["__team_short"] = sr["Team"].replace(TEAM_FULL_TO_SHORT)
     sr["Points"] = pd.to_numeric(sr["Points"], errors="coerce")
+    sr["__pos"] = sr["Position"] if has_position else ""
 
-    lookup = {}
+    # Values are (Points, display_name) tuples so a display-quality name can
+    # ride along with the merged value at no extra matching cost.
+    lookup = {}          # (norm_name, team_short) -> (Points, name)  [primary]
+    lookup_short = {}    # (last_word_of_norm, team_short)             [secondary]
+    # Tertiary/quaternary tiers are team-agnostic, so a shared surname (e.g.
+    # "Palmer" — Cole Palmer, MID, CHE vs. Alex Palmer, GK, IPS) could
+    # otherwise cross-match two unrelated players. Position is required to
+    # corroborate these team-agnostic tiers.
+    lookup_name = {}     # (norm_name, position) -> (Points, name)     [tertiary — team-agnostic]
+    lookup_lastword = {} # (last_word, position) -> (Points, name)     [quaternary — last resort]
     for _, row in sr.iterrows():
-        key = (row["__norm"], str(row["__team_short"]))
         val = row["Points"]
-        if pd.notna(val):
-            lookup[key] = val
+        if pd.isna(val):
+            continue
+        norm = row["__norm"]
+        team_short = str(row["__team_short"])
+        pos = row["__pos"]
+        entry = (val, row["Player"])
+        key = (norm, team_short)
+        lookup[key] = entry
+        last_word = norm.split()[-1] if norm else ""
+        if last_word:
+            short_key = (last_word, team_short)
+            if short_key not in lookup_short:
+                lookup_short[short_key] = entry
+        if norm:
+            name_key = (norm, pos)
+            if name_key not in lookup_name:
+                lookup_name[name_key] = entry
+        if last_word:
+            lastword_key = (last_word, pos)
+            if lastword_key not in lookup_lastword:
+                lookup_lastword[lastword_key] = entry
 
     if not lookup:
         return result
 
+    subset_candidates = [
+        (row["__norm"], str(row["__team_short"]), row["__pos"], (row["Points"], row["Player"]))
+        for _, row in sr.iterrows()
+    ]
+
     result["__norm"] = result[name_col].apply(canonical_normalize)
     team_col = "Team" if "Team" in result.columns else None
+    pos_col = "Position" if has_position else None
 
     for idx in result.index:
         norm_name = result.at[idx, "__norm"]
         team_short = str(result.at[idx, team_col]) if team_col else ""
         team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
+        position = str(result.at[idx, pos_col]) if pos_col else ""
+        last_word = norm_name.split()[-1] if norm_name else ""
+
         key = (norm_name, team_short)
-        if key in lookup:
-            result.at[idx, output_col] = lookup[key]
+        match = lookup.get(key)
+        if match is None and last_word:
+            match = lookup_short.get((last_word, team_short))
+        if match is None and norm_name:
+            match = lookup_name.get((norm_name, position))
+        if match is None and last_word:
+            match = lookup_lastword.get((last_word, position))
+        if match is None and norm_name:
+            match = _resolve_by_token_subset(norm_name, team_short, position, subset_candidates)
+        if match is not None:
+            val, display_name = match
+            result.at[idx, output_col] = val
+            result.at[idx, "_display_name"] = display_name
 
     result.drop(columns=["__norm"], inplace=True, errors="ignore")
     return result
@@ -1003,37 +1139,57 @@ def merge_ffp_single_gw_data(
             if not ffp_cols:
                 return result
 
+    has_position = "Position" in ffp_df.columns and "Position" in result.columns
+
     # Build lookup: (normalized_name, team_short) -> {Predicted, Start, LongStart}
-    ffp = ffp_df[["Name", "Team"] + ffp_cols].copy()
+    ffp = ffp_df[["Name", "Team"] + ffp_cols + (["Position"] if has_position else [])].copy()
     ffp["__norm"] = ffp["Name"].apply(canonical_normalize)
     ffp["__team_short"] = ffp["Team"].replace(TEAM_FULL_TO_SHORT)
     for col in ffp_cols:
         ffp[col] = pd.to_numeric(ffp[col], errors="coerce")
+    # FFP uses GK/DEF/MID/FWD; normalize to the app's G/D/M/F scheme.
+    ffp["__pos"] = ffp["Position"].map(POS_MAP_TO_RW).fillna("") if has_position else ""
 
     lookup = {}          # (norm_name, team_short) -> data dict  [primary]
     lookup_short = {}    # (last_word_of_norm, team_short)        [secondary]
-    lookup_name = {}     # norm_name only                         [tertiary — team-agnostic]
-    lookup_lastword = {} # last_word only                         [quaternary — last resort]
+    # Tertiary/quaternary tiers are team-agnostic, so a shared surname (e.g.
+    # "Palmer" — Cole Palmer, MID, CHE vs. Alex Palmer, GK, IPS) could
+    # otherwise cross-match two unrelated players. Position is required to
+    # corroborate these team-agnostic tiers.
+    lookup_name = {}     # (norm_name, position) -> data dict     [tertiary — team-agnostic]
+    lookup_lastword = {} # (last_word, position) -> data dict     [quaternary — last resort]
     for _, row in ffp.iterrows():
         key = (row["__norm"], str(row["__team_short"]))
         data = {col: row[col] for col in ffp_cols if pd.notna(row[col])}
         lookup[key] = data
         last_word = row["__norm"].split()[-1] if row["__norm"] else ""
+        pos = row["__pos"]
         if last_word:
             short_key = (last_word, str(row["__team_short"]))
             if short_key not in lookup_short:
                 lookup_short[short_key] = data
-        if row["__norm"] and row["__norm"] not in lookup_name:
-            lookup_name[row["__norm"]] = data
-        if last_word and last_word not in lookup_lastword:
-            lookup_lastword[last_word] = data
+        if row["__norm"]:
+            name_key = (row["__norm"], pos)
+            if name_key not in lookup_name:
+                lookup_name[name_key] = data
+        if last_word:
+            lastword_key = (last_word, pos)
+            if lastword_key not in lookup_lastword:
+                lookup_lastword[lastword_key] = data
 
     if not lookup:
         return result
 
+    subset_candidates = [
+        (row["__norm"], str(row["__team_short"]), row["__pos"],
+         {col: row[col] for col in ffp_cols if pd.notna(row[col])})
+        for _, row in ffp.iterrows()
+    ]
+
     # Match players
     result["__norm"] = result[name_col].apply(canonical_normalize)
     team_col = "Team" if "Team" in result.columns else None
+    pos_col = "Position" if has_position else None
 
     col_map = {"Predicted": "FFP_Predicted", "Start": "FFP_Start", "LongStart": "FFP_LongStart"}
 
@@ -1041,6 +1197,7 @@ def merge_ffp_single_gw_data(
         norm_name = result.at[idx, "__norm"]
         team_short = str(result.at[idx, team_col]) if team_col else ""
         team_short = TEAM_FULL_TO_SHORT.get(team_short, team_short)
+        position = str(result.at[idx, pos_col]) if pos_col else ""
         last_word = norm_name.split()[-1] if norm_name else ""
 
         key = (norm_name, team_short)
@@ -1048,15 +1205,117 @@ def merge_ffp_single_gw_data(
         if data is None and last_word:
             data = lookup_short.get((last_word, team_short))
         if data is None and norm_name:
-            data = lookup_name.get(norm_name)
+            data = lookup_name.get((norm_name, position))
         if data is None and last_word:
-            data = lookup_lastword.get(last_word)
+            data = lookup_lastword.get((last_word, position))
+        if data is None and norm_name:
+            data = _resolve_by_token_subset(norm_name, team_short, position, subset_candidates)
         if data:
             for src_col, dst_col in col_map.items():
                 if src_col in data:
                     result.at[idx, dst_col] = data[src_col]
 
     result.drop(columns=["__norm"], inplace=True, errors="ignore")
+    return result
+
+
+def compute_early_season_scores(
+    pool: pd.DataFrame,
+    gw1_projections_df: Optional[pd.DataFrame],
+    season_rankings_df: Optional[pd.DataFrame],
+    ffp_df: Optional[pd.DataFrame],
+    fdr_avg: Optional[pd.Series],
+    current_gw: int,
+    w_season: float,
+    w_week1: float,
+    w_fixture: float,
+    format_context: str = "draft",
+) -> pd.DataFrame:
+    """Blend preseason Season Rankings + GW1 projections + opening FDR into
+    Season/Week1/Fixture sub-scores and a weighted Player Score.
+
+    Used for early-season valuation before any in-season signal exists (no
+    actual points, form, or multi-GW data yet) — shared by Classic's Initial
+    Squad Optimizer-style scoring and Draft Helper. Season Score and Fixture
+    Score are positional percentiles; Week1 Score reuses
+    ``compute_player_scores()``'s ``"1GW"`` output (Rotowire + FFP blend x
+    start likelihood) — that call's ROS/Transfer/Keep outputs are computed
+    internally but intentionally discarded since they depend on in-season
+    signals (form, starts, multi-GW data) that don't exist pre-season.
+
+    Args:
+        pool: Full candidate player DataFrame (Player, Team, Position, plus
+            whatever else the caller has already attached).
+        gw1_projections_df: Rotowire GW1 projections (Player, Team, Points).
+        season_rankings_df: Rotowire season-long rankings (Player, Team, Points).
+        ffp_df: FFP projections DataFrame (Name, Team, Predicted, Start, LongStart).
+        fdr_avg: Series mapping team short code -> average FDR over the
+            opening-fixture horizon. None/missing teams default to 3.0.
+        current_gw: Current gameweek (passed through to compute_player_scores).
+        w_season, w_week1, w_fixture: Blend weights for Player Score (need not
+            be pre-normalized to sum to 1, but callers generally should).
+        format_context: "draft" or "classic" — passed through to compute_player_scores.
+
+    Returns:
+        pool with SeasonProjection, Points, FFP_Predicted/Start/LongStart,
+        Season Score, Week1 Score, Fixture Score, GW1 Proj Pts, Player
+        Score, and Display_Name (Rotowire's shorter name where matched,
+        e.g. "Bruno Fernandes" vs. FPL's full "Bruno Borges Fernandes";
+        NaN if unmatched — callers should fall back to their own short-name
+        source) columns added.
+    """
+    result = pool.copy()
+
+    # compute_player_scores() requires an FDR column to exist even though ROS
+    # (which uses it) is discarded below — placeholder, not read otherwise.
+    if "AvgFDR" not in result.columns and "AvgFDRNextN" not in result.columns:
+        result["AvgFDR"] = 3.0
+
+    # Season-long value: literal preseason Rotowire Season Rankings.
+    result = merge_season_projections(result, season_rankings_df, output_col="SeasonProjection")
+    # Season Rankings' display name is preferred (broadest coverage); GW1's
+    # name is the fallback for players season rankings didn't cover.
+    result["Display_Name"] = result["_display_name"]
+
+    # GW1 projection — reuses merge_season_projections since Rotowire's weekly
+    # rankings table has the same Player/Team/Points shape as season rankings.
+    result = merge_season_projections(result, gw1_projections_df, output_col="Points")
+    result["Points"] = result["Points"].fillna(0)
+    result["Display_Name"] = result["Display_Name"].fillna(result["_display_name"])
+    result.drop(columns=["_display_name"], inplace=True, errors="ignore")
+
+    # FFP single-GW data (Predicted, Start, LongStart) for the 1GW blend.
+    result = merge_ffp_single_gw_data(result, ffp_df)
+
+    # Week1 Score: reuse the app's exact 1GW methodology (0.6 Rotowire + 0.4
+    # FFP Predicted, x start likelihood). Discard ROS/Transfer/Keep — those
+    # depend on live-season signals that don't exist pre-season.
+    scored = compute_player_scores(result, result, current_gw=current_gw, format_context=format_context)
+    result["Week1 Score"] = scored["1GW"]
+    result["GW1 Proj Pts"] = scored["_effective_proj"]
+
+    # Season Score: positional percentile of the literal season-long ranking.
+    result["Season Score"] = positional_percentile(
+        result, result, value_col="SeasonProjection", position_col="Position"
+    )
+
+    # Fixture Score: opening-slate FDR, inverted (easier = better) and percentile-ranked.
+    if fdr_avg is not None:
+        result["Team_AvgFDR"] = result["Team"].map(fdr_avg).fillna(3.0)
+    else:
+        result["Team_AvgFDR"] = 3.0
+    result["_fixture_ease_raw"] = -result["Team_AvgFDR"]
+    result["Fixture Score"] = positional_percentile(
+        result, result, value_col="_fixture_ease_raw", position_col="Position"
+    )
+
+    result["Player Score"] = (
+        w_season * result["Season Score"]
+        + w_week1 * result["Week1 Score"]
+        + w_fixture * result["Fixture Score"]
+    )
+
+    result.drop(columns=["_fixture_ease_raw"], inplace=True, errors="ignore")
     return result
 
 
