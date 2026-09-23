@@ -47,7 +47,9 @@ def show_settings_page():
     st.header("Deadline Alerts")
     st.caption(
         "Choose when to get reminded before each deadline. "
-        "Draft waivers close 25.5h before the first kickoff; Classic transfers close 1.5h before."
+        "Draft waivers close 25.5h before the first kickoff; Classic transfers close 1.5h before. "
+        "Draft **trade offers** close with waivers, or a further 24h earlier where "
+        "your league requires trades to be approved."
     )
 
     all_window_options = [48, 24, 12, 6, 3, 1]
@@ -55,6 +57,7 @@ def show_settings_page():
     dl = settings.get("deadline_alerts", {})
     draft_cfg = dl.get("draft", {})
     classic_cfg = dl.get("classic", {})
+    trade_cfg = dl.get("trade", {})
 
     col1, col2 = st.columns(2)
     with col1:
@@ -92,6 +95,28 @@ def show_settings_page():
             key="classic_windows",
             help="Select which reminder intervals you want before the Classic deadline",
         )
+
+    st.subheader("Draft Trades")
+    st.caption(
+        "Deadline: with waivers (25.5h before kickoff), or 49.5h before kickoff if "
+        "your league requires administrator or manager approval. Needs "
+        "FPL_DRAFT_LEAGUE_ID available to the notifier to read your league's setting; "
+        "without it the earlier deadline is assumed and the alert says so."
+    )
+    trade_enabled = st.toggle(
+        "Enable Draft trade deadline alerts",
+        value=trade_cfg.get("enabled", False),
+        key="trade_enabled",
+    )
+    saved_trade_windows = trade_cfg.get("alert_windows", [24, 6, 1])
+    trade_windows = st.multiselect(
+        "Alert me before deadline",
+        options=all_window_options,
+        default=[w for w in saved_trade_windows if w in all_window_options],
+        format_func=lambda h: f"{h}h before",
+        key="trade_windows",
+        help="Select which reminder intervals you want before the trade deadline",
+    )
 
     # =================================================================
     # Data Source Alerts
@@ -253,6 +278,7 @@ def show_settings_page():
                 "deadline_alerts": {
                     "draft": {"enabled": draft_enabled, "alert_windows": sorted(draft_windows, reverse=True)},
                     "classic": {"enabled": classic_enabled, "alert_windows": sorted(classic_windows, reverse=True)},
+                    "trade": {"enabled": trade_enabled, "alert_windows": sorted(trade_windows, reverse=True)},
                 },
                 "data_source_alerts": {
                     "rotowire": {"enabled": rotowire_enabled},

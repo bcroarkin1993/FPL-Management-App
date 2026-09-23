@@ -20,6 +20,64 @@ TZ = ZoneInfo("America/New_York")
 DRAFT_OFFSET_HOURS = 25.5
 CLASSIC_OFFSET_HOURS = 1.5
 
+# Where accepted trades need approval, trade offers close a full day before the
+# waiver deadline to leave room for the approval window.
+TRADE_APPROVAL_LEAD_HOURS = 24.0
+
+# `league.trades` codes whose meaning is confirmed. Deliberately a local copy of the
+# table in fpl_draft_api.py: that module imports Streamlit and this one must stay
+# importable from GitHub Actions. Only administrator approval has ever been verified
+# against a real league — see "Draft Transaction Rules" in CLAUDE.md.
+TRADE_SETTING_ADMIN_APPROVAL = "a"
+TRADE_SETTINGS_REQUIRING_APPROVAL = frozenset({TRADE_SETTING_ADMIN_APPROVAL})
+TRADE_SETTINGS_DISABLED = frozenset()   # the "no trades" code has not been observed
+#: Every code whose meaning is established. Anything outside this is as good as
+#: unread — it must not fall through to the "no approval needed" branch and buy
+#: itself a later deadline on a code we cannot interpret.
+KNOWN_TRADE_SETTINGS = TRADE_SETTINGS_REQUIRING_APPROVAL | TRADE_SETTINGS_DISABLED
+
+
+def _fetch_league_trades_setting(league_id):
+    """Read `league.trades` for a Draft league, or None if it cannot be read.
+
+    A plain requests call rather than fpl_draft_api.get_draft_transaction_window(),
+    which is Streamlit-cached and would drag Streamlit into the Actions runtime.
+    """
+    if not league_id:
+        return None
+    try:
+        r = requests.get(
+            f"https://draft.premierleague.com/api/league/{league_id}/details",
+            timeout=20,
+        )
+        r.raise_for_status()
+        return (r.json().get("league") or {}).get("trades")
+    except (requests.RequestException, ValueError, AttributeError) as e:
+        print(f"[waiver_alerts] Could not read league trade setting ({e})")
+        return None
+
+
+def trade_deadline_for(kickoff_et, trades_code):
+    """(deadline, approval_assumed) for trade offers, or (None, _) if trades are off.
+
+    Returns `approval_assumed=True` when the league's setting could not be read and
+    the earlier deadline was used anyway. That is the safe direction — an alert a day
+    early is a mild annoyance, an alert after the window has shut is the failure this
+    exists to prevent — but the message has to say it was an assumption rather than
+    state a deadline this league never confirmed.
+    """
+    if trades_code in TRADE_SETTINGS_DISABLED:
+        return None, False
+
+    waiver_deadline = kickoff_et - timedelta(hours=DRAFT_OFFSET_HOURS)
+    if trades_code in TRADE_SETTINGS_REQUIRING_APPROVAL:
+        return waiver_deadline - timedelta(hours=TRADE_APPROVAL_LEAD_HOURS), False
+    if trades_code not in KNOWN_TRADE_SETTINGS:
+        # Unread, or read but unrecognised — both are "we do not know this league".
+        return waiver_deadline - timedelta(hours=TRADE_APPROVAL_LEAD_HOURS), True
+    # A recognised code that does not require approval: trades close with waivers.
+    return waiver_deadline, False
+
 
 def _get_current_gameweek():
     """Fetch current/next GW from the official Draft endpoint. Returns None if season has ended
@@ -77,6 +135,7 @@ def _check_and_send_alert(
     alert_type: str,
     now_et: datetime,
     alert_windows: list = None,
+    note: str = "",
 ) -> bool:
     """
     Check if we're in an alert window and send notification if so.
@@ -86,9 +145,11 @@ def _check_and_send_alert(
         mention: Mention string (user/role pings)
         deadline_et: The deadline datetime
         gw: Gameweek number
-        alert_type: "Draft" or "Classic"
+        alert_type: "Draft", "Classic" or "Trade"
         now_et: Current time in ET
         alert_windows: List of hours-before-deadline to fire alerts (e.g. [24, 6, 1])
+        note: Appended to the message. Used to say when a deadline rests on an
+            assumption rather than on the league's stated setting.
 
     Returns:
         True if an alert was sent, False otherwise
@@ -116,11 +177,16 @@ def _check_and_send_alert(
             if alert_type == "Draft":
                 emoji = "\U0001f514"
                 desc = "Draft transactions"
+            elif alert_type == "Trade":
+                emoji = "\U0001f500"
+                desc = "Draft trade offers"
             else:
                 emoji = "\u23f0"
                 desc = "Classic transfers"
 
             msg = f"{mention}{emoji} FPL **{alert_type}** deadline: {desc} for **GW {gw}** are due in ~**{target}h** (deadline **{ts}**)."
+            if note:
+                msg += f" {note}"
             requests.post(webhook, json={"content": msg}, timeout=10)
             print(f"[waiver_alerts:{alert_type}] Sent {target}h reminder")
             return True
@@ -213,6 +279,10 @@ def main():
     classic_enabled = classic_cfg.get("enabled", False) or os.getenv("FPL_CLASSIC_ALERTS_ENABLED", "false").lower() in ("true", "1", "yes")
     classic_windows = classic_cfg.get("alert_windows", [24, 6, 1])
 
+    trade_cfg = dl.get("trade", {})
+    trade_enabled = trade_cfg.get("enabled", False) or os.getenv("FPL_TRADE_ALERTS_ENABLED", "false").lower() in ("true", "1", "yes")
+    trade_windows = trade_cfg.get("alert_windows", [24, 6, 1])
+
     # Data source alert settings (JSON only, no env var fallback)
     ds_settings = settings.get("data_source_alerts", {})
     rotowire_enabled = ds_settings.get("rotowire", {}).get("enabled", False)
@@ -228,7 +298,7 @@ def main():
     if mention_role:
         mention += f"<@&{mention_role}> "
 
-    any_enabled = draft_enabled or classic_enabled or rotowire_enabled or ffp_enabled
+    any_enabled = draft_enabled or classic_enabled or trade_enabled or rotowire_enabled or ffp_enabled
     if not any_enabled:
         print("[waiver_alerts] All alerts are disabled")
         return
@@ -255,6 +325,7 @@ def main():
     print(f"[waiver_alerts] Kickoff: {kickoff_et.strftime('%Y-%m-%d %H:%M %Z')}")
     print(f"[waiver_alerts] Draft alerts: {'enabled' if draft_enabled else 'disabled'} (windows={draft_windows})")
     print(f"[waiver_alerts] Classic alerts: {'enabled' if classic_enabled else 'disabled'} (windows={classic_windows})")
+    print(f"[waiver_alerts] Trade alerts: {'enabled' if trade_enabled else 'disabled'} (windows={trade_windows})")
     print(f"[waiver_alerts] Rotowire data alerts: {'enabled' if rotowire_enabled else 'disabled'}")
     print(f"[waiver_alerts] FFP data alerts: {'enabled' if ffp_enabled else 'disabled'}")
 
@@ -271,6 +342,25 @@ def main():
         classic_deadline = kickoff_et - timedelta(hours=CLASSIC_OFFSET_HOURS)
         if _check_and_send_alert(webhook, mention, classic_deadline, gw, "Classic", now_et, classic_windows):
             alerts_sent += 1
+
+    # Check the Draft trade deadline. Distinct from the Draft waiver deadline: where
+    # the league requires approval, trade offers shut a full day earlier.
+    if trade_enabled:
+        trades_code = _fetch_league_trades_setting(os.getenv("FPL_DRAFT_LEAGUE_ID"))
+        trade_deadline, approval_assumed = trade_deadline_for(kickoff_et, trades_code)
+        if trade_deadline is None:
+            print("[waiver_alerts:Trade] League has trading disabled, skipping")
+        else:
+            print(f"[waiver_alerts:Trade] league.trades={trades_code!r} "
+                  f"approval_assumed={approval_assumed}")
+            note = (
+                "_(Your league's trade setting could not be read, so this assumes "
+                "approval is required — the earlier of the two possible deadlines.)_"
+                if approval_assumed else ""
+            )
+            if _check_and_send_alert(webhook, mention, trade_deadline, gw, "Trade",
+                                     now_et, trade_windows, note=note):
+                alerts_sent += 1
 
     # Check data source alerts
     if rotowire_enabled or ffp_enabled:

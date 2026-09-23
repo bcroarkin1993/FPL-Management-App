@@ -33,6 +33,13 @@ jobs:
           # Classic alerts (set secret to 'true' to enable)
           FPL_CLASSIC_ALERTS_ENABLED: ${{ secrets.FPL_CLASSIC_ALERTS_ENABLED || 'false' }}
           FPL_CLASSIC_DEADLINE_OFFSET_HOURS: ${{ secrets.FPL_CLASSIC_DEADLINE_OFFSET_HOURS || '1.5' }}
+          # Draft trade alerts. The league ID is needed to read league.trades, which
+          # decides whether trades close with waivers or a day earlier. It is a
+          # secret rather than a committed setting because league_settings.json is
+          # gitignored to keep league IDs out of this public repo; without it the
+          # alert assumes the earlier deadline and says so.
+          FPL_TRADE_ALERTS_ENABLED: ${{ secrets.FPL_TRADE_ALERTS_ENABLED || 'false' }}
+          FPL_DRAFT_LEAGUE_ID: ${{ secrets.FPL_DRAFT_LEAGUE_ID }}
         run: python -m scripts.common.waiver_alerts
 
       - name: Commit alert state changes

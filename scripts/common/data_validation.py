@@ -35,6 +35,7 @@ __all__ = [
     "check_merge_match_rate",
     "check_initial_squad",
     "check_element_states",
+    "check_league_trade_config",
     "check_transfer_risk",
     "check_transfer_windows",
     "check_transfer_odds",
@@ -788,6 +789,86 @@ def check_element_states(states: Optional[dict],
             "Every player being owned or locked would leave the waiver wire empty; "
             "far more players exist than a league can roster.",
         ))
+
+    return issues
+
+
+#: `league.trades` codes whose meaning has been confirmed against a real league.
+#: Deliberately a local copy of TRADE_SETTING_LABELS in fpl_draft_api.py rather than
+#: an import: this module must stay Streamlit-free so GitHub Actions can import it,
+#: and fpl_draft_api reaches Streamlit for its caching. Same reasoning, and the same
+#: duplication, as VALID_ELEMENT_STATES above.
+KNOWN_TRADE_SETTINGS = frozenset({"a"})
+
+
+def check_league_trade_config(window: Optional[dict]) -> List[Issue]:
+    """Assert the league's trade settings are still published in the shape we read.
+
+    The Trade Analyzer decides the trade deadline and whether a trade can be vetoed
+    from these two fields. If either stops being published the page silently reverts
+    to "assume approval is required", which is the safe direction but is no longer a
+    statement about this league — so a shape change has to surface as a failure here
+    rather than as a caption nobody can tell is generic.
+
+    An **unrecognised** `trades` code is only a warning. FPL offers four settings and
+    publishes single-letter codes for them, and exactly one has ever been confirmed
+    against a real league — so meeting an unknown code is the expected state of
+    partial knowledge, not a defect. Erroring on it would be a check that cries wolf,
+    and a check that cries wolf gets muted.
+    """
+    check = "league_trade_config"
+
+    if not window or not isinstance(window, dict):
+        return [Issue(
+            check, "error", "transaction window is empty",
+            "get_draft_transaction_window() returned nothing, so the Trade Analyzer "
+            "cannot state a trade deadline or an approval regime.",
+        )]
+
+    issues = []
+
+    if "trades" not in window:
+        issues.append(Issue(
+            check, "error", "no 'trades' key in the transaction window",
+            "league.trades sits on /api/league/{id}/details beside transaction_mode. "
+            "Its absence means the payload changed shape, not that trading is off.",
+        ))
+    else:
+        code = window.get("trades")
+        if code is None:
+            issues.append(Issue(
+                check, "error", "league.trades is null",
+                "The setting is fixed before the draft and cannot be unset, so a "
+                "null here is a failed fetch being reported as a real value.",
+            ))
+        elif code not in KNOWN_TRADE_SETTINGS:
+            issues.append(Issue(
+                check, "warning",
+                "unrecognised league.trades code %r" % code,
+                "Only 'a' (administrator approval) is verified. Add this code to "
+                "TRADE_SETTING_LABELS in fpl_draft_api.py once its meaning is "
+                "confirmed from the league's own settings screen — until then the "
+                "page renders the raw code and assumes approval is required.",
+            ))
+
+    if "trades_time_for_approval" not in window:
+        issues.append(Issue(
+            check, "error",
+            "no 'trades_time_for_approval' key in the transaction window",
+            "/api/game publishes this alongside waivers_processed. Its absence "
+            "means the game endpoint changed shape.",
+        ))
+    else:
+        flag = window.get("trades_time_for_approval")
+        if flag is not None and not isinstance(flag, bool):
+            issues.append(Issue(
+                check, "error",
+                "trades_time_for_approval is %s, expected a bool" % type(flag).__name__,
+                "Despite the name this field is a boolean, observed True on "
+                "2026-09-23. A timestamp appearing here would mean FPL changed it "
+                "to what the name suggests, and any code reading it must be "
+                "revisited before it is trusted.",
+            ))
 
     return issues
 

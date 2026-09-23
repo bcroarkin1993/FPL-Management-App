@@ -1157,6 +1157,7 @@ to import from GitHub Actions.
 | `check_team_strength()` | Degenerate power rankings — every team scoring ~50 because position codes were `GKP/DEF/MID/FWD` instead of `G/D/M/F`, short squads, impossible injury costs |
 | `check_resolved_squad()` | A Classic squad that is illegal (size, duplicates, >3 per club, negative bank from double-applied transfer arithmetic) or **stale** — the last-deadline fifteen presented as current, whose every individual value is plausible |
 | `check_element_states()` | Draft player states changing shape — an unknown `status` code, `owner` disagreeing with the status, an owned count that isn't teams x 15. Every one makes locked players read as available, so the Waiver Wire suggests players who cannot be picked up |
+| `check_league_trade_config()` | The league's trade rules changing shape — `league.trades` vanishing or coming back null, `trades_time_for_approval` ceasing to be a bool. Both make the Trade Analyzer fall back to "assume approval is required", which is safe but is no longer a statement about *this* league and looks identical on screen. An **unrecognised** trades code is only a warning: three of the four codes are genuinely unknown, and a check that fires on expected ignorance gets muted |
 
 Ranges are deliberately wide — these are "this cannot be right" boundaries, not
 "this looks unusual" ones. A check that cries wolf gets muted. Note the XI floor is
@@ -2196,31 +2197,100 @@ sides.** 1 MID + 2 FWD for 1 MID + 2 FWD is legal; the same three for 2 MID + 1 
 not, and neither is any unequal shape. This is the rule the Trade Analyzer used to
 break — it searched cross-position 1-for-1 swaps and had a whole 2-for-1 finder, both
 producing trades that cannot be submitted. `_is_legal_trade()` now gates every proposal
-from inside `_score_proposal()`, so only 1-for-1 and 2-for-2 are discoverable.
+from inside `_score_proposal()`.
 
-Offers can be made until the waiver deadline, or 24h earlier where approval is required.
-A player may appear in several offers; accepting one invalidates the rest. Accepted
-trades cannot be cancelled, and trades process *before* waivers.
+**The rule bounds the shape, not the size, and the two must not be confused.** Any
+N-for-N with matching position multisets is proposable — FPL's own worked example is a
+**3-for-3**. What the app *searches* is narrower than what the platform *permits*, and
+describing our search space as FPL's rule is exactly how the page came to tell users,
+in the trade-type help text, that 1-for-1 and 2-for-2 were "the only shapes that can
+actually be proposed". They were only the shapes we looked for.
+`_find_upgrade_sweetener_trades(n)` now generalises the old 2-for-2 search — one or
+more *upgrade* positions (send my worst, receive their best) funded by one or more
+*sweeteners* (send my best, receive their worst) — and covers n=2 and n=3. At n=2 it
+reproduces the hand-written finder exactly, which a test pins. The genuinely new shape
+is n=3's `(2 upgrades, 1 sweetener)`: a two-position upgrade funded by a single
+sweetener, unreachable before. Measured at 18ms against a 10-team league, so 3-for-3 is
+off by default for signal, not for cost.
 
-League setting lives at `league.trades` on `/api/league/{id}/details`. The four options
-are no trades / all trades (immediate) / administrator approval / manager approval
-(fails on 50%+ objection); where approval is required, an un-vetoed trade counts as
-approved at the waiver deadline. **Only one code is verified: `"a"` = administrator
-approval**, confirmed against a league whose admin reported the setting. Do not guess
-the others — label an unrecognised code as unknown rather than inventing a mapping.
+Offers can be made until the waiver deadline, or 24h earlier where approval is
+required, and may be **withdrawn at any time until they are accepted**. A player may
+appear in several offers; accepting one invalidates the rest — which is a strategy, not
+a hazard, so the suggestion list says so rather than implying its cards are mutually
+exclusive. Accepted trades cannot be cancelled, and trades process *before* waivers.
 
-Trade states: proposed, withdrawn, rejected, accepted, invalid, vetoed, expired,
-processed.
+**Approval and veto are asymmetric in time.** Approval is only *assumed* at the
+deadline — an un-objected trade counts as approved then — but a veto is flagged **as
+soon as the rejection criteria are met**, which under manager approval is the moment
+50% object. So a trade can die immediately and can only succeed slowly.
+
+League setting lives at `league.trades` on `/api/league/{id}/details`, in the same
+payload as `transaction_mode`, so `get_draft_transaction_window()` reads it for free.
+The four options are no trades / all trades (immediate) / administrator approval /
+manager approval (fails on 50%+ objection). **The setting can only be changed before
+the draft starts**, so it is a season constant. **Only one code is verified: `"a"` =
+administrator approval**, confirmed against a league whose admin reported the setting.
+Do not guess the others — label an unrecognised code as unknown rather than inventing a
+mapping.
+
+**An unknown code must resolve to "approval required" at every callsite.** That yields
+the *earlier* of the two possible deadlines, and the two errors are not symmetric: a
+trade reminder a day early is an annoyance, one after the window has shut costs the
+manager the gameweek. Same reasoning as `WEIGHT_UNKNOWN = 0.60` in the transfer-risk
+model — a value we could not read must never be presented as the reassuring one. The
+alert says when a deadline rests on that assumption rather than on the league's stated
+setting. Note this cuts the other way for *veto scoring*, which applies only where the
+regime is **known**: a league set to "all trades" has no veto at all, so discounting a
+proposal on an uninterpretable code would invent a penalty out of our own ignorance.
+
+Veto risk is modelled as `(1 - fairness) x exposure` and multiplied into the trade
+score. It deliberately charges fairness a second time — it is already a 15% component
+— because the two ask different questions: the component asks whether the *counterparty*
+accepts, the multiplier whether a *third party* lets the result stand. Measured live on
+league 11347, 170 of 182 one-for-one proposals carried non-zero veto risk while the top
+five by score sat at 0.00-0.04, so its visible effect is that lopsided proposals stop
+surfacing. The card badge is correspondingly rare, which is the model working rather
+than a dead control.
+
+Trade states, each of which the app has to be able to tell apart:
+
+| State | Meaning |
+|---|---|
+| Proposed | Offer has been made |
+| Withdrawn | Withdrawn by the instigator, before acceptance |
+| Rejected | Turned down by the recipient |
+| Accepted | Accepted, but still needs approval |
+| **Invalid** | **A player in it was part of another accepted trade** |
+| Vetoed | Accepted, then blocked by the administrator or the managers |
+| Expired | Not accepted by the trade deadline |
+| Processed | The trade has been made |
+
+**`Invalid` is the rule `in_accepted_trade` exists to serve.** The element-status
+endpoint publishes that flag per player, and it was parsed into
+`get_league_element_states()` and read by nothing for as long as the field existed.
+A player already inside an accepted trade cannot be part of another, so the Trade
+Analyzer strips them from every roster before searching and names who it removed —
+an unexplained gap in a squad reads as a bug, and silently proposing one of them
+produces an offer FPL will void.
 
 ### Verified live payload
 
-League 11347, 2026-08-27 — the numbers `check_element_states()` asserts against:
+League 11347 — the numbers `check_element_states()` and `check_league_trade_config()`
+assert against. Element counts observed 2026-08-27, trade config re-verified
+2026-09-23:
 
 ```
 element-status : 616 elements -> 446 'a', 150 'o' (10 teams x 15), 20 'l'
 league details : transaction_mode "free-agency", trades "a"
 game           : waivers_processed true, current_event 1, next_event 2
+                 trades_time_for_approval true
 ```
+
+**`trades_time_for_approval` is a boolean, not a timestamp.** The name invites the
+opposite assumption, and nothing in the app reads it — its exact semantics have not
+been established, so it is carried through unread rather than interpreted. A live test
+pins the type, so if FPL ever makes it what it sounds like, the failure is the prompt
+to work out what it means before anything starts trusting it.
 
 ## Environment Variables
 
@@ -2238,6 +2308,7 @@ Optional (Notifications):
 - `FPL_DEADLINE_OFFSET_HOURS` - Hours before kickoff for Draft deadline (default: 25.5)
 - `FPL_CLASSIC_ALERTS_ENABLED` - Enable Classic transfer alerts (default: false)
 - `FPL_CLASSIC_DEADLINE_OFFSET_HOURS` - Hours before kickoff for Classic deadline (default: 1.5)
+- `FPL_TRADE_ALERTS_ENABLED` - Enable Draft trade deadline alerts (default: false). Trades close with waivers, or 24h earlier where the league requires approval — read from `league.trades`, which needs `FPL_DRAFT_LEAGUE_ID` to be visible to the notifier. The GitHub Actions workflow passes it as a secret rather than committing it, since `league_settings.json` is gitignored to keep league IDs out of a public repo. Without it the earlier deadline is assumed and the alert message says so
 
 Optional (Classic):
 - `FPL_CLASSIC_LEAGUE_IDS` - Comma-separated list of `league_id:League Name` pairs (e.g., `123456:My League,789012:Friends`)
@@ -2307,7 +2378,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 |------|--------|-------|
 | Transfer Risk Tracking | Phases 1-3 complete | Outbound (Google News RSS + bootstrap ground truth + per-region windows), inbound (per-club feeds, arrivals watchlist, minutes competition, fee attribution, `Transfer_Status`) and bookmaker odds are wired into the Draft Helper board and the Availability page. Remaining: Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model" and "Transfer Odds Model". |
 | Mini-League Rival Tracker | Not Started | Tab on League Analysis pages. Show differential players, projected points gap, effective ownership within mini-league. Data available via get_league_player_ownership (Draft) and team picks (Classic). No transfer advice (handled elsewhere). |
-| Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2 trade discovery (position-matched — see "Draft Transaction Rules"; cross-position and 2-for-1 shapes were removed as FPL forbids them), acceptance likelihood scoring, Explore Teams comparison, Regression Watch (buy-low/sell-high) |
+| Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2/3-for-3 trade discovery (position-matched — see "Draft Transaction Rules"; cross-position and 2-for-1 shapes were removed as FPL forbids them, while N-for-N was added because it never did), acceptance likelihood scoring with veto risk, Explore Teams comparison, Regression Watch (buy-low/sell-high). Reads the league's own trade rules: approval regime, the real trade deadline (24h earlier under approval), and `in_accepted_trade` exclusion |
 | Historical Data Analysis | Completed | Season History section on Classic Team Analysis (rank chart, points chart, data table); League Standing metrics on Draft Team Analysis |
 | Split utils.py | Completed | Split into 7 focused modules (`text_helpers`, `fpl_draft_api`, `fpl_classic_api`, `scraping`, `fixture_helpers`, `analytics`, `optimization`); merged matching functions into `player_matching.py`; `utils.py` is now a thin re-export shim |
 

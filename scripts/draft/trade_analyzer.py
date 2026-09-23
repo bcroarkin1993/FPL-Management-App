@@ -10,11 +10,20 @@ Identifies mutually beneficial trades by combining:
 Every proposal must be one FPL would actually accept: a trade swaps the *same
 number* of players with *identical position composition* on both sides (1 MID +
 2 FWD for 1 MID + 2 FWD, never 2 MID + 1 FWD). See "Draft Transaction Rules" in
-CLAUDE.md. Only 1-for-1 and 2-for-2 shapes are discoverable as a result.
+CLAUDE.md.
+
+That rule bounds the *shape*, not the size: any N-for-N with matching position
+multisets is proposable, and FPL's own worked example is a 3-for-3. What this
+module searches is a narrower set than what the platform permits — 1-for-1, plus
+the upgrade/sweetener structures at n=2 and n=3 — and the two must not be
+confused. Describing our search space as FPL's rule is how the page came to tell
+users that 3-for-3 could not be proposed.
 """
 
 import logging
 from collections import Counter
+from datetime import timedelta
+from itertools import combinations, product
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -35,6 +44,12 @@ from scripts.common.fpl_draft_api import (
     get_draft_points_by_position,
     get_draft_team_players_with_points,
     get_fpl_player_mapping,
+    get_draft_transaction_window,
+    get_league_element_states,
+    TRADE_SETTING_ADMIN_APPROVAL,
+    requires_trade_approval,
+    trade_setting_label,
+    trades_allowed,
 )
 from scripts.draft.waiver_wire import (
     _min_max_norm,
@@ -42,6 +57,7 @@ from scripts.draft.waiver_wire import (
     _availability_multiplier,
     _format_availability,
     _load_bootstrap,
+    _next_waiver_deadline,
 )
 from scripts.fpl.player_statistics import prepare_advanced_stats_df
 
@@ -356,6 +372,7 @@ def _find_1_for_1_trades(
     rosters: Dict,
     needs: Dict,
     num_teams: int,
+    veto_exposure: float = 0.0,
 ) -> List[Dict]:
     """Find 1-for-1 trade proposals (same position on both sides)."""
     proposals = []
@@ -393,9 +410,162 @@ def _find_1_for_1_trades(
 
                     proposal = _score_proposal(
                         my_team_id, opp_id, [send_p], [recv_p],
-                        rosters, needs, num_teams,
+                        rosters, needs, num_teams, veto_exposure,
                     )
                     if proposal and proposal["trade_score"] > 0.05:
+                        proposals.append(proposal)
+
+    return proposals
+
+
+#: Positions usable as trade filler. GK is excluded: with only 20 starting
+#: goalkeepers in the game, giving one away as a sweetener costs more than the
+#: sweetener is worth.
+_SWEETENER_POSITIONS = ["DEF", "MID", "FWD"]
+_ALL_POSITIONS = ["GK", "DEF", "MID", "FWD"]
+
+#: Replacement-level players make a trade look busy without moving either squad.
+_MIN_CALIBER = 0.10
+
+#: Candidates considered per slot, at each end. The search is a product over slots,
+#: so this is the exponent: raising it to 3 multiplies an n=3 search eightfold.
+_CANDIDATES_PER_SLOT = 2
+
+
+#: How exposed an accepted trade is to being vetoed, by league trade setting.
+#:
+#: Acceptance modelling asks whether the *counterparty* says yes. Under an approval
+#: regime that is not the last word: an administrator, or 50% of the league, can kill
+#: a deal both managers wanted. A lopsided trade is the one that draws that scrutiny,
+#: so exposure is scaled by how unfair the trade looks — which is `fairness`, already
+#: computed.
+#:
+#: Only the administrator-approval code has been verified, so only it appears here.
+#: An unrecognised setting maps to no exposure and leaves scoring untouched: a league
+#: with instant processing has no veto at all, and discounting a trade on a guessed
+#: code would invent a penalty out of our own ignorance. Manager approval would sit
+#: higher than admin approval — more potential objectors — but its code is unknown.
+_VETO_EXPOSURE = {
+    TRADE_SETTING_ADMIN_APPROVAL: 0.35,
+}
+
+
+def veto_exposure_for(trades_code) -> float:
+    """Veto exposure for a `league.trades` code. 0.0 when the setting is unknown."""
+    return _VETO_EXPOSURE.get(trades_code, 0.0)
+
+
+def _upgrade_sweetener_shapes(n: int):
+    """Yield every (upgrade_positions, sweetener_positions) split of an n-player side.
+
+    Both sides of a trade must carry the same position multiset, so a shape is just
+    an assignment of positions to slots. Positions are kept distinct across the whole
+    shape: repeating one would put two slots at the same position in competition for
+    the same "my worst / their best" ordering, and the resulting pair is reachable as
+    a different shape anyway.
+
+    At n=2 this reproduces the original 2-for-2 search exactly — one upgrade, one
+    sweetener. At n=3 it adds (1 upgrade, 2 sweeteners) and, more interestingly,
+    (2 upgrades, 1 sweetener): a two-position upgrade funded by a single sweetener,
+    which no previous shape could express.
+    """
+    for n_upgrade in range(1, n):          # at least one of each; s = n - u >= 1
+        n_sweetener = n - n_upgrade
+        for upgrades in combinations(_ALL_POSITIONS, n_upgrade):
+            eligible = [p for p in _SWEETENER_POSITIONS if p not in upgrades]
+            for sweeteners in combinations(eligible, n_sweetener):
+                yield upgrades, sweeteners
+
+
+def _find_upgrade_sweetener_trades(
+    n: int,
+    my_team_id: int,
+    rosters: Dict,
+    needs: Dict,
+    num_teams: int,
+    veto_exposure: float = 0.0,
+    min_score: float = 0.03,
+) -> List[Dict]:
+    """Find position-mirrored n-for-n trades built from upgrades and sweeteners.
+
+    The structure, generalised from the original 2-for-2 search:
+      - upgrade positions: I am weak, they are strong -> I send my worst, receive
+        their best.
+      - sweetener positions: I am deep, they are short -> I send my best, receive
+        their worst. This is what I pay with.
+
+    Position counts are preserved on both sides by construction, so no trade here can
+    force a drop, and `_is_legal_trade` inside `_score_proposal` holds regardless.
+    """
+    proposals = []
+    my_roster = rosters[my_team_id]["players"]
+    my_needs = needs[my_team_id]
+
+    for opp_id, opp_data in rosters.items():
+        if opp_id == my_team_id:
+            continue
+        opp_roster = opp_data["players"]
+        opp_needs = needs[opp_id]
+
+        for upgrades, sweeteners in _upgrade_sweetener_shapes(n):
+            # I must be able to afford every sweetener, and they must want it.
+            if any(my_needs[pos] > 0.6 for pos in sweeteners):
+                continue
+            if any(opp_needs[pos] < 0.2 for pos in sweeteners):
+                continue
+
+            def _at(roster, pos, best_first):
+                return sorted(
+                    [p for p in roster if p["position"] == pos],
+                    key=lambda x: x.get("trade_value", 0),
+                    reverse=best_first,
+                )[:_CANDIDATES_PER_SLOT]
+
+            # Slot order is (upgrades..., sweeteners...) on both sides, so the i-th
+            # send slot and the i-th receive slot are the same position — which is
+            # what makes the per-slot upgrade comparison below meaningful.
+            send_slots = (
+                [_at(my_roster, pos, best_first=False) for pos in upgrades]
+                + [_at(my_roster, pos, best_first=True) for pos in sweeteners]
+            )
+            recv_slots = (
+                [_at(opp_roster, pos, best_first=True) for pos in upgrades]
+                + [_at(opp_roster, pos, best_first=False) for pos in sweeteners]
+            )
+            if any(not slot for slot in send_slots + recv_slots):
+                continue
+
+            n_upgrades = len(upgrades)
+            for send_players in product(*send_slots):
+                send_names = {p["name"] for p in send_players}
+                if len(send_names) != n:
+                    continue
+                if min(p.get("trade_value", 0) for p in send_players) < _MIN_CALIBER:
+                    continue
+
+                for recv_players in product(*recv_slots):
+                    recv_names = {p["name"] for p in recv_players}
+                    if len(recv_names) != n:
+                        continue
+                    if send_names & recv_names:
+                        continue
+                    if min(p.get("trade_value", 0) for p in recv_players) < _MIN_CALIBER:
+                        continue
+
+                    # Every upgrade slot has to actually be an upgrade, or this is
+                    # just a reshuffle dressed up as one.
+                    if any(
+                        recv_players[i].get("trade_value", 0)
+                        <= send_players[i].get("trade_value", 0)
+                        for i in range(n_upgrades)
+                    ):
+                        continue
+
+                    proposal = _score_proposal(
+                        my_team_id, opp_id, list(send_players), list(recv_players),
+                        rosters, needs, num_teams, veto_exposure,
+                    )
+                    if proposal and proposal["trade_score"] > min_score:
                         proposals.append(proposal)
 
     return proposals
@@ -406,101 +576,28 @@ def _find_2_for_2_trades(
     rosters: Dict,
     needs: Dict,
     num_teams: int,
+    veto_exposure: float = 0.0,
 ) -> List[Dict]:
+    """Find position-mirrored 2-for-2 trades — one upgrade funded by one sweetener."""
+    return _find_upgrade_sweetener_trades(
+        2, my_team_id, rosters, needs, num_teams, veto_exposure
+    )
+
+
+def _find_3_for_3_trades(
+    my_team_id: int,
+    rosters: Dict,
+    needs: Dict,
+    num_teams: int,
+    veto_exposure: float = 0.0,
+) -> List[Dict]:
+    """Find position-mirrored 3-for-3 trades.
+
+    Legal in FPL and unreachable by this app until now — see the module docstring.
     """
-    Find position-mirrored 2-for-2 trades that avoid drops.
-
-    Structure: swap within the SAME two positions so roster counts stay balanced.
-    - upgrade_pos: position where I'm weak, opponent is strong → I upgrade here
-    - sweetener_pos: position where I'm strong, opponent is weak → I give here
-    - I send:    my worst at upgrade_pos  + my best at sweetener_pos
-    - I receive: their best at upgrade_pos + their worst at sweetener_pos
-    """
-    proposals = []
-    my_roster = rosters[my_team_id]["players"]
-    my_needs = needs[my_team_id]
-    _MIN_CALIBER = 0.10  # skip replacement-level players
-    # GK excluded from sweetener role — only 20 starting GKs makes them
-    # too scarce to use as trade filler
-    _SWEETENER_POSITIONS = ["DEF", "MID", "FWD"]
-
-    for opp_id, opp_data in rosters.items():
-        if opp_id == my_team_id:
-            continue
-        opp_roster = opp_data["players"]
-        opp_needs = needs[opp_id]
-
-        # For each pair of positions (upgrade_pos, sweetener_pos)
-        for upgrade_pos in ["GK", "DEF", "MID", "FWD"]:
-            for sweetener_pos in _SWEETENER_POSITIONS:
-                if upgrade_pos == sweetener_pos:
-                    continue
-
-                # I want to upgrade at upgrade_pos (some need)
-                # I can afford to give at sweetener_pos (low need)
-                # Opponent wants upgrade at sweetener_pos (some need)
-                # Opponent can afford to give at upgrade_pos
-                if my_needs[sweetener_pos] > 0.6:
-                    continue  # I need sweetener_pos too much
-                if opp_needs[sweetener_pos] < 0.2:
-                    continue  # Opponent doesn't want my sweetener_pos
-
-                # My players at each position
-                my_at_upgrade = sorted(
-                    [p for p in my_roster if p["position"] == upgrade_pos],
-                    key=lambda x: x.get("trade_value", 0),  # worst first (I send worst)
-                )
-                my_at_sweetener = sorted(
-                    [p for p in my_roster if p["position"] == sweetener_pos],
-                    key=lambda x: x.get("trade_value", 0), reverse=True,  # best first (I send best)
-                )
-                # Their players at each position
-                their_at_upgrade = sorted(
-                    [p for p in opp_roster if p["position"] == upgrade_pos],
-                    key=lambda x: x.get("trade_value", 0), reverse=True,  # best first (I get best)
-                )
-                their_at_sweetener = sorted(
-                    [p for p in opp_roster if p["position"] == sweetener_pos],
-                    key=lambda x: x.get("trade_value", 0),  # worst first (I get worst)
-                )
-
-                if not (my_at_upgrade and my_at_sweetener and their_at_upgrade and their_at_sweetener):
-                    continue
-
-                # Try top 2 candidates per slot
-                for s_upgrade in my_at_upgrade[:2]:
-                    for s_sweet in my_at_sweetener[:2]:
-                        if s_upgrade["name"] == s_sweet["name"]:
-                            continue
-                        for r_upgrade in their_at_upgrade[:2]:
-                            for r_sweet in their_at_sweetener[:2]:
-                                if r_upgrade["name"] == r_sweet["name"]:
-                                    continue
-
-                                send_players = [s_upgrade, s_sweet]
-                                recv_players = [r_upgrade, r_sweet]
-
-                                # No overlap
-                                if {p["name"] for p in send_players} & {p["name"] for p in recv_players}:
-                                    continue
-
-                                # Caliber floor — skip if any player is replacement-level
-                                all_tv = [p.get("trade_value", 0) for p in send_players + recv_players]
-                                if min(all_tv) < _MIN_CALIBER:
-                                    continue
-
-                                # The upgrade should actually be an upgrade for me
-                                if r_upgrade.get("trade_value", 0) <= s_upgrade.get("trade_value", 0):
-                                    continue
-
-                                proposal = _score_proposal(
-                                    my_team_id, opp_id, send_players, recv_players,
-                                    rosters, needs, num_teams,
-                                )
-                                if proposal and proposal["trade_score"] > 0.03:
-                                    proposals.append(proposal)
-
-    return proposals
+    return _find_upgrade_sweetener_trades(
+        3, my_team_id, rosters, needs, num_teams, veto_exposure
+    )
 
 
 # ============================================================================
@@ -515,6 +612,7 @@ def _score_proposal(
     rosters: Dict,
     needs: Dict,
     num_teams: int,
+    veto_exposure: float = 0.0,
 ) -> Optional[Dict]:
     """Score a trade proposal and return structured proposal dict (or None if invalid)."""
     # Belt and braces: whatever the finders do, an illegal shape must never reach
@@ -602,6 +700,19 @@ def _score_proposal(
     if drop_suggestion:
         trade_score *= 0.05
 
+    # Veto risk — a trade both managers want can still be blocked. Scaled by how
+    # unfair it looks, because that is what draws an objection; zero in leagues
+    # where trades process instantly, and zero when the setting could not be read.
+    #
+    # This does charge fairness twice, since it is already a 15% component above.
+    # That is intended: the component asks whether the counterparty accepts, this
+    # asks whether a third party lets it stand, and they are different failures. The
+    # multiplier is bounded at 1 - max(_VETO_EXPOSURE), so it reorders the tail
+    # rather than dominating. Its visible effect is that lopsided proposals stop
+    # surfacing, which is why the card badge is rare in a healthy league.
+    veto_risk = (1.0 - fairness) * veto_exposure
+    trade_score *= (1.0 - veto_risk)
+
     # Determine trade type
     n_send = len(send_players)
     n_recv = len(recv_players)
@@ -638,6 +749,7 @@ def _score_proposal(
         "acceptance": round(acceptance, 2),
         "accept_label": accept_label,
         "fairness": round(fairness, 2),
+        "veto_risk": round(veto_risk, 2),
         "my_pos_gain": round(my_pos_gain, 3),
         "net_value": round(net_value, 3),
         "drop_suggestion": drop_suggestion,
@@ -870,6 +982,131 @@ def _render_positional_profile(team_id: int, rosters: Dict, pos_ranks: Dict,
     st.plotly_chart(fig, use_container_width=True)
 
 
+#: Approval-gated leagues close trades a full day before the waiver deadline.
+TRADE_APPROVAL_LEAD_HOURS = 24
+
+
+def trade_deadline_from(waiver_deadline, approval_required):
+    """The trade deadline given the waiver deadline and whether approval applies.
+
+    Offers can be made until the waiver deadline, except where accepted trades need
+    approval — then they close 24 hours earlier, to leave the approval window. None
+    in, None out, so a page that cannot resolve a deadline simply omits the line.
+    """
+    if waiver_deadline is None:
+        return None
+    if approval_required:
+        return waiver_deadline - timedelta(hours=TRADE_APPROVAL_LEAD_HOURS)
+    return waiver_deadline
+
+
+def _pending_trade_ids(element_states):
+    """Element ids FPL has flagged as part of an already-accepted trade.
+
+    A proposal naming one of these would be marked **Invalid** the moment the other
+    trade processes, so they cannot be traded for now. An empty or missing state map
+    means "unknown", and yields an empty set — the page then behaves exactly as it
+    did before this existed, rather than hiding players on the strength of data it
+    does not have.
+    """
+    if not element_states:
+        return set()
+    return {
+        int(eid) for eid, state in element_states.items()
+        if state.get("in_accepted_trade")
+    }
+
+
+def _strip_pending_players(rosters, pending_ids):
+    """Remove players already committed to an accepted trade from every roster.
+
+    Returns (rosters, removed) where `removed` maps team id -> player names dropped,
+    so the page can say who is missing instead of silently shrinking a squad.
+    """
+    if not pending_ids:
+        return rosters, {}
+
+    trimmed, removed = {}, {}
+    for tid, data in rosters.items():
+        keep, gone = [], []
+        for player in data["players"]:
+            pid = player.get("player_id")
+            if pid is not None and int(pid) in pending_ids:
+                gone.append(player.get("display_name", player.get("name", "?")))
+            else:
+                keep.append(player)
+        trimmed[tid] = {**data, "players": keep}
+        if gone:
+            removed[tid] = gone
+    return trimmed, removed
+
+
+def _render_trade_window(window: Dict, pending_count: int):
+    """Render the league's trade regime and the real trade deadline.
+
+    The Trade Analyzer used to recommend trades in the abstract: it never read the
+    league's trade setting, so it could not say whether a proposal needed approval,
+    nor that approval moves the deadline a full day earlier. A manager reading the
+    waiver deadline off the Waiver Wire would have been a day late.
+    """
+    if not window:
+        return
+
+    trades_code = window.get("trades")
+    label = trade_setting_label(trades_code)
+    approval = requires_trade_approval(trades_code)
+    # None means an unrecognised code. Assume approval — the earlier deadline is the
+    # safe direction, and being early costs nothing a missed window does not.
+    approval_required = True if approval is None else approval
+
+    if label:
+        regime_value, regime_note = label, (
+            "Accepted trades can be vetoed" if approval_required
+            else "Accepted trades process instantly"
+        )
+    elif trades_code is None:
+        regime_value, regime_note = "Unknown", "League trade setting unavailable"
+    else:
+        regime_value = f"Setting '{trades_code}'"
+        regime_note = "Unrecognised code — assuming approval is required"
+
+    next_gw = window.get("next_event") or window.get("current_event")
+    deadline = trade_deadline_from(_next_waiver_deadline(next_gw), approval_required)
+    if deadline is not None:
+        # %-I is glibc/BSD-only, so strip the leading zero by hand for Windows.
+        deadline_value = deadline.strftime("%a %I:%M %p ET").replace(" 0", " ", 1)
+        deadline_note = (
+            "24h before the waiver deadline" if approval_required
+            else "Same as the waiver deadline"
+        )
+    else:
+        deadline_value, deadline_note = "—", "Deadline unavailable"
+
+    def _card(icon: str, value: str, label_: str, note: str, color: str) -> str:
+        return (
+            '<div style="flex:1;text-align:center;padding:14px 12px;color:#e0e0e0;'
+            'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);'
+            'border:1px solid #333;border-radius:10px;margin:0 6px;">'
+            f'<div style="font-size:1.3em;margin-bottom:4px;color:#e0e0e0;">{icon}</div>'
+            f'<div style="color:{color};font-size:1.05em;font-weight:bold;">{value}</div>'
+            f'<div style="color:#e0e0e0;font-size:0.85em;margin-top:4px;">{label_}</div>'
+            f'<div style="color:#888;font-size:0.75em;margin-top:2px;">{note}</div>'
+            '</div>'
+        )
+
+    st.markdown(
+        '<div style="display:flex;margin-bottom:1rem;">'
+        + _card("⚖️", regime_value, "Trade approval", regime_note, "#4ecca3")
+        + _card("⏰", deadline_value,
+                f"GW{next_gw} trade deadline" if next_gw else "Trade deadline",
+                deadline_note, "#3498db")
+        + _card("🔗", str(pending_count), "In accepted trades",
+                "Cannot be traded again until processed", "#ff9800")
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_trade_card(proposal: Dict, idx: int):
     """Render a single trade proposal card."""
     accept_colors = {"High": "#4ecca3", "Medium": "#ffa726", "Low": "#e74c3c"}
@@ -946,10 +1183,19 @@ def _render_trade_card(proposal: Dict, idx: int):
         )
     card_html += '</div></div>'
 
-    # Footer: fairness + drop suggestion (removed confusing "net value" metric)
+    # Footer: fairness + veto risk + drop suggestion
+    # (removed confusing "net value" metric)
     footer_parts = [
         f'Fairness: {proposal["fairness"]:.0%}',
     ]
+    # Veto risk is only modelled where the league's trade setting is known, so a
+    # zero here means "no exposure or not established" — either way, nothing to say.
+    veto_risk = proposal.get("veto_risk", 0.0)
+    if veto_risk >= 0.05:
+        veto_color = "#e74c3c" if veto_risk >= 0.20 else "#ffa726"
+        footer_parts.append(
+            f'<span style="color:{veto_color};">Veto risk: {veto_risk:.0%}</span>'
+        )
     if proposal.get("drop_suggestion"):
         footer_parts.append(
             f'<span style="color:#ffa726;">Drop needed: {proposal["drop_suggestion"]}</span>'
@@ -1144,6 +1390,31 @@ def show_trade_analyzer_page():
         st.warning("No roster data found. The season may not have started yet.")
         return
 
+    # League trade rules and per-player trade state. Both fail open: an empty result
+    # means the page behaves as it did before it knew about either.
+    try:
+        transaction_window = get_draft_transaction_window(league_id)
+    except Exception:
+        _logger.warning("Unable to load Draft transaction window", exc_info=True)
+        transaction_window = {}
+    try:
+        element_states = get_league_element_states(league_id)
+    except Exception:
+        _logger.warning("Unable to load Draft element states", exc_info=True)
+        element_states = {}
+
+    trades_code = transaction_window.get("trades")
+    if not trades_allowed(trades_code):
+        st.warning(
+            "Trading is disabled in this league, so nothing here could be "
+            "submitted. The rest of the page is hidden rather than recommending "
+            "moves you cannot make."
+        )
+        return
+
+    pending_ids = _pending_trade_ids(element_states)
+    _render_trade_window(transaction_window, len(pending_ids))
+
     # Team selector
     team_options = sorted(
         [(tid, data["team_name"]) for tid, data in rosters.items()],
@@ -1183,12 +1454,14 @@ def show_trade_analyzer_page():
         with col_types:
             trade_types = st.multiselect(
                 "Trade Types",
-                ["1-for-1", "2-for-2"],
+                ["1-for-1", "2-for-2", "3-for-3"],
                 default=["1-for-1", "2-for-2"],
                 key="ta_trade_types",
                 help="FPL requires both sides of a trade to move the same number of "
-                     "players in the same positions, so these are the only shapes "
-                     "that can actually be proposed.",
+                     "players in the same positions — but any size is allowed, and "
+                     "FPL's own example is a 3-for-3. These are the shapes this "
+                     "page searches. 3-for-3 is off by default because it finds "
+                     "many more combinations, not because it is disallowed.",
             )
         with col_fdr:
             fdr_weeks = int(st.number_input(
@@ -1212,6 +1485,17 @@ def show_trade_analyzer_page():
     # Enrich rosters with stats and compute trade values
     rosters = _enrich_with_stats(rosters, stats_df, current_gw, fdr_weeks, weights)
 
+    # A player already inside an accepted trade cannot be part of another: FPL marks
+    # the second one Invalid as soon as the first processes. Remove them from every
+    # roster so no proposal is built around one, and say who went.
+    rosters, pending_removed = _strip_pending_players(rosters, pending_ids)
+    if pending_removed:
+        names = sorted({n for names in pending_removed.values() for n in names})
+        st.caption(
+            "Excluded from trade search — already part of an accepted trade, so a "
+            "second offer involving them would be invalidated: " + ", ".join(names)
+        )
+
     # Compute positional needs (using accurate GW-by-GW API data)
     team_pos_pts = _build_pos_pts_from_api(league_id, rosters)
     needs = _compute_positional_needs(team_pos_pts)
@@ -1230,12 +1514,21 @@ def show_trade_analyzer_page():
         num_teams = len(rosters)
         all_proposals = []
 
+        # A trade both managers want can still be vetoed where the league requires
+        # approval, and a lopsided one is what draws the objection.
+        veto_exposure = veto_exposure_for(trades_code)
+
         # Collect proposals by type
         proposals_by_type = {}
         if "1-for-1" in trade_types:
-            proposals_by_type["1-for-1"] = _find_1_for_1_trades(my_team_id, rosters, needs, num_teams)
+            proposals_by_type["1-for-1"] = _find_1_for_1_trades(
+                my_team_id, rosters, needs, num_teams, veto_exposure)
         if "2-for-2" in trade_types:
-            proposals_by_type["2-for-2"] = _find_2_for_2_trades(my_team_id, rosters, needs, num_teams)
+            proposals_by_type["2-for-2"] = _find_2_for_2_trades(
+                my_team_id, rosters, needs, num_teams, veto_exposure)
+        if "3-for-3" in trade_types:
+            proposals_by_type["3-for-3"] = _find_3_for_3_trades(
+                my_team_id, rosters, needs, num_teams, veto_exposure)
 
         # Deduplicate within each type
         for ttype in proposals_by_type:
@@ -1274,7 +1567,15 @@ def show_trade_analyzer_page():
         total_found = sum(len(v) for v in proposals_by_type.values())
 
         if top_proposals:
-            st.caption(f"Showing top {len(top_proposals)} of {total_found} proposals found.")
+            # FPL explicitly allows the same player to appear in several offers, and
+            # the first acceptance invalidates the rest — so these are alternatives
+            # that can all be on the table at once. Nothing in the list says that,
+            # and a manager who assumes otherwise sends one offer and waits.
+            st.caption(
+                f"Showing top {len(top_proposals)} of {total_found} proposals found. "
+                "You can have several of these open at once — FPL allows the same "
+                "player in multiple offers, and accepting one invalidates the others."
+            )
             for i, proposal in enumerate(top_proposals):
                 _render_trade_card(proposal, i)
         else:

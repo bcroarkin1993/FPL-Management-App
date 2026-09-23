@@ -105,3 +105,77 @@ class TestUpdateAlertState:
             update_alert_state("ffp", 10)
             settings = load_settings()
             assert settings["alert_state"]["last_ffp_alert_gw"] == 10
+
+
+class TestTradeDeadlineAlertSettings:
+    """Trades close with waivers, or a day earlier under approval — its own deadline."""
+
+    def test_trade_defaults_exist(self):
+        from scripts.common.alert_config import DEFAULT_SETTINGS
+
+        trade = DEFAULT_SETTINGS["deadline_alerts"]["trade"]
+        assert trade["enabled"] is False
+        assert trade["alert_windows"] == [24, 6, 1]
+
+    def test_backfilled_into_a_config_written_before_it_existed(self):
+        """No migration: _deep_merge fills the key in for configs already on disk.
+
+        alert_settings.json is committed and rewritten by the notifier workflow, so
+        a config predating this feature is the normal case, not an edge one.
+        """
+        from scripts.common.alert_config import DEFAULT_SETTINGS, _deep_merge
+
+        old_config = {
+            "version": 1,
+            "deadline_alerts": {
+                "draft": {"enabled": True, "alert_windows": [12]},
+                "classic": {"enabled": True, "alert_windows": [6]},
+            },
+        }
+        merged = _deep_merge(DEFAULT_SETTINGS, old_config)
+
+        assert merged["deadline_alerts"]["trade"] == {
+            "enabled": False, "alert_windows": [24, 6, 1],
+        }
+        # The user's own settings survive the merge untouched.
+        assert merged["deadline_alerts"]["draft"] == {"enabled": True, "alert_windows": [12]}
+
+
+class TestTradeDeadlineDerivation:
+    """Where accepted trades need approval, offers shut 24h before the waiver deadline."""
+
+    def _kickoff(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        return datetime(2026, 9, 26, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    def test_admin_approval_pulls_the_deadline_forward(self):
+        from datetime import timedelta
+        from scripts.common.waiver_alerts import (
+            DRAFT_OFFSET_HOURS, TRADE_APPROVAL_LEAD_HOURS, trade_deadline_for,
+        )
+
+        kickoff = self._kickoff()
+        deadline, assumed = trade_deadline_for(kickoff, "a")
+
+        expected = kickoff - timedelta(
+            hours=DRAFT_OFFSET_HOURS + TRADE_APPROVAL_LEAD_HOURS
+        )
+        assert deadline == expected
+        assert assumed is False
+
+    def test_an_unreadable_setting_takes_the_earlier_deadline_and_says_so(self):
+        """Erring early is a mild annoyance; erring late costs the window entirely.
+
+        The flag matters as much as the time: the message must not state a deadline
+        this league never confirmed as though it had.
+        """
+        from scripts.common.waiver_alerts import trade_deadline_for
+
+        kickoff = self._kickoff()
+        approved, _ = trade_deadline_for(kickoff, "a")
+
+        for unreadable in (None, "zzz"):
+            deadline, assumed = trade_deadline_for(kickoff, unreadable)
+            assert deadline == approved, unreadable
+            assert assumed is True, unreadable

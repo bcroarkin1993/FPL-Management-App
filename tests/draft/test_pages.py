@@ -186,7 +186,9 @@ class TestTradeAnalyzerPage:
              patch("scripts.draft.trade_analyzer.pull_fpl_player_stats", return_value=pd.DataFrame()), \
              patch("scripts.draft.trade_analyzer.get_draft_points_by_position", return_value=pd.DataFrame()), \
              patch("scripts.draft.trade_analyzer.get_draft_team_players_with_points", return_value={}), \
-             patch("scripts.draft.trade_analyzer.prepare_advanced_stats_df", return_value=pd.DataFrame()):
+             patch("scripts.draft.trade_analyzer.prepare_advanced_stats_df", return_value=pd.DataFrame()), \
+             patch("scripts.draft.trade_analyzer.get_draft_transaction_window", return_value={}), \
+             patch("scripts.draft.trade_analyzer.get_league_element_states", return_value={}):
             from scripts.draft.trade_analyzer import show_trade_analyzer_page
             try:
                 show_trade_analyzer_page()

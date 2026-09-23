@@ -1020,6 +1020,78 @@ TRANSACTION_MODE_WAIVERS = "waivers"
 TRANSACTION_MODE_FREE_AGENCY = "free-agency"
 
 
+# --- League trade setting ------------------------------------------------------
+# `league.trades` on /api/league/{id}/details. FPL offers four settings — no trades,
+# all trades (processed instantly), administrator approval, manager approval (vetoed
+# by a 50% objection) — but publishes them as single-letter codes and documents none
+# of them. Only one has ever been confirmed against a real league, so only one is
+# mapped here: guessing the rest would put an invented label on the page, and the
+# whole point of reading this field is to stop telling the manager things that are
+# not true. An unrecognised code is reported as unknown and logged.
+#
+# The setting is fixed before the draft and cannot be changed afterwards, so it is a
+# season constant — which is why it is safe to read it from the same cached payload
+# as `transaction_mode`, a value that does change every gameweek.
+TRADE_SETTING_ADMIN_APPROVAL = "a"   # verified live, league 11347 (admin confirmed)
+
+TRADE_SETTING_LABELS = {
+    TRADE_SETTING_ADMIN_APPROVAL: "Administrator approval",
+}
+
+#: Trade settings under which no trade can be proposed at all. Empty until the code
+#: for "no trades" is observed — see the note above on not guessing.
+TRADE_SETTINGS_DISABLED = frozenset()
+
+#: Trade settings whose accepted trades can be vetoed, and which therefore move the
+#: trade deadline 24h earlier than the waiver deadline.
+TRADE_SETTINGS_REQUIRING_APPROVAL = frozenset({TRADE_SETTING_ADMIN_APPROVAL})
+
+
+def trade_setting_label(trades_code):
+    """Human-readable name for a `league.trades` code, or None if unrecognised.
+
+    Callers must render the raw code when this returns None rather than substituting
+    a plausible-looking label.
+    """
+    if trades_code is None:
+        return None
+    return TRADE_SETTING_LABELS.get(trades_code)
+
+
+def trades_allowed(trades_code):
+    """Whether trading is possible at all. True unless the code is a known 'no trades'.
+
+    Returns True for an unrecognised code: three of the four settings permit trading,
+    and hiding the Trade Analyzer on a code we simply do not recognise would remove a
+    working page on no evidence.
+    """
+    return trades_code not in TRADE_SETTINGS_DISABLED
+
+
+def requires_trade_approval(trades_code):
+    """Whether accepted trades in this league need approval — True / False / None.
+
+    None means the code is unrecognised. **Every caller must treat None as True**,
+    because that is the direction that fails safe: approval moves the trade deadline
+    24 hours earlier, so assuming it costs the manager nothing but a premature
+    reminder, while assuming the opposite costs them the window entirely. Same
+    reasoning as `WEIGHT_UNKNOWN` in the transfer-risk model — a value we could not
+    read must never be presented as the reassuring one.
+    """
+    if trades_code is None:
+        return None
+    if trades_code in TRADE_SETTINGS_REQUIRING_APPROVAL:
+        return True
+    if trades_code in TRADE_SETTING_LABELS:
+        return False
+    _logger.warning(
+        "Unrecognised league.trades code %r — only %r is verified. Treating as "
+        "'approval required' (the safe direction) and rendering the raw code.",
+        trades_code, TRADE_SETTING_ADMIN_APPROVAL,
+    )
+    return None
+
+
 @st.cache_data(ttl=300)
 def get_league_element_states(league_id):
     """Fetch every player's transaction state for a Draft league.
@@ -1070,9 +1142,18 @@ def get_draft_transaction_window(league_id):
     active window is a per-league setting on `/api/league/{id}/details`.
 
     Returns a dict with keys ``mode`` ("waivers" | "free-agency" | None),
-    ``waivers_processed``, ``current_event``, ``next_event`` and
-    ``current_event_finished``. Every value degrades to None on failure so a banner
-    built from this can simply render nothing.
+    ``waivers_processed``, ``current_event``, ``next_event``,
+    ``current_event_finished``, ``trades`` and ``trades_time_for_approval``. Every
+    value degrades to None on failure so a banner built from this can simply render
+    nothing.
+
+    ``trades`` is the league's trade setting (see `requires_trade_approval`) and rides
+    along free: it sits in the same `/api/league/{id}/details` payload as
+    ``transaction_mode``, so reading it costs no extra request.
+
+    ``trades_time_for_approval`` is a **boolean** on `/api/game`, not a timestamp as
+    its name suggests (observed True on 2026-09-23). Its exact meaning has not been
+    established, so it is carried through unread rather than interpreted.
     """
     blank = {
         "mode": None,
@@ -1080,6 +1161,8 @@ def get_draft_transaction_window(league_id):
         "current_event": None,
         "next_event": None,
         "current_event_finished": None,
+        "trades": None,
+        "trades_time_for_approval": None,
     }
 
     result = dict(blank)
@@ -1090,6 +1173,7 @@ def get_draft_transaction_window(league_id):
         result["current_event"] = game.get("current_event")
         result["next_event"] = game.get("next_event")
         result["current_event_finished"] = game.get("current_event_finished")
+        result["trades_time_for_approval"] = game.get("trades_time_for_approval")
     except Exception as e:
         _logger.warning("Failed to fetch Draft game state: %s", e)
 
@@ -1097,7 +1181,9 @@ def get_draft_transaction_window(league_id):
         details = requests.get(
             f"https://draft.premierleague.com/api/league/{league_id}/details", timeout=30
         ).json()
-        result["mode"] = (details.get("league") or {}).get("transaction_mode")
+        league = details.get("league") or {}
+        result["mode"] = league.get("transaction_mode")
+        result["trades"] = league.get("trades")
     except Exception as e:
         _logger.warning("Failed to fetch transaction mode for league %s: %s", league_id, e)
 

@@ -1081,3 +1081,65 @@ class TestCheckTransferPlan:
             "Team": ["T%d" % i for i in range(15)],
         })
         assert _errors(check_transfer_plan(self._good(), squad_after=squad))
+
+
+class TestLeagueTradeConfig:
+    """The Trade Analyzer states a deadline and a veto regime from two API fields.
+
+    If either stops being published the page reverts to "assume approval is
+    required" — safe, but no longer a statement about *this* league, and nothing on
+    screen distinguishes the two. A shape change has to fail here instead.
+    """
+
+    def _check(self, window):
+        from scripts.common.data_validation import check_league_trade_config
+        return check_league_trade_config(window)
+
+    def _severities(self, window):
+        return {i.severity for i in self._check(window)}
+
+    def test_live_shape_is_clean(self):
+        """The payload observed on 2026-09-23, league 11347."""
+        assert self._check({"trades": "a", "trades_time_for_approval": True}) == []
+
+    def test_empty_window_errors(self):
+        assert "error" in self._severities(None)
+        assert "error" in self._severities({})
+
+    def test_missing_fields_error(self):
+        issues = self._check({"mode": "waivers"})
+        assert {i.severity for i in issues} == {"error"}
+        messages = " ".join(i.message for i in issues)
+        assert "trades" in messages
+        assert "trades_time_for_approval" in messages
+
+    def test_null_trades_setting_errors(self):
+        """The setting is fixed before the draft and cannot be unset."""
+        issues = self._check({"trades": None, "trades_time_for_approval": True})
+        assert any(i.severity == "error" for i in issues)
+
+    def test_unknown_code_warns_but_does_not_error(self):
+        """Three of the four settings have unknown codes — meeting one is expected.
+
+        Erroring on partial knowledge is a check that cries wolf, and a check that
+        cries wolf gets muted.
+        """
+        issues = self._check({"trades": "m", "trades_time_for_approval": True})
+        assert issues
+        assert {i.severity for i in issues} == {"warning"}
+        assert "'m'" in issues[0].message
+
+    def test_a_timestamp_where_a_bool_belongs_errors(self):
+        """Despite its name trades_time_for_approval is a boolean, observed True.
+
+        If FPL ever changes it to what the name suggests, anything reading it must
+        be revisited before it is trusted.
+        """
+        issues = self._check({"trades": "a", "trades_time_for_approval": "2026-09-23"})
+        assert any(i.severity == "error" for i in issues)
+
+    def test_raise_on_error_surfaces_shape_changes(self):
+        from scripts.common.data_validation import raise_on_error
+
+        with pytest.raises(AssertionError):
+            raise_on_error(self._check({"mode": "waivers"}))

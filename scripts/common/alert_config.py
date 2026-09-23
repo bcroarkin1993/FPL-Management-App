@@ -17,6 +17,11 @@ DEFAULT_SETTINGS = {
     "deadline_alerts": {
         "draft": {"enabled": False, "alert_windows": [24, 6, 1]},
         "classic": {"enabled": False, "alert_windows": [24, 6, 1]},
+        # Trades close with waivers, or a full 24h earlier where the league requires
+        # approval — so this is a genuinely different deadline, not a duplicate of
+        # the Draft one. _deep_merge backfills it into configs written before it
+        # existed, so no migration is needed.
+        "trade": {"enabled": False, "alert_windows": [24, 6, 1]},
     },
     "data_source_alerts": {
         "rotowire": {"enabled": False},

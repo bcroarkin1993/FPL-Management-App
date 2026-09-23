@@ -248,3 +248,212 @@ class TestTradeLegality:
         import scripts.draft.trade_analyzer as ta
 
         assert not hasattr(ta, "_find_2_for_1_trades")
+
+
+class TestTradeShapesBeyondTwo:
+    """FPL permits any N-for-N with matching position multisets.
+
+    The app told users otherwise for a long time: the trade-type help text claimed
+    1-for-1 and 2-for-2 were "the only shapes that can actually be proposed", which
+    restated our search space as the platform's rule. FPL's own worked example is a
+    3-for-3 (1 MID + 2 FWD for 1 MID + 2 FWD).
+    """
+
+    def test_three_for_three_is_legal(self):
+        from scripts.draft.trade_analyzer import _is_legal_trade
+
+        send = [{"position": "MID"}, {"position": "FWD"}, {"position": "FWD"}]
+        recv = [{"position": "FWD"}, {"position": "MID"}, {"position": "FWD"}]
+        assert _is_legal_trade(send, recv)
+
+    def test_three_for_three_is_discoverable(self):
+        from scripts.draft.trade_analyzer import _find_3_for_3_trades
+
+        rosters = _make_full_rosters()
+        proposals = _find_3_for_3_trades(1, rosters, _needs_for(rosters), num_teams=2)
+
+        assert proposals, "no 3-for-3 proposals generated — the shape is unreachable"
+        for proposal in proposals:
+            assert _is_balanced(proposal), proposal["trade_type"]
+            assert len(proposal["send"]) == 3
+
+    def test_n_equals_two_matches_the_original_search(self):
+        """The generalised finder must reproduce the hand-written 2-for-2 exactly.
+
+        _find_2_for_2_trades was replaced by a wrapper over the n-slot search. If the
+        generalisation drifted, the shape users already rely on changes silently.
+        """
+        from scripts.draft.trade_analyzer import (
+            _find_2_for_2_trades,
+            _find_upgrade_sweetener_trades,
+        )
+
+        rosters = _make_full_rosters()
+        needs = _needs_for(rosters)
+
+        wrapper = _find_2_for_2_trades(1, rosters, needs, num_teams=2)
+        general = _find_upgrade_sweetener_trades(2, 1, rosters, needs, num_teams=2)
+
+        def key(props):
+            return sorted(
+                (p["opp_id"],
+                 tuple(sorted(x["name"] for x in p["send"])),
+                 tuple(sorted(x["name"] for x in p["receive"])))
+                for p in props
+            )
+
+        assert wrapper, "2-for-2 search produced nothing — assertion would be vacuous"
+        assert key(wrapper) == key(general)
+
+    def test_shapes_never_repeat_a_position(self):
+        """A shape assigns each position at most once, across upgrades and sweeteners."""
+        from scripts.draft.trade_analyzer import _upgrade_sweetener_shapes
+
+        for n in (2, 3):
+            shapes = list(_upgrade_sweetener_shapes(n))
+            assert shapes, f"no shapes generated for n={n}"
+            for upgrades, sweeteners in shapes:
+                combined = list(upgrades) + list(sweeteners)
+                assert len(combined) == n
+                assert len(set(combined)) == n, (upgrades, sweeteners)
+                # GK is too scarce to give away as filler.
+                assert "GK" not in sweeteners
+
+
+class TestPendingTradeExclusion:
+    """A player already inside an accepted trade cannot be part of another.
+
+    FPL marks the second offer **Invalid** as soon as the first processes. The
+    element-status endpoint publishes `in_accepted_trade`, which this app fetched and
+    read nowhere until the platform rules were written down properly.
+    """
+
+    def test_pending_ids_read_the_flag(self):
+        from scripts.draft.trade_analyzer import _pending_trade_ids
+
+        states = {
+            101: {"status": "o", "owner": 1, "in_accepted_trade": True},
+            102: {"status": "o", "owner": 1, "in_accepted_trade": False},
+            103: {"status": "a", "owner": None, "in_accepted_trade": False},
+        }
+        assert _pending_trade_ids(states) == {101}
+
+    def test_unknown_states_hide_nobody(self):
+        """An empty state map means 'unknown', not 'nobody is pending'.
+
+        The endpoint failing must leave the page exactly as it was before this
+        existed — never shrink a squad on the strength of data we do not have.
+        """
+        from scripts.draft.trade_analyzer import _pending_trade_ids, _strip_pending_players
+
+        rosters = _make_full_rosters()
+        assert _pending_trade_ids({}) == set()
+        assert _pending_trade_ids(None) == set()
+
+        trimmed, removed = _strip_pending_players(rosters, set())
+        assert removed == {}
+        assert trimmed is rosters
+
+    def test_pending_players_leave_every_roster(self):
+        from scripts.draft.trade_analyzer import _strip_pending_players
+
+        rosters = _make_full_rosters()
+        victim = rosters[1]["players"][0]
+        trimmed, removed = _strip_pending_players(rosters, {int(victim["player_id"])})
+
+        assert victim["name"] not in {p["name"] for p in trimmed[1]["players"]}
+        assert len(trimmed[1]["players"]) == len(rosters[1]["players"]) - 1
+        assert removed[1] == [victim["name"]]
+        # Other squads are untouched.
+        assert len(trimmed[2]["players"]) == len(rosters[2]["players"])
+
+    def test_excluded_players_never_reach_a_proposal(self):
+        from scripts.draft.trade_analyzer import (
+            _find_1_for_1_trades,
+            _strip_pending_players,
+        )
+
+        rosters = _make_full_rosters()
+        needs = _needs_for(rosters)
+        # Their best midfielder is mid-trade, so no proposal may name him.
+        target = max(
+            (p for p in rosters[2]["players"] if p["position"] == "MID"),
+            key=lambda p: p["trade_value"],
+        )
+        trimmed, _ = _strip_pending_players(rosters, {int(target["player_id"])})
+
+        for proposal in _find_1_for_1_trades(1, trimmed, needs, num_teams=2):
+            named = {p["name"] for p in proposal["send"] + proposal["receive"]}
+            assert target["name"] not in named
+
+
+class TestVetoRisk:
+    """Acceptance models the counterparty; a veto is a third party killing the deal.
+
+    Under administrator or manager approval an accepted trade can still be blocked,
+    and a lopsided one is what draws the objection.
+    """
+
+    def _proposal(self, veto_exposure):
+        from scripts.draft.trade_analyzer import _score_proposal
+
+        rosters = _make_full_rosters()
+        needs = _needs_for(rosters)
+        send = [p for p in rosters[1]["players"] if p["position"] == "MID"][:1]
+        recv = [p for p in rosters[2]["players"] if p["position"] == "MID"][:1]
+        return _score_proposal(1, 2, send, recv, rosters, needs, 2, veto_exposure)
+
+    def test_unknown_regime_leaves_scoring_untouched(self):
+        """Only 'a' is a verified trade setting.
+
+        Discounting a trade on a code we cannot interpret invents a penalty out of
+        our own ignorance — and a league set to 'all trades' has no veto at all.
+        """
+        from scripts.draft.trade_analyzer import veto_exposure_for
+
+        assert veto_exposure_for(None) == 0.0
+        assert veto_exposure_for("zzz") == 0.0
+
+        baseline = self._proposal(0.0)
+        assert baseline["veto_risk"] == 0.0
+
+    def test_admin_approval_is_exposed(self):
+        from scripts.draft.trade_analyzer import (
+            TRADE_SETTING_ADMIN_APPROVAL,
+            veto_exposure_for,
+        )
+
+        assert veto_exposure_for(TRADE_SETTING_ADMIN_APPROVAL) > 0.0
+
+    def test_an_unfair_trade_is_penalised_a_fair_one_is_not(self):
+        exposure = 0.35
+        baseline = self._proposal(0.0)
+        exposed = self._proposal(exposure)
+
+        # veto_risk scales with unfairness, so it is bounded by the exposure itself.
+        assert 0.0 <= exposed["veto_risk"] <= exposure
+        if exposed["fairness"] >= 0.999:
+            assert exposed["veto_risk"] == 0.0
+            assert exposed["trade_score"] == baseline["trade_score"]
+        else:
+            assert exposed["veto_risk"] > 0.0
+            assert exposed["trade_score"] < baseline["trade_score"]
+
+
+class TestTradeDeadline:
+    """Approval moves the trade deadline a full day earlier than the waiver one."""
+
+    def test_approval_pulls_the_deadline_forward(self):
+        from datetime import datetime, timedelta
+        from scripts.draft.trade_analyzer import trade_deadline_from
+
+        waiver = datetime(2026, 9, 26, 8, 30)
+        assert trade_deadline_from(waiver, False) == waiver
+        assert trade_deadline_from(waiver, True) == waiver - timedelta(hours=24)
+
+    def test_no_waiver_deadline_yields_none(self):
+        """A page that cannot resolve a deadline omits the line, never guesses one."""
+        from scripts.draft.trade_analyzer import trade_deadline_from
+
+        assert trade_deadline_from(None, True) is None
+        assert trade_deadline_from(None, False) is None

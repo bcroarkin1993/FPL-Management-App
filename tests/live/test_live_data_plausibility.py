@@ -501,6 +501,60 @@ class TestDraftElementStates:
         )
 
 
+class TestDraftTradeConfig:
+    """The Trade Analyzer states a trade deadline and a veto regime from two fields.
+
+    Both ride on payloads the app already fetches. If either stops being published
+    the page silently falls back to "assume approval is required" — the safe
+    direction, but no longer a statement about this league, and indistinguishable on
+    screen from a real one.
+    """
+
+    @pytest.fixture(scope="class")
+    def window(self, draft_league_id):
+        from scripts.common.fpl_draft_api import get_draft_transaction_window
+
+        return skip_if_unreachable(
+            lambda: get_draft_transaction_window(draft_league_id),
+            "Draft transaction window",
+        )
+
+    def test_trade_config_is_plausible(self, window):
+        from scripts.common.data_validation import check_league_trade_config
+
+        raise_on_error(
+            check_league_trade_config(window), context="Draft league trade config"
+        )
+
+    def test_trades_setting_is_published(self, window):
+        """league.trades sits beside transaction_mode on the same payload.
+
+        It is fixed before the draft and cannot be changed afterwards, so a null
+        here is a failed read being reported as a real value, never a league that
+        turned trading off mid-season.
+        """
+        assert "trades" in window, (
+            "league.trades is no longer on /api/league/{id}/details. The Trade "
+            "Analyzer cannot tell whether trades need approval without it."
+        )
+        assert window["trades"] is not None, "league.trades came back null"
+
+    def test_trades_time_for_approval_is_still_a_boolean(self, window):
+        """Despite the name this is a bool, not a timestamp — observed True.
+
+        Pinned because the name invites the opposite assumption. If FPL ever makes
+        it what it sounds like, this failure is the prompt to work out what it means
+        before anything starts reading it.
+        """
+        flag = window.get("trades_time_for_approval")
+        if flag is None:
+            pytest.skip("trades_time_for_approval not published")
+        assert isinstance(flag, bool), (
+            "trades_time_for_approval is %r (%s), expected a bool."
+            % (flag, type(flag).__name__)
+        )
+
+
 class TestDraftWinProbabilityInputs:
     def test_score_spread_is_usable(self, draft_league_id):
         """sigma == 0 is the preseason failure that produced 85%/15% on a
