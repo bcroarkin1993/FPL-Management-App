@@ -37,6 +37,67 @@ TRADE_SETTINGS_DISABLED = frozenset()   # the "no trades" code has not been obse
 KNOWN_TRADE_SETTINGS = TRADE_SETTINGS_REQUIRING_APPROVAL | TRADE_SETTINGS_DISABLED
 
 
+def resolve_trade_deadline(gw, kickoff_et, trades_code, now_et):
+    """(gw, deadline, approval_assumed) for the next *reachable* trade deadline.
+
+    Returns `(gw, None, False)` where trading is disabled.
+
+    **Why this needs a look-ahead when the waiver alert does not.** main() resolves
+    one gameweek — the current one until its last match finishes — and derives every
+    deadline from that gameweek's earliest kickoff. Under approval, trades close
+    49.5h before kickoff, and for a *midweek* gameweek all three alert windows
+    (73.5h, 55.5h and 50.5h before kickoff) fall while the previous gameweek is still
+    being played. So `gw` is still N, `kickoff_et` is GW N's kickoff in the past,
+    every window reads as elapsed, and the alert silently never fires. Worked
+    through for a Tuesday 15:00 kickoff: the windows land Sat 13:30, Sun 07:30 and
+    Sun 12:30, with GW N running until Sunday evening.
+
+    The Draft waiver alert survives the same arithmetic only by luck — its 25.5h
+    deadline leaves the 6h and 1h windows after the rollover. The extra day of lead
+    a trade deadline carries pushes all of its windows into the dead zone. 7 of 38
+    gameweeks are midweek, so this is a seventh of the season, not an edge case.
+    """
+    deadline, assumed = trade_deadline_for(kickoff_et, trades_code)
+    if deadline is None or deadline > now_et:
+        return gw, deadline, assumed
+
+    # This gameweek's trade window has already shut. The one that matters now is the
+    # next gameweek's, which is what a manager would actually be planning for.
+    try:
+        next_kickoff = _earliest_kickoff_et(gw + 1)
+    except RuntimeError as e:
+        print(f"[waiver_alerts:Trade] No fixtures for GW {gw + 1} ({e})")
+        return gw, deadline, assumed
+
+    next_deadline, next_assumed = trade_deadline_for(next_kickoff, trades_code)
+    if next_deadline is not None and next_deadline > now_et:
+        print(f"[waiver_alerts:Trade] GW {gw} trade window has shut; "
+              f"targeting GW {gw + 1}")
+        return gw + 1, next_deadline, next_assumed
+    return gw, deadline, assumed
+
+
+def _resolve_draft_league_id():
+    """Draft league id for the notifier: locked in-app setting first, then the env.
+
+    The same precedence config.py applies, reimplemented here because this module is
+    deliberately config-free for GitHub Actions. league_config is Streamlit-free and
+    is already this module's transitive dependency via alert_config.
+
+    Reading the env alone meant a user who configured their league on the League
+    Setup page rather than in .env got "your league's trade setting could not be
+    read" on every locally-run alert, with the setting sitting readable on disk.
+    """
+    try:
+        from scripts.common.league_config import load_settings as load_league_settings
+        draft = load_league_settings().get("draft", {})
+        if draft.get("locked") and draft.get("league_id"):
+            return str(draft["league_id"])
+    except Exception as e:
+        print(f"[waiver_alerts] Could not read local league settings ({e})")
+    return os.getenv("FPL_DRAFT_LEAGUE_ID")
+
+
 def _fetch_league_trades_setting(league_id):
     """Read `league.trades` for a Draft league, or None if it cannot be read.
 
@@ -346,20 +407,22 @@ def main():
     # Check the Draft trade deadline. Distinct from the Draft waiver deadline: where
     # the league requires approval, trade offers shut a full day earlier.
     if trade_enabled:
-        trades_code = _fetch_league_trades_setting(os.getenv("FPL_DRAFT_LEAGUE_ID"))
-        trade_deadline, approval_assumed = trade_deadline_for(kickoff_et, trades_code)
+        trades_code = _fetch_league_trades_setting(_resolve_draft_league_id())
+        trade_gw, trade_deadline, approval_assumed = resolve_trade_deadline(
+            gw, kickoff_et, trades_code, now_et
+        )
         if trade_deadline is None:
             print("[waiver_alerts:Trade] League has trading disabled, skipping")
         else:
             print(f"[waiver_alerts:Trade] league.trades={trades_code!r} "
-                  f"approval_assumed={approval_assumed}")
+                  f"approval_assumed={approval_assumed} target_gw={trade_gw}")
             note = (
                 "_(Your league's trade setting could not be read, so this assumes "
                 "approval is required — the earlier of the two possible deadlines.)_"
                 if approval_assumed else ""
             )
-            if _check_and_send_alert(webhook, mention, trade_deadline, gw, "Trade",
-                                     now_et, trade_windows, note=note):
+            if _check_and_send_alert(webhook, mention, trade_deadline, trade_gw,
+                                     "Trade", now_et, trade_windows, note=note):
                 alerts_sent += 1
 
     # Check data source alerts

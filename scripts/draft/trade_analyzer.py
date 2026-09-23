@@ -13,17 +13,18 @@ number* of players with *identical position composition* on both sides (1 MID +
 CLAUDE.md.
 
 That rule bounds the *shape*, not the size: any N-for-N with matching position
-multisets is proposable, and FPL's own worked example is a 3-for-3. What this
-module searches is a narrower set than what the platform permits — 1-for-1, plus
-the upgrade/sweetener structures at n=2 and n=3 — and the two must not be
-confused. Describing our search space as FPL's rule is how the page came to tell
-users that 3-for-3 could not be proposed.
+multisets is proposable, and FPL's own worked example is a 3-for-3 (1 MID + 2
+FWD). What this module searches is a narrower set than what the platform permits
+— 1-for-1, plus the upgrade/sweetener structures at n=2 and n=3, which between
+them reach 16 of the 20 position multisets of size three — and the two must not
+be confused. Describing our search space as FPL's rule is how the page came to
+tell users that 3-for-3 could not be proposed at all.
 """
 
 import logging
 from collections import Counter
 from datetime import timedelta
-from itertools import combinations, product
+from itertools import combinations, combinations_with_replacement, product
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -459,22 +460,65 @@ def _upgrade_sweetener_shapes(n: int):
     """Yield every (upgrade_positions, sweetener_positions) split of an n-player side.
 
     Both sides of a trade must carry the same position multiset, so a shape is just
-    an assignment of positions to slots. Positions are kept distinct across the whole
-    shape: repeating one would put two slots at the same position in competition for
-    the same "my worst / their best" ordering, and the resulting pair is reachable as
-    a different shape anyway.
+    an assignment of positions to slots.
 
-    At n=2 this reproduces the original 2-for-2 search exactly — one upgrade, one
-    sweetener. At n=3 it adds (1 upgrade, 2 sweeteners) and, more interestingly,
-    (2 upgrades, 1 sweetener): a two-position upgrade funded by a single sweetener,
-    which no previous shape could express.
+    **A position may repeat within a role**, which is the whole point at n=3: FPL's
+    own worked example is 1 MID + 2 FWD, and drawing from `combinations` rather than
+    `combinations_with_replacement` made that multiset — and 16 of the 20 possible
+    ones — unreachable, while the module docstring and the page's help text both
+    cited it. Advertising a shape the search cannot produce is the exact failure this
+    module was rewritten to stop committing.
+
+    The two *roles* stay disjoint in position. A position that is simultaneously an
+    upgrade and a sweetener would have the search send that club's worst and best
+    player at once and receive their best and worst, which is not a coherent trade to
+    propose, merely a legal one. So the reachable multisets are those with at least
+    two distinct positions — not every legal multiset, and the docstrings say so
+    rather than overclaiming a second time.
     """
     for n_upgrade in range(1, n):          # at least one of each; s = n - u >= 1
         n_sweetener = n - n_upgrade
-        for upgrades in combinations(_ALL_POSITIONS, n_upgrade):
+        for upgrades in combinations_with_replacement(_ALL_POSITIONS, n_upgrade):
             eligible = [p for p in _SWEETENER_POSITIONS if p not in upgrades]
-            for sweeteners in combinations(eligible, n_sweetener):
+            for sweeteners in combinations_with_replacement(eligible, n_sweetener):
                 yield upgrades, sweeteners
+
+
+def _slot_groups(positions, roster, best_first):
+    """Candidate tuples for each distinct position in a role, of the right arity.
+
+    A position appearing k times needs k *distinct* players chosen from it, so the
+    group is a `combinations` over its candidate pool rather than a product over k
+    independent slots — which would generate the same trade twice (as (a,b) and
+    (b,a)) and once illegally (as (a,a)).
+
+    The pool widens with k so a doubled position still has more than one way to fill
+    itself: at k=2 the top `_CANDIDATES_PER_SLOT` alone would yield exactly one pair.
+    """
+    groups = []
+    for pos, k in Counter(positions).items():
+        pool = sorted(
+            [p for p in roster if p["position"] == pos],
+            key=lambda x: x.get("trade_value", 0),
+            reverse=best_first,
+        )[: k + _CANDIDATES_PER_SLOT - 1]
+        if len(pool) < k:
+            return None
+        groups.append((pos, list(combinations(pool, k))))
+    return groups
+
+
+def _is_genuine_upgrade(sent, received):
+    """Whether every player received at a position beats the one sent in its place.
+
+    Ranked against ranked: the i-th best sent against the i-th best received. At one
+    player per position this is the original scalar comparison; at two it stops a
+    pair that improves the top slot while quietly downgrading the other from reading
+    as an upgrade.
+    """
+    sent_values = sorted(p.get("trade_value", 0) for p in sent)
+    recv_values = sorted(p.get("trade_value", 0) for p in received)
+    return all(r > s for s, r in zip(sent_values, recv_values))
 
 
 def _find_upgrade_sweetener_trades(
@@ -514,36 +558,30 @@ def _find_upgrade_sweetener_trades(
             if any(opp_needs[pos] < 0.2 for pos in sweeteners):
                 continue
 
-            def _at(roster, pos, best_first):
-                return sorted(
-                    [p for p in roster if p["position"] == pos],
-                    key=lambda x: x.get("trade_value", 0),
-                    reverse=best_first,
-                )[:_CANDIDATES_PER_SLOT]
-
-            # Slot order is (upgrades..., sweeteners...) on both sides, so the i-th
-            # send slot and the i-th receive slot are the same position — which is
-            # what makes the per-slot upgrade comparison below meaningful.
-            send_slots = (
-                [_at(my_roster, pos, best_first=False) for pos in upgrades]
-                + [_at(my_roster, pos, best_first=True) for pos in sweeteners]
-            )
-            recv_slots = (
-                [_at(opp_roster, pos, best_first=True) for pos in upgrades]
-                + [_at(opp_roster, pos, best_first=False) for pos in sweeteners]
-            )
-            if any(not slot for slot in send_slots + recv_slots):
+            # Slots are grouped by position and role. Send and receive are built in
+            # the same group order, so an upgrade group on one side lines up with the
+            # same position's group on the other.
+            send_groups = _slot_groups(upgrades, my_roster, best_first=False)
+            recv_groups = _slot_groups(upgrades, opp_roster, best_first=True)
+            send_sweet = _slot_groups(sweeteners, my_roster, best_first=True)
+            recv_sweet = _slot_groups(sweeteners, opp_roster, best_first=False)
+            if None in (send_groups, recv_groups, send_sweet, recv_sweet):
                 continue
 
-            n_upgrades = len(upgrades)
-            for send_players in product(*send_slots):
+            n_upgrade_groups = len(send_groups)
+            send_all = send_groups + send_sweet
+            recv_all = recv_groups + recv_sweet
+
+            for send_combo in product(*[opts for _pos, opts in send_all]):
+                send_players = [p for group in send_combo for p in group]
                 send_names = {p["name"] for p in send_players}
                 if len(send_names) != n:
                     continue
                 if min(p.get("trade_value", 0) for p in send_players) < _MIN_CALIBER:
                     continue
 
-                for recv_players in product(*recv_slots):
+                for recv_combo in product(*[opts for _pos, opts in recv_all]):
+                    recv_players = [p for group in recv_combo for p in group]
                     recv_names = {p["name"] for p in recv_players}
                     if len(recv_names) != n:
                         continue
@@ -552,17 +590,16 @@ def _find_upgrade_sweetener_trades(
                     if min(p.get("trade_value", 0) for p in recv_players) < _MIN_CALIBER:
                         continue
 
-                    # Every upgrade slot has to actually be an upgrade, or this is
+                    # Every upgrade group has to actually be an upgrade, or this is
                     # just a reshuffle dressed up as one.
-                    if any(
-                        recv_players[i].get("trade_value", 0)
-                        <= send_players[i].get("trade_value", 0)
-                        for i in range(n_upgrades)
+                    if not all(
+                        _is_genuine_upgrade(send_combo[i], recv_combo[i])
+                        for i in range(n_upgrade_groups)
                     ):
                         continue
 
                     proposal = _score_proposal(
-                        my_team_id, opp_id, list(send_players), list(recv_players),
+                        my_team_id, opp_id, send_players, recv_players,
                         rosters, needs, num_teams, veto_exposure,
                     )
                     if proposal and proposal["trade_score"] > min_score:
@@ -1106,6 +1143,19 @@ def _render_trade_window(window: Dict, pending_count: int):
         unsafe_allow_html=True,
     )
 
+    # The deadline and the scoring resolve an unknown setting in *opposite*
+    # directions, on purpose — the earlier deadline is the safe error, while a veto
+    # penalty drawn from a code we cannot read would be invented. Left unsaid, the
+    # page would announce "this league can veto your trade" directly above proposals
+    # ranked as though it cannot, which is the page disagreeing with itself.
+    if approval is None:
+        st.caption(
+            "The trade deadline above assumes approval is required, which is the "
+            "earlier of the two possibilities. Veto risk is **not** priced into the "
+            "scores below, because that would mean inferring a penalty from a "
+            "setting we could not read."
+        )
+
 
 def _render_trade_card(proposal: Dict, idx: int):
     """Render a single trade proposal card."""
@@ -1459,9 +1509,10 @@ def show_trade_analyzer_page():
                 key="ta_trade_types",
                 help="FPL requires both sides of a trade to move the same number of "
                      "players in the same positions — but any size is allowed, and "
-                     "FPL's own example is a 3-for-3. These are the shapes this "
-                     "page searches. 3-for-3 is off by default because it finds "
-                     "many more combinations, not because it is disallowed.",
+                     "FPL's own example is a 3-for-3 (1 MID + 2 FWD). These are "
+                     "the shapes this page searches. 3-for-3 is off by default "
+                     "because it finds many more combinations, not because it is "
+                     "disallowed.",
             )
         with col_fdr:
             fdr_weeks = int(st.number_input(

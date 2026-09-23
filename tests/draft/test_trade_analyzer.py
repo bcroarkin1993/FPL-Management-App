@@ -305,17 +305,61 @@ class TestTradeShapesBeyondTwo:
         assert wrapper, "2-for-2 search produced nothing — assertion would be vacuous"
         assert key(wrapper) == key(general)
 
-    def test_shapes_never_repeat_a_position(self):
-        """A shape assigns each position at most once, across upgrades and sweeteners."""
+    def test_fpls_own_example_shape_is_reachable(self):
+        """1 MID + 2 FWD — the multiset the docstring and the page's help both cite.
+
+        The first cut of the generator drew from `combinations` rather than
+        `combinations_with_replacement`, so every shape had distinct positions and
+        only 4 of the 20 possible 3-position multisets could be produced. The page
+        advertised a shape the search could not find — the same fault, in the same
+        module, that this whole feature exists to correct.
+        """
+        from scripts.draft.trade_analyzer import _upgrade_sweetener_shapes
+
+        reachable = {
+            tuple(sorted(list(u) + list(s)))
+            for u, s in _upgrade_sweetener_shapes(3)
+        }
+        assert ("FWD", "FWD", "MID") in reachable
+        # A position repeating within a role is the general case, not a special one.
+        assert len(reachable) >= 16, sorted(reachable)
+
+    def test_a_repeated_position_yields_distinct_players(self):
+        """Two slots at one position must draw two different players, once each.
+
+        A product over k independent slots would offer the same player twice and
+        offer each real pair twice more, in both orders.
+        """
+        from scripts.draft.trade_analyzer import _find_3_for_3_trades
+
+        rosters = _make_full_rosters()
+        proposals = _find_3_for_3_trades(1, rosters, _needs_for(rosters), num_teams=2)
+
+        repeated = [
+            p for p in proposals
+            if len({x["position"] for x in p["send"]}) < 3
+        ]
+        assert repeated, "no repeated-position shapes reached a proposal"
+        for proposal in repeated:
+            for side in ("send", "receive"):
+                names = [x["name"] for x in proposal[side]]
+                assert len(names) == len(set(names)), proposal[side]
+
+    def test_shapes_keep_the_two_roles_disjoint(self):
+        """A position may repeat, but never act as upgrade and sweetener at once.
+
+        That would have the search send a club's worst *and* best player at the same
+        position while receiving their best and worst — legal, but not a coherent
+        proposal.
+        """
         from scripts.draft.trade_analyzer import _upgrade_sweetener_shapes
 
         for n in (2, 3):
             shapes = list(_upgrade_sweetener_shapes(n))
             assert shapes, f"no shapes generated for n={n}"
             for upgrades, sweeteners in shapes:
-                combined = list(upgrades) + list(sweeteners)
-                assert len(combined) == n
-                assert len(set(combined)) == n, (upgrades, sweeteners)
+                assert len(upgrades) + len(sweeteners) == n
+                assert not (set(upgrades) & set(sweeteners)), (upgrades, sweeteners)
                 # GK is too scarce to give away as filler.
                 assert "GK" not in sweeteners
 

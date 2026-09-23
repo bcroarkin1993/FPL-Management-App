@@ -179,3 +179,115 @@ class TestTradeDeadlineDerivation:
             deadline, assumed = trade_deadline_for(kickoff, unreadable)
             assert deadline == approved, unreadable
             assert assumed is True, unreadable
+
+
+class TestTradeDeadlineGameweekTargeting:
+    """A midweek gameweek's trade windows all fall inside the previous gameweek.
+
+    main() derives every deadline from one gameweek's kickoff, and that gameweek is
+    still N until N's last match finishes. Under approval, trades close 49.5h before
+    kickoff — so for a Tuesday fixture all three windows (73.5h/55.5h/50.5h out) land
+    while GW N is being played, `hours_left` reads negative, and the alert silently
+    never fires. 7 of 38 gameweeks are midweek.
+    """
+
+    TZ_NAME = "America/New_York"
+
+    def _tz(self):
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(self.TZ_NAME)
+
+    def test_midweek_gameweek_alerts_are_reachable(self):
+        from datetime import datetime
+        from unittest.mock import patch
+        import scripts.common.waiver_alerts as wa
+
+        tz = self._tz()
+        gw8_kickoff = datetime(2026, 10, 3, 7, 30, tzinfo=tz)    # Sat
+        gw9_kickoff = datetime(2026, 10, 6, 15, 0, tzinfo=tz)    # Tue — midweek
+        kickoffs = {8: gw8_kickoff, 9: gw9_kickoff}
+
+        # Each of the three windows, evaluated while GW8 is still in play.
+        moments = [
+            (24, datetime(2026, 10, 3, 13, 30, tzinfo=tz)),
+            (6, datetime(2026, 10, 4, 7, 30, tzinfo=tz)),
+            (1, datetime(2026, 10, 4, 12, 30, tzinfo=tz)),
+        ]
+        with patch.object(wa, "_earliest_kickoff_et", side_effect=lambda g: kickoffs[g]):
+            for window, now in moments:
+                gw, deadline, _ = wa.resolve_trade_deadline(8, gw8_kickoff, "a", now)
+                assert gw == 9, f"{window}h window still targeting the old gameweek"
+                hours_left = (deadline - now).total_seconds() / 3600
+                assert abs(hours_left - window) <= 0.5, (window, hours_left)
+
+    def test_a_live_deadline_is_never_skipped_ahead(self):
+        """The look-ahead fires only once this gameweek's window has actually shut."""
+        from datetime import datetime
+        from unittest.mock import patch
+        import scripts.common.waiver_alerts as wa
+
+        tz = self._tz()
+        kickoff = datetime(2026, 10, 10, 10, 0, tzinfo=tz)       # Sat
+        now = datetime(2026, 10, 7, 8, 30, tzinfo=tz)            # deadline still ahead
+
+        with patch.object(wa, "_earliest_kickoff_et", side_effect=AssertionError):
+            gw, deadline, _ = wa.resolve_trade_deadline(10, kickoff, "a", now)
+
+        assert gw == 10
+        assert deadline > now
+
+    def test_no_fixtures_for_the_next_gameweek_degrades_quietly(self):
+        """End of season: there is no GW+1 to look ahead to."""
+        from datetime import datetime
+        from unittest.mock import patch
+        import scripts.common.waiver_alerts as wa
+
+        tz = self._tz()
+        kickoff = datetime(2026, 10, 3, 7, 30, tzinfo=tz)
+        now = datetime(2026, 10, 3, 12, 0, tzinfo=tz)            # deadline long past
+
+        with patch.object(wa, "_earliest_kickoff_et",
+                          side_effect=RuntimeError("no fixtures")):
+            gw, deadline, _ = wa.resolve_trade_deadline(38, kickoff, "a", now)
+
+        assert gw == 38
+        assert deadline < now          # stale, so no window matches and nothing sends
+
+
+class TestNotifierLeagueIdResolution:
+    """The notifier must see a league configured on the League Setup page.
+
+    Reading FPL_DRAFT_LEAGUE_ID alone put "your league's trade setting could not be
+    read" on every locally-run alert for a user who had never touched .env, with the
+    setting sitting readable in league_settings.json.
+    """
+
+    def test_locked_local_settings_win_over_the_env(self):
+        import os
+        from unittest.mock import patch
+        import scripts.common.waiver_alerts as wa
+
+        locked = {"draft": {"locked": True, "league_id": 4242}}
+        with patch("scripts.common.league_config.load_settings", return_value=locked), \
+             patch.dict(os.environ, {"FPL_DRAFT_LEAGUE_ID": "9999"}):
+            assert wa._resolve_draft_league_id() == "4242"
+
+    def test_env_is_the_fallback_when_nothing_is_locked(self):
+        import os
+        from unittest.mock import patch
+        import scripts.common.waiver_alerts as wa
+
+        unlocked = {"draft": {"locked": False, "league_id": 4242}}
+        with patch("scripts.common.league_config.load_settings", return_value=unlocked), \
+             patch.dict(os.environ, {"FPL_DRAFT_LEAGUE_ID": "9999"}):
+            assert wa._resolve_draft_league_id() == "9999"
+
+    def test_unreadable_settings_fall_back_rather_than_raise(self):
+        import os
+        from unittest.mock import patch
+        import scripts.common.waiver_alerts as wa
+
+        with patch("scripts.common.league_config.load_settings",
+                   side_effect=OSError("boom")), \
+             patch.dict(os.environ, {"FPL_DRAFT_LEAGUE_ID": "9999"}):
+            assert wa._resolve_draft_league_id() == "9999"

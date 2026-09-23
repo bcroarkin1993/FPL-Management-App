@@ -1040,6 +1040,13 @@ TRADE_SETTING_LABELS = {
 
 #: Trade settings under which no trade can be proposed at all. Empty until the code
 #: for "no trades" is observed — see the note above on not guessing.
+#:
+#: Being empty makes `trades_allowed()` constant True, so the "trading is disabled"
+#: branches it guards (the Trade Analyzer's early return, and the notifier's skip)
+#: are unreachable today. That is deliberate and is the lesser of the two errors: a
+#: league with trading off currently sees proposals it cannot submit, whereas
+#: guessing wrong would hide a working page from a league that can trade. Populating
+#: this set is a one-line change the moment a second league's setting is confirmed.
 TRADE_SETTINGS_DISABLED = frozenset()
 
 #: Trade settings whose accepted trades can be vetoed, and which therefore move the

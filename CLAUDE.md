@@ -2210,8 +2210,24 @@ more *upgrade* positions (send my worst, receive their best) funded by one or mo
 *sweeteners* (send my best, receive their worst) — and covers n=2 and n=3. At n=2 it
 reproduces the hand-written finder exactly, which a test pins. The genuinely new shape
 is n=3's `(2 upgrades, 1 sweetener)`: a two-position upgrade funded by a single
-sweetener, unreachable before. Measured at 18ms against a 10-team league, so 3-for-3 is
+sweetener, unreachable before. Measured at 71ms against a 10-team league, so 3-for-3 is
 off by default for signal, not for cost.
+
+**A position repeats within a role, and getting that wrong reproduced the original
+sin one level down.** The first cut drew shapes from `combinations`, so every one had
+*distinct* positions — which makes 1 MID + 2 FWD, the very example the docstring and
+the page's help text cite, unreachable, along with 16 of the 20 possible multisets.
+The page again advertised something the code could not do. `combinations_with_replacement`
+fixes it, and `_slot_groups()` then draws a repeated position's k players with a single
+`combinations` over one pool rather than a product over k independent slots — which
+would offer the same player twice and offer each real pair twice more, in both orders.
+`_is_genuine_upgrade()` compares ranked-against-ranked so a pair that lifts the top slot
+while quietly downgrading the other does not read as an upgrade.
+
+The two *roles* stay disjoint in position: a position acting as upgrade and sweetener
+at once would send a club's worst and best player at that position simultaneously.
+So the search reaches every multiset with at least two distinct positions — 16 of 20
+— and the docs say exactly that rather than claiming the full set.
 
 Offers can be made until the waiver deadline, or 24h earlier where approval is
 required, and may be **withdrawn at any time until they are accepted**. A player may
@@ -2232,6 +2248,18 @@ the draft starts**, so it is a season constant. **Only one code is verified: `"a
 administrator approval**, confirmed against a league whose admin reported the setting.
 Do not guess the others — label an unrecognised code as unknown rather than inventing a
 mapping.
+
+**Trade deadlines need a gameweek look-ahead that waiver deadlines do not.**
+`main()` in `waiver_alerts.py` derives every deadline from one gameweek's earliest
+kickoff, and that gameweek stays N until N's last match finishes. Under approval
+trades close 49.5h before kickoff, so for a **midweek** gameweek all three alert
+windows (73.5h, 55.5h and 50.5h out) fall while the previous gameweek is still being
+played: `hours_left` reads negative and the alert never fires. Worked through for a
+Tuesday 15:00 kickoff, the windows land Sat 13:30, Sun 07:30 and Sun 12:30 against a
+GW N that runs to Sunday evening. The Draft waiver alert survives the same arithmetic
+only by luck — its 25.5h deadline leaves the 6h and 1h windows after the rollover.
+7 of 38 gameweeks are midweek, so `resolve_trade_deadline()` targets GW+1 once the
+current gameweek's trade window has shut.
 
 **An unknown code must resolve to "approval required" at every callsite.** That yields
 the *earlier* of the two possible deadlines, and the two errors are not symmetric: a

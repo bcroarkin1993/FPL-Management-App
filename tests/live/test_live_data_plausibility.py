@@ -514,10 +514,19 @@ class TestDraftTradeConfig:
     def window(self, draft_league_id):
         from scripts.common.fpl_draft_api import get_draft_transaction_window
 
-        return skip_if_unreachable(
+        window = skip_if_unreachable(
             lambda: get_draft_transaction_window(draft_league_id),
             "Draft transaction window",
         )
+        # skip_if_unreachable cannot see this outage on its own: the fetcher catches
+        # its own transport errors and returns the blank dict, so an unreachable API
+        # arrives as a well-formed window full of Nones. Judged as data that would
+        # read as "league.trades is null" — an error — and fail the suite for a
+        # network blip, inverting the unreachable-SKIPs contract. `trades` and `mode`
+        # come from the same request, so both being None is the signature.
+        if window.get("trades") is None and window.get("mode") is None:
+            pytest.skip("Draft league details unreachable (transaction window empty)")
+        return window
 
     def test_trade_config_is_plausible(self, window):
         from scripts.common.data_validation import check_league_trade_config
