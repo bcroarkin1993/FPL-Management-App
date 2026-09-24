@@ -202,3 +202,16 @@ class TestBasisIsNotMixed:
         draft = pd.Series({"Season_Points": 80, "status": "a"})
         classic = pd.Series({"total_points": 5, "status": "a"})
         assert not [c for c in sanity_check_signals(draft, classic) if c[0] == "season_pts"]
+
+    def test_the_three_gameweek_signal_prefers_the_engines_horizon(self):
+        """`MultiGW_Proj` is a mixture -- FFP's start-adjusted total where FFP
+        matched the player, a conditional `x 3` fallback where it did not. Read
+        raw, the two sides of a swap can be on different bases."""
+        drop = pd.Series({"Proj_Next3": 12.0, "MultiGW_Proj": 12.0, "status": "a"})
+        add = pd.Series({"Proj_Next3": 4.0, "MultiGW_Proj": 30.0, "status": "a"})
+        assert ("3gw_proj", False) in sanity_check_signals(drop, add)
+
+    def test_a_horizon_on_one_side_only_is_not_compared(self):
+        drop = pd.Series({"Proj_Next3": 12.0, "status": "a"})
+        add = pd.Series({"MultiGW_Proj": 30.0, "status": "a"})
+        assert not [c for c in sanity_check_signals(drop, add) if c[0] == "3gw_proj"]

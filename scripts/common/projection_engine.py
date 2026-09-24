@@ -663,14 +663,33 @@ def blend_aligned(
     # Converting *down* is multiplication, so unlike the conditional recovery
     # above it cannot explode and needs no floor.
     next3 = pd.Series(np.nan, index=index, dtype="float64")
+    supplied = False
     for name in ("ffp", "rotowire", "fpl_ep"):
         if name not in per_source_next3:
             continue
+        supplied = True
         values = per_source_next3[name].reindex(index)
         if per_source_next3_basis.get(name, BASIS_UNCONDITIONAL) == BASIS_CONDITIONAL:
             values = values * start_pct
         next3 = next3.fillna(values)
-    out["Proj_Next3"] = next3
+
+    # A player this blend has judged a non-starter has a horizon of zero, not
+    # an unknown one -- the same call `Proj` and `Proj_Start` just made, for the
+    # same reason. Left NaN he takes the neutral 0.50 that every percentile
+    # fills with, which ranks him at the median of his position: measured live
+    # at GW6, 289 of the 295 players with no horizon were ones the engine had
+    # already scored 0. NaN survives only where the club itself is unpriced,
+    # which is the honest "we cannot tell".
+    next3 = next3.mask(unpriced & (club_known | unavailable), 0.0)
+
+    # Only write the column when this call actually had something to say. A
+    # caller who blended a horizon earlier and then asks for a single-gameweek
+    # blend must not have it erased: `compute_player_scores` did exactly that to
+    # the Classic planner's squad frame, so the legs it proposed selling were
+    # priced over one gameweek while the legs it proposed buying were priced
+    # over three.
+    if supplied or "Proj_Next3" not in out.columns:
+        out["Proj_Next3"] = next3
 
     out["Proj_GW"] = gameweek
     return out

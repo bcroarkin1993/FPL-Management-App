@@ -869,6 +869,67 @@ class TestCheckBlendedProjections:
         assert any("missing Proj/Proj_Start" in i.message for i in issues)
 
 
+class TestCheckBlendedHorizon:
+    """`Proj_Next3` carries a basis too, and nothing looked at it.
+
+    The engine's own invariants are all about the single gameweek, so a horizon
+    built from a conditional fallback satisfies every one of them while running
+    the fringe of the pool many times high. These fixtures are the live GW6
+    numbers: Jack Hinshelwood, projected 0 this week, carried a 48-point
+    three-gameweek total off a 16.0 points-per-game average.
+    """
+
+    def _frame(self, n=30):
+        return pd.DataFrame({
+            "Proj_Start": [5.0] * n,
+            "Start_Pct": [0.8] * n,
+            "Proj": [4.0] * n,
+            "Proj_Next3": [12.0] * n,
+        })
+
+    def test_a_consistent_horizon_is_clean(self):
+        assert check_blended_projections(self._frame()) == []
+
+    def test_a_negative_horizon_is_an_error(self):
+        df = self._frame()
+        df.loc[0, "Proj_Next3"] = -3.0
+        issues = check_blended_projections(df)
+        assert any("negative Proj_Next3" in i.message and i.severity == "error"
+                   for i in issues)
+
+    def test_an_implausible_horizon_is_an_error(self):
+        df = self._frame()
+        df.loc[0, "Proj_Next3"] = 60.0
+        issues = check_blended_projections(df)
+        assert any("over three gameweeks" in i.message and i.severity == "error"
+                   for i in issues)
+
+    def test_a_conditional_horizon_is_caught_by_its_ratio(self):
+        """The signature of the real bug: every value plausible on its own, and
+        the whole column denominated in points-if-he-starts."""
+        df = self._frame()
+        df["Proj_Next3"] = df["Proj_Start"] * 3          # never start-discounted
+        df["Proj"] = df["Proj_Start"] * 0.35
+        issues = check_blended_projections(df)
+        assert any("three-gameweek rate" in i.message and i.severity == "error"
+                   for i in issues)
+
+    def test_a_declared_non_starter_with_no_horizon_is_a_warning(self):
+        """He is filled with the neutral 0.50 by every percentile, which ranks
+        him at the median of his position rather than the bottom."""
+        df = self._frame()
+        df.loc[0, ["Proj", "Proj_Start", "Start_Pct"]] = 0.0
+        df.loc[0, "Proj_Next3"] = np.nan
+        issues = check_blended_projections(df)
+        assert any("carry no three-gameweek total" in i.message
+                   and i.severity == "warning" for i in issues)
+
+    def test_a_frame_with_no_horizon_at_all_says_nothing(self):
+        """Not every frame has been through a multi-gameweek merge."""
+        df = self._frame().drop(columns=["Proj_Next3"])
+        assert check_blended_projections(df) == []
+
+
 def _warnings(issues):
     return [i for i in issues if i.severity == "warning"]
 

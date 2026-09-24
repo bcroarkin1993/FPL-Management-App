@@ -63,6 +63,48 @@ class TestTheTwoCallsitesAgree:
         displayed = blend_fixture_projections(df.copy(), None)
         assert scored.loc[1, "Start_Pct"] == displayed.loc[1, "Start_Pct"]
 
+    def test_they_agree_on_the_horizon_too(self):
+        """The multi-gameweek half of the blend was written into one twin only.
+
+        `blend_projections_onto` split `MultiGW_Proj` by provenance and let the
+        engine convert each half; `compute_player_scores` -- the one that
+        percentiles the result for 40% of every ROS score -- never assembled a
+        horizon at all. Same columns in, two different answers out.
+        """
+        df = _frame()
+        df["MultiGW_Proj"] = [24.0, 18.0, 15.0]
+        df["MultiGW_Src"] = ["ffp", "single_x3", "single_x3"]
+        pool = df.copy()
+
+        scored = compute_player_scores(df.copy(), pool, current_gw=3)
+        displayed = blend_projections_onto(df.copy(), None)
+
+        pd.testing.assert_series_equal(
+            scored["Proj_Next3"].reset_index(drop=True),
+            displayed["Proj_Next3"].reset_index(drop=True),
+            check_names=False,
+        )
+        # And it is a real conversion, not a pass-through: the conditional
+        # fallback is discounted by the same start probability as `Proj`.
+        assert scored.loc[1, "Proj_Next3"] == pytest.approx(
+            18.0 * scored.loc[1, "Start_Pct"])
+
+    def test_scoring_does_not_erase_a_horizon_it_was_given(self):
+        """`blend_aligned` wrote `Proj_Next3` whether or not it had anything to
+        write, so scoring a frame that had already been blended replaced its
+        horizon with NaN. On the Classic page that is `squad_df`, and the
+        planner then priced the legs it proposed selling over one gameweek
+        while pricing the legs it proposed buying over three -- the solve was
+        unaffected, the leg the user reads was not.
+        """
+        df = _frame()
+        df["Proj_Next3"] = [24.0, 18.0, 15.0]
+
+        scored = compute_player_scores(df.copy(), df.copy(), current_gw=3)
+
+        assert scored["Proj_Next3"].notna().all()
+        assert list(scored["Proj_Next3"]) == [24.0, 18.0, 15.0]
+
     def test_legacy_column_matches_the_canonical_one(self):
         """Proj_Blended is kept for the pages that still read it. If it ever
         stops equalling Proj, the app has two blends again."""
@@ -118,6 +160,20 @@ class TestNobodyReimplementsTheBlend:
             "FFP term came to run ~44%% low. Use the engine's Proj (expected "
             "value) or Proj_Start (conditional): %s" % offenders
         )
+
+    def test_only_one_place_assembles_the_per_source_dicts(self):
+        """The two hand-copied assemblies are why the horizon reached one
+        callsite and not the other. There is one now: `_frame_projection_sources`."""
+        pattern = re.compile(r"per_source_next3\s*(\[|=)")
+        offenders = [
+            str(p.relative_to(REPO)) for p in self._page_sources()
+            if pattern.search(p.read_text())
+            and str(p.relative_to(REPO)) not in self.ALLOWED | {
+                "scripts/common/analytics.py"}
+        ]
+        assert offenders == [], (
+            "Only analytics._frame_projection_sources and the engine may build "
+            "per-source horizons: %s" % offenders)
 
     def test_engine_is_importable_without_streamlit(self):
         """The Actions snapshot collector installs requirements best-effort
@@ -182,7 +238,9 @@ class TestRotowireCoverageMemo:
         })
         projection_sources._ROTOWIRE_CLUB_COVERAGE.clear()
         out = blend_fixture_projections(squad.copy(), None)
-        assert out.loc[2, "Start_Pct"] == 1.0
+        # FFP's own 70% stands untouched: with no coverage memo there is no
+        # evidence that Rotowire *left him out*, only that it did not price him.
+        assert out.loc[2, "Start_Pct"] == pytest.approx(0.70)
 
     def test_a_warm_memo_reaches_a_squad_sized_frame(self):
         import pandas as pd

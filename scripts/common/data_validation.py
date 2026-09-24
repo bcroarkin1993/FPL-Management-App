@@ -1670,6 +1670,17 @@ BLEND_BOUNDS_TOLERANCE = 0.01
 #: unusual" one. Measured: the live pool's true maximum is ~8.
 MAX_PLAUSIBLE_PROJ_START = 15.0
 
+#: How far the horizon's per-gameweek rate may sit from the single-gameweek
+#: projection, as a population median, before it is reporting a different basis.
+#:
+#: Individual players legitimately diverge -- a fixture run is the whole reason
+#: to look at three gameweeks -- but the *typical* player's three-gameweek rate
+#: is his one-gameweek number. A median far above 1.0 is the signature of a
+#: conditional fallback reaching `Proj_Next3` undiscounted, which was measured
+#: at 10.6x before the engine converted it, and which no single-player check can
+#: see because every individual value is plausible.
+MAX_HORIZON_RATE_RATIO = 1.60
+
 
 def check_blended_projections(df: Optional[pd.DataFrame],
                               source: str = "projection engine") -> List[Issue]:
@@ -1793,6 +1804,85 @@ def check_blended_projections(df: Optional[pd.DataFrame],
                 "A weighted mean of positive values is bounded by those values. "
                 "Escaping that range means the weights are wrong, or a source "
                 "was converted to the wrong basis before blending.",
+            ))
+
+    issues.extend(_check_horizon(df, proj, check))
+    return issues
+
+
+def _check_horizon(df: pd.DataFrame, proj: pd.Series, check: str) -> List[Issue]:
+    """``Proj_Next3`` must be on ``Proj``'s basis, and say so.
+
+    A multi-gameweek total is read beside the single-gameweek one and divided by
+    3 to compare them, so it carries a basis exactly as ``Proj`` does. Nothing
+    here looked at it: the engine's own invariants are all about the single
+    gameweek, and a horizon built from a conditional fallback satisfies every
+    one of them while running the fringe of the pool 10x high.
+    """
+    issues: List[Issue] = []
+    if "Proj_Next3" not in df.columns:
+        return issues
+
+    next3 = pd.to_numeric(df["Proj_Next3"], errors="coerce")
+    if not next3.notna().any():
+        return issues
+
+    negative = next3.notna() & next3.lt(0)
+    if negative.any():
+        issues.append(Issue(
+            check, "error",
+            "%d players have a negative Proj_Next3 (min %.2f)."
+            % (int(negative.sum()), float(next3.min())),
+            "Expected points over a window cannot be negative. A subtraction "
+            "has been applied to a total that was never a difference.",
+        ))
+
+    ceiling = 3 * MAX_PLAUSIBLE_PROJ_START
+    huge = next3.notna() & next3.gt(ceiling)
+    if huge.any():
+        issues.append(Issue(
+            check, "error",
+            "%d players project above %.0f points over three gameweeks "
+            "(max %.1f)." % (int(huge.sum()), ceiling, float(next3.max())),
+            "The magnitude check that the single-gameweek projection already "
+            "carries, applied to the window. An unconditional source "
+            "un-discounted by the wrong start probability explodes here too.",
+        ))
+
+    # A player the engine has zeroed is a declared non-starter, and his horizon
+    # is zero too. Left NaN he takes the neutral 0.50 that every percentile
+    # fills with, which ranks him at the *median* of his position: 289 of the
+    # 295 players carrying no horizon at GW6 were ones already scored 0. That is
+    # the phantom neutral that had a projected-zero defender out-ranking a
+    # projected-2.9 one on the Waiver Wire, one scoring term over.
+    #
+    # A warning rather than an error: it degrades a ranking rather than stating
+    # a wrong number, and a frame whose horizon was never built at all is a
+    # legitimate state that this must not take a page down for.
+    phantom = proj.notna() & proj.eq(0) & next3.isna()
+    if phantom.any():
+        issues.append(Issue(
+            check, "warning",
+            "%d players projected 0 this gameweek carry no three-gameweek "
+            "total." % int(phantom.sum()),
+            "Proj and Proj_Next3 should agree about whether a player is "
+            "expected to feature. A missing horizon is filled with the neutral "
+            "0.50 by every percentile, which ranks a declared non-starter at "
+            "the median of his position.",
+        ))
+
+    both = proj.notna() & proj.gt(0) & next3.notna() & next3.gt(0)
+    if int(both.sum()) >= 20:
+        ratio = float(((next3[both] / 3.0) / proj[both]).median())
+        if ratio > MAX_HORIZON_RATE_RATIO:
+            issues.append(Issue(
+                check, "error",
+                "The median player's three-gameweek rate is %.2fx his expected "
+                "points this gameweek." % ratio,
+                "These are the same quantity over different windows, so the "
+                "typical ratio is 1.0. A systematic multiple means Proj_Next3 "
+                "is on the conditional basis -- points if he starts -- while "
+                "Proj is expected value.",
             ))
 
     return issues

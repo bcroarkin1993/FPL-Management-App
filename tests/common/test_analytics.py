@@ -26,6 +26,7 @@ from scripts.common.analytics import (
     season_progress_weight,
     merge_season_projections,
     merge_ffp_single_gw_data,
+    _reference_horizon,
     PositionalDepth,
 )
 
@@ -1522,3 +1523,89 @@ class TestFixtureBlendBasis:
         assert out.loc[0, "Proj_Blended"] == pytest.approx(5.4 * 0.68, abs=0.01)
         # The old behaviour blended Predicted (3.0) instead: 0.6*5 + 0.4*3 = 4.2.
         assert out.loc[0, "Proj_Blended"] > 4.2 * 0.68
+
+
+# =============================================================================
+# TestRosHorizonBasis
+# =============================================================================
+
+class TestRosHorizonBasis:
+    """The ROS horizon term is 40% of the score, and it was on two bases.
+
+    `compute_player_scores` percentiled the raw `MultiGW_Proj` column: FFP's
+    start-adjusted `Next3GWs` where FFP matched, a conditional `x 3` fallback
+    where it did not, and a `points_per_game x 3` reference pool underneath
+    both. Measured on the live GW6 pool, 296 players the engine scored 0 for
+    the gameweek included 10 ranked in the top *quarter* of their position on
+    that term, and 6 in the top decile.
+    """
+
+    @staticmethod
+    def _pool():
+        """Three players, one of them a fringe man with a flattering average.
+
+        Jack Hinshelwood is the live case: `points_per_game` 16.0 off a single
+        big return, no projection from any source this week, and top of the
+        midfielders on the old horizon term.
+        """
+        return pd.DataFrame({
+            "Player_ID": [1, 2, 3],
+            "Player": ["Bukayo Saka", "Cole Palmer", "Jack Hinshelwood"],
+            # He shares a club with a priced player, which is how the engine
+            # tells "Rotowire left him out of the XI" from "this whole club is
+            # missing from the feeds". Only the first is a lineup call.
+            "Team": ["ARS", "CHE", "ARS"],
+            "Position": ["M", "M", "M"],
+            "Projected_Points": [6.0, 5.0, 0.0],
+            "points_per_game": [5.0, 4.0, 16.0],
+            "total_points": [30, 25, 16],
+            "form": [5.0, 4.0, 0.0],
+            "minutes": [500, 480, 90],
+            "starts": [5, 5, 1],
+            "AvgFDR": [3.0, 3.0, 3.0],
+            "MultiGW_Proj": [18.0, 15.0, 48.0],
+            "MultiGW_Src": [MULTIGW_SRC_FFP, MULTIGW_SRC_FFP, MULTIGW_SRC_PPG],
+        })
+
+    def test_a_conditional_fallback_is_start_discounted(self):
+        """`Projected_Points x 3` is "if he starts"; the horizon is not."""
+        df = self._pool()
+        df.loc[0, "MultiGW_Src"] = MULTIGW_SRC_SINGLE_X3
+        df["FFP_Start"] = [50.0, 100.0, 100.0]
+        out = compute_player_scores(df, df.copy(), current_gw=6)
+        # Rotowire prices him, so the start floor lifts 50% to the MID floor.
+        assert out.loc[0, "Proj_Next3"] == pytest.approx(18.0 * out.loc[0, "Start_Pct"])
+        # FFP's own total is already expected points and is passed through.
+        assert out.loc[1, "Proj_Next3"] == pytest.approx(15.0)
+
+    def test_an_unpriced_player_has_a_horizon_of_zero_not_a_flattering_one(self):
+        df = self._pool()
+        out = compute_player_scores(df, df.copy(), current_gw=6)
+        assert out.loc[2, "Proj"] == 0.0
+        assert out.loc[2, "Proj_Next3"] == 0.0
+        # And his raw column is left alone -- the cards still render it.
+        assert out.loc[2, "MultiGW_Proj"] == 48.0
+
+    def test_he_no_longer_outranks_the_players_who_are_playing(self):
+        df = self._pool()
+        out = compute_player_scores(df, df.copy(), current_gw=6)
+        assert out.loc[2, "ROS"] < out.loc[0, "ROS"]
+        assert out.loc[2, "ROS"] < out.loc[1, "ROS"]
+
+    def test_the_reference_pool_is_converted_too(self):
+        """A percentile is a comparison: converting one side fixes nothing.
+
+        The Draft page's reference pool is `points_per_game x 3` -- conditional,
+        since a per-game average covers only the matches a player featured in.
+        """
+        ref = self._pool().drop(columns=["MultiGW_Proj", "MultiGW_Src"])
+        converted = _reference_horizon(ref)
+        assert "Proj_Next3" in converted.columns
+        # The fringe player is unpriced at a club the pool covers, so his
+        # 48-point horizon becomes 0 rather than topping the position.
+        assert converted.loc[2, "Proj_Next3"] == 0.0
+
+    def test_a_reference_with_nothing_to_convert_is_returned_unchanged(self):
+        ref = pd.DataFrame({"Player": ["x"], "Position": ["M"]})
+        assert _reference_horizon(ref) is ref
+        assert _reference_horizon(None) is None

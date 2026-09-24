@@ -56,6 +56,15 @@ _SEASON_COLS = ("Season_Points", "total_points")
 #: built to end; it is not being reintroduced in the veto.
 _PROJ_COLS = ("_effective_proj", "Proj", "Projected_Points")
 
+#: Three-gameweek column, most specific first, resolved by the same rule and
+#: for the same reason. ``Proj_Next3`` is the engine's horizon in expected
+#: points; ``MultiGW_Proj`` is the column it is built from, and that one is a
+#: *mixture* -- FFP's start-adjusted ``Next3GWs`` where FFP matched the player,
+#: and a conditional ``x 3`` fallback where it did not. Read raw, a drop priced
+#: by FFP and an add on the fallback are compared across bases, which is
+#: precisely the comparison this veto exists to make safe.
+_MULTI_COLS = ("Proj_Next3", "MultiGW_Proj")
+
 
 def _number(value, default: float = 0.0) -> float:
     """Numeric value, or ``default`` for anything unusable."""
@@ -149,8 +158,8 @@ def sanity_check_signals(drop_row, add_row,
         checks.append(("season_pts", add_season >= drop_season * tolerance))
 
     # 3. The three-gameweek window, which is where a fixture run shows up.
-    drop_multi = _number(drop_row.get("MultiGW_Proj"))
-    add_multi = _number(add_row.get("MultiGW_Proj"))
+    _drop_multi, _add_multi = _same_basis(drop_row, add_row, _MULTI_COLS)
+    drop_multi, add_multi = _number(_drop_multi), _number(_add_multi)
     if drop_multi > 0 and add_multi > 0:
         checks.append(("3gw_proj", add_multi >= drop_multi * tolerance))
 

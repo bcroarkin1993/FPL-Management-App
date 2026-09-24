@@ -347,48 +347,21 @@ def compute_player_scores(
     ref_season_col = "total_points" if (all_players_df is not None and "total_points" in all_players_df.columns) else season_col
 
     # --- 1GW Score (pure expected value) ---
-    # The blend is `projection_engine.blend_aligned` -- the same call the fixture
-    # pages make, so a player cannot score differently here than he displays
-    # there. This block used to be a hand-copied twin of
-    # `blend_fixture_projections`: same weights, same floors, same FFP recovery,
-    # but only this copy fell back to the FPL `chance_of_playing` when FFP had no
-    # start percentage. On a week FFP was unpublished a 25%-chance player was
-    # discounted to 0.25 in his 1GW score and left at the position floor on the
-    # fixture pages, under the same label.
-    rotowire_proj = numeric_col(result, proj_col, 0)
-    if "FFP_Start" in result.columns:
-        _ffp_start = pd.to_numeric(result["FFP_Start"], errors="coerce") / 100.0
-    else:
-        _ffp_start = pd.Series(np.nan, index=result.index)
-
-    _per_source_raw = {"rotowire": rotowire_proj.where(rotowire_proj.gt(0))}
-    _per_source_basis = {"rotowire": projection_engine.BASIS_CONDITIONAL}
-    _per_source_startpct = {}
-    if "FFP_Start" in result.columns:
-        _per_source_startpct["ffp"] = _ffp_start.clip(0, 1)
-    if "FFP_Starting_Predicted" in result.columns or "FFP_Predicted" in result.columns:
-        _per_source_raw["ffp"] = projection_sources.ffp_conditional_points(
-            result.get("FFP_Predicted"), result.get("FFP_Starting_Predicted"), _ffp_start
-        )
-        _per_source_basis["ffp"] = projection_engine.BASIS_CONDITIONAL
-
-    result = projection_engine.blend_aligned(
-        index=result.index,
-        per_source_raw=_per_source_raw,
-        per_source_basis=_per_source_basis,
-        per_source_startpct=_per_source_startpct,
-        starters_only={"rotowire"},
-        source_club_coverage=_rotowire_club_coverage(),
-        positions=(result["Position"] if "Position" in result.columns
-                   else pd.Series("M", index=result.index)),
-        # Club coverage is how the engine tells "Rotowire left him out of the
-        # XI" from "Rotowire has nothing for this club at all". Without it the
-        # omission penalty cannot be applied safely, so it is not applied.
-        teams=(result["Team"] if "Team" in result.columns else None),
-        chance_of_playing=result.get("chance_of_playing_next_round"),
-        status=result.get("status"),
-        extra=result,
-    )
+    # The blend is `_blend_frame` -- the same call, over the same assembly, that
+    # the fixture pages make, so a player cannot score differently here than he
+    # displays there.
+    #
+    # Both halves of that sentence were bought the hard way. This was once a
+    # hand-copied twin of `blend_fixture_projections` -- same weights, same
+    # floors, same FFP recovery -- and only this copy fell back to the FPL
+    # `chance_of_playing` when FFP had no start percentage, so on a week FFP was
+    # unpublished a 25%-chance player was discounted to 0.25 here and left at
+    # the position floor there, under the same label. When the arithmetic was
+    # unified the *assembly* of the sources was not, and this copy was missing
+    # the multi-gameweek half: the horizon ROS percentiles was never built, and
+    # `blend_aligned` then wrote NaN over any `Proj_Next3` the caller arrived
+    # with.
+    result = _blend_frame(result, rotowire_col=proj_col)
 
     # `_effective_proj` is the historical name for the engine's `Proj`. Kept
     # because the Waiver Wire suggestion engine and its cards read it; both
@@ -478,20 +451,29 @@ def compute_player_scores(
 
     season_quality = p * season_pts_pctile + (1 - p) * season_proj_pctile
 
-    # Multi-GW projection percentile
+    # Multi-GW projection percentile.
+    #
+    # **On the engine's `Proj_Next3`, not the raw `MultiGW_Proj` it is built
+    # from, and on that basis at both ends of the comparison.** This term is 40%
+    # of ROS and it used to percentile a column that is three different things
+    # at once: FFP's `Next3GWs`, which is start-adjusted and so is expected
+    # points, against Rotowire's `Projected_Points x 3` or `points_per_game x 3`
+    # where FFP had not matched, both of which are "points if he starts". The
+    # reference pool was `points_per_game x 3` throughout, so the two
+    # populations were not even mixed the same way.
+    #
+    # It is the same fault `blend_multi_gw_projections` was fixed for on the
+    # Classic planner's side and it is systematic in one direction: it promotes
+    # exactly the fringe players whose conditional and unconditional numbers
+    # diverge most, which in a *waiver* score is a recommendation to pick one up.
     if "MultiGW_Proj" not in result.columns:
         result["MultiGW_Proj"] = 0
     result["MultiGW_Proj"] = pd.to_numeric(result["MultiGW_Proj"], errors="coerce").fillna(0)
-    if all_players_df is not None and "MultiGW_Proj" not in all_players_df.columns and "points_per_game" in all_players_df.columns:
-        ref_mgw = all_players_df.copy()
-        ref_mgw["_mgw_proxy"] = pd.to_numeric(ref_mgw["points_per_game"], errors="coerce").fillna(0) * 3
-        multigw_pctile = positional_percentile(
-            result, ref_mgw, "MultiGW_Proj", ref_value_col="_mgw_proxy", min_minutes=90
-        ).fillna(0.5)
-    else:
-        multigw_pctile = positional_percentile(
-            result, all_players_df, "MultiGW_Proj", ref_value_col="MultiGW_Proj", min_minutes=90
-        ).fillna(0.5)
+
+    ref_horizon = _reference_horizon(all_players_df)
+    multigw_pctile = positional_percentile(
+        result, ref_horizon, "Proj_Next3", ref_value_col="Proj_Next3", min_minutes=90
+    ).fillna(0.5)
 
     # Form dampened by starts
     form_pctile = positional_percentile(
@@ -1312,6 +1294,183 @@ def _rotowire_club_coverage() -> dict:
     return {"rotowire": counts} if counts else {}
 
 
+def _frame_projection_sources(df: pd.DataFrame, rotowire_col: str = "Points"):
+    """The per-source series, bases and horizons, read off one frame's columns.
+
+    Returns ``(raw, basis, startpct, next3, next3_basis)`` -- the five dicts
+    :func:`projection_engine.blend_aligned` takes.
+
+    **This exists because there were two copies of it and only one was whole.**
+    ``blend_projections_onto`` and ``compute_player_scores`` each assembled
+    these dicts by hand from the same columns, and the multi-gameweek half was
+    written into the first alone. So ``compute_player_scores`` percentiled the
+    raw, mixed-basis ``MultiGW_Proj`` column for 40% of every ROS score, and --
+    because ``blend_aligned`` writes ``Proj_Next3`` whether or not it was given
+    anything to write -- it also wiped the horizon off any frame that arrived
+    carrying one. That is the same drift the module docstring of
+    ``tests/common/test_projection_wiring.py`` describes, one term over.
+
+    The frame is expected to carry Rotowire's single-gameweek projection in
+    ``rotowire_col`` and FFP's columns already merged (``merge_ffp_single_gw_data``);
+    this function never fetches or merges, so it cannot disagree with its caller
+    about which gameweek is being described.
+
+    ``fpl_ep`` is deliberately *not* assembled here. ``blend_projections_onto``
+    declares it as a zero-weight fallback that fills players no weighted source
+    priced, and turning it on inside ``compute_player_scores`` would stop those
+    players being scored 0 -- a change to what "unpriced" means, which belongs
+    to the accuracy work that gives ``fpl_ep`` a real weight, not here.
+    """
+    rw = numeric_col(df, rotowire_col, 0)
+    per_source_raw = {"rotowire": rw.where(rw.gt(0))}
+    per_source_basis = {"rotowire": projection_engine.BASIS_CONDITIONAL}
+    per_source_startpct = {}
+    per_source_next3 = {}
+    per_source_next3_basis = {}
+
+    if "FFP_Start" in df.columns:
+        ffp_start = pd.to_numeric(df["FFP_Start"], errors="coerce") / 100.0
+        per_source_startpct["ffp"] = ffp_start.clip(0, 1)
+    else:
+        ffp_start = pd.Series(np.nan, index=df.index)
+
+    if "FFP_Starting_Predicted" in df.columns or "FFP_Predicted" in df.columns:
+        per_source_raw["ffp"] = projection_sources.ffp_conditional_points(
+            df.get("FFP_Predicted"), df.get("FFP_Starting_Predicted"), ffp_start
+        )
+        per_source_basis["ffp"] = projection_engine.BASIS_CONDITIONAL
+
+    if "MultiGW_Proj" in df.columns:
+        # `MultiGW_Proj` is a *mixture*: FFP where it matched the player,
+        # and Rotowire x 3 or points_per_game x 3 where it did not. Handing
+        # the whole column over as "ffp" labelled two conditional fallbacks
+        # as an unconditional source, so the engine passed them through
+        # undiscounted. Split it by the provenance column and let each half
+        # declare what it actually is.
+        mgw = numeric_col(df, "MultiGW_Proj", np.nan)
+        src = df.get("MultiGW_Src")
+        if src is None:
+            per_source_next3["ffp"] = mgw
+            per_source_next3_basis["ffp"] = projection_engine.BASIS_UNCONDITIONAL
+        else:
+            is_ffp = src.eq(MULTIGW_SRC_FFP)
+            per_source_next3["ffp"] = mgw.where(is_ffp)
+            per_source_next3_basis["ffp"] = projection_engine.BASIS_UNCONDITIONAL
+            # Labelled `rotowire` because that is where the fallback's
+            # numbers come from, and the engine reads it after `ffp` --
+            # which is the precedence we want, FFP first.
+            per_source_next3["rotowire"] = mgw.where(
+                src.isin(MULTIGW_CONDITIONAL_SRCS))
+            per_source_next3_basis["rotowire"] = projection_engine.BASIS_CONDITIONAL
+
+    return (per_source_raw, per_source_basis, per_source_startpct,
+            per_source_next3, per_source_next3_basis)
+
+
+def _reference_horizon(reference_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """The percentile reference pool, carrying a ``Proj_Next3`` on the same basis.
+
+    A percentile is a comparison, so converting only the frame being scored
+    fixes nothing: the pool it is ranked against has to be converted too. The
+    Classic page happens to blend its pool already (``blend_projections_onto``
+    on ``all_players``); the Draft page does not, and passes a ``fpl_stats``
+    whose horizon is ``points_per_game x 3`` -- a conditional number, since a
+    per-game average covers only the matches a player featured in.
+
+    Deriving it here rather than asking the pages to is the same choice as the
+    gameweek gate living inside the merges: a caller cannot forget, and there is
+    no second way to get it wrong.
+    """
+    if reference_df is None or reference_df.empty:
+        return reference_df
+
+    if ("Proj_Next3" in reference_df.columns
+            and pd.to_numeric(reference_df["Proj_Next3"], errors="coerce").notna().any()):
+        return reference_df
+
+    ref = reference_df.copy()
+    if "MultiGW_Proj" not in ref.columns:
+        if "points_per_game" not in ref.columns:
+            # Nothing to convert and nothing to convert it from. The percentile
+            # falls back to min-max over the scored frame, which is what it did
+            # before any of this existed.
+            return reference_df
+        # The old `_mgw_proxy` path, declared for what it is instead of being
+        # silently compared against expected points.
+        ref["MultiGW_Proj"] = pd.to_numeric(
+            ref["points_per_game"], errors="coerce").fillna(0) * 3
+        ref["MultiGW_Src"] = MULTIGW_SRC_PPG
+
+    ref_proj_col = "Projected_Points" if "Projected_Points" in ref.columns else "Points"
+    return _blend_frame(ref, ref_proj_col)
+
+
+def _blend_frame(df: pd.DataFrame, rotowire_col: str = "Points",
+                 with_fpl_ep: bool = False, gameweek=None) -> pd.DataFrame:
+    """Run the engine over a frame that already carries its sources as columns.
+
+    The single call site of ``blend_aligned`` for page frames, so the scoring
+    path and the display path cannot pass it different arguments -- which they
+    did: one normalised positions and read ``chance_of_playing`` under either
+    name, the other did neither, and neither built a horizon.
+
+    ``with_fpl_ep`` is off by default; see ``_frame_projection_sources``.
+    """
+    (per_source_raw, per_source_basis, per_source_startpct,
+     per_source_next3, per_source_next3_basis) = _frame_projection_sources(df, rotowire_col)
+
+    # FPL's own expected points, as a declared fallback rather than a value
+    # laundered into the Rotowire column. It is unconditional -- FPL's number
+    # already prices in the chance of playing -- so the engine un-discounts it
+    # before comparing it with anything.
+    #
+    # **It must carry its own start probability**, exactly as
+    # ``projection_sources.fpl_ep_source`` does. Without it the engine
+    # un-discounts FPL's number by the app's *resolved* Start_Pct, which the
+    # Rotowire omission penalty has already pulled down -- so FPL's opinion gets
+    # divided by Rotowire's pessimism. Live, Joao Pedro (75% chance of playing,
+    # omitted by Rotowire, resolved to 33%) came out at 6.1 / 0.33 = 18.5 points
+    # "if he starts". Nothing caught it because Proj = Proj_Start x Start_Pct
+    # still held: dividing and then multiplying by the same wrong number is
+    # self-consistent, and both halves were wrong together.
+    fallback_names = []
+    if with_fpl_ep and "ep_next" in df.columns:
+        ep = numeric_col(df, "ep_next", 0)
+        per_source_raw["fpl_ep"] = ep.where(ep.gt(0))
+        per_source_basis["fpl_ep"] = projection_engine.BASIS_UNCONDITIONAL
+        ep_chance = _chance_of_playing_col(df)
+        if ep_chance is not None:
+            per_source_startpct["fpl_ep"] = (
+                pd.to_numeric(ep_chance, errors="coerce") / 100.0).clip(0, 1)
+        fallback_names.append("fpl_ep")
+
+    return projection_engine.blend_aligned(
+        index=df.index,
+        per_source_raw=per_source_raw,
+        per_source_basis=per_source_basis,
+        per_source_startpct=per_source_startpct,
+        per_source_next3=per_source_next3,
+        per_source_next3_basis=per_source_next3_basis,
+        starters_only={"rotowire"},
+        source_club_coverage=_rotowire_club_coverage(),
+        fallback_names=fallback_names,
+        # Normalized to G/D/M/F. Pages disagree about this: the Draft pages carry
+        # GK/DEF/MID/FWD while analytics groups on single letters. Feeding the
+        # wrong codes in makes the Rotowire start floors match no position and
+        # silently do nothing -- the same class of failure that once had every
+        # team in the Power Rankings scoring exactly 50.
+        positions=_normalized_positions(df),
+        # Club coverage is how the engine tells "Rotowire left him out of the
+        # XI" from "this whole club is missing from the feeds". Without it the
+        # omission penalty cannot be applied safely, so it is not applied.
+        teams=(df["Team"] if "Team" in df.columns else None),
+        chance_of_playing=_chance_of_playing_col(df),
+        status=df.get("status"),
+        gameweek=gameweek,
+        extra=df,
+    )
+
+
 def blend_projections_onto(
     players_df: pd.DataFrame,
     ffp_df: Optional[pd.DataFrame] = None,
@@ -1343,97 +1502,10 @@ def blend_projections_onto(
     result = players_df.copy()
     gw = _resolve_expected_gw(expected_gw)
 
-    rw = numeric_col(result, rotowire_col, 0)
-    per_source_raw = {"rotowire": rw.where(rw.gt(0))}
-    per_source_basis = {"rotowire": projection_engine.BASIS_CONDITIONAL}
-    per_source_startpct = {}
-    per_source_next3 = {}
-    per_source_next3_basis = {}
-
     if ffp_df is not None and not ffp_df.empty:
         result = merge_ffp_single_gw_data(result, ffp_df, expected_gw=expected_gw)
-        if "FFP_Start" in result.columns:
-            ffp_start = pd.to_numeric(result["FFP_Start"], errors="coerce") / 100.0
-            per_source_startpct["ffp"] = ffp_start.clip(0, 1)
-        else:
-            ffp_start = pd.Series(np.nan, index=result.index)
-        per_source_raw["ffp"] = projection_sources.ffp_conditional_points(
-            result.get("FFP_Predicted"), result.get("FFP_Starting_Predicted"), ffp_start
-        )
-        per_source_basis["ffp"] = projection_engine.BASIS_CONDITIONAL
-        if "MultiGW_Proj" in result.columns:
-            # `MultiGW_Proj` is a *mixture*: FFP where it matched the player,
-            # and Rotowire x 3 or points_per_game x 3 where it did not. Handing
-            # the whole column over as "ffp" labelled two conditional fallbacks
-            # as an unconditional source, so the engine passed them through
-            # undiscounted. Split it by the provenance column and let each half
-            # declare what it actually is.
-            mgw = numeric_col(result, "MultiGW_Proj", np.nan)
-            src = result.get("MultiGW_Src")
-            if src is None:
-                per_source_next3["ffp"] = mgw
-                per_source_next3_basis["ffp"] = projection_engine.BASIS_UNCONDITIONAL
-            else:
-                is_ffp = src.eq(MULTIGW_SRC_FFP)
-                per_source_next3["ffp"] = mgw.where(is_ffp)
-                per_source_next3_basis["ffp"] = projection_engine.BASIS_UNCONDITIONAL
-                # Labelled `rotowire` because that is where the fallback's
-                # numbers come from, and the engine reads it after `ffp` --
-                # which is the precedence we want, FFP first.
-                per_source_next3["rotowire"] = mgw.where(
-                    src.isin(MULTIGW_CONDITIONAL_SRCS))
-                per_source_next3_basis["rotowire"] = projection_engine.BASIS_CONDITIONAL
 
-    # FPL's own expected points, as a declared fallback rather than a value
-    # laundered into the Rotowire column. It is unconditional -- FPL's number
-    # already prices in the chance of playing -- so the engine un-discounts it
-    # before comparing it with anything.
-    #
-    # **It must carry its own start probability**, exactly as
-    # ``projection_sources.fpl_ep_source`` does. Without it the engine
-    # un-discounts FPL's number by the app's *resolved* Start_Pct, which the
-    # Rotowire omission penalty has already pulled down -- so FPL's opinion gets
-    # divided by Rotowire's pessimism. Live, Joao Pedro (75% chance of playing,
-    # omitted by Rotowire, resolved to 33%) came out at 6.1 / 0.33 = 18.5 points
-    # "if he starts". Nothing caught it because Proj = Proj_Start x Start_Pct
-    # still held: dividing and then multiplying by the same wrong number is
-    # self-consistent, and both halves were wrong together.
-    fallback_names = []
-    if "ep_next" in result.columns:
-        ep = numeric_col(result, "ep_next", 0)
-        per_source_raw["fpl_ep"] = ep.where(ep.gt(0))
-        per_source_basis["fpl_ep"] = projection_engine.BASIS_UNCONDITIONAL
-        ep_chance = _chance_of_playing_col(result)
-        if ep_chance is not None:
-            per_source_startpct["fpl_ep"] = (
-                pd.to_numeric(ep_chance, errors="coerce") / 100.0).clip(0, 1)
-        fallback_names.append("fpl_ep")
-
-    result = projection_engine.blend_aligned(
-        index=result.index,
-        per_source_raw=per_source_raw,
-        per_source_basis=per_source_basis,
-        per_source_startpct=per_source_startpct,
-        per_source_next3=per_source_next3,
-        per_source_next3_basis=per_source_next3_basis,
-        starters_only={"rotowire"},
-        source_club_coverage=_rotowire_club_coverage(),
-        fallback_names=fallback_names,
-        # Normalized to G/D/M/F. Pages disagree about this: the Draft pages carry
-        # GK/DEF/MID/FWD while analytics groups on single letters. Feeding the
-        # wrong codes in makes the Rotowire start floors match no position and
-        # silently do nothing -- the same class of failure that once had every
-        # team in the Power Rankings scoring exactly 50.
-        positions=_normalized_positions(result),
-        # Club coverage is how the engine tells "not expected to start" from
-        # "this whole club is missing from the feeds", so it needs the club.
-        teams=(result["Team"] if "Team" in result.columns else None),
-        chance_of_playing=_chance_of_playing_col(result),
-        status=result.get("status"),
-        gameweek=gw,
-        extra=result,
-    )
-    return result
+    return _blend_frame(result, rotowire_col, with_fpl_ep=True, gameweek=gw)
 
 
 def _normalized_positions(df: pd.DataFrame) -> pd.Series:

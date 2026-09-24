@@ -440,18 +440,86 @@ because the caller picks the column: the Classic page passes Rotowire's
 (`waiver_wire.py:2317`). Both are conditional, which is all the basis flag
 needs, but calling it "rotowire" would be false on half the callsites.
 
-**This does not reach the Draft ROS score**, which is a separate problem.
-`compute_player_scores()` percentiles the raw `MultiGW_Proj` column directly and
-never reads `Proj_Next3`, so the conversion above does not touch it. It is also
-messier than a basis fix alone would settle: the frame being scored carries
-FFP and Rotowire-derived values while its reference pool (`fpl_stats`) is
-`points_per_game`-derived throughout, so the percentile compares two differently
-based populations before any of this. Worth its own investigation rather than a
-bolt-on.
+**The ROS score reads `Proj_Next3`, and its reference pool is converted too.**
+`compute_player_scores()` used to percentile the raw `MultiGW_Proj` column, and
+that term is **40% of ROS** in *both* formats -- the Draft Waiver Wire and
+Classic Transfers call this one function. It compared a frame carrying FFP
+expected points where FFP matched and a conditional `x 3` fallback where it did
+not against a reference pool (`fpl_stats`) that is `points_per_game`-derived
+throughout: two populations, mixed differently, neither on one basis.
+
+A percentile is a comparison, so converting one side fixes nothing.
+`_reference_horizon()` converts the pool as well -- passing through a
+`Proj_Next3` the caller already blended (Classic's `all_players` has one) and
+otherwise deriving it, including from a `points_per_game x 3` proxy, which is
+conditional because a per-game average covers only the matches a player
+featured in. It lives inside the scoring function rather than at the pages, for
+the reason the gameweek gate lives inside the merges: no caller can forget.
+17ms on a 667-row pool.
+
+**What it cost, measured on the live GW6 pool.** 296 players the engine scored
+`Proj = 0` -- not expected to start -- of whom **10 ranked in the top quarter of
+their position** on the old horizon term and 6 in the top decile; afterwards, 0
+and 0. Top of the midfielders was Jack Hinshelwood: no source pricing him this
+week, `points_per_game` 16.0 off a single big return, `16.0 x 3 = 48` points
+over the window, percentile 1.00. 18 players move more than 0.10 on the term,
+51 move ROS by more than 0.02, and the largest ROS rank move is 326 places. In
+a *waiver* score, promoting a player nobody expects to start is a
+recommendation to pick him up.
+
+**`blend_aligned` also wrote `Proj_Next3` when it had nothing to write.** The
+column was assigned unconditionally, so scoring a frame that had already been
+blended replaced its horizon with NaN. On Classic Transfers that frame is
+`squad_df` -- blended, then reassigned by `_compute_keep_score()` -- so the
+planner priced the legs it proposed *selling* over one gameweek while pricing
+the legs it proposed buying over three. The ILP itself was unaffected: it
+solves on the pool built from `all_players`, which nothing had scored. What
+disagreed was the leg the user reads, and the tie-break that orders it. It now
+writes only when a source supplied a horizon, or when the column is absent.
+
+And a player the engine has zeroed now gets a horizon of **0, not NaN**: left
+NaN he takes the neutral 0.50 that every percentile fills with, which ranks a
+declared non-starter at the median of his position. That is the phantom neutral
+recorded under "An unpriced player is a non-starter", one scoring term over.
+NaN survives only where the club itself is unpriced -- the honest "cannot tell".
+
+**The cause was a twin drifting a third time.** `blend_projections_onto()` and
+`compute_player_scores()` each hand-assembled the per-source dicts from the same
+columns, and the multi-gameweek half was written into the first alone -- so the
+scoring path never built a horizon at all. `_frame_projection_sources()` is that
+assembly, once, and `_blend_frame()` is the single call to `blend_aligned()` for
+page frames; the two entry points could otherwise pass it different arguments,
+and did (one normalised positions and read `chance_of_playing` under either
+name, the other did neither). `test_projection_wiring.py` now asserts the two
+agree on `Proj_Next3` as well as `Proj`, and that nothing else builds a
+per-source horizon.
+
+One consequence worth knowing: the FFP columns on a frame are now honoured even
+when the caller passes no `ffp_df`, because the assembly reads the frame rather
+than the argument. That is what `compute_player_scores` always did; no page
+reaches it, since FFP columns only ever arrive via `merge_ffp_single_gw_data`.
+
+`transfer_sanity` had the same mixture in its three-gameweek signal, comparing
+a drop priced by FFP against an add on the fallback. It resolves `Proj_Next3`
+then `MultiGW_Proj` through the existing "both sides must resolve to the same
+column" rule.
+
+**`fpl_ep` is deliberately still declared by `blend_projections_onto` alone.**
+Turning it on inside `compute_player_scores` would stop the players no weighted
+source priced being scored 0 -- a change to what "unpriced" means, which belongs
+with the accuracy work that gives `fpl_ep` a real weight.
 
 **Validation.** `check_blended_projections()` asserts `Proj <= Proj_Start`,
 `Proj == Proj_Start × Start_Pct`, `Start_Pct ∈ [0,1]`, and that the blend lies
-inside the range of its own sources. `check_source_scale_agreement()` — written
+inside the range of its own sources. It now checks the horizon too, which
+nothing looked at: `Proj_Next3` non-negative and inside `3 ×
+MAX_PLAUSIBLE_PROJ_START`, a **warning** where a zeroed player carries no
+horizon (the phantom neutral), and — the one that would actually have caught
+this — the *population* median of `(Proj_Next3 / 3) / Proj`, which is 1.0 when
+the two share a basis and a systematic multiple when they do not. No
+single-player check can see that: every individual value is plausible.
+
+`check_source_scale_agreement()` — written
 after the cumulative-article incident and, until now, only ever run in tests —
 runs inside the engine on every build, logged rather than raised so a page
 degrades instead of dying. `tests/common/test_projection_wiring.py` asserts the
@@ -1252,7 +1320,7 @@ p = season_progress_weight(current_gw)  // 0.10 at GW1 → 0.95 at GW38
 
 season_quality = p × season_pts_pctile + (1-p) × season_proj_pctile
 
-w_mgw   = 0.40 - 0.10×p   // 40% → 30%  (multi-GW projections — FFP Next3GWs)
+w_mgw   = 0.40 - 0.10×p   // 40% → 30%  (multi-GW — the engine's Proj_Next3)
 w_sq    = 0.30 + 0.15×p   // 30% → 45%  (season quality — actual + projected blend)
 w_form  = 0.15 - 0.05×p   // 15% → 10%  (trajectory indicator)
 w_start = 0.10            // 10% constant (start consistency — nailed-on starters)
@@ -1264,7 +1332,7 @@ ROS = w_mgw × multigw_pctile + w_sq × season_quality
 ```
 
 **Key design decisions**:
-- **Multi-GW at ~40%** (was 20%): FFP's 3-week window captures upcoming fixture runs and is the most actionable forward-looking signal. 3 GWs is the sweet spot — long enough to capture a fixture run, short enough to be reliable.
+- **Multi-GW at ~40%** (was 20%): FFP's 3-week window captures upcoming fixture runs and is the most actionable forward-looking signal. 3 GWs is the sweet spot — long enough to capture a fixture run, short enough to be reliable. It is percentiled as `Proj_Next3` — **expected** points over the window, converted by the engine — never as the raw `MultiGW_Proj` it is built from, which is a mixture of bases; and the reference pool is converted the same way, since a percentile is a comparison. See "The ROS score reads `Proj_Next3`".
 - **Season quality grows over time**: Early season, trust preseason projections; late season, trust actual performance. The `season_progress_weight` concave curve shifts this trust faster than linear.
 - **Form is a trajectory indicator** (15→10%): A player at #10 in their position on strong form is likely heading to #8 soon. Form matters *more* for ROS than 1GW because it signals where positional ranking is heading. Dampened by starts to avoid overvaluing small-sample hot streaks.
 - **Start consistency at 10%** (constant): Uses FFP `LongStart` (long-term start %) to reward nailed-on starters. A rotation player who starts 50% of games should be worth less for ROS even if per-game stats are good. Critical for Draft where dropped players go to the waiver wire.
@@ -1300,7 +1368,7 @@ Score = α × 1GW + (1-α) × ROS
 |--------|---------------|----------|---------|
 | Single-GW projection | Rotowire + FFP Predicted (blended) | Rotowire only or FFP only | 1GW |
 | Start likelihood | FFP Start % | FPL chance_of_playing → 100% | 1GW |
-| Multi-GW projection | FFP Next3GWs | single_gw × 3 | ROS |
+| Multi-GW projection | FFP Next3GWs | single_gw × 3, start-discounted | ROS |
 | Season projection | Rotowire Season Rankings | Season points (actuals) | ROS (season_quality) |
 | Start consistency | FFP LongStart | FPL starts count | ROS |
 | Form | HealthyForm (element-summary) | FPL form → points_per_game | ROS |
@@ -1317,6 +1385,9 @@ Score = α × 1GW + (1-α) × ROS
 | `blend_projections_onto()` | `scripts/common/analytics.py` | The app-facing entry point to the projection engine. Attaches `Proj`, `Proj_Start`, `Start_Pct`, `Proj_Src`, `Proj_Spread`. |
 | `blend_fixture_projections()` | `scripts/common/analytics.py` | Thin wrapper that additionally writes the legacy `Proj_Blended` / `_proj_source`. Prefer `blend_projections_onto()`. `Proj_Blended` stays distinct from `Blended_Points`, the *live* in-gameweek blend. |
 | `blend_aligned()` | `scripts/common/projection_engine.py` | The blend itself — the only implementation. |
+| `_frame_projection_sources()` | `scripts/common/analytics.py` | The per-source series, bases and horizons read off one frame's columns — the only assembly. |
+| `_blend_frame()` | `scripts/common/analytics.py` | The single `blend_aligned()` call for page frames, so scoring and display cannot pass it different arguments. |
+| `_reference_horizon()` | `scripts/common/analytics.py` | The percentile reference pool, carrying a `Proj_Next3` on the same basis as the frame being scored. |
 | `positional_percentile()` | `scripts/common/analytics.py` | Within-position percentile against full FPL pool |
 | `season_progress_weight()` | `scripts/common/analytics.py` | Concave GW→weight curve for season quality blend |
 
@@ -2511,7 +2582,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Task | Status | Notes |
 |------|--------|-------|
 | Projection accuracy harness | Phases 1-3 of 4 complete | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". Remaining: **Phase 4** fit `PROJECTION_SOURCE_WEIGHTS` from measured accuracy, give `fpl_ep` a real weight, and add an odds-derived source from stored match odds. |
-| Multi-GW Transfer Planner | Completed | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. The sanity-check gate is shared with Classic — see "Suggestion sanity veto". Classic now has a real multi-transfer planner: an ILP over the whole squad in expected points, solved for every K, with the −4 priced inside the objective — see "Multi-Transfer Planner". Remaining: only Next3GWs is used (Next2/4–6 fetched but ignored), and `Proj_Next3` carries an undiscounted conditional basis for FFP-unmatched players, worked around page-side and worth fixing in `blend_multi_gw_projections` where it would also correct the Draft ROS score. |
+| Multi-GW Transfer Planner | Completed | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. The sanity-check gate is shared with Classic — see "Suggestion sanity veto". Classic now has a real multi-transfer planner: an ILP over the whole squad in expected points, solved for every K, with the −4 priced inside the objective — see "Multi-Transfer Planner". The horizon's basis is now the engine's throughout: `Proj_Next3` is converted once, `compute_player_scores()` percentiles it (on both sides of the percentile) instead of the raw mixed `MultiGW_Proj`, and the page-side workaround is gone — see "The ROS score reads `Proj_Next3`". Remaining: only Next3GWs is used (Next2/4–6 fetched but ignored). |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
 | Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |
 
