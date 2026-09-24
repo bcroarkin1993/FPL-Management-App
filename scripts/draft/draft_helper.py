@@ -19,6 +19,9 @@ from scripts.common.transfer_risk_app import (
     get_pl_team_names,
 )
 from scripts.common.error_helpers import get_logger
+from scripts.common.analytics import _claim_reference_rows
+from scripts.common.data_validation import check_merge_match_rate, format_issues
+from scripts.common.fpl_draft_api import get_fpl_player_mapping
 
 _logger = get_logger("fpl_app.draft.draft_helper")
 
@@ -295,6 +298,93 @@ def _render_arrivals(arrivals) -> None:
 
 
 @st.cache_data(ttl=600)
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fpl_draft_board() -> pd.DataFrame:
+    """FPL's own draft board: one row per element with its `draft_rank`.
+
+    `draft_rank` is published on every element of the Draft bootstrap and is the
+    order an absent manager's picks are auto-made in when they have set no
+    watchlist — so it is not just a second opinion, it is what actually happens
+    to the players nobody is at the keyboard for.
+
+    Empty frame on failure: the board renders exactly as it did before.
+    """
+    try:
+        mapping = get_fpl_player_mapping()
+    except Exception:
+        _logger.warning("Could not load the FPL draft board", exc_info=True)
+        return pd.DataFrame()
+    if not mapping:
+        return pd.DataFrame()
+
+    rows = [
+        {"Player": v.get("Player"), "Web_Name": v.get("Web_Name"),
+         "Team": v.get("Team"), "Position": v.get("Position"),
+         "Draft_Rank": v.get("Draft_Rank")}
+        for v in mapping.values()
+    ]
+    df = pd.DataFrame(rows)
+    df["Draft_Rank"] = pd.to_numeric(df["Draft_Rank"], errors="coerce")
+    return df.dropna(subset=["Draft_Rank"])
+
+
+def _attach_draft_rank(rankings: pd.DataFrame) -> pd.DataFrame:
+    """Join FPL's `draft_rank` onto the Rotowire board as `FPL Rank`.
+
+    The board is keyed on Rotowire's names and carries no element id, so this is
+    a cross-source name merge and goes through `_claim_reference_rows()` like
+    every other one in the app — never a hand-rolled ladder. That matters more
+    here than usual: a board is read by eye during a live draft, and a surname
+    collision would put another player's rank beside this one with nothing on
+    screen to suggest it (the Alex/Cole Palmer failure, in the one place a
+    manager is making irreversible decisions at speed).
+
+    Both frames already speak short team codes and the position alphabets are
+    normalised inside the matcher, so no relabelling is needed.
+
+    A missing rank stays missing. Filling a gap with a plausible number is the
+    failure mode this column exists to guard against. Measured 2026-09-24 the
+    join resolved 399 of Rotowire's 400, so a blank here is rare and real.
+
+    The two boards disagree by method, not only by opinion: FPL's rank leans on
+    last season's points, so promoted-club players sit near the bottom of it
+    regardless of their projection. Every one of the five largest positive deltas
+    was a Coventry or Ipswich defender. The column help says so, because a
+    +478 that means "FPL has no data for this league yet" reads identically to a
+    +478 that means "we have found value".
+    """
+    result = rankings.copy()
+    result["FPL Rank"] = pd.NA
+
+    board = _fpl_draft_board()
+    if board.empty or "Player" not in result.columns:
+        return result
+
+    try:
+        claims = _claim_reference_rows(
+            result, board,
+            name_col="Player",
+            ref_name_col="Player",
+            ref_team_col="Team",
+            ref_web_col="Web_Name",
+            source_name="FPL draft_rank",
+        )
+    except Exception:
+        _logger.warning("Could not match the board against FPL draft ranks", exc_info=True)
+        return result
+
+    for idx, ref_idx in claims.items():
+        result.at[idx, "FPL Rank"] = board.at[ref_idx, "Draft_Rank"]
+    result["FPL Rank"] = pd.to_numeric(result["FPL Rank"], errors="coerce")
+
+    issues = check_merge_match_rate(
+        len(claims), len(board), "FPL draft_rank -> board", input_rows=len(result),
+    )
+    if issues:
+        _logger.warning(format_issues(issues))
+    return result
+
+
 def _load_reference_data():
     """FPL availability (ground truth on completed moves) and the PL club list."""
     from scripts.common.fpl_classic_api import get_classic_bootstrap_static
@@ -387,6 +477,17 @@ def show_draft_helper_page():
     # Discount the board by transfer risk before anything is ranked or displayed.
     rankings, has_risk = _apply_transfer_risk(rankings)
 
+    # FPL's own board, beside ours. The delta is against the *final* Rank — after
+    # any transfer-risk re-ranking — because that is the order on screen, and a
+    # delta measured against a different ordering than the one displayed is worse
+    # than no delta at all.
+    rankings = _attach_draft_rank(rankings)
+    if "FPL Rank" in rankings.columns:
+        rankings["Δ"] = (
+            pd.to_numeric(rankings["FPL Rank"], errors="coerce")
+            - pd.to_numeric(rankings["Rank"], errors="coerce")
+        )
+
     # Session-state flags mapped to each row via a stable key
     rankings["key"] = rankings.apply(_player_key, axis=1)
     rankings["Taken"] = rankings["key"].isin(st.session_state.draft_taken_keys)
@@ -423,14 +524,15 @@ def show_draft_helper_page():
         # Risk sits immediately after Position: it is the reason the board is
         # ordered the way it is, so it must be readable without scrolling past
         # three numeric columns to find it.
-        display_cols = ["Rank", "RW Rank", "Player", "Team", "Position",
+        display_cols = ["Rank", "RW Rank", "FPL Rank", "Δ", "Player", "Team", "Position",
                         "Risk", "Transfer Note", "Points", "Adj Points",
                         "PP/90", "Pos Rank", "Taken", "Mine"]
         df = df.rename(columns={"Transfer_Note": "Transfer Note"})
         df["Risk"] = (pd.to_numeric(df["Transfer_Risk"], errors="coerce")
                       .fillna(0.0) * 100).round(0)
     else:
-        display_cols = ["Rank", "Player", "Team", "Position", "Points", "PP/90", "Pos Rank", "Taken", "Mine"]
+        display_cols = ["Rank", "FPL Rank", "Δ", "Player", "Team", "Position",
+                        "Points", "PP/90", "Pos Rank", "Taken", "Mine"]
     display_cols = [c for c in display_cols if c in df.columns]
 
     st.markdown(
@@ -456,6 +558,22 @@ def show_draft_helper_page():
                 "Points", help="Rotowire projected season points, undiscounted", disabled=True),
             "RW Rank": st.column_config.NumberColumn(
                 "RW Rank", help="Rotowire's original overall rank", disabled=True),
+            "FPL Rank": st.column_config.NumberColumn(
+                "FPL Rank",
+                help="FPL's own draft_rank — the order absent managers' picks are "
+                     "auto-made in when they have set no watchlist. Blank means FPL "
+                     "has not ranked him, not that he is unranked by us.",
+                disabled=True),
+            "Δ": st.column_config.NumberColumn(
+                "Δ", format="%+d",
+                help="FPL Rank minus this board's rank. Positive means we rate him "
+                     "higher than FPL does, so he may last longer in the draft than "
+                     "his value suggests. Note FPL's rank leans on last season's "
+                     "points, so it systematically buries promoted-club players — "
+                     "measured 2026-09-24, the five largest positive deltas were all "
+                     "Coventry and Ipswich defenders. Read a big gap as a difference "
+                     "in method before reading it as an edge.",
+                disabled=True),
             "Adj Points": st.column_config.NumberColumn(
                 "Adj Points", help="Season points after the transfer-risk discount", disabled=True),
             "Risk": st.column_config.NumberColumn(

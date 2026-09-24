@@ -36,6 +36,8 @@ __all__ = [
     "check_initial_squad",
     "check_element_states",
     "check_league_trade_config",
+    "check_waiver_order",
+    "check_draft_game_settings",
     "check_transfer_risk",
     "check_transfer_windows",
     "check_transfer_odds",
@@ -869,6 +871,204 @@ def check_league_trade_config(window: Optional[dict]) -> List[Issue]:
                 "to what the name suggests, and any code reading it must be "
                 "revisited before it is trusted.",
             ))
+
+    return issues
+
+
+#: The Draft rules this app hardcodes, and the `bootstrap-static.settings` path
+#: each is published at. Verified live on 2026-09-24. A check, not a source of
+#: truth: the app does not read its quota from here at runtime, it asserts the
+#: quota it compiled in is still the one FPL enforces.
+EXPECTED_DRAFT_SETTINGS = {
+    ("squad", "size"): 15,
+    ("squad", "select_GKP"): 2,
+    ("squad", "select_DEF"): 5,
+    ("squad", "select_MID"): 5,
+    ("squad", "select_FWD"): 3,
+    ("squad", "play"): 11,
+    ("squad", "captains_disabled"): True,
+    ("transactions", "waivers_before_deadline_hours"): 24,
+    ("transactions", "new_element_locked_hours"): 24,
+    ("transactions", "trade_veto_hours"): 24,
+    ("transactions", "trade_veto_minimum"): 50,
+}
+
+#: Where in the app each of those is written down, so a failure names the code to
+#: change rather than only the value that moved.
+_DRAFT_SETTING_SITES = {
+    ("squad", "size"): "optimization.py, data_validation._SQUAD_POSITION_QUOTA",
+    ("squad", "select_GKP"): "data_validation._SQUAD_POSITION_QUOTA, team_strength.py",
+    ("squad", "select_DEF"): "data_validation._SQUAD_POSITION_QUOTA, team_strength.py",
+    ("squad", "select_MID"): "data_validation._SQUAD_POSITION_QUOTA, team_strength.py",
+    ("squad", "select_FWD"): "data_validation._SQUAD_POSITION_QUOTA, team_strength.py",
+    ("squad", "play"): "optimization.solve_squad_ilp()",
+    ("squad", "captains_disabled"): "bench_analysis.compute_draft_bench_data(), gameweek_review",
+    ("transactions", "waivers_before_deadline_hours"):
+        "waiver_alerts.DRAFT_OFFSET_HOURS (25.5h before kickoff = 24h before deadline)",
+    ("transactions", "new_element_locked_hours"):
+        "the locked-player rule in waiver_wire.py and CLAUDE.md",
+    ("transactions", "trade_veto_hours"): "waiver_alerts.TRADE_APPROVAL_LEAD_HOURS",
+    ("transactions", "trade_veto_minimum"): "the 50% veto threshold in trade_analyzer.py",
+}
+
+
+def check_draft_game_settings(settings: Optional[dict]) -> List[Issue]:
+    """Assert the Draft rules this app compiled in are still the rules FPL enforces.
+
+    Every quota, window length and veto threshold in this codebase is a constant
+    written down from the platform's documentation. That is the right design — the
+    rules are season-stable and reading them at runtime would make a feed outage
+    into a rules change — but it means a genuine rules change is invisible: the app
+    keeps enforcing last season's, and every number it produces stays plausible.
+
+    `bootstrap-static.settings` publishes all of them, so this is the tripwire.
+
+    **An empty payload is unknown, not wrong.** The Draft bootstrap being
+    unreachable must never be reported as FPL having changed the squad size.
+
+    `waivers_before_deadline_hours_event` is a **warning**: it is a per-gameweek
+    override of the waiver window, empty for the whole of this season, and it is
+    the one thing that would invalidate the fallback offsets in waiver_alerts.py.
+    The deadline code now prefers FPL's published per-event timestamps, so an
+    override is handled correctly — but it is worth knowing it started happening.
+    """
+    check = "draft_game_settings"
+
+    if not settings or not isinstance(settings, dict):
+        return [Issue(
+            check, "warning", "Draft game settings are unavailable",
+            "get_draft_game_settings() returned nothing. The rules cannot be "
+            "verified this run; this is an outage, not a rules change.",
+        )]
+
+    issues = []
+    for (section, key), expected in EXPECTED_DRAFT_SETTINGS.items():
+        block = settings.get(section)
+        if not isinstance(block, dict) or key not in block:
+            issues.append(Issue(
+                check, "error",
+                "settings.%s.%s is no longer published" % (section, key),
+                "The app encodes this rule at: %s. A field vanishing means the "
+                "payload changed shape, so the rule can no longer be verified at "
+                "all." % _DRAFT_SETTING_SITES.get((section, key), "see CLAUDE.md"),
+            ))
+            continue
+        actual = block.get(key)
+        if actual != expected:
+            issues.append(Issue(
+                check, "error",
+                "settings.%s.%s is %r, expected %r" % (section, key, actual, expected),
+                "FPL has changed a Draft rule this app hardcodes. Update: %s"
+                % _DRAFT_SETTING_SITES.get((section, key), "see CLAUDE.md"),
+            ))
+
+    overrides = (settings.get("transactions") or {}).get("waivers_before_deadline_hours_event")
+    if overrides:
+        issues.append(Issue(
+            check, "warning",
+            "per-gameweek waiver overrides are now published: %r" % (overrides,),
+            "waivers_before_deadline_hours_event shortens the waiver window for "
+            "specific gameweeks — the article's 'less when gameweeks are close "
+            "together'. Deadlines are read from events[].waivers_time so this is "
+            "handled, but the kickoff-offset fallback in waiver_alerts.py would "
+            "be wrong for those gameweeks.",
+        ))
+
+    return issues
+
+
+def check_waiver_order(order: Optional[Sequence[dict]],
+                       n_entries: Optional[int] = None,
+                       my_entry_id: Optional[int] = None,
+                       standings: Optional[Sequence[dict]] = None) -> List[Issue]:
+    """Assert the published waiver queue is a queue, and that it contains you.
+
+    `league_entries[].waiver_pick` decides which of a league's managers sees an
+    available player first, and the Waiver Wire's claim outlook rests entirely on
+    it. Three things can go wrong and none of them raises on its own:
+
+    * **A gap or a duplicate.** The picks must be a permutation of 1..N. Anything
+      else means the payload changed or a row was dropped in parsing, and the
+      resulting "3 managers ahead of you" is a fabrication.
+    * **Your own entry missing.** The details payload carries two id spaces —
+      `id` keys the standings, `entry_id` keys element-status and transactions —
+      and crossing them produces an empty match, not an error. That reads on the
+      page as "you have no waiver pick" and silently disables the whole feature.
+    * **The order contradicting the standings.** FPL derives the queue from rank,
+      worst team first. This is a **warning** only: a successful claim rotates its
+      manager to the back mid-gameweek, so a legitimately rotated order breaks the
+      inverse relationship and an error here would fire most weeks.
+    """
+    check = "waiver_order"
+
+    if not order:
+        return [Issue(
+            check, "error", "the waiver order is empty",
+            "league_entries[].waiver_pick is published on /api/league/{id}/details "
+            "for every entry. An empty order means the fetch failed or the field "
+            "stopped being published — either way the claim outlook is disabled.",
+        )]
+
+    issues = []
+    picks = [r.get("pick") for r in order if isinstance(r, dict)]
+    n = len(picks)
+
+    if sorted(p for p in picks if p is not None) != list(range(1, n + 1)):
+        issues.append(Issue(
+            check, "error",
+            "waiver picks are not a permutation of 1..%d: %r" % (n, sorted(picks, key=lambda x: (x is None, x))),
+            "Every manager holds exactly one distinct pick. A gap or a repeat "
+            "means rows were lost or the field changed meaning, and 'N managers "
+            "ahead of you' is then an invented number.",
+        ))
+
+    if n_entries is not None and n != n_entries:
+        issues.append(Issue(
+            check, "error",
+            "waiver order covers %d of %d league entries" % (n, n_entries),
+            "A manager missing from the queue is a manager the outlook does not "
+            "know picks ahead of you, so every claim reads as safer than it is.",
+        ))
+
+    if my_entry_id is not None and not any(
+        isinstance(r, dict) and r.get("entry_id") == my_entry_id for r in order
+    ):
+        issues.append(Issue(
+            check, "error",
+            "entry_id %r is not in the waiver order" % (my_entry_id,),
+            "Match on entry_id (the element-status/transactions space), not on "
+            "league_entries[].id (the standings space). Crossing the two yields "
+            "an empty match rather than an error, and the page then shows no "
+            "waiver pick at all.",
+        ))
+
+    if standings:
+        by_league_entry = {
+            r.get("league_entry_id"): r.get("pick")
+            for r in order if isinstance(r, dict)
+        }
+        pairs = []
+        for s in standings:
+            if not isinstance(s, dict):
+                continue
+            pick = by_league_entry.get(s.get("league_entry"))
+            rank = s.get("rank")
+            if pick is not None and rank is not None:
+                pairs.append((rank, pick))
+        if len(pairs) >= 3:
+            expected = {rank: len(pairs) - rank + 1 for rank, _ in pairs}
+            mismatches = sum(1 for rank, pick in pairs if expected.get(rank) != pick)
+            if mismatches > len(pairs) / 2:
+                issues.append(Issue(
+                    check, "warning",
+                    "waiver order disagrees with the standings for %d of %d teams"
+                    % (mismatches, len(pairs)),
+                    "FPL derives the queue from rank, worst first. Heavy "
+                    "disagreement is expected mid-gameweek once claims have "
+                    "rotated managers to the back, but wholesale disagreement "
+                    "before a waiver round would mean the two id spaces were "
+                    "crossed when the standings were joined.",
+                ))
 
     return issues
 

@@ -1,7 +1,8 @@
 # scripts/common/waiver_alerts.py  (GitHub Actions-friendly; no config.py imports including from utils.py)
 #
 # Supports both Draft and Classic FPL alerts:
-#   - Draft: 25.5h before kickoff (waiver/transaction deadline)
+#   - Draft: FPL's published events[].waivers_time, else 25.5h before kickoff
+#   - Draft trades: events[].trades_time under approval, else the waiver deadline
 #   - Classic: 1.5h before kickoff (transfer deadline)
 # Also supports data source alerts:
 #   - Rotowire: notifies when GW rankings article is published
@@ -16,9 +17,18 @@ from scripts.common.alert_config import load_settings, update_alert_state
 
 TZ = ZoneInfo("America/New_York")
 
-# Default offsets (hours before kickoff)
+# Fallback offsets (hours before kickoff), used only when FPL's own timestamps
+# cannot be read. The Draft bootstrap publishes `waivers_time` and `trades_time`
+# on every event, and those are preferred — see published_deadlines(). Measured
+# 2026-09-24: for all 38 events waivers_time == deadline - 24h and
+# trades_time == deadline - 48h, which is 25.5h and 49.5h before the earliest
+# kickoff, so these constants are currently exactly right. They are kept because
+# `settings.transactions.waivers_before_deadline_hours_event` exists to shorten a
+# specific gameweek's window, and arithmetic cannot see that.
 DRAFT_OFFSET_HOURS = 25.5
 CLASSIC_OFFSET_HOURS = 1.5
+
+DRAFT_BOOTSTRAP_URL = "https://draft.premierleague.com/api/bootstrap-static"
 
 # Where accepted trades need approval, trade offers close a full day before the
 # waiver deadline to leave room for the approval window.
@@ -35,6 +45,88 @@ TRADE_SETTINGS_DISABLED = frozenset()   # the "no trades" code has not been obse
 #: unread — it must not fall through to the "no approval needed" branch and buy
 #: itself a later deadline on a code we cannot interpret.
 KNOWN_TRADE_SETTINGS = TRADE_SETTINGS_REQUIRING_APPROVAL | TRADE_SETTINGS_DISABLED
+
+
+def _draft_events():
+    """Every gameweek from the Draft bootstrap, or [] if it cannot be read.
+
+    `events` is `{"current": ..., "next": ..., "data": [...]}` — the list lives
+    under `data`, and reading the container as a list is the shape error this
+    would otherwise fail on silently.
+    """
+    try:
+        r = requests.get(DRAFT_BOOTSTRAP_URL, timeout=20)
+        r.raise_for_status()
+        events = r.json().get("events")
+    except (requests.RequestException, ValueError, AttributeError) as e:
+        print(f"[waiver_alerts] Could not read Draft bootstrap events ({e})")
+        return []
+    if isinstance(events, dict):
+        events = events.get("data")
+    return events if isinstance(events, list) else []
+
+
+def _iso_to_et(value):
+    """ISO-8601 UTC string to an ET datetime, or None."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(TZ)
+    except (TypeError, ValueError):
+        return None
+
+
+def published_deadlines(gw, events=None):
+    """FPL's own deadlines for a gameweek: `{deadline, waivers, trades}` in ET.
+
+    The Draft bootstrap states all three outright, so the app does not have to
+    infer them from kickoff times. That matters because the offsets are not a
+    constant of the game: `settings.transactions.waivers_before_deadline_hours_event`
+    shortens the waiver window for specific gameweeks — the article's "less when
+    gameweeks are close together" — and no amount of arithmetic over the fixture
+    list can see that.
+
+    `trades_time` is published for every league regardless of its trade setting,
+    and is the *approval-required* deadline (a full day before waivers). Which of
+    the two applies to a given league is `trade_deadline_for()`'s decision.
+
+    Returns None when the gameweek is absent or the bootstrap is unreachable —
+    the caller then falls back to the kickoff offsets, and says so.
+    """
+    if gw is None:
+        return None
+    for event in (events if events is not None else _draft_events()):
+        if not isinstance(event, dict):
+            continue
+        try:
+            if int(event.get("id")) != int(gw):
+                continue
+        except (TypeError, ValueError):
+            continue
+        waivers = _iso_to_et(event.get("waivers_time"))
+        if waivers is None:
+            return None
+        return {
+            "deadline": _iso_to_et(event.get("deadline_time")),
+            "waivers": waivers,
+            "trades": _iso_to_et(event.get("trades_time")),
+        }
+    return None
+
+
+def waiver_deadline_for(gw, kickoff_et, events=None):
+    """(deadline_et, source) for the Draft waiver round. source is 'published'|'offset'.
+
+    The source is returned rather than logged internally because a fallback that
+    looks identical to the real thing is exactly how the hardcoded 25.5h went
+    unquestioned for a season.
+    """
+    pub = published_deadlines(gw, events=events)
+    if pub and pub.get("waivers"):
+        return pub["waivers"], "published"
+    if kickoff_et is None:
+        return None, "unavailable"
+    return kickoff_et - timedelta(hours=DRAFT_OFFSET_HOURS), "offset"
 
 
 def resolve_trade_deadline(gw, kickoff_et, trades_code, now_et):
@@ -57,19 +149,26 @@ def resolve_trade_deadline(gw, kickoff_et, trades_code, now_et):
     a trade deadline carries pushes all of its windows into the dead zone. 7 of 38
     gameweeks are midweek, so this is a seventh of the season, not an edge case.
     """
-    deadline, assumed = trade_deadline_for(kickoff_et, trades_code)
+    events = _draft_events()
+    deadline, assumed = trade_deadline_for(kickoff_et, trades_code, gw=gw, events=events)
     if deadline is None or deadline > now_et:
         return gw, deadline, assumed
 
     # This gameweek's trade window has already shut. The one that matters now is the
     # next gameweek's, which is what a manager would actually be planning for.
-    try:
-        next_kickoff = _earliest_kickoff_et(gw + 1)
-    except RuntimeError as e:
-        print(f"[waiver_alerts:Trade] No fixtures for GW {gw + 1} ({e})")
-        return gw, deadline, assumed
+    # With published timestamps this is a lookup; only without them does it cost a
+    # fixture fetch.
+    next_kickoff = None
+    if not published_deadlines(gw + 1, events=events):
+        try:
+            next_kickoff = _earliest_kickoff_et(gw + 1)
+        except RuntimeError as e:
+            print(f"[waiver_alerts:Trade] No fixtures for GW {gw + 1} ({e})")
+            return gw, deadline, assumed
 
-    next_deadline, next_assumed = trade_deadline_for(next_kickoff, trades_code)
+    next_deadline, next_assumed = trade_deadline_for(
+        next_kickoff, trades_code, gw=gw + 1, events=events
+    )
     if next_deadline is not None and next_deadline > now_et:
         print(f"[waiver_alerts:Trade] GW {gw} trade window has shut; "
               f"targeting GW {gw + 1}")
@@ -118,8 +217,15 @@ def _fetch_league_trades_setting(league_id):
         return None
 
 
-def trade_deadline_for(kickoff_et, trades_code):
+def trade_deadline_for(kickoff_et, trades_code, gw=None, events=None):
     """(deadline, approval_assumed) for trade offers, or (None, _) if trades are off.
+
+    Which of FPL's two published times applies is a property of the *league*:
+    under approval, offers shut at `trades_time`; otherwise they shut with waivers
+    at `waivers_time`. FPL publishes both for every gameweek, so pass `gw` and
+    neither is computed. Without `gw` — or with the bootstrap unreachable — it
+    falls back to the kickoff offsets, which give the same answer for every
+    gameweek of this season.
 
     Returns `approval_assumed=True` when the league's setting could not be read and
     the earlier deadline was used anyway. That is the safe direction — an alert a day
@@ -130,12 +236,23 @@ def trade_deadline_for(kickoff_et, trades_code):
     if trades_code in TRADE_SETTINGS_DISABLED:
         return None, False
 
-    waiver_deadline = kickoff_et - timedelta(hours=DRAFT_OFFSET_HOURS)
+    pub = published_deadlines(gw, events=events)
+    if pub and pub.get("waivers"):
+        waiver_deadline = pub["waivers"]
+        approval_deadline = pub.get("trades") or (
+            waiver_deadline - timedelta(hours=TRADE_APPROVAL_LEAD_HOURS)
+        )
+    elif kickoff_et is not None:
+        waiver_deadline = kickoff_et - timedelta(hours=DRAFT_OFFSET_HOURS)
+        approval_deadline = waiver_deadline - timedelta(hours=TRADE_APPROVAL_LEAD_HOURS)
+    else:
+        return None, False
+
     if trades_code in TRADE_SETTINGS_REQUIRING_APPROVAL:
-        return waiver_deadline - timedelta(hours=TRADE_APPROVAL_LEAD_HOURS), False
+        return approval_deadline, False
     if trades_code not in KNOWN_TRADE_SETTINGS:
         # Unread, or read but unrecognised — both are "we do not know this league".
-        return waiver_deadline - timedelta(hours=TRADE_APPROVAL_LEAD_HOURS), True
+        return approval_deadline, True
     # A recognised code that does not require approval: trades close with waivers.
     return waiver_deadline, False
 
@@ -181,10 +298,19 @@ def _earliest_kickoff_et(gw: int) -> datetime:
 
 
 def get_next_transaction_deadline(offset_hours: float = 25.5, gw: int = None):
-    """Returns (deadline_et, kickoff_et, gw). Deadline = earliest kickoff - offset."""
+    """Returns (deadline_et, kickoff_et, gw) for the Draft waiver round.
+
+    Prefers FPL's published `waivers_time` for the gameweek and falls back to
+    `earliest kickoff - offset_hours`. The signature is unchanged because the
+    Streamlit banner and fixture_helpers both call it positionally; `offset_hours`
+    is now the fallback rather than the rule.
+    """
     if gw is None:
         gw = _get_current_gameweek()
     kickoff_et = _earliest_kickoff_et(gw)
+    pub = published_deadlines(gw)
+    if pub and pub.get("waivers"):
+        return pub["waivers"], kickoff_et, gw
     return kickoff_et - timedelta(hours=float(offset_hours)), kickoff_et, gw
 
 
@@ -392,10 +518,13 @@ def main():
 
     alerts_sent = 0
 
-    # Check Draft deadline (fixed at 25.5h before kickoff)
+    # Check Draft deadline — FPL's published waivers_time, else the kickoff offset
     if draft_enabled:
-        draft_deadline = kickoff_et - timedelta(hours=DRAFT_OFFSET_HOURS)
-        if _check_and_send_alert(webhook, mention, draft_deadline, gw, "Draft", now_et, draft_windows):
+        draft_deadline, deadline_source = waiver_deadline_for(gw, kickoff_et)
+        print(f"[waiver_alerts:Draft] deadline source: {deadline_source}")
+        if draft_deadline is not None and _check_and_send_alert(
+            webhook, mention, draft_deadline, gw, "Draft", now_et, draft_windows
+        ):
             alerts_sent += 1
 
     # Check Classic deadline (fixed at 1.5h before kickoff)

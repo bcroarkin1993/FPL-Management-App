@@ -413,3 +413,112 @@ class TestOneAddCannotBeSuggestedTwice:
             "expected at least one pair that cleared its threshold but lost the "
             "add to a better pairing"
         )
+
+
+class TestClaimReachabilityIsStampedInsideTheSearch:
+    """A suggested claim you cannot win at your waiver priority is not a plan.
+
+    The outlook is computed inside `_compute_transfer_suggestions()`, not at the
+    callsite, for the same reason the locked filter above is: a caller that
+    forgets it renders a page that looks identical and quietly recommends players
+    six other managers see first.
+    """
+
+    def _avail_pair(self):
+        return _avail([
+            {"Player": "Top Mid", "Team": "NEW", "Position": "M", "Points": 6.5,
+             "Transfer Score": 0.90, "Draft_State": "a"},
+            {"Player": "Deep Mid", "Team": "BUR", "Position": "M", "Points": 6.0,
+             "Transfer Score": 0.72, "Draft_State": "a"},
+        ])
+
+    def test_the_best_target_at_a_position_rivals_need_is_a_long_shot(self):
+        from scripts.common.waiver_priority import BAND_LONG_SHOT
+        from scripts.draft.waiver_wire import _compute_transfer_suggestions
+
+        suggestions, _ = _compute_transfer_suggestions(
+            self._avail_pair(), _roster(ROSTER), top_n=3,
+            one_per_position=False, roster_candidates=None, avail_candidates=None,
+            waiver_context={"n_ahead": 6, "rival_needs": {"M": [1, 2, 3, 4]},
+                            "expected_gone": 4.6},
+        )
+        top = next(s for s in suggestions if s["add_player"] == "Top Mid")
+        assert top["outlook_band"] == BAND_LONG_SHOT
+        assert "4 of the 6" in top["outlook_reason"]
+
+    def test_a_deeper_target_at_the_same_position_survives_them(self):
+        from scripts.common.waiver_priority import BAND_LIKELY
+        from scripts.draft.waiver_wire import _compute_transfer_suggestions
+
+        suggestions, _ = _compute_transfer_suggestions(
+            self._avail_pair(), _roster(ROSTER), top_n=3,
+            one_per_position=False, roster_candidates=None, avail_candidates=None,
+            waiver_context={"n_ahead": 6, "rival_needs": {"M": []},
+                            "expected_gone": 0.0},
+        )
+        assert {s["outlook_band"] for s in suggestions} == {BAND_LIKELY}
+
+    def test_no_waiver_context_leaves_the_band_blank_rather_than_neutral(self):
+        """The order or the power rankings being unavailable is not a finding.
+
+        A grey "Unknown" badge on every card is noise; the pill renders nothing.
+        """
+        from scripts.draft.waiver_wire import _compute_transfer_suggestions, _outlook_pill
+
+        suggestions, _ = _compute_transfer_suggestions(
+            self._avail_pair(), _roster(ROSTER), top_n=3,
+        )
+        assert suggestions
+        assert all(s["outlook_band"] == "" for s in suggestions)
+        assert _outlook_pill("") == ""
+
+    def test_ranks_come_from_the_ordering_the_search_itself_walks(self):
+        """The outlook must not disagree with the list it annotates.
+
+        Position rank is taken from `avail_sorted` — the same injury-adjusted
+        ordering the search iterates — so the "#1 available" the badge refers to
+        is the player the search actually considered first.
+        """
+        from scripts.common.waiver_priority import BAND_LONG_SHOT
+        from scripts.draft.waiver_wire import _compute_transfer_suggestions
+
+        avail = self._avail_pair()
+        # Make the nominally weaker player the best *adjusted* candidate.
+        avail.loc[avail["Player"] == "Top Mid", "chance_of_playing_next_round"] = 25
+
+        suggestions, _ = _compute_transfer_suggestions(
+            avail, _roster(ROSTER), top_n=3,
+            one_per_position=False, roster_candidates=None, avail_candidates=None,
+            waiver_context={"n_ahead": 6, "rival_needs": {"M": [1]}, "expected_gone": 4.6},
+        )
+        deep = next(s for s in suggestions if s["add_player"] == "Deep Mid")
+        assert deep["outlook_band"] == BAND_LONG_SHOT, "he is now the #1 adjusted target"
+
+
+class TestWaiverContextDegradesQuietly:
+    def test_an_unknown_order_disables_the_outlook(self):
+        from scripts.draft.waiver_wire import _build_waiver_context
+
+        assert _build_waiver_context([], 56086, 5) == {}
+        assert _build_waiver_context(None, 56086, 5) == {}
+
+    def test_a_manager_absent_from_the_order_disables_it(self):
+        """The two-id-space trap: matching on the standings id finds nothing."""
+        from scripts.draft.waiver_wire import _build_waiver_context
+
+        order = [{"pick": 1, "entry_id": 56094, "league_entry_id": 56190,
+                  "team_name": "Starboys"}]
+        assert _build_waiver_context(order, 56190, 5) == {}
+
+    def test_the_first_pick_needs_no_power_rankings(self):
+        """Nothing ahead of you can take anyone, so no network call is warranted."""
+        from unittest.mock import patch
+        import scripts.draft.waiver_wire as ww
+
+        order = [{"pick": 1, "entry_id": 56094, "league_entry_id": 56190,
+                  "team_name": "Starboys"},
+                 {"pick": 2, "entry_id": 56086, "league_entry_id": 56182,
+                  "team_name": "Stoned Squirrels"}]
+        with patch.object(ww, "_waiver_claim_stats", side_effect=AssertionError):
+            ctx = ww._build_waiver_context(order, 56094, 5)
+        assert ctx == {"n_ahead": 0, "rival_needs": {}, "expected_gone": 0.0}

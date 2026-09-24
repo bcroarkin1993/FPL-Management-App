@@ -181,6 +181,112 @@ class TestTradeDeadlineDerivation:
             assert assumed is True, unreadable
 
 
+class TestPublishedDeadlines:
+    """FPL states its own waiver and trade deadlines; the offsets are the fallback.
+
+    The Draft bootstrap carries `waivers_time` and `trades_time` on every event.
+    They agree with the hardcoded 25.5h/49.5h for all 38 gameweeks of this season,
+    so nothing is visibly broken today — but `waivers_before_deadline_hours_event`
+    exists to shorten a specific gameweek's window, and arithmetic over the fixture
+    list cannot see that.
+    """
+
+    TZ_NAME = "America/New_York"
+
+    def _events(self):
+        """One gameweek, shaped as the live bootstrap shapes it."""
+        return [{
+            "id": 6,
+            "deadline_time": "2026-10-10T10:00:00Z",
+            "waivers_time": "2026-10-09T10:00:00Z",
+            "trades_time": "2026-10-08T10:00:00Z",
+        }]
+
+    def _kickoff(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        # Deliberately inconsistent with the published times, so a test that passes
+        # can only have read the published ones.
+        return datetime(2026, 10, 10, 3, 0, tzinfo=ZoneInfo(self.TZ_NAME))
+
+    def test_the_events_list_lives_under_data(self):
+        """`events` is a dict with the list under `data`, not a bare list."""
+        from unittest.mock import patch
+        import scripts.common.waiver_alerts as wa
+
+        class _Resp:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return {"events": {"current": 5, "next": 6, "data": [{"id": 6}]}}
+
+        with patch.object(wa.requests, "get", return_value=_Resp()):
+            assert wa._draft_events() == [{"id": 6}]
+
+    def test_published_waiver_time_beats_the_kickoff_offset(self):
+        import scripts.common.waiver_alerts as wa
+
+        deadline, source = wa.waiver_deadline_for(6, self._kickoff(), events=self._events())
+        assert source == "published"
+        assert deadline == wa._iso_to_et("2026-10-09T10:00:00Z")
+
+    def test_an_unreadable_bootstrap_falls_back_and_says_so(self):
+        from datetime import timedelta
+        import scripts.common.waiver_alerts as wa
+
+        kickoff = self._kickoff()
+        deadline, source = wa.waiver_deadline_for(6, kickoff, events=[])
+        assert source == "offset"
+        assert deadline == kickoff - timedelta(hours=wa.DRAFT_OFFSET_HOURS)
+
+    def test_a_gameweek_absent_from_the_payload_is_not_a_zero(self):
+        import scripts.common.waiver_alerts as wa
+        assert wa.published_deadlines(99, events=self._events()) is None
+        assert wa.published_deadlines(None, events=self._events()) is None
+
+    def test_approval_takes_trades_time_and_instant_takes_waivers_time(self):
+        """Which published time applies is a property of the league, not the game."""
+        import scripts.common.waiver_alerts as wa
+
+        events = self._events()
+        approval, assumed = wa.trade_deadline_for(None, "a", gw=6, events=events)
+        assert approval == wa._iso_to_et("2026-10-08T10:00:00Z")
+        assert assumed is False
+
+        # A recognised no-approval code would shut with waivers. None is confirmed
+        # yet, so this asserts the branch through the constant rather than a code.
+        with patch_known_setting(wa, "x"):
+            instant, assumed = wa.trade_deadline_for(None, "x", gw=6, events=events)
+        assert instant == wa._iso_to_et("2026-10-09T10:00:00Z")
+        assert assumed is False
+
+    def test_an_unreadable_setting_still_takes_the_earlier_published_time(self):
+        import scripts.common.waiver_alerts as wa
+
+        events = self._events()
+        for unreadable in (None, "zzz"):
+            deadline, assumed = wa.trade_deadline_for(None, unreadable, gw=6, events=events)
+            assert deadline == wa._iso_to_et("2026-10-08T10:00:00Z"), unreadable
+            assert assumed is True, unreadable
+
+
+import contextlib
+
+
+@contextlib.contextmanager
+def patch_known_setting(wa, code):
+    """Temporarily treat `code` as a recognised no-approval trade setting."""
+    original = wa.KNOWN_TRADE_SETTINGS
+    wa.KNOWN_TRADE_SETTINGS = original | {code}
+    try:
+        yield
+    finally:
+        wa.KNOWN_TRADE_SETTINGS = original
+
+
 class TestTradeDeadlineGameweekTargeting:
     """A midweek gameweek's trade windows all fall inside the previous gameweek.
 
@@ -189,6 +295,11 @@ class TestTradeDeadlineGameweekTargeting:
     kickoff — so for a Tuesday fixture all three windows (73.5h/55.5h/50.5h out) land
     while GW N is being played, `hours_left` reads negative, and the alert silently
     never fires. 7 of 38 gameweeks are midweek.
+
+    Every test here stubs `_draft_events` to [] so it exercises the *fallback*
+    kickoff arithmetic against fabricated gameweeks. Left live they would score
+    against FPL's real published calendar, which is a different test (and a
+    network call from an offline suite).
     """
 
     TZ_NAME = "America/New_York"
@@ -213,7 +324,8 @@ class TestTradeDeadlineGameweekTargeting:
             (6, datetime(2026, 10, 4, 7, 30, tzinfo=tz)),
             (1, datetime(2026, 10, 4, 12, 30, tzinfo=tz)),
         ]
-        with patch.object(wa, "_earliest_kickoff_et", side_effect=lambda g: kickoffs[g]):
+        with patch.object(wa, "_earliest_kickoff_et", side_effect=lambda g: kickoffs[g]), \
+             patch.object(wa, "_draft_events", return_value=[]):
             for window, now in moments:
                 gw, deadline, _ = wa.resolve_trade_deadline(8, gw8_kickoff, "a", now)
                 assert gw == 9, f"{window}h window still targeting the old gameweek"
@@ -230,7 +342,8 @@ class TestTradeDeadlineGameweekTargeting:
         kickoff = datetime(2026, 10, 10, 10, 0, tzinfo=tz)       # Sat
         now = datetime(2026, 10, 7, 8, 30, tzinfo=tz)            # deadline still ahead
 
-        with patch.object(wa, "_earliest_kickoff_et", side_effect=AssertionError):
+        with patch.object(wa, "_earliest_kickoff_et", side_effect=AssertionError), \
+             patch.object(wa, "_draft_events", return_value=[]):
             gw, deadline, _ = wa.resolve_trade_deadline(10, kickoff, "a", now)
 
         assert gw == 10
@@ -247,7 +360,8 @@ class TestTradeDeadlineGameweekTargeting:
         now = datetime(2026, 10, 3, 12, 0, tzinfo=tz)            # deadline long past
 
         with patch.object(wa, "_earliest_kickoff_et",
-                          side_effect=RuntimeError("no fixtures")):
+                          side_effect=RuntimeError("no fixtures")), \
+             patch.object(wa, "_draft_events", return_value=[]):
             gw, deadline, _ = wa.resolve_trade_deadline(38, kickoff, "a", now)
 
         assert gw == 38

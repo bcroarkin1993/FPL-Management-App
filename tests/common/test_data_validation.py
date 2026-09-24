@@ -1143,3 +1143,139 @@ class TestLeagueTradeConfig:
 
         with pytest.raises(AssertionError):
             raise_on_error(self._check({"mode": "waivers"}))
+
+
+class TestCheckWaiverOrder:
+    """The published waiver queue decides who sees a player first.
+
+    Everything the Waiver Wire's claim outlook says rests on this order being
+    complete and containing you. Every way it can be wrong is silent.
+    """
+
+    def _order(self, n=10):
+        return [
+            {"pick": i, "entry_id": 56085 + i, "league_entry_id": 56181 + i,
+             "team_name": f"Team {i}"}
+            for i in range(1, n + 1)
+        ]
+
+    def test_the_live_order_is_clean(self):
+        from scripts.common.data_validation import check_waiver_order
+        assert check_waiver_order(self._order(), n_entries=10, my_entry_id=56092) == []
+
+    def test_an_empty_order_errors(self):
+        """A missing order silently disables the feature rather than failing."""
+        from scripts.common.data_validation import check_waiver_order
+        issues = check_waiver_order([])
+        assert issues and issues[0].severity == "error"
+
+    def test_a_gap_in_the_picks_errors(self):
+        from scripts.common.data_validation import check_waiver_order
+        order = self._order()
+        order[3]["pick"] = 11          # leaves 4 unclaimed, 11 out of range
+        issues = check_waiver_order(order, n_entries=10, my_entry_id=56092)
+        assert any("permutation" in i.message for i in issues)
+
+    def test_a_duplicate_pick_errors(self):
+        from scripts.common.data_validation import check_waiver_order
+        order = self._order()
+        order[3]["pick"] = 5
+        assert any(i.severity == "error" for i in check_waiver_order(order))
+
+    def test_a_manager_missing_from_the_queue_errors(self):
+        from scripts.common.data_validation import check_waiver_order
+        issues = check_waiver_order(self._order(9), n_entries=10)
+        assert any("9 of 10" in i.message for i in issues)
+
+    def test_your_own_entry_missing_errors(self):
+        """The two-id-space trap: matching on the standings id yields no match.
+
+        That reads on the page as "you have no waiver pick", not as an error.
+        """
+        from scripts.common.data_validation import check_waiver_order
+        issues = check_waiver_order(self._order(), n_entries=10, my_entry_id=56182)
+        assert any("not in the waiver order" in i.message for i in issues)
+
+    def test_a_rotated_order_warns_and_does_not_error(self):
+        """A successful claim moves its manager to the back mid-gameweek.
+
+        So the inverse-of-standings relationship legitimately breaks, and an error
+        here would fire most weeks — a check that cries wolf gets muted.
+        """
+        from scripts.common.data_validation import check_waiver_order
+        order = self._order()
+        # Standings in the same order as the picks: maximally "wrong".
+        standings = [{"league_entry": 56181 + i, "rank": i} for i in range(1, 11)]
+        issues = check_waiver_order(order, n_entries=10, my_entry_id=56092,
+                                    standings=standings)
+        assert issues
+        assert {i.severity for i in issues} == {"warning"}
+
+    def test_the_real_inverse_ordering_is_quiet(self):
+        from scripts.common.data_validation import check_waiver_order
+        order = self._order()
+        standings = [{"league_entry": 56181 + i, "rank": 11 - i} for i in range(1, 11)]
+        assert check_waiver_order(order, n_entries=10, my_entry_id=56092,
+                                  standings=standings) == []
+
+
+class TestCheckDraftGameSettings:
+    """The app compiles the Draft rules in; this is how a rules change surfaces.
+
+    Every quota and window length here is a constant written down from FPL's
+    documentation. That is the right design — reading them at runtime would turn a
+    feed outage into a rules change — but it means a real change is invisible.
+    """
+
+    def _settings(self, **overrides):
+        base = {
+            "squad": {"size": 15, "select_GKP": 2, "select_DEF": 5, "select_MID": 5,
+                      "select_FWD": 3, "play": 11, "captains_disabled": True},
+            "transactions": {"new_element_locked_hours": 24, "trade_veto_minimum": 50,
+                             "trade_veto_hours": 24,
+                             "waivers_before_deadline_hours": 24,
+                             "waivers_before_deadline_hours_event": {}},
+        }
+        for section, values in overrides.items():
+            base.setdefault(section, {}).update(values)
+        return base
+
+    def test_the_live_payload_is_clean(self):
+        from scripts.common.data_validation import check_draft_game_settings
+        assert check_draft_game_settings(self._settings()) == []
+
+    def test_an_unreachable_bootstrap_is_unknown_not_wrong(self):
+        """An outage must never be reported as FPL changing the squad size."""
+        from scripts.common.data_validation import check_draft_game_settings
+        for empty in (None, {}, "nope"):
+            issues = check_draft_game_settings(empty)
+            assert issues and {i.severity for i in issues} == {"warning"}
+
+    def test_a_changed_squad_quota_errors_and_names_the_code(self):
+        from scripts.common.data_validation import check_draft_game_settings
+        issues = check_draft_game_settings(self._settings(squad={"select_GKP": 3}))
+        assert any(i.severity == "error" for i in issues)
+        assert any("_SQUAD_POSITION_QUOTA" in i.hint for i in issues)
+
+    def test_captains_appearing_in_draft_errors(self):
+        """Draft has no captain; several pages are built on that being true."""
+        from scripts.common.data_validation import check_draft_game_settings
+        issues = check_draft_game_settings(self._settings(squad={"captains_disabled": False}))
+        assert any("captains_disabled" in i.message for i in issues)
+
+    def test_a_field_vanishing_errors(self):
+        from scripts.common.data_validation import check_draft_game_settings
+        settings = self._settings()
+        del settings["transactions"]["trade_veto_minimum"]
+        issues = check_draft_game_settings(settings)
+        assert any("no longer published" in i.message for i in issues)
+
+    def test_a_per_gameweek_waiver_override_warns(self):
+        """The one thing that would invalidate the kickoff-offset fallback."""
+        from scripts.common.data_validation import check_draft_game_settings
+        issues = check_draft_game_settings(
+            self._settings(transactions={"waivers_before_deadline_hours_event": {"14": 12}})
+        )
+        assert issues
+        assert {i.severity for i in issues} == {"warning"}
+        assert "waivers_before_deadline_hours_event" in issues[0].hint

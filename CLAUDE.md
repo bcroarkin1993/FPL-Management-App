@@ -1157,6 +1157,8 @@ to import from GitHub Actions.
 | `check_team_strength()` | Degenerate power rankings — every team scoring ~50 because position codes were `GKP/DEF/MID/FWD` instead of `G/D/M/F`, short squads, impossible injury costs |
 | `check_resolved_squad()` | A Classic squad that is illegal (size, duplicates, >3 per club, negative bank from double-applied transfer arithmetic) or **stale** — the last-deadline fifteen presented as current, whose every individual value is plausible |
 | `check_element_states()` | Draft player states changing shape — an unknown `status` code, `owner` disagreeing with the status, an owned count that isn't teams x 15. Every one makes locked players read as available, so the Waiver Wire suggests players who cannot be picked up |
+| `check_waiver_order()` | A waiver queue that is not a queue — a gap or repeat in the 1..N picks, a manager missing from it, or **your own entry absent**, which is the two-id-space trap whose only other symptom is an empty join that reads on the page as "you have no waiver pick". Disagreement with the standings is a *warning*: a successful claim rotates its manager to the back mid-gameweek |
+| `check_draft_game_settings()` | FPL changing a Draft rule this codebase hardcodes — the squad quota, the 50%/24h veto, the locked-player window, captains becoming a thing. Every one of these is a constant written down from the documentation, so a real change is otherwise invisible. An unreachable bootstrap is a **warning** (unknown), never an error (wrong) |
 | `check_league_trade_config()` | The league's trade rules changing shape — `league.trades` vanishing or coming back null, `trades_time_for_approval` ceasing to be a bool. Both make the Trade Analyzer fall back to "assume approval is required", which is safe but is no longer a statement about *this* league and looks identical on screen. An **unrecognised** trades code is only a warning: three of the four codes are genuinely unknown, and a check that fires on expected ignorance gets muted |
 
 Ranges are deliberately wide — these are "this cannot be right" boundaries, not
@@ -2178,10 +2180,13 @@ Two windows alternate every gameweek, and which one is open decides whether an
 available player can be taken *today*:
 
 1. After the draft, unselected players go to waivers.
-2. Waivers process ~24h before the gameweek deadline (less when gameweeks are close
-   together). Lowest-ranked team picks first; a successful claim sends that team to the
-   back of the queue. Claims are position-locked: you propose replacing a squad player
-   with an unselected one **in the same position**. Multiple claims must be ranked.
+2. Waivers process 24h before the gameweek deadline — **read it from
+   `events[].waivers_time`, do not derive it**; FPL can shorten the window for a
+   specific gameweek and the offsets cannot see that. Lowest-ranked team picks
+   first; a successful claim sends that team to the back of the queue, a failed
+   one costs nothing. Claims are position-locked: you propose replacing a squad
+   player with an unselected one **in the same position**. Multiple claims must
+   be ranked, and `waiver_pick` says where in the queue you sit.
 3. Free agency then runs until the gameweek deadline — adds process immediately.
 4. At the deadline, all unowned players return to waivers and the cycle repeats.
 
@@ -2189,6 +2194,112 @@ The active window is `league.transaction_mode` on `/api/league/{id}/details`
 (`"waivers"` | `"free-agency"`); `/api/game` carries the global cycle state
 (`waivers_processed`, `current_event`, `next_event`, `current_event_finished`,
 `trades_time_for_approval`). `get_draft_transaction_window()` merges the two.
+
+### The queue is published — `waiver_pick`
+
+`scripts/common/waiver_priority.py` (pure), surfaced on the Waiver Wire.
+
+**The page ranked players by how much they would improve the squad and had no
+notion of whether you could win them.** A claim is a *request*, processed in
+league order, and a target every manager ahead of you also wants is not a plan.
+Half of this league's successful claims were for a player somebody else also
+asked for, and one GW3 target drew **eight** competing claims.
+
+FPL publishes the order outright: `league_entries[].waiver_pick`, 1 first, live
+for the **next** round. `grep waiver_pick` returned nothing until 2026-09-24.
+
+**Two id spaces on one payload.** `league_entries[].id` (56182) keys
+`standings.league_entry`; `league_entries[].entry_id` (56086) keys
+`element_status.owner` and `transactions.entry`. `waiver_pick` sits on the row
+carrying both, and `team_strength`'s `Team_ID` is the **entry_id** space — so
+that join is exact, but standings must hop via `id`. Crossing them yields a
+silently empty join, not an error, which on the page reads as "you have no
+waiver pick" and disables the feature. `check_waiver_order()` asserts the picks
+are a permutation of 1..N *and* that the configured team resolves.
+
+**A failed claim costs nothing.** Only a *successful* one sends you to the back.
+Recovered from the league's own log by `index` ordering: RIP Gary's Boys were
+declined at priorities 2, 3 and 4 in GW4, won at 5, and kept their slot
+throughout. So the right claim list is the honest preference order with long
+shots at the top — the opposite of how most managers hedge — which is what
+`rank_claim_plan()` builds and why it exists rather than a `sort` at the
+callsite.
+
+**The transaction log decodes, and two of its three result codes are not
+interchangeable.** `kind` is `w`/`f`, `priority` is the manager's own ranking,
+`index` is the global processing order. `di` means *beaten to this player by a
+higher priority claim* — all 58 `di` rows had that same `element_in` accepted by
+someone else in the same event. `do` is some other decline, and only 9 of 15 had
+the player taken, so **`do` is not a contention signal** and counting it as one
+inflates every contested figure.
+
+**The forward estimate is calibrated on participation, not on your pick number.**
+The players gone before your turn is the number of managers ahead of you who
+*claim at all*, which is a property of the league and measurable from nothing but
+its own log. Measured across five rounds: 76% participation, so at pick 7 expect
+~4.6 gone — against 5 actually observed in GW4 and 4 in GW5. Without history the
+rate is None and no figure is quoted, rather than assuming everyone claims.
+
+Rival *need* reuses `aggregate_team_strength()` rather than inventing a second
+notion of squad strength. Bands are `likely` / `contested` / `long_shot`, and an
+unresolvable input renders **no badge at all** — the order or the power rankings
+being unavailable is not a finding about a player, and a neutral pill on every
+card is noise. The outlook is computed inside `_compute_transfer_suggestions()`,
+not at the callsite, for the same reason the locked-player filter is.
+
+### Deadlines are published too — stop deriving them
+
+`bootstrap-static.events[]` carries `waivers_time` and `trades_time` per
+gameweek. The app derived both from earliest kickoff minus hardcoded 25.5h /
+49.5h; it now reads FPL's and keeps the offsets as fallback
+(`published_deadlines()`, `waiver_deadline_for()`, `trade_deadline_for(gw=...)`).
+
+Which of the two published times applies is a property of the **league**: under
+approval, offers shut at `trades_time`; otherwise with waivers at `waivers_time`.
+An unreadable trade setting still takes the earlier one and still reports
+`approval_assumed=True` — unchanged reasoning, real timestamps.
+
+Verified 2026-09-24 across all 38 events: `waivers_time == deadline − 24h` and
+`trades_time == deadline − 48h`, which is exactly the 25.5h/49.5h the constants
+encode. **So this fixed no live bug**, and saying so matters: the reason to do it
+is `settings.transactions.waivers_before_deadline_hours_event`, a per-gameweek
+override of the waiver window — the article's "less when gameweeks are close
+together" — that arithmetic over the fixture list cannot see. It is empty for
+this whole season, and `check_draft_game_settings()` warns if it stops being.
+
+This also collapses the midweek look-ahead in `resolve_trade_deadline()` to a
+lookup: the reasoning in its docstring stays as the *why*, but walking `events`
+forward needs no fixture fetch. The kickoff path remains so a bootstrap outage
+cannot silence an alert.
+
+### `settings` is the rulebook, and the tripwire for it
+
+`bootstrap-static.settings` states every rule this codebase compiles in as a
+constant. That is the right design — reading them at runtime would turn a feed
+outage into a rules change — but it means a *real* change is invisible: the app
+keeps enforcing last season's rules and every number stays plausible.
+`check_draft_game_settings()` is the tripwire, and an unreachable bootstrap is a
+**warning** (unknown), never an error (wrong).
+
+Confirmed 2026-09-24: `squad.size` 15, `select_GKP/DEF/MID/FWD` 2/5/5/3, `play`
+11, **`captains_disabled: true`** (no captain in Draft — `bench_analysis` and
+`gameweek_review` are built on this), `waivers_before_deadline_hours` 24,
+`new_element_locked_hours` 24, `trade_veto_hours` 24, `trade_veto_minimum` 50,
+`max_drafts` 4 (one draft plus up to three in-season redrafts), `max_entries` 16
+/ `min_entries` 2 private, `public_entry_sizes` [4, 6, 8].
+
+`elements[].draft_rank` is FPL's own board and the order an absent manager's
+picks are auto-made in when they have set no watchlist. It rides on the Draft
+bootstrap, was fetched in six places and discarded every time; it now comes
+through `get_fpl_player_mapping()` as `Draft_Rank` and renders on the Draft
+Helper as `FPL Rank` with a `Δ` against our own ordering. The join is a
+cross-source name merge and goes through `_claim_reference_rows()` like every
+other one — 399 of Rotowire's 400 resolved. **The two boards differ by method,
+not only opinion:** FPL's rank leans on last season's points, so promoted-club
+players sit near the bottom regardless of projection, and all five largest
+positive deltas were Coventry or Ipswich defenders. The column help says so,
+because a +478 meaning "FPL has no data for this league yet" reads identically
+to one meaning "we have found value".
 
 ### Trades
 
@@ -2303,16 +2414,26 @@ produces an offer FPL will void.
 
 ### Verified live payload
 
-League 11347 — the numbers `check_element_states()` and `check_league_trade_config()`
-assert against. Element counts observed 2026-08-27, trade config re-verified
-2026-09-23:
+League 11347 — the numbers `check_element_states()`, `check_league_trade_config()`,
+`check_waiver_order()` and `check_draft_game_settings()` assert against. Element
+counts observed 2026-08-27, trade config re-verified 2026-09-23, everything below
+that re-verified 2026-09-24:
 
 ```
 element-status : 616 elements -> 446 'a', 150 'o' (10 teams x 15), 20 'l'
 league details : transaction_mode "free-agency", trades "a"
+                 waiver_pick a 1..10 permutation, exactly inverse to the standings
 game           : waivers_processed true, current_event 1, next_event 2
                  trades_time_for_approval true
+bootstrap      : 667 elements, draft_rank on 667; events[].waivers_time on all 38
+transactions   : 160 rows -> 136 'w' / 24 'f'; 87 'a', 58 'di', 15 'do'
+                 76% of managers claim per round; peak contention 8 on one player
 ```
+
+**The order is re-derived from rank each gameweek**, worst team first, and
+rotates within the round — which is why `waiver_pick` reads as the exact inverse
+of the standings between rounds and why `check_waiver_order()` only *warns* when
+it does not.
 
 **`trades_time_for_approval` is a boolean, not a timestamp.** The name invites the
 opposite assumption, and nothing in the app reads it — its exact semantics have not
@@ -2426,6 +2547,8 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Season Highlights for Team Analysis | Best XI (optimal formation from top scorers), Team MVP (with starts/goals/assists/captain stats), Best Clubs (top 3 contributing EPL clubs); shared `team_analysis_helpers.py` module for Draft and Classic |
 | Advanced Player Statistics Table | 40+ columns with 8 presets (Essential, Attacking, Defensive, Per 90, ICT Focus, Fixture Focus, GK Stats, Regression); green-white-red color gradients; regression metrics (G-xG, A-xA, GI-xGI) to identify over/under performers; switched to Classic FPL API for price/ownership data |
 | Waiver Wire Transfer Suggestions | Top-3 position-locked swap suggestions with unified Player Value scoring, injury-aware hold logic, raised score-gap thresholds (elite/above-avg/weak tiers), multi-signal sanity check (vetoes ADD clearly worse on proj/season/3GW), 4-level FFP name fallback, and inline GW+3GW+season stats on each suggestion card |
+| Waiver claim reachability | Reads FPL's published `waiver_pick`, so the page knows where in the claim queue this manager sits and stops leading with targets six other managers see first. Banner card, queue expander, a `likely`/`contested`/`long_shot` band per suggestion driven by Power Rankings positional need, and a priority-ordered claim plan built on "a failed claim costs nothing". Calibrated on the league's own transaction history. See "The queue is published" |
+| Deadlines and rules read from FPL | `events[].waivers_time` / `trades_time` replace the hardcoded 25.5h/49.5h offsets (kept as fallback), and `check_draft_game_settings()` fires if FPL moves a rule the codebase compiles in. `draft_rank` joins onto the Draft Helper board as `FPL Rank` / `Δ` |
 | Error logging & better error messages | Added `error_helpers.py` module with structured logging and user-facing error display; added `timeout=30` to ~12 unprotected `requests.get()` calls; added `_logger.warning()` to ~15 silent `except` blocks; replaced ~13 generic error messages with actionable hints |
 | Luck-Adjusted Standings (All-Play Record) | Replaced simplistic average-based model with industry-standard All-Play Record (every team vs every other each GW); fixed 0-score filter bug; shared `luck_analysis.py` module for Draft and Classic H2H; color-styled standings tables with auto-sized height; added toggle to Classic H2H standings |
 | Data Source Update Alerts | Discord notifications when Rotowire/FFP publish new GW data; unified Alert Settings page in FPL App Home with configurable alert windows, test buttons, and live data source status checks; JSON config (`alert_settings.json`) with GitHub Actions commit-back for state persistence |

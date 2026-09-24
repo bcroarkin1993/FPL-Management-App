@@ -115,7 +115,8 @@ def get_fpl_player_mapping():
     Fetches FPL player data from the FPL Draft API and returns it as a dictionary to link player ids to player names.
 
     Returns:
-    - fpl_player_data: Dictionary with Player_ID as key and dict with 'Player', 'Web_Name', 'Team', 'Position'.
+    - fpl_player_data: Dictionary with Player_ID as key and dict with 'Player',
+      'Web_Name', 'Team', 'Position', 'Draft_Rank'.
     """
     # Fetch data from the FPL Draft API
     player_url = "https://draft.premierleague.com/api/bootstrap-static"
@@ -153,7 +154,11 @@ def get_fpl_player_mapping():
             'Player': full_name,
             'Web_Name': web_name,
             'Team': team_short_name,
-            'Position': position
+            'Position': position,
+            # FPL's own board ordering, and the order an absent manager's picks are
+            # auto-made in when they have set no watchlist. Published on every
+            # element of the Draft bootstrap and discarded here for years.
+            'Draft_Rank': player.get('draft_rank'),
         }
 
     return fpl_player_map
@@ -1139,6 +1144,48 @@ def get_league_element_states(league_id):
             "in_accepted_trade": bool(row.get("in_accepted_trade", False)),
         }
     return states
+
+
+@st.cache_data(ttl=300)
+def get_league_waiver_order(league_id):
+    """The league's waiver queue for the next round, best pick first.
+
+    Reads the same `/api/league/{id}/details` payload `get_draft_transaction_window`
+    already fetches, so this costs one request rather than new data. Returns
+    `parse_waiver_order()`'s rows, or `[]` when the order cannot be read — which
+    callers must treat as "unknown", never as "there is no order".
+    """
+    from scripts.common.waiver_priority import parse_waiver_order
+
+    url = f"https://draft.premierleague.com/api/league/{league_id}/details"
+    try:
+        payload = requests.get(url, timeout=30).json()
+    except Exception as e:
+        _logger.warning("Failed to fetch waiver order for league %s: %s", league_id, e)
+        return []
+    return parse_waiver_order(payload)
+
+
+@st.cache_data(ttl=3600)
+def get_draft_game_settings():
+    """The Draft game's own rulebook, from `bootstrap-static.settings`.
+
+    FPL publishes the squad quota, the scoring table, the veto threshold and every
+    transaction window length that this app otherwise carries as constants. Read
+    here so `check_draft_game_settings()` can fail loudly if one of them moves —
+    the alternative is the app quietly enforcing last season's rules.
+
+    Returns `{}` on failure, which the check treats as unknown rather than wrong.
+    """
+    try:
+        payload = requests.get(
+            "https://draft.premierleague.com/api/bootstrap-static", timeout=30
+        ).json()
+    except Exception as e:
+        _logger.warning("Failed to fetch Draft game settings: %s", e)
+        return {}
+    settings = payload.get("settings")
+    return settings if isinstance(settings, dict) else {}
 
 
 @st.cache_data(ttl=300)
