@@ -85,9 +85,14 @@ class TestTheTwoCallsitesAgree:
             check_names=False,
         )
         # And it is a real conversion, not a pass-through: the conditional
-        # fallback is discounted by the same start probability as `Proj`.
-        assert scored.loc[1, "Proj_Next3"] == pytest.approx(
-            18.0 * scored.loc[1, "Start_Pct"])
+        # fallback is start-discounted before it lands.
+        assert scored.loc[1, "Proj_Next3"] < 18.0
+        # Deliberately *not* `18.0 x Start_Pct`. `Start_Pct` carries this player's
+        # 25% chance of playing **this** gameweek; the horizon converts on his
+        # ordinary start probability instead, because applying a one-week absence
+        # uniformly across three weeks is the error FFP's single `start_pct`
+        # makes. A stated absence reaches the horizon through the duration cap.
+        assert scored.loc[1, "Proj_Next3"] > 18.0 * scored.loc[1, "Start_Pct"]
 
     def test_scoring_does_not_erase_a_horizon_it_was_given(self):
         """`blend_aligned` wrote `Proj_Next3` whether or not it had anything to

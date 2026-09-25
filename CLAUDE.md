@@ -370,13 +370,58 @@ one source's number by another's pessimism is the João Pedro bug above.
 `Proj_Start` is deliberately untouched — he would still score 10 if he played,
 and `team_strength` percentiles that.
 
-One consequence, surfaced by `check_blended_projections()`'s own warning: ten
-players now carry `Proj == 0` with **no** three-gameweek total, because a
-horizon is only built where a source published one. That is honest — Milenković
-is due back on 11 Oct, so his three-week window is genuinely not zero — but a
-missing horizon takes the neutral 0.50 in every percentile. Modelling a return
-date into `Proj_Next3` is separate work; `injury_helpers.estimate_games_to_miss()`
-already exists for it.
+**A return date is information about the window, not just about this week.**
+The ceiling above is a statement about one gameweek, and the three paths into
+`Proj_Next3` each mishandled the other two. FFP publishes **one** `start_pct`
+per player across all six forecast weeks, so its horizon is uniformly optimistic
+or uniformly pessimistic and cannot model a return. The conditional fallbacks
+were multiplied by the ceilinged `start_pct` and so collapsed to zero for the
+whole window — writing off a player due back next week. And a player no source
+priced carried NaN, which every percentile fills with the neutral 0.50, ranking
+a man with a hamstring tear at the median of his position (ten players live,
+flagged by `check_blended_projections()`'s own warning).
+
+Two changes, and the split between them is the point:
+
+- **The horizon converts on the pre-ceiling start probability.** `start_pct`
+  prices this gameweek; `start_pct_window` is his ordinary rate. Applying a
+  one-week absence uniformly across three weeks is exactly FFP's error.
+- **A *stated* absence caps the horizon** at `Proj_Start × weeks available`.
+  Generous by construction — it assumes he starts every week he is fit — so it
+  binds only where a source claims more than the absence allows, and it is
+  skipped entirely where nothing is stated, which is what keeps a legitimate
+  double gameweek from being clipped. Where the horizon is missing the cap
+  *becomes* the value, since "out for the window" is a number and NaN is not.
+
+**`stated_games_to_miss()` is a new gate, not a new estimate.**
+`estimate_games_to_miss()` always answers, falling through return dates to
+suspension lengths to `chance` buckets to the `status` code — right for a
+discount, wrong for anything asserting a fact about future gameweeks, because
+the buckets are a guess: "25% chance" becomes "misses 3 games" on no evidence.
+So the cap fires only on a return date, a suspension length, or an
+out-of-squad status (`i`/`s`/`u`/`n`); a merely **doubtful** player gets nothing,
+since whether he plays this week is already priced and nothing is known about
+the two after it.
+
+The gate asks `estimate_games_to_miss(news, None, None)` — chance and status
+withheld — so a non-zero answer provably came from the news. Matching the
+keywords by hand instead let "Unspecified injury - Unknown return date" through
+on the word *return* and then answered from the very buckets the gate excludes.
+
+Measured live at GW6: 180 players carry a stated absence, 10 of them with a
+projection at all; nine are out for the whole window and score 0, and Pau Torres
+("Expected back 10 Oct", two gameweeks) gets one week's worth — 3.34 where he was
+previously written off. **No fit player's horizon changed**, and the
+phantom-neutral cohort went from ten to zero.
+
+One wart fixed on the way in, because the horizon model depends on it:
+`estimate_games_to_miss("", 100, "a")` returned **1**. FPL states an explicit
+100 once news is resolved — 84 live players carry it with `status == 'a'` — and a
+stated chance wins over the `status` check that would have answered 0, so
+`team_strength` was applying an injury discount to a fully available squad.
+`injury_helpers` also drops its `error_helpers` import (an unused logger that
+reached Streamlit) so the engine can import it at all; the module docstring had
+claimed purity for as long as it had been untrue.
 
 **`covers=starters_only` is why absence from Rotowire is a signal.** Rotowire
 lists 20 clubs × 11, so a player it does not price is not un-priced, he is not

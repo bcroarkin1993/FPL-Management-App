@@ -1466,6 +1466,10 @@ def _blend_frame(df: pd.DataFrame, rotowire_col: str = "Points",
         teams=(df["Team"] if "Team" in df.columns else None),
         chance_of_playing=_chance_of_playing_col(df),
         status=df.get("status"),
+        # An explicit return date bounds the multi-gameweek horizon; see
+        # `projection_engine.blend_aligned`. Absent on frames that never merged
+        # it, which simply means no player has a stated absence.
+        news=df.get("news"),
         gameweek=gameweek,
         extra=df,
     )

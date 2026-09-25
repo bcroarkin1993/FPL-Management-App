@@ -9,7 +9,11 @@ from datetime import datetime, timedelta
 import numpy as np
 import pytest
 
+import pandas as pd
+
 from scripts.common.injury_helpers import (
+    games_to_miss_series,
+    stated_games_to_miss,
     INJURY_FLOOR,
     estimate_games_to_miss,
     gameweeks_remaining,
@@ -93,3 +97,91 @@ class TestGameweeksRemaining:
 
     def test_bad_input_defaults_to_full_season(self):
         assert gameweeks_remaining(None) == 38
+
+
+class TestAFitPlayerMissesNothing:
+    """FPL states an explicit 100 once news is resolved.
+
+    Live, 84 players carry `chance == 100` with `status == 'a'`. The chance
+    buckets below start at 75, so without an explicit 100 case they reported
+    every one of those as missing a gameweek -- and `team_strength` applied an
+    injury discount to a fully available squad. The `status` check that would
+    have answered 0 is never reached, because a stated chance wins over it.
+    """
+
+    def test_an_explicit_hundred_is_zero(self):
+        assert estimate_games_to_miss("", 100, "a") == 0
+
+    def test_an_absent_chance_still_falls_through_to_status(self):
+        assert estimate_games_to_miss("", np.nan, "a") == 0
+
+    def test_a_doubt_below_a_hundred_is_unchanged(self):
+        assert estimate_games_to_miss("", 75, "d") == 1
+
+
+class TestStatedGamesToMiss:
+    """Only a *stated* duration may bound a future gameweek.
+
+    `estimate_games_to_miss` always answers, falling back through chance buckets
+    to the status code. That is right for a discount -- something beats nothing --
+    and wrong for anything asserting a fact about the next three gameweeks: "25%
+    chance" becomes "misses 3 games" on no evidence, and a player who may be back
+    next week gets written off.
+    """
+
+    def test_an_explicit_return_date_is_stated(self):
+        assert stated_games_to_miss(
+            "Hamstring injury - Expected back 11 Oct", 0, "i") is not None
+
+    def test_a_suspension_length_is_stated(self):
+        assert stated_games_to_miss("Suspended for 3 matches", np.nan, "a") == 3
+
+    def test_out_of_the_squad_is_stated(self):
+        """`i`/`s`/`u`/`n` mean FPL has removed him, not that it has a doubt."""
+        assert stated_games_to_miss("", np.nan, "u") > 0
+        assert stated_games_to_miss("", np.nan, "i") > 0
+
+    def test_a_doubtful_player_states_nothing(self):
+        """The case the gate exists for: `d` means he may well play."""
+        assert stated_games_to_miss("Knock", 75, "d") is None
+        assert stated_games_to_miss("", 25, "d") is None
+
+    def test_unknown_return_date_does_not_leak_the_chance_bucket(self):
+        """"Unknown return date" contains the word "return".
+
+        Matching the keyword by hand let it through and then answered from the
+        very buckets this function excludes. The duration has to come from the
+        news *alone* -- chance and status withheld -- for the news to count.
+        """
+        from_news_only = estimate_games_to_miss(
+            "Unspecified injury - Unknown return date", None, None)
+        assert from_news_only == 0
+        # He is still bounded, but by his status rather than by a bucket.
+        assert stated_games_to_miss(
+            "Unspecified injury - Unknown return date", 0, "i") == \
+            estimate_games_to_miss(None, None, "i")
+
+    def test_a_fit_player_states_nothing(self):
+        assert stated_games_to_miss("", 100, "a") is None
+
+
+class TestGamesToMissSeries:
+    def test_it_is_zero_where_nothing_is_stated(self):
+        idx = pd.Index([0, 1, 2])
+        out = games_to_miss_series(
+            pd.Series(["", "", "Knock"], index=idx),
+            pd.Series([100, None, 75], index=idx),
+            pd.Series(["a", "a", "d"], index=idx), idx)
+        assert list(out) == [0, 0, 0]
+
+    def test_it_reads_a_return_date(self):
+        idx = pd.Index([7])
+        out = games_to_miss_series(
+            pd.Series(["Hamstring injury - Expected back 11 Oct"], index=idx),
+            pd.Series([0], index=idx), pd.Series(["i"], index=idx), idx)
+        assert out.iloc[0] > 0
+
+    def test_a_bare_list_index_is_accepted(self):
+        """`blend_aligned` passes whatever the caller had, list included."""
+        out = games_to_miss_series(None, None, None, [0, 1])
+        assert list(out) == [0, 0]

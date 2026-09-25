@@ -744,6 +744,9 @@ def _build_pool(bootstrap) -> pd.DataFrame:
             "ep_next": pd.to_numeric(e.get("ep_next"), errors="coerce"),
             "status": e.get("status"),
             "chance_of_playing_next_round": e.get("chance_of_playing_next_round"),
+            # Carries the return date the horizon model reads -- "Expected back
+            # 11 Oct" is three gameweeks at GW6.
+            "news": e.get("news"),
         })
     return pd.DataFrame(rows)
 

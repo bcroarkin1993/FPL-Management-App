@@ -40,6 +40,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from scripts.common.injury_helpers import games_to_miss_series
 from scripts.common.name_matching import ReferenceMatcher
 from scripts.common.projection_sources import (
     BASIS_CONDITIONAL,
@@ -54,6 +55,10 @@ CANONICAL_COLUMNS = [
     "Proj", "Proj_Start", "Start_Pct", "Proj_Next3",
     "Proj_Src", "Proj_Spread", "Proj_GW",
 ]
+
+#: Gameweeks `Proj_Next3` covers, including the current one -- pinned live under
+#: "Fantasy Football Pundit feed". The window a return date is measured against.
+HORIZON_GWS = 3
 
 #: Short labels for ``Proj_Src``. Kept terse because this renders in a table cell.
 SOURCE_LABELS = {"rotowire": "RW", "ffp": "FFP", "fpl_ep": "xP", "odds": "ODDS"}
@@ -318,6 +323,7 @@ def build_projections(
         positions=_pool_col(pool, "Position", out.index, default="M"),
         teams=_pool_col(pool, "Team", out.index),
         chance_of_playing=_pool_col(pool, "chance_of_playing_next_round", out.index),
+        news=_pool_col(pool, "news", out.index),
         status=_pool_col(pool, "status", out.index),
         weights=weights,
         gameweek=gameweek,
@@ -348,6 +354,7 @@ def blend_aligned(
     teams: Optional[pd.Series] = None,
     chance_of_playing: Optional[pd.Series] = None,
     status: Optional[pd.Series] = None,
+    news: Optional[pd.Series] = None,
     weights: Optional[Dict[str, float]] = None,
     fallback_names: Optional[Sequence[str]] = None,
     gameweek: Optional[int] = None,
@@ -529,6 +536,14 @@ def blend_aligned(
     # the divisor for recovering an unconditional source's conditional basis,
     # and dividing one source's number by another's pessimism is the bug
     # recorded above under Joao Pedro.
+    # The ceiling below is a statement about *this* gameweek. The multi-gameweek
+    # horizon needs his ordinary start probability -- applying a one-week absence
+    # uniformly across three weeks is the same error as FFP publishing a single
+    # `start_pct` for its whole window. His absence reaches the horizon through
+    # the stated-duration cap further down, which is the part that knows how many
+    # of those weeks he actually misses.
+    start_pct_window = start_pct.copy()
+
     if status is not None:
         out_of_squad = status.reindex(index).isin(["i", "s", "u"]).fillna(False)
         start_pct = start_pct.where(~out_of_squad, 0.0)
@@ -713,7 +728,7 @@ def blend_aligned(
         supplied = True
         values = per_source_next3[name].reindex(index)
         if per_source_next3_basis.get(name, BASIS_UNCONDITIONAL) == BASIS_CONDITIONAL:
-            values = values * start_pct
+            values = values * start_pct_window
         next3 = next3.fillna(values)
 
     # A player this blend has judged a non-starter has a horizon of zero, not
@@ -733,6 +748,45 @@ def blend_aligned(
     # over three.
     if supplied or "Proj_Next3" not in out.columns:
         out["Proj_Next3"] = next3
+
+    # --- A return date is information about the window, not just this week ----
+    #
+    # The availability ceiling above zeroes `Proj`, which is right: he is not
+    # playing this gameweek. It says nothing about the other two weeks in the
+    # horizon, and the three paths into `Proj_Next3` then disagreed about him.
+    # FFP publishes **one** `start_pct` per player across all six forecast weeks
+    # (see "Fantasy Football Pundit feed"), so its horizon cannot model a return
+    # either -- it is uniformly optimistic or uniformly pessimistic. The
+    # conditional fallbacks are multiplied by the ceilinged `start_pct` and so
+    # collapse to zero for the whole window, which writes off a player due back
+    # next week. And a player no source priced carries NaN, which every
+    # percentile fills with a neutral 0.50 -- ranking a man with a hamstring tear
+    # at the median of his position.
+    #
+    # FPL's news carries the answer for the cases that matter: "Expected back 11
+    # Oct" is three gameweeks at GW6. `estimate_games_to_miss` already parses it
+    # -- for the Draft waiver hold logic and the Power Rankings injury discount --
+    # and it falls back through suspension lengths, chance buckets and the status
+    # code, so a player with no date still gets an estimate rather than nothing.
+    #
+    # **A cap, for the same reason the availability signal is a cap.** The bound
+    # is `Proj_Start x weeks he is available`, which assumes he starts every week
+    # he is fit -- generous on purpose, so it binds only where a source is
+    # claiming more than the absence allows. For a fit player it is
+    # `3 x Proj_Start`, above any honest horizon, and it is skipped outright
+    # where nothing is flagged so a double gameweek is never clipped.
+    #
+    # Where the horizon is missing entirely the cap *becomes* the value, since
+    # "out for the window" is a real number and NaN is not.
+    if HORIZON_GWS > 0:
+        gws_out = games_to_miss_series(news, chance_of_playing, status, index)
+        flagged = gws_out.gt(0)
+        if flagged.any():
+            weeks_available = (HORIZON_GWS - gws_out).clip(lower=0, upper=HORIZON_GWS)
+            cap = pd.to_numeric(out["Proj_Start"], errors="coerce") * weeks_available
+            current = pd.to_numeric(out["Proj_Next3"], errors="coerce")
+            capped = np.minimum(current.fillna(cap), cap)
+            out["Proj_Next3"] = current.where(~flagged, capped)
 
     out["Proj_GW"] = gameweek
     return out

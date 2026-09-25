@@ -10,14 +10,17 @@ This module is pure (no Streamlit, no network) so it is safe to import from
 tests and from GitHub Actions.
 """
 
+import logging
 import re
 from datetime import datetime
 
 import pandas as pd
 
-from scripts.common.error_helpers import get_logger
-
-_logger = get_logger("fpl_app.injury_helpers")
+# Plain `logging`, not `error_helpers.get_logger`: that module imports Streamlit,
+# and this one's docstring has always claimed purity -- `projection_engine` now
+# imports it, and a test asserts the engine loads with Streamlit absent. The
+# logger it pulled in was never used.
+_logger = logging.getLogger("fpl_app.injury_helpers")
 
 # Total gameweeks in a Premier League season.
 TOTAL_GWS = 38
@@ -73,6 +76,15 @@ def estimate_games_to_miss(news, chance, status) -> int:
     if not pd.isna(chance):
         try:
             c = float(chance)
+            # **100 means fit, and must return 0.** FPL states an explicit 100
+            # once news is resolved -- live, 84 players carry `chance == 100`
+            # with `status == 'a'` -- so without this the bucket below reported
+            # them as missing a gameweek, and `team_strength` applied an injury
+            # discount to a fully available squad. The `status` check that would
+            # have returned 0 is never reached, because a stated chance wins
+            # over it by design.
+            if c >= 100:
+                return 0
             if c >= 75:
                 return 1
             if c >= 50:
@@ -96,6 +108,82 @@ def estimate_games_to_miss(news, chance, status) -> int:
             return 3
 
     return 0
+
+
+#: Status codes meaning FPL has taken the player out of the squad, rather than
+#: merely flagged a doubt. ``d`` is deliberately absent: a doubtful player may
+#: well play, which is what makes him doubtful.
+OUT_OF_SQUAD_STATUSES = ("i", "s", "u", "n")
+
+
+def stated_games_to_miss(news, chance, status):
+    """Games missed where the *source states a duration*, else ``None``.
+
+    :func:`estimate_games_to_miss` always answers, falling back through
+    ``chance`` buckets to the ``status`` code, which is right for a discount --
+    something is better than nothing. It is wrong for anything that treats the
+    answer as a fact about *future* gameweeks, because the buckets are a guess:
+    "25% chance" becomes "misses 3 games" on no evidence at all, and applied to
+    a three-gameweek horizon that writes off a player who may be back next week.
+
+    So this returns a number only where the duration is stated:
+
+      * an explicit return date in ``news`` ("Expected back 11 Oct"),
+      * a suspension length ("Suspended for 3 matches"),
+      * a status that means *out of the squad* rather than doubtful.
+
+    A doubtful player with no date gets ``None``: whether he plays *this* week
+    is already priced by his start probability, and nothing is known about the
+    two weeks after it.
+    """
+    # Ask for the news-derived duration *alone*: with chance and status withheld,
+    # the bucket fallbacks cannot fire, so anything above zero came from a real
+    # date or a suspension length. Matching the keywords by hand instead lets
+    # "Unspecified injury - Unknown return date" through on the word "return",
+    # and then answers from the very buckets this function exists to exclude.
+    from_news = estimate_games_to_miss(news, None, None)
+    if from_news > 0:
+        return from_news
+
+    if not pd.isna(status) and str(status).lower() in OUT_OF_SQUAD_STATUSES:
+        return estimate_games_to_miss(None, None, status)
+
+    return None
+
+
+def games_to_miss_series(news, chance, status, index) -> pd.Series:
+    """:func:`stated_games_to_miss` over aligned Series, 0 where nothing is stated.
+
+    The scalar version runs regexes over free text, so it is only called for
+    players carrying *some* availability signal -- a status that is not ``a`` or
+    a stated chance below 100. Live that is 205 of 667 rows, and the rest are
+    zero by definition rather than by computation.
+    """
+    # Callers pass whatever they have -- `blend_aligned` takes a bare list as
+    # often as an Index -- so normalise before any positional indexing.
+    index = pd.Index(index)
+    news = _as_series(news, index)
+    chance = pd.to_numeric(_as_series(chance, index), errors="coerce")
+    status = _as_series(status, index).astype("object")
+
+    flagged = (status.notna() & ~status.isin(["a", ""])) | (chance.notna() & chance.lt(100))
+    flagged = flagged.reindex(index).fillna(False).astype(bool)
+
+    out = pd.Series(0, index=index, dtype="int64")
+    for idx in index[flagged.to_numpy()]:
+        stated = stated_games_to_miss(news.get(idx), chance.get(idx), status.get(idx))
+        if stated is not None:
+            out.at[idx] = stated
+    return out
+
+
+def _as_series(value, index) -> pd.Series:
+    """``value`` as a Series on ``index``; an all-NaN one when it is absent."""
+    if value is None:
+        return pd.Series([float("nan")] * len(index), index=index, dtype="object")
+    if isinstance(value, pd.Series):
+        return value.reindex(index)
+    return pd.Series([value] * len(index), index=index)
 
 
 def gameweeks_remaining(current_gw, total_gws: int = TOTAL_GWS) -> int:

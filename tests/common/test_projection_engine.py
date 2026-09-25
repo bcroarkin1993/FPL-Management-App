@@ -189,6 +189,77 @@ class TestStartProbability:
         # FPL calling him fit.
         assert out.loc[4, "Start_Pct"] == pytest.approx(DEFAULT_START_FLOORS["M"])
 
+    def test_a_return_date_bounds_the_multi_gameweek_horizon(self):
+        """The ceiling zeroes this week; a return date prices the other two.
+
+        FFP publishes one `start_pct` per player across all six forecast weeks,
+        so its horizon cannot model a return -- it is uniformly optimistic or
+        uniformly pessimistic. The conditional fallbacks are multiplied by the
+        ceilinged start probability and collapse to zero for the whole window,
+        writing off a player due back next week.
+        """
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player": ["Cole Palmer"], "Team": ["CHE"], "Position": ["M"],
+                   "Proj_Start": [6.0], "Proj_Next3": [18.0]})
+        pool = _pool(
+            status=["a", "a", "a", "i"],
+            chance_of_playing_next_round=[None, None, None, 0],
+            news=["", "", "", "Hamstring injury - Suspended for 2 matches"],
+        )
+        out = build_projections([rw], gameweek=3, pool=pool, weights={"rotowire": 1.0})
+        # Out for two of the three, so at most one week's worth -- and the bound
+        # is `Proj_Start`, which assumes he starts when fit. Generous by design:
+        # it binds only where a source claims more than the absence allows.
+        assert out.loc[4, "Proj"] == 0.0
+        assert out.loc[4, "Proj_Next3"] == pytest.approx(6.0)
+        # Not zero, which is what the ceiling alone produced: the conditional
+        # horizon was multiplied by a start probability meaning "not this week"
+        # and so wrote off all three.
+        assert out.loc[4, "Proj_Next3"] > 0
+
+    def test_a_player_out_for_the_window_carries_a_zero_not_a_blank(self):
+        """NaN is filled with the neutral 0.50 by every percentile, which ranks
+        a man with a hamstring tear at the median of his position."""
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player": ["Cole Palmer"], "Team": ["CHE"], "Position": ["M"],
+                   "Proj_Start": [6.0]})          # no horizon published at all
+        pool = _pool(status=["a", "a", "a", "i"],
+                     news=["", "", "", "Suspended for 6 matches"])
+        out = build_projections([rw], gameweek=3, pool=pool, weights={"rotowire": 1.0})
+        assert out.loc[4, "Proj_Next3"] == 0.0
+
+    def test_a_doubtful_player_is_not_written_off_across_the_window(self):
+        """A coarse bucket must not write off two gameweeks.
+
+        "25% chance" becomes "misses 3 games" in `estimate_games_to_miss`, which
+        is a guess, so it never reaches the cap. His doubt still reaches the
+        window through the resolved start probability -- that is the floor's
+        doing, not the cap's -- but it is nothing like the uniform collapse that
+        applying this week's 25% to all three weeks would produce.
+        """
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player": ["Cole Palmer"], "Team": ["CHE"], "Position": ["M"],
+                   "Proj_Start": [6.0], "Proj_Next3": [18.0]})
+        doubtful = _pool(status=["a", "a", "a", "d"],
+                         chance_of_playing_next_round=[None, None, None, 25])
+        out = build_projections([rw], gameweek=3, pool=doubtful, weights={"rotowire": 1.0})
+        fit = build_projections([rw], gameweek=3, pool=_pool(), weights={"rotowire": 1.0})
+        assert out.loc[4, "Proj"] < fit.loc[4, "Proj"]      # this week is discounted
+        # The window is not: well above the 3 x 0.25 a uniformly-applied doubt
+        # would give, and nowhere near the zero the cap would have imposed.
+        assert out.loc[4, "Proj_Next3"] > 3 * 0.25 * 6.0
+        assert out.loc[4, "Proj_Next3"] <= fit.loc[4, "Proj_Next3"]
+
+    def test_a_fit_player_with_a_double_gameweek_is_not_clipped(self):
+        """The cap would bind at `3 x Proj_Start`, and a double gameweek can
+        legitimately exceed that -- so it is skipped where nothing is stated."""
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player": ["Cole Palmer"], "Team": ["CHE"], "Position": ["M"],
+                   "Proj_Start": [6.0], "Proj_Next3": [30.0]})
+        out = build_projections([rw], gameweek=3, pool=_pool(),
+                                weights={"rotowire": 1.0})
+        assert out.loc[4, "Proj_Next3"] == pytest.approx(30.0)
+
     def test_rotowire_presence_floors_the_start_probability(self):
         """Rotowire lists only expected starters, so presence is information."""
         rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
