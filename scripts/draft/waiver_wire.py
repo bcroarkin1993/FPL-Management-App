@@ -1153,7 +1153,50 @@ def _sanity_check_suggestion(drop_row: pd.Series, add_row: pd.Series) -> Tuple[b
     return sanity_check_suggestion(drop_row, add_row)
 
 
-def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef, outlook=None):
+#: Gameweeks in the engine's `Proj_Next3` window, so it can be read as a rate.
+_HORIZON_GWS = 3
+
+
+def _claim_points_rate(row) -> float:
+    """Expected points per gameweek, for ranking claims against each other.
+
+    **The scores this page decides with are positional percentiles, and a
+    percentile difference does not mean the same thing at two positions.**
+    Measured on the live GW6 pool, a 0.10 gain is worth 0.091 expected points at
+    goalkeeper and 0.405 at forward -- a 4.4x spread -- because the positions
+    differ in depth and in scoring range. Ranking a GK swap against a FWD swap
+    on that difference is the saturate-and-invert failure the Initial Squad
+    Optimizer and the Multi-Transfer Planner were both fixed for; this page
+    still had it in the one place it decides submission order.
+
+    Percentiles stay in charge of *whether* a swap is worth suggesting -- the
+    per-position thresholds and the sanity veto are calibrated on them. Points
+    decide only the order.
+
+    The window is three gameweeks rather than one because a Draft claim is a
+    lasting roster change: the player is yours until you drop him, and a
+    one-week number would rank a good fixture above a better player.
+    `Proj_Next3` includes the current gameweek (see "Fantasy Football Pundit
+    feed"), so dividing by three gives a rate on the same basis as `Proj`.
+
+    No injury multiplier is applied here. `Proj` is *expected* points -- start
+    probability and availability are already inside it -- so discounting again
+    is the double-charge this codebase has paid for repeatedly. The injury
+    factors stay where they belong, on the percentile side that decides whether
+    to suggest the swap at all.
+    """
+    next3 = pd.to_numeric(row.get("Proj_Next3"), errors="coerce")
+    if pd.notna(next3) and next3 > 0:
+        return float(next3) / _HORIZON_GWS
+    for col in ("_effective_proj", "Proj"):
+        val = pd.to_numeric(row.get(col), errors="coerce")
+        if pd.notna(val):
+            return float(val)
+    return 0.0
+
+
+def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef,
+                      outlook=None, points_gain=0.0):
     """One suggestion card's payload.
 
     Extracted from the middle of the search loop so that loop can be read as
@@ -1202,6 +1245,10 @@ def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef, 
             best_avail.get('news')
         ),
         'transaction_score': round(float(txn_score), 3),
+        # Expected points per gameweek this swap adds. The ranking currency --
+        # `transaction_score` is a percentile gap and is not comparable across
+        # positions. See `_claim_points_rate`.
+        'points_gain': round(float(points_gain), 2),
         'rationale': _build_rationale(worst_roster, best_avail),
         'urgency': compute_transfer_urgency(pos, depth_map) if depth_map else "",
     }
@@ -1360,8 +1407,10 @@ def _compute_transfer_suggestions(
             else:
                 min_threshold = 0.05   # weak: 5% — raised from 2% to cut noise
 
+            drop_rate = _claim_points_rate(worst_roster)
             for add_idx, best_avail in avail_iter.iterrows():
                 txn_score = best_avail['_adj_value'] - worst_roster['_adj_value']
+                points_gain = _claim_points_rate(best_avail) - drop_rate
 
                 pair_info = {
                     'drop': _display_of(worst_roster),
@@ -1372,6 +1421,7 @@ def _compute_transfer_suggestions(
                     'add_adj': round(float(best_avail.get('_adj_value', 0)), 3),
                     'add_chance': best_avail.get('chance_of_playing_next_round'),
                     'gap': round(float(txn_score), 3),
+                    'points_gain': round(float(points_gain), 2),
                     'threshold': min_threshold,
                     'passed': txn_score > min_threshold,
                     'sanity': 'n/a',
@@ -1390,6 +1440,7 @@ def _compute_transfer_suggestions(
                         continue
                     candidates.append({
                         'score': float(txn_score),
+                        'points': float(points_gain),
                         'drop_idx': drop_idx,
                         'add_idx': add_idx,
                         'drop': worst_roster,
@@ -1410,14 +1461,29 @@ def _compute_transfer_suggestions(
         # player against every drop that cleared a threshold.
         #
         # Greedy on gain gives the intuitively right answer for free: gain is
-        # add_adj - drop_adj, so for a fixed add it is largest against the
-        # weakest drop. The best target lands on the player you most want to
-        # replace, and the next drop takes the next-best target.
+        # add minus drop, so for a fixed add it is largest against the weakest
+        # drop. The best target lands on the player you most want to replace,
+        # and the next drop takes the next-best target.
         #
         # This is the assignment problem, and greedy is not provably optimal --
         # but scipy is not a dependency here (Spearman is hand-rolled in
         # projection_accuracy for the same reason) and at 4 positions x a handful
         # of droppable players the difference is not worth the dependency.
+        #
+        # **This stays on the percentile gap, while the cross-position sort below
+        # moves to points.** The two currencies answer different questions here.
+        # Assignment is a within-position matching problem, and everything it
+        # depends on is calibrated on percentiles: the per-position thresholds,
+        # the `break` short-circuit -- which is only sound because `avail_sorted`
+        # is ordered by the same `_adj_value` the threshold tests -- and
+        # `_pos_rank`, which the reachability badge reads. Re-ordering only this
+        # loop on points desynchronises it from all three: a card could then be
+        # captioned "#1 available" while sitting third in the list it annotates,
+        # which is exactly the disagreement `_pos_rank` was introduced to end.
+        #
+        # Cross-position ordering has no such entanglement. It is pure
+        # presentation and submission order, and that is where the percentile
+        # gap is not a comparable quantity at all.
         used_drops, used_adds = set(), set()
         for cand in sorted(candidates, key=lambda c: c['score'], reverse=True):
             if cand['drop_idx'] in used_drops or cand['add_idx'] in used_adds:
@@ -1434,7 +1500,8 @@ def _compute_transfer_suggestions(
                     overall_rank=_overall_rank.get(cand['add_idx']),
                 )
             suggestions.append(_build_suggestion(
-                cand['drop'], cand['add'], pos, cand['score'], depth_map, _ef, outlook
+                cand['drop'], cand['add'], pos, cand['score'], depth_map, _ef,
+                outlook, points_gain=cand['points'],
             ))
             used_drops.add(cand['drop_idx'])
             used_adds.add(cand['add_idx'])
@@ -1448,8 +1515,17 @@ def _compute_transfer_suggestions(
             'locked_excluded': locked_excluded,
         })
 
-    # Sort by transaction score descending, return top N (all of them if top_n is None)
-    suggestions.sort(key=lambda x: x['transaction_score'], reverse=True)
+    # **Ordered by expected points, not by the percentile gap.** This is the
+    # cross-position comparison -- a GK swap against a FWD swap -- and a
+    # percentile difference means something different at each position: 0.10 is
+    # worth 0.091 points at GK and 0.405 at FWD on the live GW6 pool. The gap
+    # still decides which swaps qualify; it just no longer decides their order.
+    #
+    # The percentile gap is the tie-break, so a gameweek with no projections
+    # published degrades to exactly the old ordering rather than to an arbitrary
+    # one.
+    suggestions.sort(key=lambda x: (x['points_gain'], x['transaction_score']),
+                     reverse=True)
     return (suggestions if top_n is None else suggestions[:top_n]), debug_rows
 
 
@@ -1704,7 +1780,9 @@ def _render_transfer_suggestions(
     if len(suggestions) > 1:
         note += (" Each player appears once, so these can all be made — the best "
                  "target goes to the player you most want to replace, and the "
-                 "next drop takes the next-best target.")
+                 "next drop takes the next-best target. They are ordered by the "
+                 "**expected points** the swap adds per gameweek, which is the "
+                 "only way a goalkeeper move and a forward move can be compared.")
     st.caption(note)
 
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
@@ -1714,6 +1792,20 @@ def _render_transfer_suggestions(
     for s in suggestions:
         pos_label = pos_labels.get(s['drop_position'], s['drop_position'])
         score = s['transaction_score']
+
+        # The badge shows what the list is *ordered* by. It used to show the
+        # percentile gap, which is not a comparable quantity between positions --
+        # 0.10 was worth 0.091 expected points at GK and 0.405 at FWD on the live
+        # GW6 pool -- so two cards showing "+0.10" were not offering the same
+        # thing. The percentile gap is still what qualifies a swap, and stays on
+        # the card as a hover.
+        points_gain = float(s.get('points_gain', 0) or 0)
+        if points_gain > 0:
+            badge = f"+{points_gain:.2f} pts/GW"
+            badge_title = f"Score gap +{score:.3f} (positional percentile)"
+        else:
+            badge = f"+{score:.3f}"
+            badge_title = "Positional percentile gap — no projection to price the move"
 
         # Urgency badge
         urgency = s.get('urgency', '')
@@ -1756,8 +1848,8 @@ def _render_transfer_suggestions(
                     <span style="background: #0f3460; color: #e0e0e0; padding: 3px 12px; border-radius: 12px;
                                  font-size: 0.85em; font-weight: bold;">{pos_label}</span>{urgency_html}{outlook_html}
                 </div>
-                <span style="background: #1a472a; color: #4ecca3; padding: 3px 12px; border-radius: 12px;
-                             font-size: 0.85em; font-weight: bold;">+{score:.3f}</span>
+                <span title="{badge_title}" style="background: #1a472a; color: #4ecca3; padding: 3px 12px;
+                             border-radius: 12px; font-size: 0.85em; font-weight: bold;">{badge}</span>
             </div>
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                 <div style="flex: 1;">

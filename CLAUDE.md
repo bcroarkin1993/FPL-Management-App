@@ -1698,6 +1698,55 @@ reason), and at four positions against a handful of droppable players the
 difference does not justify one. Debug rows carry `assigned` alongside `passed`,
 because clearing a threshold and being recommended are no longer the same thing.
 
+**Across positions the ranking is in expected points, because a percentile gap
+is not the same quantity at two positions.** Transfer and Keep Score are
+positional percentiles, so a gap between them only means something when both
+sides sit in the same pool. Measured on the live GW6 pool, 0.10 of gain buys
+0.091 expected points at goalkeeper and 0.405 at forward -- a 4.4x spread,
+because the positions differ in depth and in scoring range. Simulating
+same-position swaps drawn from that pool, the two currencies rank
+**13.6% of cross-position claim pairs differently**.
+
+That mattered most in the one place order is the whole output:
+`rank_claim_plan()` stamps the priority list typed into FPL, processing stops at
+your first success, and it ranked a goalkeeper claim against a forward claim on
+that gap. `_claim_points_rate()` supplies the currency -- `Proj_Next3 / 3`, an
+expected-points rate over the window a claim actually lasts, falling back to the
+single gameweek and then to zero. Three gameweeks rather than one because a
+Draft claim is a lasting roster change: the player is yours until you drop him,
+so a one-week number ranks a good fixture above a better player.
+
+Three boundaries are load-bearing:
+
+- **No availability multiplier on the points side.** `Proj` is expected points
+  and start probability is already inside it; the percentile side applies its
+  own multiplier, and applying one here too is the double-discount this codebase
+  has paid for repeatedly.
+- **Only the cross-position sort moved.** The within-position search stays on
+  percentiles, because everything it depends on is calibrated there: the
+  per-position thresholds, the `break` short-circuit -- sound only because
+  `avail_sorted` is ordered by the same `_adj_value` the threshold tests -- and
+  `_pos_rank`, which the reachability badge reads. Re-ordering the greedy
+  assignment on points desynchronises all three, and a card can then read "#1
+  available" while sitting third in the list it annotates. A test caught exactly
+  that.
+- **The percentile gap is the tie-break**, so a gameweek with no published
+  projections degrades to the previous ordering rather than to an arbitrary one.
+
+The card badge shows the ranking currency (`+0.42 pts/GW`) with the percentile
+gap as a hover, since two cards reading "+0.10" were not offering the same thing.
+
+**VORP does not belong here, and the reason is a rule rather than a preference.**
+`settings.squad.select_*` fixes the squad at 2/5/5/3, waiver claims are
+position-locked, and a trade must have identical position composition on both
+sides -- so no in-season transaction can reallocate across positions. A claim is
+therefore always same-position, and a replacement-level term cancels exactly:
+`VORP(add) - VORP(drop) = add - drop`. Scarcity is already priced, because a
+thin position simply has worse available players and therefore smaller gains;
+adding VORP would count it twice. It earns its keep in a *draft*, where every
+pick is a cross-position choice -- which is where the unmerged
+`feature/draft-helper-vorp` work lives.
+
 Classic (`_build_transfer_suggestions`) has the same rule but keeps its own
 ordering: `drop_candidates` is already sorted by urgency -- unavailable players
 and uncovered blanks first -- which is more useful there than raw gain, so it is

@@ -436,6 +436,18 @@ def rank_claim_plan(suggestions: Sequence[Dict[str, Any]]) -> List[Dict[str, Any
 
     Duplicate ``(drop, add)`` pairs are collapsed — the same swap cannot be
     claimed twice — and each row is stamped with its ``claim_priority``.
+
+    **Gain is measured in expected points, not in the percentile gap.** This
+    list is ranked across positions — a goalkeeper claim against a forward one —
+    and a percentile difference is not the same quantity at two positions: on
+    the live GW6 pool a 0.10 gain was worth 0.091 expected points at goalkeeper
+    and 0.405 at forward, and this function ranked them equal. Since processing
+    stops at your first success, mis-ordering the list costs you the claim you
+    most wanted, which is the whole thing it exists to get right.
+
+    ``transaction_score`` remains the tie-break, so a gameweek with no published
+    projections degrades to the previous ordering rather than to an arbitrary
+    one.
     """
     seen = set()
     rows = []
@@ -448,11 +460,14 @@ def rank_claim_plan(suggestions: Sequence[Dict[str, Any]]) -> List[Dict[str, Any
         seen.add(key)
         rows.append(dict(s))
 
-    def _gain(row):
+    def _number(row, key):
         try:
-            return float(row.get("transaction_score") or 0.0)
+            return float(row.get(key) or 0.0)
         except (TypeError, ValueError):
             return 0.0
+
+    def _gain(row):
+        return (_number(row, "points_gain"), _number(row, "transaction_score"))
 
     rows.sort(key=_gain, reverse=True)
     for i, row in enumerate(rows, start=1):

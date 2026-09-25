@@ -522,3 +522,103 @@ class TestWaiverContextDegradesQuietly:
         with patch.object(ww, "_waiver_claim_stats", side_effect=AssertionError):
             ctx = ww._build_waiver_context(order, 56094, 5)
         assert ctx == {"n_ahead": 0, "rival_needs": {}, "expected_gone": 0.0}
+
+
+class TestClaimsAreRankedInPoints:
+    """A percentile gap is not the same quantity at two positions.
+
+    Measured on the live GW6 pool, a 0.10 gain in Transfer/Keep Score was worth
+    0.091 expected points at goalkeeper and 0.405 at forward -- a 4.4x spread,
+    because the positions differ in depth and in scoring range. The suggestion
+    list and the claim plan both ranked across positions on that gap, so a
+    goalkeeper move and a forward move that looked equal were not. Since waiver
+    processing stops at your first success, mis-ordering the plan costs you the
+    claim you most wanted.
+    """
+
+    @staticmethod
+    def _frames():
+        """A GK swap with the larger percentile gap and the smaller points gain.
+
+        The numbers are the live shape: goalkeepers are packed into a narrow
+        scoring band, so a big move in rank buys very few points.
+        """
+        avail = _avail([
+            {"Player": "Better Keeper", "Team": "NEW", "Position": "G", "Points": 3.6,
+             "Transfer Score": 0.92, "Draft_State": "a"},
+            {"Player": "Better Forward", "Team": "BUR", "Position": "F", "Points": 5.2,
+             "Transfer Score": 0.74, "Draft_State": "a"},
+        ])
+        roster = _roster([
+            {"Player": "My Keeper", "Team": "EVE", "Position": "G", "Points": 3.2,
+             "Keep Score": 0.40, "Season_Points": 20},
+            {"Player": "Spare Keeper", "Team": "AVL", "Position": "G", "Points": 2.9,
+             "Keep Score": 0.35, "Season_Points": 18},
+            {"Player": "My Forward", "Team": "WOL", "Position": "F", "Points": 2.6,
+             "Keep Score": 0.45, "Season_Points": 22},
+            {"Player": "Spare Forward", "Team": "BHA", "Position": "F", "Points": 2.4,
+             "Keep Score": 0.42, "Season_Points": 21},
+        ])
+        return avail, roster
+
+    def _suggestions(self):
+        avail, roster = self._frames()
+        suggestions, _ = _compute_transfer_suggestions(
+            avail, roster, top_n=None, one_per_position=True,
+            roster_candidates=None, avail_candidates=None,
+        )
+        return suggestions
+
+    def test_the_bigger_points_move_leads_even_on_a_smaller_score_gap(self):
+        suggestions = self._suggestions()
+        assert len(suggestions) == 2
+        lead, second = suggestions[0], suggestions[1]
+        assert lead["add_player"] == "Better Forward"
+        # ...and it leads *despite* the goalkeeper move looking better on the
+        # currency the old ordering used.
+        assert second["transaction_score"] > lead["transaction_score"]
+        assert lead["points_gain"] > second["points_gain"]
+
+    def test_the_claim_plan_uses_the_same_order(self):
+        """The plan is what gets typed into FPL, in priority order."""
+        from scripts.common.waiver_priority import rank_claim_plan
+
+        plan = rank_claim_plan(self._suggestions())
+        assert [p["add_player"] for p in plan] == ["Better Forward", "Better Keeper"]
+        assert [p["claim_priority"] for p in plan] == [1, 2]
+
+    def test_the_three_gameweek_window_is_preferred_to_one(self):
+        """A claim is a lasting roster change, not a one-week rental."""
+        from scripts.draft.waiver_wire import _claim_points_rate
+
+        row = {"_effective_proj": 2.0, "Proj_Next3": 12.0}
+        assert _claim_points_rate(row) == pytest.approx(4.0)
+
+    def test_it_falls_back_to_the_single_gameweek_then_to_zero(self):
+        from scripts.draft.waiver_wire import _claim_points_rate
+
+        assert _claim_points_rate({"_effective_proj": 2.5}) == pytest.approx(2.5)
+        assert _claim_points_rate({}) == 0.0
+
+    def test_no_projections_anywhere_degrades_to_the_old_ordering(self):
+        """A dead feed must reorder nothing, not order arbitrarily."""
+        from scripts.common.waiver_priority import rank_claim_plan
+
+        rows = [
+            {"drop_player": "a", "add_player": "b", "transaction_score": 0.05},
+            {"drop_player": "c", "add_player": "d", "transaction_score": 0.20},
+        ]
+        assert [r["add_player"] for r in rank_claim_plan(rows)] == ["d", "b"]
+
+    def test_availability_is_not_charged_twice(self):
+        """`Proj` is expected points -- start probability is already inside it.
+
+        The percentile side applies its own availability multiplier; doing it
+        again on the points side is the double-discount this codebase keeps
+        paying for.
+        """
+        from scripts.draft.waiver_wire import _claim_points_rate
+
+        doubtful = {"_effective_proj": 3.0, "chance_of_playing_next_round": 25,
+                    "status": "d"}
+        assert _claim_points_rate(doubtful) == pytest.approx(3.0)
