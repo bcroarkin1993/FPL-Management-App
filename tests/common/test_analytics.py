@@ -1271,24 +1271,34 @@ class TestNew1GWScore:
         # Injured player should score lower
         assert result_injured["1GW"].iloc[0] < result_full["1GW"].iloc[0]
 
-    def test_ffp_start_takes_priority_over_fpl_chance(self):
-        """FFP_Start used when both FFP_Start and chance_of_playing exist."""
+    def test_ffp_start_is_the_start_model_and_fpl_chance_is_only_a_ceiling(self):
+        """FFP supplies the start probability; FPL's chance can only lower it.
+
+        The two are not rival estimates of the same thing. FFP publishes a
+        continuous 0-100 forecast of *starting*; FPL's `chance_of_playing` is a
+        statement about *availability* and reads 100 for every fit bench player
+        -- scored over GW4-GW5 it carried a bias of +0.49 as a start predictor.
+        So FFP wins wherever FPL is not expressing a doubt, and FPL binds where
+        it is: across every cohort where it published one, 0 of 363 players
+        started.
+        """
         pool = self._make_pool()
         mid_player = pool[pool["Position"] == "M"].iloc[10:11].copy()
 
-        # FFP says 95% start, FPL says 25% chance → FFP should win
-        mid_player_ffp = mid_player.copy()
-        mid_player_ffp["FFP_Start"] = 95.0
-        mid_player_ffp["chance_of_playing_next_round"] = 25
-        result_ffp = compute_player_scores(mid_player_ffp, pool, current_gw=20)
+        def _score(**cols):
+            row = mid_player.copy()
+            for k, v in cols.items():
+                row[k] = v
+            return compute_player_scores(row, pool, current_gw=20)["1GW"].iloc[0]
 
-        # FPL only says 25%
-        mid_player_fpl = mid_player.copy()
-        mid_player_fpl["chance_of_playing_next_round"] = 25
-        result_fpl = compute_player_scores(mid_player_fpl, pool, current_gw=20)
+        # FPL says he is fit, so FFP's 95% stands and beats an FPL-only doubt.
+        assert _score(FFP_Start=95.0, chance_of_playing_next_round=100) > \
+            _score(chance_of_playing_next_round=25)
 
-        # FFP override (95%) should give higher score than FPL-only (25%)
-        assert result_ffp["1GW"].iloc[0] > result_fpl["1GW"].iloc[0]
+        # FPL says 25%: the ceiling binds, whatever FFP thinks of his place in
+        # the XI. This is the case that used to go the other way.
+        assert _score(FFP_Start=95.0, chance_of_playing_next_round=25) == \
+            pytest.approx(_score(chance_of_playing_next_round=25))
 
 
 # =============================================================================

@@ -335,6 +335,49 @@ carried. They live in `config.PROJECTION_SOURCE_WEIGHTS` (env-overridable via
 `FPL_PROJECTION_WEIGHTS="rotowire:0.55,ffp:0.45"`), not as bare literals in two
 functions restated in six comments.
 
+**FPL's availability is a ceiling, never a source.** The positional floor below
+clips a listed player's start probability *up*, and it did so unconditionally —
+so a player FPL rated 0% to play, with a stated return date, came out at the
+floor and projected like a starter. Live at GW6: Nikola Milenković 0.75 / 3.14
+points ("Hamstring injury — Expected back 11 Oct") and Dean Henderson 0.80 /
+3.06 ("Foot injury — Expected back 11 Oct"), both from the floor; Amar Dedić
+0.90 / 3.31 from FFP publishing a stale 90% start. The engine already knew —
+`unavailable` (status `i`/`s`/`u`, or chance < 50) is computed and used to zero
+the *unpriced*. So it trusted FPL exactly where the projection was small and
+ignored it where the projection was large, which is the wrong way round: a
+priced player is the one who reaches the top of a board.
+
+The direction is settled by measurement, not by which source feels more expert.
+Scored against actuals over GW4–GW5, FPL's `chance_of_playing` is a **dreadful
+start predictor** — Brier 0.486, bias +0.49 on the rows where it disagrees with
+FFP — because it reads 100 for every fit bench player. It is measuring
+availability, not selection. As a **ceiling** it is flawless: of the 350 rows
+where it said 0%, **0 started**; of the 9 where it merely sat below the engine's
+resolved value, **0 started**; and of the 4 where Rotowire listed the player
+anyway — the exact cohort the floor-overrides-chance rule was written for — **0
+started, all on 0 minutes**. Nobody started in any cohort where FPL published a
+doubt: 0 of 363. For contrast, a Rotowire-listed player with no FPL doubt
+started **89.9%** of the time, so the floor itself is sound and keeps its job.
+
+The aggregate accuracy effect is noise-sized (Brier 0.0678 → 0.0673, because it
+fires on 9 rows in 1315) and that is not the reason for it. The reason is that
+the alternative states, in the app's most-read column, that a man with a
+hamstring tear is a 3.1-point starter.
+
+Applied to the resolved value only, never to `start_pct_stated`: that is the
+divisor for recovering an unconditional source's conditional basis, and dividing
+one source's number by another's pessimism is the João Pedro bug above.
+`Proj_Start` is deliberately untouched — he would still score 10 if he played,
+and `team_strength` percentiles that.
+
+One consequence, surfaced by `check_blended_projections()`'s own warning: ten
+players now carry `Proj == 0` with **no** three-gameweek total, because a
+horizon is only built where a source published one. That is honest — Milenković
+is due back on 11 Oct, so his three-week window is genuinely not zero — but a
+missing horizon takes the neutral 0.50 in every percentile. Modelling a return
+date into `Proj_Next3` is separate work; `injury_helpers.estimate_games_to_miss()`
+already exists for it.
+
 **`covers=starters_only` is why absence from Rotowire is a signal.** Rotowire
 lists 20 clubs × 11, so a player it does not price is not un-priced, he is not
 expected to start. The engine encodes that as a positional floor on `Start_Pct`

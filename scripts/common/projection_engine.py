@@ -495,6 +495,49 @@ def blend_aligned(
         out[f"Start_Pct__{name}"] = implied.where(target).fillna(
             positions.map(floors).astype("float64").where(priced))
 
+    # --- FPL's availability is a ceiling, never a source ---------------------
+    #
+    # **A source listing a player cannot outvote FPL saying he is injured.**
+    # The positional floor above clips a listed player's start probability *up*,
+    # and it did so unconditionally -- so a player FPL rates 0% to play, with a
+    # stated return date, came out at the floor and projected like a starter.
+    # Live at GW6: Nikola Milenkovic 0.75 / 3.14 points ("Hamstring injury -
+    # Expected back 11 Oct") and Dean Henderson 0.80 / 3.06 ("Foot injury -
+    # Expected back 11 Oct"), both from the floor; Amar Dedic 0.90 / 3.31 from
+    # FFP publishing a stale 90% start.
+    #
+    # The engine already knew: `unavailable` is computed below and zeroes the
+    # *unpriced*. So it trusted FPL exactly where the projection was small and
+    # ignored it where the projection was large -- the wrong way round, since a
+    # priced player is the one who reaches the top of a board.
+    #
+    # **A ceiling, and never a source, because that is what the numbers say it
+    # is.** Scored against actuals over GW4-GW5: as a *predictor* of starting,
+    # FPL's chance is dreadful -- Brier 0.486 and bias +0.49 on the rows where
+    # it disagrees with FFP -- because it reads 100 for every fit bench player.
+    # It is measuring availability, not selection. As a ceiling it is flawless:
+    # of the 350 rows where it said 0%, **0 started**; of the 9 where it merely
+    # sat below the engine's resolved value, **0 started**. It only ever fires
+    # where FPL has published news, which is why it touched 9 of 1315 rows.
+    #
+    # The aggregate effect is therefore noise-sized (Brier 0.0678 -> 0.0673) and
+    # that is not the reason for it. The reason is that the alternative states,
+    # confidently and in the app's most-read column, that a man with a hamstring
+    # tear is a 3.1-point starter.
+    #
+    # Applied to the resolved value only, never to `start_pct_stated`: that is
+    # the divisor for recovering an unconditional source's conditional basis,
+    # and dividing one source's number by another's pessimism is the bug
+    # recorded above under Joao Pedro.
+    if status is not None:
+        out_of_squad = status.reindex(index).isin(["i", "s", "u"]).fillna(False)
+        start_pct = start_pct.where(~out_of_squad, 0.0)
+    if chance_of_playing is not None:
+        ceiling = pd.to_numeric(
+            chance_of_playing.reindex(index), errors="coerce") / 100.0
+        start_pct = start_pct.where(ceiling.isna(),
+                                    np.minimum(start_pct, ceiling.clip(0, 1)))
+
     out["Start_Pct"] = start_pct
 
     # --- Basis conversion ---------------------------------------------------

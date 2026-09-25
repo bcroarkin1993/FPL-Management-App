@@ -125,9 +125,68 @@ class TestStartProbability:
                    "Position": ["M"], "Proj_Start": [10.0]})
         pool = _pool(chance_of_playing_next_round=[None, None, None, 25])
         out = build_projections([rw], gameweek=3, pool=pool, weights={"rotowire": 1.0})
-        # 25% chance, floored to the MID Rotowire floor because Rotowire still
-        # lists him -- the floor is the expert-lineup signal, and it is applied
-        # in exactly one place now.
+        # The floor does not override it. Rotowire listing a player is the
+        # expert-lineup signal and it is worth a great deal -- listed players
+        # with no FPL doubt started 89.9% of the time over GW4-GW5 -- but it is
+        # an opinion about the XI, and FPL's chance is a statement about whether
+        # he is fit to be in it. Scored over those two gameweeks, *every* cohort
+        # where FPL published a doubt started nobody: 0 of 350 where it said 0%,
+        # 0 of 9 where it merely sat below the engine's resolved value, and 0 of
+        # 4 (all on 0 minutes) where Rotowire had listed him anyway.
+        assert out.loc[4, "Start_Pct"] == pytest.approx(0.25)
+
+    def test_an_injured_player_is_not_floored_up_to_a_starter(self):
+        """A source listing a player cannot outvote FPL saying he is injured.
+
+        The floor clipped a listed player's start probability *up*
+        unconditionally, so a player FPL rated 0% to play came out at the floor
+        and projected like a starter. Live at GW6 that was Nikola Milenkovic
+        (0.75, 3.14 points, "Hamstring injury - Expected back 11 Oct") and Dean
+        Henderson (0.80, 3.06, "Foot injury - Expected back 11 Oct").
+
+        The engine already knew -- `unavailable` zeroes the *unpriced* on the
+        same signal. It trusted FPL exactly where the projection was small and
+        ignored it where the projection was large.
+        """
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player": ["Cole Palmer"], "Team": ["CHE"],
+                   "Position": ["M"], "Proj_Start": [10.0]})
+        pool = _pool(chance_of_playing_next_round=[None, None, None, 0])
+        out = build_projections([rw], gameweek=3, pool=pool, weights={"rotowire": 1.0})
+        assert out.loc[4, "Start_Pct"] == 0.0
+        assert out.loc[4, "Proj"] == 0.0
+        # The conditional projection is untouched: he would still score 10 if he
+        # played. That is what `Proj_Start` means, and `team_strength`
+        # percentiles it.
+        assert out.loc[4, "Proj_Start"] == pytest.approx(10.0)
+
+    def test_an_out_of_squad_status_is_a_ceiling_of_zero(self):
+        """`i`/`s`/`u` is FPL stating he is not available to be picked."""
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player": ["Cole Palmer"], "Team": ["CHE"],
+                   "Position": ["M"], "Proj_Start": [10.0]})
+        pool = _pool(status=["a", "a", "a", "i"])
+        out = build_projections([rw], gameweek=3, pool=pool, weights={"rotowire": 1.0})
+        assert out.loc[4, "Start_Pct"] == 0.0
+
+    def test_the_ceiling_only_lowers(self):
+        """FPL's chance is an availability ceiling, never a start model.
+
+        As a *predictor* of starting it is dreadful -- Brier 0.486, bias +0.49
+        on the GW4-GW5 rows where it disagrees with FFP -- because it reads 100
+        for every fit bench player. So a player FPL calls fully available must
+        keep whatever the real start models said about him.
+        """
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player": ["Cole Palmer"], "Team": ["CHE"],
+                   "Position": ["M"], "Proj_Start": [10.0]})
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL,
+                   {"Player_ID": [4], "Proj_Start": [10.0], "Start_Pct": [0.30]})
+        pool = _pool(chance_of_playing_next_round=[None, None, None, 100])
+        out = build_projections([rw, ffp], gameweek=3, pool=pool,
+                                weights={"rotowire": 0.5, "ffp": 0.5})
+        # Floored to the MID floor by Rotowire's presence, not raised to 1.0 by
+        # FPL calling him fit.
         assert out.loc[4, "Start_Pct"] == pytest.approx(DEFAULT_START_FLOORS["M"])
 
     def test_rotowire_presence_floors_the_start_probability(self):
@@ -430,7 +489,11 @@ class TestPositionCodesAndFallbacks:
             "Team": ["MCI"],
             "Position": ["FWD"],          # not "F"
             "Points": [10.0],
-            "chance_of_playing_next_round": [25],
+            # The start probability has to start *below* the floor for the floor
+            # to be observable. It comes from FFP rather than from
+            # `chance_of_playing_next_round`, which is a ceiling on the result
+            # and would mask the thing under test.
+            "FFP_Start": [40.0],
         })
         out = blend_projections_onto(df, None)
         assert out.loc[0, "Start_Pct"] == pytest.approx(DEFAULT_START_FLOORS["F"])
