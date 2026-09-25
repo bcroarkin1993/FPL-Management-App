@@ -142,6 +142,55 @@ class TestSheetSchema:
         assert ffp_feed.to_sheet_schema([{"nonsense": 1}]).empty
 
 
+class TestStartPctRecovery:
+    """FFP stops publishing `start_pct` for the gameweek it is *currently* on.
+
+    Measured 2026-09-25 with the app on GW6: null on all 372 current-week rows,
+    published in full for GW7-GW11. That is the one week the app scores, and
+    without it every player Rotowire listed resolved to a 100% start
+    probability -- 208 of 220 on the Projections Hub, against an FFP view of the
+    same players with a median of 70%. FFP never rates anybody above 95%, so
+    every 100% there was the app's fallback rather than anyone's opinion.
+    """
+
+    @staticmethod
+    def _rows(start_pct, published=True):
+        rows = [_row(6, 223340, "Saka", "Bukayo", "Saka", 3, "Arsenal", "CHE",
+                     6.0, start_pct)]
+        if not published:
+            rows[0]["start_pct"] = None
+        return rows
+
+    def test_it_is_recovered_from_the_two_point_columns(self):
+        """`Predicted == StartingPredicted x Start/100`, so the ratio is it."""
+        df = ffp_feed.to_sheet_schema(self._rows(70, published=False), gw=6)
+        assert df["Start"].iloc[0] == pytest.approx(70.0, abs=0.05)
+
+    def test_a_published_value_is_left_alone(self):
+        df = ffp_feed.to_sheet_schema(self._rows(70), gw=6)
+        assert df["Start"].iloc[0] == pytest.approx(70.0)
+
+    def test_the_relation_still_holds_after_recovery(self):
+        df = ffp_feed.to_sheet_schema(self._rows(35, published=False), gw=6)
+        row = df.iloc[0]
+        assert row["Predicted"] == pytest.approx(
+            row["StartingPredicted"] * row["Start"] / 100.0, abs=0.01)
+
+    def test_a_missing_column_entirely_does_not_raise(self):
+        """`DataFrame.get` returns None for an absent column, not a Series."""
+        rows = self._rows(70)
+        rows[0].pop("start_pct")
+        df = ffp_feed.to_sheet_schema(rows, gw=6)
+        assert df["Start"].iloc[0] == pytest.approx(70.0, abs=0.05)
+
+    def test_a_zero_projection_recovers_nothing_rather_than_dividing_by_it(self):
+        rows = self._rows(70, published=False)
+        rows[0]["predicted_points"] = "0.000"
+        rows[0]["predicted_points_start"] = "0.000"
+        df = ffp_feed.to_sheet_schema(rows, gw=6)
+        assert pd.isna(df["Start"].iloc[0])
+
+
 class TestGameweekResolution:
     """Ordered fixture pairs, because team *sets* cannot separate gameweeks.
 

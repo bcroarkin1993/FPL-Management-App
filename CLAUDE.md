@@ -181,6 +181,39 @@ publishes one `start_pct` per player, identical across all six forecast weeks
 the FPL `starts` count for `_start_consistency`; a copy of `Start` would instead
 spend 10% of ROS on a signal 1GW already carries.
 
+**FFP stops publishing `start_pct` for the gameweek it is currently on**, which
+is the only gameweek the app scores. Measured 2026-09-25 with the app on GW6:
+null on all 372 current-week rows, published in full for GW7–GW11 (372 each,
+mean 58.5%). It is recent — the GW5 snapshot a week earlier captured it live,
+and the GW6 table archived on 11 September from a GW4 window carries it — so
+treat it as "the current week is the one without it", not as FFP going dark.
+
+Nothing downstream could tell. `Start` is the app's **primary** start model,
+the only continuous 0–100 one any source publishes; `blend_aligned` falls
+through it to FPL's `chance_of_playing` (set for 46 of 667 players) and then to
+"no news means he plays". So every player Rotowire listed resolved to exactly
+1.00: **208 of 220 on the Projections Hub at 100%**, against an FFP view of the
+same players with a median of 70%. FFP's model never rates anybody above 95%,
+so every 100% on that page was the app's fallback rather than anyone's opinion.
+The distribution was bimodal with nothing in between — listed 1.00, omitted
+~0.10 — which is what a primary source contributing *nothing* looks like.
+
+`to_sheet_schema()` recovers it from the two point columns, since they are the
+same forecast with and without the discount: `predicted_points_start ==
+predicted_points × start_pct/100`, the relation `check_ffp_feed()` already
+guards. Inverted against the 1,860 live rows where FFP *does* publish it, the
+ratio reproduces the published value to **0.008 percentage points** (max 0.05),
+and the recovered GW6 distribution matches GW7's published one at every
+quartile. After it: 4 players at 100% instead of 208, all four Rotowire-listed
+players FFP did not price at all. A published value is never overwritten, and a
+zero projection recovers nothing rather than dividing by it.
+
+`check_ffp_feed()` now errors on a `Start` column that is absent or entirely
+empty and warns when it is missing for more than half the table, and
+`tests/live/` fails if most of the column reads 100% or has no spread. The
+silent degradation is the thing to catch: every individual number stayed
+plausible, and the only symptom was a page of identical 100%s.
+
 **A set of team names cannot identify a gameweek.** All 20 clubs play every
 week, so the 50%-overlap check this replaced scored 18/19 for GW2, GW3 *and*
 GW4, never fired, and had `is_ffp_available_for_gw(3)` announcing "FFP GW3

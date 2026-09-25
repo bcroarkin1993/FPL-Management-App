@@ -1485,11 +1485,41 @@ def check_ffp_feed(df: Optional[pd.DataFrame],
                     "the two. They have almost certainly been mapped across from "
                     "the site payload by name instead of by basis."))
 
-    if "Start" in df.columns:
-        start = pd.to_numeric(df["Start"], errors="coerce").dropna()
-        if not start.empty and not start.between(0, 100).all():
+    # `Start` is the app's *primary* start-probability source -- the only
+    # continuous 0-100 start model any feed publishes -- and when it goes empty
+    # nothing downstream says so. `blend_aligned` falls through to FPL's
+    # `chance_of_playing`, which is set for a few dozen players, and then to "no
+    # news means he plays", so every player Rotowire listed resolves to exactly
+    # 1.00 and the Projections Hub renders a column of 100%s. FFP itself never
+    # rates anyone above 95%.
+    #
+    # This is not hypothetical: FFP stops publishing `start_pct` for the
+    # gameweek it is currently on, which is the only gameweek the app scores.
+    # See `ffp_feed.to_sheet_schema`, which recovers it from the two point
+    # columns; this check is what fires if that recovery ever stops working.
+    if "Start" not in df.columns:
+        issues.append(Issue(check, "error",
+            "FFP table carries no Start%% column",
+            "Without it every player a source prices resolves to a 100% start "
+            "probability, which is the app's fallback and nobody's opinion."))
+    else:
+        start = pd.to_numeric(df["Start"], errors="coerce")
+        known = start.dropna()
+        if known.empty:
             issues.append(Issue(check, "error",
-                "Start%% outside 0-100 (min %.1f, max %.1f)" % (start.min(), start.max()),
+                "FFP Start%% is empty for all %d rows" % len(df),
+                "Recoverable from the point columns: Predicted == "
+                "StartingPredicted x Start/100, so the ratio is the start "
+                "probability. Check ffp_feed.to_sheet_schema."))
+        elif len(known) < 0.5 * len(df):
+            issues.append(Issue(check, "warning",
+                "FFP Start%% is missing for %d of %d rows"
+                % (len(df) - len(known), len(df)),
+                "Players without one fall back to a 100% start probability, "
+                "which ranks them above players FFP rates as likely starters."))
+        if not known.empty and not known.between(0, 100).all():
+            issues.append(Issue(check, "error",
+                "Start%% outside 0-100 (min %.1f, max %.1f)" % (known.min(), known.max()),
                 "The app divides this by 100 to scale projections, so an out-of-range "
                 "value silently rescales every score that touches it."))
 

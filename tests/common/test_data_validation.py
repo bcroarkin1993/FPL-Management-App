@@ -672,6 +672,27 @@ class TestCheckFfpFeed:
         errors = [i for i in issues if i.severity == "error"]
         assert errors and "GW2" in errors[0].message and "GW3" in errors[0].message
 
+    def test_an_empty_start_column_is_an_error(self):
+        """The live failure: FFP publishes no `start_pct` for the gameweek it is
+        currently on, so the app's primary start model went silently missing and
+        every player a source priced resolved to a 100% start probability."""
+        feed = self._feed()
+        feed["Start"] = np.nan
+        issues = check_ffp_feed(feed, gameweek=3, expected_gw=3)
+        assert any("Start" in i.message and i.severity == "error" for i in issues)
+
+    def test_a_missing_start_column_is_an_error(self):
+        issues = check_ffp_feed(self._feed().drop(columns=["Start"]),
+                                gameweek=3, expected_gw=3)
+        assert any("no Start" in i.message and i.severity == "error" for i in issues)
+
+    def test_a_mostly_missing_start_column_warns(self):
+        feed = self._feed(n=300)
+        feed.loc[feed.index[:200], "Start"] = np.nan
+        issues = check_ffp_feed(feed, gameweek=3, expected_gw=3)
+        assert any("missing for 200" in i.message and i.severity == "warning"
+                   for i in issues)
+
     def test_an_unknown_gameweek_warns_rather_than_errors(self):
         issues = check_ffp_feed(self._feed(), gameweek=None, expected_gw=3)
         assert issues and all(i.severity == "warning" for i in issues)

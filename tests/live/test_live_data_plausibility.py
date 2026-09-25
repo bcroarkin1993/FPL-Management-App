@@ -152,6 +152,35 @@ class TestFfpSource:
             context="FFP feed",
         )
 
+    def test_start_percentages_are_published_for_the_week_being_scored(self, ffp_projections):
+        """FFP stops publishing `start_pct` for the gameweek it is *currently* on.
+
+        Measured 2026-09-25 with the app on GW6: null on all 372 current-week
+        rows while GW7-GW11 carried it in full. That is the only week the app
+        scores, and with it missing every player Rotowire listed fell through to
+        "no news means he plays" -- 208 of 220 on the Projections Hub at exactly
+        100%. `to_sheet_schema` recovers it from the two point columns; this is
+        what fails if that ever stops working.
+        """
+        assert "Start" in ffp_projections.columns, "FFP table carries no Start column"
+        start = pd.to_numeric(ffp_projections["Start"], errors="coerce")
+        known = start.dropna()
+        assert len(known) >= 0.9 * len(start), (
+            "FFP Start%% is missing for %d of %d players. Players without one "
+            "resolve to a 100%% start probability."
+            % (len(start) - len(known), len(start))
+        )
+        # FFP's model never rates anyone certain -- 95% is its ceiling live -- so
+        # a column that is mostly 100 is the app's fallback, not FFP's opinion.
+        assert known.eq(100).mean() < 0.5, (
+            "%.0f%% of FFP players are at a 100%% start probability, which FFP "
+            "itself does not publish." % (100 * known.eq(100).mean())
+        )
+        assert known.std() > 5, (
+            "FFP start percentages have almost no spread (std %.2f), so they "
+            "are not distinguishing starters from rotation risks." % known.std()
+        )
+
     def test_names_are_rendered_short_enough_to_read(self, ffp_projections):
         """FFP republishes the bootstrap's full legal name.
 

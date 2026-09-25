@@ -260,6 +260,19 @@ def _num(value, default=float("nan")) -> float:
     return out
 
 
+def _numeric(df: pd.DataFrame, col: str) -> pd.Series:
+    """``col`` as a numeric Series aligned to ``df``, all-NaN when absent.
+
+    ``DataFrame.get("missing")`` returns None, not a Series, so the natural
+    ``pd.to_numeric(df.get(col)).fillna(...)`` raises exactly when the column is
+    missing -- which is the case it was written for. See "``DataFrame.get()`` is
+    not a safe accessor" in CLAUDE.md.
+    """
+    if col not in df.columns:
+        return pd.Series(float("nan"), index=df.index, dtype="float64")
+    return pd.to_numeric(df[col], errors="coerce")
+
+
 def to_sheet_schema(rows: List[dict], gw: Optional[int] = None,
                     code_to_id: Optional[Dict[int, int]] = None) -> pd.DataFrame:
     """Project the site payload onto the legacy Google Sheet column names.
@@ -334,7 +347,35 @@ def to_sheet_schema(rows: List[dict], gw: Optional[int] = None,
 
     out["Price"] = current.get("price")
     out["Ownership"] = current.get("selected_by_percent")
-    out["Start"] = current.get("start_pct")
+
+    # **FFP stops publishing `start_pct` for the gameweek it is currently on.**
+    # Measured 2026-09-25 with the app on GW6: null on all 372 current-week
+    # rows, published in full (372 each, mean 58.5%) for GW7 through GW11. So
+    # the one week the app actually scores is the one week the app's *primary*
+    # start-probability source says nothing about -- and `Start` is primary
+    # precisely because it is the only continuous 0-100 start model any source
+    # gives us.
+    #
+    # Nothing downstream could tell. `blend_aligned` falls through FFP, then
+    # FPL's `chance_of_playing` (set for 46 of 667 players), then "no news means
+    # he plays" -- so every player Rotowire listed resolved to exactly 1.00. On
+    # the Projections Hub that was 208 of 220 listed players at 100%, against an
+    # FFP view of the same players with a median of 70% and a maximum of 95%:
+    # FFP never rates anybody certain, so every 100% on that page was the app's
+    # fallback rather than anyone's opinion.
+    #
+    # The number is recoverable exactly, because the two point columns are the
+    # same forecast with and without the discount: `predicted_points_start ==
+    # predicted_points x start_pct/100`, the relation `check_ffp_feed()` already
+    # guards. Inverted against the 1,860 live rows where FFP *does* publish
+    # `start_pct`, the ratio reproduces it to 0.008 percentage points (max
+    # 0.05), and the recovered GW6 distribution is identical to GW7's published
+    # one to every quartile.
+    start = _numeric(current, "start_pct")
+    cond_points = _numeric(current, "predicted_points")
+    uncond_points = _numeric(current, "predicted_points_start")
+    recovered = 100.0 * uncond_points / cond_points.where(cond_points.gt(0))
+    out["Start"] = start.fillna(recovered).clip(0, 100)
 
     # The basis inversion. Site `predicted_points` is conditional on starting,
     # which is the sheet's `StartingPredicted`; site `predicted_points_start`
