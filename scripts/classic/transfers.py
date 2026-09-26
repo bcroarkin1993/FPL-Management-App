@@ -37,7 +37,8 @@ from scripts.common.optimization import (
 )
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import compact_html
-from scripts.common.transfer_sanity import sanity_check_suggestion
+from scripts.common.transfer_sanity import (horizon_column, horizon_points,
+                                             sanity_check_suggestion)
 from scripts.common.analytics import (
     _claim_reference_rows,
     compute_player_scores,
@@ -2080,10 +2081,16 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
         proj_drop = _blended_proj(drop_row)
         if pd.notna(proj_add) and pd.notna(proj_drop) and proj_add > proj_drop:
             reasons.append(f"+{proj_add - proj_drop:.1f} projected points")
-        add_multi = float(add_row.get("MultiGW_Proj", 0) or 0)
-        drop_multi = float(drop_row.get("MultiGW_Proj", 0) or 0)
-        if add_multi > drop_multi and add_multi > 0:
-            reasons.append(f"3GW outlook: {add_multi:.1f} vs {drop_multi:.1f} pts")
+        # The engine's converted horizon, and only where both sides resolve to
+        # the same column -- `Proj_Next3` is expected points while
+        # `MultiGW_Proj` can be a conditional "if he starts" total, so mixing
+        # them charges a rotation risk to one player only.
+        if horizon_column(add_row) is not None and \
+                horizon_column(add_row) == horizon_column(drop_row):
+            add_multi = horizon_points(add_row)
+            drop_multi = horizon_points(drop_row)
+            if add_multi > drop_multi and add_multi > 0:
+                reasons.append(f"3GW outlook: {add_multi:.1f} vs {drop_multi:.1f} pts")
         add_fdr = add_row.get("AvgFDR")
         drop_fdr = drop_row.get("AvgFDR")
         if pd.notna(add_fdr) and pd.notna(drop_fdr) and add_fdr < drop_fdr:

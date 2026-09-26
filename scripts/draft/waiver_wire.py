@@ -51,7 +51,8 @@ from scripts.common.waiver_priority import (
 from scripts.common.player_matching import canonical_normalize, get_player_registry
 from scripts.common.text_helpers import _strip_accents, compact_html, to_display_name
 from scripts.common.styled_tables import render_styled_table
-from scripts.common.transfer_sanity import sanity_check_suggestion
+from scripts.common.transfer_sanity import (horizon_column, horizon_points,
+                                             sanity_check_suggestion)
 from scripts.common.analytics import (
     compute_player_scores,
     compute_dynamic_alpha,
@@ -1125,12 +1126,17 @@ def _build_rationale(drop: pd.Series, add: pd.Series) -> str:
     if add_proj > 0:
         parts.append(f"projected {add_proj:.1f} pts")
 
-    add_multi = float(add.get('MultiGW_Proj', 0) or 0)
-    drop_multi = float(drop.get('MultiGW_Proj', 0) or 0)
-    if add_multi > drop_multi and add_multi > 0 and drop_multi > 0:
-        parts.append(f"multi-GW outlook: {add_multi:.1f} vs {drop_multi:.1f} pts")
-    elif add_multi > 0 and drop_multi == 0:
-        parts.append(f"multi-GW outlook: {add_multi:.1f} pts")
+    # Compared only when both sides resolve to the *same* column: `Proj_Next3`
+    # is expected points and `MultiGW_Proj` can be a conditional "if he starts"
+    # total, so mixing them charges a rotation risk to one player only.
+    add_horizon_col, drop_horizon_col = horizon_column(add), horizon_column(drop)
+    if add_horizon_col is not None and add_horizon_col == drop_horizon_col:
+        add_multi = horizon_points(add)
+        drop_multi = horizon_points(drop)
+        if add_multi > drop_multi and add_multi > 0 and drop_multi > 0:
+            parts.append(f"multi-GW outlook: {add_multi:.1f} vs {drop_multi:.1f} pts")
+        elif add_multi > 0 and drop_multi == 0:
+            parts.append(f"multi-GW outlook: {add_multi:.1f} pts")
 
     drop_avail = _format_availability(
         drop.get('chance_of_playing_next_round'),
@@ -1223,7 +1229,7 @@ def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef,
         'drop_form': round(float(worst_roster.get('Form', 0) or 0), 1),
         'drop_season_pts': int(float(worst_roster.get('Season_Points', 0) or 0)),
         'drop_proj_pts': round(_drop_proj, 1),
-        'drop_3gw_proj': round(_ef(worst_roster.get('MultiGW_Proj', 0)), 1),
+        'drop_3gw_proj': round(horizon_points(worst_roster), 1),
         'drop_has_data': _drop_proj > 0,
         'drop_injury': _format_availability(
             worst_roster.get('chance_of_playing_next_round'),
@@ -1235,7 +1241,7 @@ def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef,
         'add_position': pos,
         'add_value': round(float(best_avail.get('Transfer Score', 0)), 3),
         'add_proj_pts': round(_add_proj, 1),
-        'add_3gw_proj': round(_ef(best_avail.get('MultiGW_Proj', 0)), 1),
+        'add_3gw_proj': round(horizon_points(best_avail), 1),
         'add_has_data': _add_proj > 0,
         'add_season_pts': int(float(best_avail.get('Season_Points', 0) or 0)),
         'add_form': round(float(best_avail.get('Form', 0) or 0), 1),

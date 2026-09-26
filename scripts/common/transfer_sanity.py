@@ -31,6 +31,8 @@ __all__ = [
     "sanity_check_signals",
     "sanity_check_suggestion",
     "is_seriously_injured",
+    "horizon_column",
+    "horizon_points",
 ]
 
 #: How much worse the incoming player may be on a signal and still pass it.
@@ -64,6 +66,25 @@ _PROJ_COLS = ("_effective_proj", "Proj", "Projected_Points")
 #: by FFP and an add on the fallback are compared across bases, which is
 #: precisely the comparison this veto exists to make safe.
 _MULTI_COLS = ("Proj_Next3", "MultiGW_Proj")
+
+
+def horizon_column(row) -> Optional[str]:
+    """Which of :data:`_MULTI_COLS` this row can answer with, or None.
+
+    Exposed because the cards have the same basis problem as the veto: they
+    rendered the raw ``MultiGW_Proj`` while the score beside them used the
+    converted ``Proj_Next3``, so an injured player showed a healthy-looking
+    three-week total next to a score that had correctly written him off. Two
+    values are only comparable when they came from the same column.
+    """
+    column, _ = _first_present(row, _MULTI_COLS)
+    return column
+
+
+def horizon_points(row) -> float:
+    """The row's three-gameweek expected points, 0.0 when it has none."""
+    _, value = _first_present(row, _MULTI_COLS)
+    return 0.0 if value is None else value
 
 
 def _number(value, default: float = 0.0) -> float:

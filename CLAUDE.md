@@ -1920,6 +1920,27 @@ blend exists to price. The same helper backs the shortlist of players worth an
 element-summary fetch, which previously fell back to bootstrap order on any
 gameweek Rotowire had not published.
 
+**And the same for the three-gameweek figure, via `horizon_points()`.** The "Next
+3 GW" on every suggestion card — both formats — read the raw `MultiGW_Proj`,
+which is the mixture the engine converts *from*: FFP's start-adjusted total
+where FFP matched, a conditional `x 3` fallback where it did not, and nothing at
+all about an absence. So a card could show a healthy-looking three-week total
+beside a score that had correctly written the player off. Measured on the live
+GW6 pool, 74 cards' figures change, median −3.0, and the change only ever lowers
+(the eight that "rose" moved 0.1 on rounding): Jack Hinshelwood 48.0 → 0.0 off a
+`points_per_game` of 16, Milenković 12.5 → 8.4 and Dean Henderson 11.5 → 7.6 —
+two of three weeks each, since both are due back on 11 Oct.
+
+`horizon_points()` / `horizon_column()` live in `transfer_sanity.py` beside
+`_MULTI_COLS`, which already resolved this pair for the veto, so the cards and
+the gate cannot disagree about which column is authoritative. The rationale
+lines ("multi-GW outlook", "3GW outlook") *compare* the two sides and so obey
+the veto's rule as well: both must resolve to the same column, or the comparison
+is skipped rather than charging a rotation risk to one player only.
+`test_no_page_renders_the_raw_multi_gameweek_column` is the grep guard, with
+`analytics` (which builds the column) and `transfer_sanity` (which resolves it)
+named as the owners.
+
 **`_effective_proj` column**: `compute_player_scores()` retains `_effective_proj` (blended_proj × start_likelihood) in its output. Consumers (Waiver Wire suggestion engine, card rendering) rely on it for GW projection display and sanity checking. Do not drop it from the result.
 
 **FFP name matching goes through `ReferenceMatcher`.** `merge_ffp_single_gw_data()`,

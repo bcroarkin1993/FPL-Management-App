@@ -180,6 +180,30 @@ class TestNobodyReimplementsTheBlend:
             "Only analytics._frame_projection_sources and the engine may build "
             "per-source horizons: %s" % offenders)
 
+    def test_no_page_renders_the_raw_multi_gameweek_column(self):
+        """The cards must show the horizon the score uses.
+
+        `MultiGW_Proj` is the pre-conversion mixture -- FFP's start-adjusted
+        total where FFP matched, a conditional `x 3` fallback where it did not.
+        Rendered beside a score built on `Proj_Next3`, an injured player showed a
+        healthy-looking three-week figure next to a score that had written him
+        off. Resolution goes through `transfer_sanity.horizon_points`.
+        """
+        # The modules that legitimately own the column: `analytics` builds and
+        # converts it, `transfer_sanity` resolves which of the two to read.
+        owners = {"scripts/common/analytics.py", "scripts/common/transfer_sanity.py"}
+        pattern = re.compile(r"""(?:get|\[)\(?["']MultiGW_Proj["']""")
+        offenders = []
+        for path in self._page_sources():
+            if str(path.relative_to(REPO)) in owners:
+                continue
+            for line in path.read_text().splitlines():
+                if pattern.search(line) and "horizon" not in line:
+                    offenders.append("%s: %s" % (path.relative_to(REPO), line.strip()))
+        assert offenders == [], (
+            "Read the three-gameweek total through transfer_sanity.horizon_points "
+            "so the card and the score cannot disagree: %s" % offenders)
+
     def test_engine_is_importable_without_streamlit(self):
         """The Actions snapshot collector installs requirements best-effort
         (`|| true` in fpl-notifications.yml), so these modules must not need

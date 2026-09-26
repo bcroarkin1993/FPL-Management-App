@@ -215,3 +215,41 @@ class TestBasisIsNotMixed:
         drop = pd.Series({"Proj_Next3": 12.0, "status": "a"})
         add = pd.Series({"MultiGW_Proj": 30.0, "status": "a"})
         assert not [c for c in sanity_check_signals(drop, add) if c[0] == "3gw_proj"]
+
+
+class TestHorizonResolution:
+    """The cards render the same horizon the score uses.
+
+    They read the raw `MultiGW_Proj` while the score beside them used the
+    engine's converted `Proj_Next3`, so an injured player showed a
+    healthy-looking three-week total next to a score that had correctly written
+    him off -- the two numbers on one card describing different things.
+    """
+
+    def test_the_engines_horizon_wins(self):
+        from scripts.common.transfer_sanity import horizon_column, horizon_points
+
+        row = pd.Series({"Proj_Next3": 8.4, "MultiGW_Proj": 18.0})
+        assert horizon_column(row) == "Proj_Next3"
+        assert horizon_points(row) == pytest.approx(8.4)
+
+    def test_the_raw_column_is_the_fallback(self):
+        from scripts.common.transfer_sanity import horizon_column, horizon_points
+
+        row = pd.Series({"MultiGW_Proj": 18.0})
+        assert horizon_column(row) == "MultiGW_Proj"
+        assert horizon_points(row) == pytest.approx(18.0)
+
+    def test_nothing_resolves_to_no_column_rather_than_zero(self):
+        """0.0 and "no information" are different claims."""
+        from scripts.common.transfer_sanity import horizon_column, horizon_points
+
+        row = pd.Series({"Proj_Next3": None})
+        assert horizon_column(row) is None
+        assert horizon_points(row) == 0.0
+
+    def test_an_injured_player_shows_what_the_score_used(self):
+        """The live case: out for the window, so the card must say 0, not 18."""
+        from scripts.common.transfer_sanity import horizon_points
+
+        assert horizon_points(pd.Series({"Proj_Next3": 0.0, "MultiGW_Proj": 18.0})) == 0.0
