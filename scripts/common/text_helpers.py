@@ -324,6 +324,71 @@ def to_display_name(first_name, second_name=None, web_name=None) -> str:
     return web
 
 
+def format_deadline_stamp(when) -> str:
+    """A deadline as "Fri Oct 9, 6:00 AM ET" -- weekday **and** date.
+
+    Both deadline cards used to render `%a %I:%M %p ET`, which gives "Fri 6:00 AM
+    ET" and is read as *this* Friday. Measured 2026-09-26 that was wrong by
+    thirteen days, and worse, GW6 and GW7 -- a week apart -- rendered identically,
+    so the card could not distinguish the deadline you have from the one after it.
+
+    `%-d` and `%-I` strip leading zeros but are glibc/BSD-only. The hack they were
+    replaced with, `replace(" 0", " ", 1)` over the whole string, removes the
+    first zero it finds *anywhere*: on "Fri Oct 09, 06:00" that is the day, and
+    the card would read "Fri Oct 9, 06:00". So the components are assembled by
+    hand.
+
+    Returns "" for anything unusable, so a caller can branch on falsiness.
+    """
+    if when is None:
+        return ""
+    try:
+        local = when.astimezone(TZ_ET)
+    except (ValueError, TypeError, AttributeError):
+        return ""
+    day = "%s %s %d" % (local.strftime("%a"), local.strftime("%b"), local.day)
+    clock = "%d:%02d %s" % (local.hour % 12 or 12, local.minute, local.strftime("%p"))
+    return "%s, %s ET" % (day, clock)
+
+
+def format_time_until(when, now=None) -> str:
+    """How far away ``when`` is, as "in 13 days" / "tomorrow" / "in 6 hours".
+
+    The forward-looking sibling of :func:`format_last_updated`'s "(3h ago)", and
+    it exists for the same reason: a bare timestamp does not tell you at a glance
+    what you need to know. A deadline card reading "Fri 6:00 AM ET" is read as
+    *this* Friday, and during an international break it is not — GW6's waiver
+    deadline was Friday 9 October, thirteen days out, while the card said only
+    "Fri".
+
+    Returns "" for anything unusable, so a caller can append it unconditionally.
+    """
+    if when is None:
+        return ""
+    try:
+        local = when.astimezone(TZ_ET)
+        reference = (now or datetime.now(TZ_ET)).astimezone(TZ_ET)
+    except (ValueError, TypeError, AttributeError):
+        return ""
+
+    seconds = (local - reference).total_seconds()
+    if seconds < 0:
+        return "passed"
+    minutes = seconds / 60.0
+    if minutes < 60:
+        return "in %d min" % max(1, int(round(minutes)))
+
+    hours = minutes / 60.0
+    # Calendar days, not 24-hour blocks: a deadline tomorrow at 06:00 is
+    # "tomorrow" whether it is 20 hours away or 4.
+    days = (local.date() - reference.date()).days
+    if days == 0:
+        return "in %d hour%s" % (int(round(hours)), "" if int(round(hours)) == 1 else "s")
+    if days == 1:
+        return "tomorrow"
+    return "in %d days" % days
+
+
 def format_last_updated(when, include_age: bool = True) -> str:
     """Render a source's publish time as "Aug 20, 2026 10:54 AM ET (3h ago)".
 

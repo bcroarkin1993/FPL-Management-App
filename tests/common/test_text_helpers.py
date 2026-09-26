@@ -9,7 +9,9 @@ from scripts.common.text_helpers import (
     TZ_ET,
     _to_short_team_code,
     compact_html,
+    format_deadline_stamp,
     format_last_updated,
+    format_time_until,
     to_display_name,
 )
 
@@ -163,3 +165,64 @@ class TestCompactHtml:
 
     def test_empty_input(self):
         assert compact_html("") == ""
+
+
+class TestFormatDeadlineStamp:
+    """Both deadline cards rendered the weekday alone.
+
+    "Fri 6:00 AM ET" is read as *this* Friday. Measured 2026-09-26 the GW6 waiver
+    deadline was Friday 9 October, thirteen days out across an international
+    break -- and GW6 and GW7, a week apart, rendered identically, so the card
+    could not distinguish the deadline you have from the one after it.
+    """
+
+    def test_it_carries_the_weekday_and_the_date(self):
+        stamp = format_deadline_stamp(datetime(2026, 10, 9, 6, 0, tzinfo=TZ_ET))
+        assert stamp == "Fri Oct 9, 6:00 AM ET"
+
+    def test_a_single_digit_day_does_not_eat_the_hours_zero(self):
+        """The hack this replaced was `replace(" 0", " ", 1)` over the whole
+        string, which strips the first zero it finds *anywhere* -- on
+        "Fri Oct 09, 06:00" that is the day, leaving the hour padded."""
+        assert format_deadline_stamp(
+            datetime(2026, 10, 19, 6, 0, tzinfo=TZ_ET)) == "Mon Oct 19, 6:00 AM ET"
+        assert format_deadline_stamp(
+            datetime(2026, 11, 1, 12, 5, tzinfo=TZ_ET)) == "Sun Nov 1, 12:05 PM ET"
+
+    def test_midnight_and_noon_read_as_twelve(self):
+        assert "12:00 AM" in format_deadline_stamp(
+            datetime(2026, 10, 9, 0, 0, tzinfo=TZ_ET))
+        assert "12:00 PM" in format_deadline_stamp(
+            datetime(2026, 10, 9, 12, 0, tzinfo=TZ_ET))
+
+    def test_nothing_usable_renders_empty(self):
+        assert format_deadline_stamp(None) == ""
+        assert format_deadline_stamp("not a datetime") == ""
+
+
+class TestFormatTimeUntil:
+    """The forward-looking sibling of `format_last_updated`'s "(3h ago)"."""
+
+    NOW = datetime(2026, 9, 26, 14, 0, tzinfo=TZ_ET)
+
+    def test_days_away(self):
+        assert format_time_until(self.NOW + timedelta(days=13), now=self.NOW) == "in 13 days"
+
+    def test_tomorrow_is_calendar_based_not_a_24_hour_block(self):
+        """A 06:00 deadline tomorrow is "tomorrow" whether it is 16 hours away
+        or 4 -- a manager reads the day, not the elapsed hours."""
+        assert format_time_until(
+            self.NOW + timedelta(hours=16), now=self.NOW) == "tomorrow"
+
+    def test_hours_and_minutes(self):
+        assert format_time_until(self.NOW + timedelta(hours=6), now=self.NOW) == "in 6 hours"
+        assert format_time_until(self.NOW + timedelta(hours=1), now=self.NOW) == "in 1 hour"
+        assert format_time_until(self.NOW + timedelta(minutes=40), now=self.NOW) == "in 40 min"
+
+    def test_a_passed_deadline_says_so(self):
+        assert format_time_until(self.NOW - timedelta(hours=2), now=self.NOW) == "passed"
+
+    def test_nothing_usable_renders_empty(self):
+        """Empty rather than a placeholder, so a caller can append it blind."""
+        assert format_time_until(None) == ""
+        assert format_time_until("not a datetime") == ""

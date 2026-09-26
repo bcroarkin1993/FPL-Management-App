@@ -34,6 +34,7 @@ import streamlit as st
 
 import config
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.text_helpers import format_deadline_stamp, format_time_until
 from scripts.common.player_matching import canonical_normalize
 from scripts.common.error_helpers import get_logger
 from scripts.common.utils import (
@@ -1110,12 +1111,18 @@ def _render_trade_window(window: Dict, pending_count: int):
     next_gw = window.get("next_event") or window.get("current_event")
     deadline = trade_deadline_from(_next_waiver_deadline(next_gw), approval_required)
     if deadline is not None:
-        # %-I is glibc/BSD-only, so strip the leading zero by hand for Windows.
-        deadline_value = deadline.strftime("%a %I:%M %p ET").replace(" 0", " ", 1)
-        deadline_note = (
+        # Weekday *and* date -- see `format_deadline_stamp`. It matters more here
+        # than on the Waiver Wire: a trade reminder a day early is an annoyance,
+        # one after the window has shut costs the manager the gameweek.
+        deadline_value = format_deadline_stamp(deadline)
+        _notes = [
             "24h before the waiver deadline" if approval_required
             else "Same as the waiver deadline"
-        )
+        ]
+        _until = format_time_until(deadline)
+        if _until:
+            _notes.append(_until)
+        deadline_note = " · ".join(_notes)
     else:
         deadline_value, deadline_note = "—", "Deadline unavailable"
 

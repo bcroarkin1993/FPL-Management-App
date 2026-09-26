@@ -2621,6 +2621,24 @@ lookup: the reasoning in its docstring stays as the *why*, but walking `events`
 forward needs no fixture fetch. The kickoff path remains so a bootstrap outage
 cannot silence an alert.
 
+**And a deadline card must name the date.** Both cards — the Waiver Wire's
+transaction window and the Trade Analyzer's — rendered `%a %I:%M %p ET`, giving
+"Fri 6:00 AM ET". A manager reads that as *this* Friday. Measured 2026-09-26 it
+meant Friday **9 October**, thirteen days out across an international break, and
+GW6 and GW7 — a week apart — rendered *identically*, so the card could not
+distinguish the deadline you have from the one after it.
+
+`format_deadline_stamp()` (`text_helpers.py`) gives "Fri Oct 9, 6:00 AM ET" and
+`format_time_until()` adds "in 13 days" to the note line, the forward-looking
+sibling of `format_last_updated()`'s "(3h ago)" and there for the same reason: the
+bare timestamp does not tell you the thing you need at a glance. Both are used by
+both cards, so the two cannot drift.
+
+`%-d` and `%-I` strip leading zeros but are glibc/BSD-only, and the hack that
+replaced them — `replace(" 0", " ", 1)` over the whole string — removes the first
+zero found *anywhere*: on "Fri Oct 09, 06:00" that is the day. So the components
+are assembled by hand, and a test pins the 9th-at-06:00 case.
+
 ### `settings` is the rulebook, and the tripwire for it
 
 `bootstrap-static.settings` states every rule this codebase compiles in as a

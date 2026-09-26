@@ -49,7 +49,9 @@ from scripts.common.waiver_priority import (
     rank_claim_plan,
 )
 from scripts.common.player_matching import canonical_normalize, get_player_registry
-from scripts.common.text_helpers import _strip_accents, compact_html, to_display_name
+from scripts.common.text_helpers import (_strip_accents, compact_html,
+                                         format_deadline_stamp, format_time_until,
+                                         to_display_name)
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.transfer_sanity import (horizon_column, horizon_points,
                                              sanity_check_suggestion)
@@ -2346,9 +2348,17 @@ def _render_transaction_window(window: Dict[str, Any], locked_count: int,
 
     deadline = _next_waiver_deadline(next_gw)
     if deadline is not None:
-        # %-I is glibc/BSD-only, so strip the leading zero by hand for Windows.
-        deadline_value = deadline.strftime("%a %I:%M %p ET").replace(" 0", " ", 1)
-        deadline_note = f"GW{next_gw} waiver deadline" if next_gw else "Next waiver deadline"
+        # **The date, not just the weekday.** This read "Fri 6:00 AM ET", which a
+        # manager takes to mean *this* Friday -- and during an international break
+        # it does not. Measured 2026-09-26 the GW6 waiver deadline was Friday 9
+        # October, thirteen days out, and GW6 and GW7 rendered identically.
+        deadline_value = format_deadline_stamp(deadline)
+
+        _notes = [f"GW{next_gw} waiver deadline" if next_gw else "Next waiver deadline"]
+        _until = format_time_until(deadline)
+        if _until:
+            _notes.append(_until)
+        deadline_note = " · ".join(_notes)
     else:
         deadline_value = "—"
         deadline_note = "Deadline unavailable"
