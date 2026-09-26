@@ -622,3 +622,52 @@ class TestClaimsAreRankedInPoints:
         doubtful = {"_effective_proj": 3.0, "chance_of_playing_next_round": 25,
                     "status": "d"}
         assert _claim_points_rate(doubtful) == pytest.approx(3.0)
+
+
+class TestTheHoldFactorReadsTheCalendar:
+    """Drop protection is bucketed by absence *duration*.
+
+    `days // 7` overstates that across an international break, and the buckets
+    turn the overstatement straight into less protection: a player back next
+    gameweek falls from 0.70 to 0.40, which is the page telling you to drop
+    someone it should be telling you to keep. Live at GW6, 19 players cross a
+    bucket -- twelve of them from 0.70 to 1.00, because they miss nothing.
+    """
+
+    @staticmethod
+    def _deadlines():
+        from datetime import datetime, timedelta
+        base = datetime.now() + timedelta(days=14)
+        return [base, base + timedelta(days=7)]
+
+    def test_back_before_the_next_deadline_keeps_full_protection(self):
+        from datetime import datetime, timedelta
+        from scripts.draft.waiver_wire import _roster_injury_factor
+
+        back = (datetime.now() + timedelta(days=13)).strftime("%d %b")
+        news = "Knock - Expected back %s" % back
+        assert _roster_injury_factor(0, "i", news, 0.0,
+                                     deadlines=self._deadlines()) == 1.0
+        # Without the calendar the same player reads as a two-gameweek absence.
+        assert _roster_injury_factor(0, "i", news, 0.0) < 1.0
+
+    def test_a_fit_player_never_reads_the_calendar(self):
+        """It is a cached HTTP fetch, and every offline test would pay for it."""
+        from scripts.draft.waiver_wire import _roster_injury_factor
+
+        def _boom():
+            raise AssertionError("the calendar was read for a fit player")
+
+        assert _roster_injury_factor(100, "a", "", 0.5, deadlines=_boom) == 1.0
+
+    def test_a_callable_is_resolved_for_a_doubtful_one(self):
+        from scripts.draft.waiver_wire import _roster_injury_factor
+
+        calls = []
+
+        def _deadlines():
+            calls.append(1)
+            return self._deadlines()
+
+        _roster_injury_factor(25, "d", "Knock", 0.5, deadlines=_deadlines)
+        assert calls == [1]

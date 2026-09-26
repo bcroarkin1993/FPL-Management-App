@@ -151,6 +151,44 @@ class TestInjuryDiscount:
         s = compute_player_strength(roster, _pool(), current_gw=15).loc[0]
         assert s["Player_Strength"] == pytest.approx(s["Raw_Strength"])
 
+    def test_a_return_date_is_counted_against_the_real_calendar(self, monkeypatch):
+        """A gameweek is not a week, and this page turns the count into a discount.
+
+        `days // 7` overstated an absence for 26 of 26 players carrying a
+        parseable return date -- by a mean of 2.0 gameweeks across the October
+        break -- which here becomes an injury discount the squad has not earned.
+        Live, 26 players' multipliers rise, by a mean of 0.054 and up to 0.091.
+        """
+        from datetime import datetime, timedelta
+        from scripts.common import team_strength
+
+        # Two weeks until the next deadline, then weekly: a break, as the real
+        # calendar has before GW6.
+        base = datetime.now() + timedelta(days=14)
+        monkeypatch.setattr(team_strength, "gameweek_deadlines",
+                            lambda: [base, base + timedelta(days=7)])
+        back = (datetime.now() + timedelta(days=13)).strftime("%d %b")
+        roster = _players(
+            {"Player": "BackBeforeThen", "status": "i",
+             "news": "Knock - Expected back %s" % back},
+        )
+        scored = compute_player_strength(roster, _pool(), current_gw=6)
+        # Thirteen days out, but no gameweek in between: he misses nothing.
+        assert scored.loc[0, "GWs_Missed"] == 0
+        assert scored.loc[0, "Injury_Mult"] == 1.0
+
+    def test_without_a_calendar_it_still_discounts(self, monkeypatch):
+        """An unreachable bootstrap must not silently clear every injury."""
+        from scripts.common import team_strength
+
+        monkeypatch.setattr(team_strength, "gameweek_deadlines", lambda: None)
+        roster = _players(
+            {"status": "i", "news": "Hamstring injury - Expected back 20 May"},
+        )
+        scored = compute_player_strength(roster, _pool(), current_gw=20)
+        assert scored.loc[0, "GWs_Missed"] > 0
+        assert scored.loc[0, "Injury_Mult"] < 1.0
+
 
 class TestRawStrengthComposition:
     def test_weights_sum_to_one(self):

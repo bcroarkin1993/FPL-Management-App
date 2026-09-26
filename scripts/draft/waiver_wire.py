@@ -54,6 +54,7 @@ from scripts.common.styled_tables import render_styled_table
 from scripts.common.transfer_sanity import (horizon_column, horizon_points,
                                              sanity_check_suggestion)
 from scripts.common.analytics import (
+    gameweek_deadlines,
     compute_player_scores,
     compute_dynamic_alpha,
     compute_healthy_form,
@@ -1006,16 +1007,33 @@ def _availability_multiplier(chance, status) -> float:
 _estimate_games_to_miss = estimate_games_to_miss
 
 
-def _roster_injury_factor(chance, status, news, season_pts_pctile) -> float:
+def _roster_injury_factor(chance, status, news, season_pts_pctile,
+                         deadlines=None) -> float:
     """Context-aware [0,1] factor for roster players (drops).
-    Star players with short injuries retain more value (hold logic)."""
+    Star players with short injuries retain more value (hold logic).
+
+    ``deadlines`` turns a stated return date into a number of *gameweeks*
+    rather than into weeks. Without it, `days // 7` overstates an absence across
+    an international break -- measured at 26 of 26 players by a mean of 2.0
+    gameweeks -- and the duration buckets below turn that straight into a lower
+    hold factor: a player back next gameweek drops from 0.70 to 0.40, which is
+    the page recommending you drop someone it should be telling you to keep.
+
+    It accepts a **callable** as well as a sequence, and is resolved only past
+    the early return above. Reading the calendar is a cached HTTP fetch, and a
+    fully fit roster -- the common case, and every offline test -- must not pay
+    for one to be told nobody is injured.
+    """
     avail = _availability_multiplier(chance, status)
 
     # Fully available — no penalty
     if avail >= 1.0:
         return 1.0
 
-    gws_to_miss = _estimate_games_to_miss(news, chance, status)
+    if callable(deadlines):
+        deadlines = deadlines()
+
+    gws_to_miss = _estimate_games_to_miss(news, chance, status, deadlines=deadlines)
 
     # Duration factor
     if gws_to_miss == 0:
@@ -1378,7 +1396,10 @@ def _compute_transfer_suggestions(
                 row.get('chance_of_playing_next_round'),
                 row.get('status'),
                 row.get('news'),
-                pctile
+                pctile,
+                # Passed unresolved: `_roster_injury_factor` reads the calendar
+                # only for a player who is actually carrying a doubt.
+                deadlines=gameweek_deadlines,
             )
             base_score = float(row.get('Keep Score', 0) or 0)
             roster_pos.loc[idx, '_adj_value'] = base_score * factor

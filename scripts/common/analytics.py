@@ -1405,7 +1405,7 @@ def _reference_horizon(reference_df: Optional[pd.DataFrame]) -> Optional[pd.Data
     return _blend_frame(ref, ref_proj_col)
 
 
-def _gameweek_deadlines():
+def gameweek_deadlines():
     """Upcoming gameweek deadlines, for turning a return date into gameweeks.
 
     A gameweek is not a week -- the season has international breaks -- so
@@ -1498,7 +1498,7 @@ def _blend_frame(df: pd.DataFrame, rotowire_col: str = "Points",
         # `projection_engine.blend_aligned`. Absent on frames that never merged
         # it, which simply means no player has a stated absence.
         news=df.get("news"),
-        deadlines=_gameweek_deadlines(),
+        deadlines=gameweek_deadlines(),
         gameweek=gameweek,
         extra=df,
     )

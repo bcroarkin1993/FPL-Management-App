@@ -37,6 +37,7 @@ from scripts.common.analytics import (
     season_progress_weight,
 )
 from scripts.common.error_helpers import get_logger
+from scripts.common.analytics import gameweek_deadlines
 from scripts.common.injury_helpers import estimate_games_to_miss, injury_multiplier
 from scripts.common.text_helpers import _map_position_to_rw
 
@@ -167,9 +168,21 @@ def compute_player_strength(
     ).clip(0.0, 1.0)
 
     # --- Injury discount (season-aware) ----------------------------------------
+    # **A gameweek is not a week.** Turning "Expected back 11 Oct" into a number
+    # of gameweeks needs the real deadline list: the season carries international
+    # breaks, and `days // 7` overstated an absence for 26 of 26 players carrying
+    # a parseable return date, by a mean of 2.0 gameweeks. Here that inflates
+    # `Injury_Mult` into a discount a fit squad has not earned. Read once, not
+    # per row -- it is a cached bootstrap fetch.
+    #
+    # This uses the *full* estimator, chance buckets included, unlike the horizon
+    # cap in `projection_engine`: a discount on a doubtful player is the point,
+    # where asserting which future gameweeks he misses is not.
+    deadlines = gameweek_deadlines()
     result["GWs_Missed"] = [
         estimate_games_to_miss(
-            row.get("news"), row.get("chance_of_playing_next_round"), row.get("status")
+            row.get("news"), row.get("chance_of_playing_next_round"), row.get("status"),
+            deadlines=deadlines,
         )
         for _, row in result.iterrows()
     ]

@@ -443,9 +443,32 @@ at all. **No fit player's horizon changed**, and the phantom-neutral cohort went
 from ten to one — Pau, whom no source priced, so his window is genuinely unknown
 and now says so through a warning rather than a silent 0.50.
 
-Note `team_strength`'s injury discount calls `estimate_games_to_miss` without a
-calendar, so it keeps the seven-day approximation and is overstated during a
-break. Same fix, different page; not done here.
+**All three callers read the calendar now**, because all three turn the count
+into a number a user acts on:
+
+| Caller | What the count becomes |
+|---|---|
+| `projection_engine` | the cap on `Proj_Next3` |
+| `team_strength` | `Injury_Mult`, and so Injury Cost on Power Rankings |
+| `waiver_wire._roster_injury_factor` | drop protection, bucketed by duration |
+
+Measured at GW6, 26 of 667 players change, every one downward, mean −1.8
+gameweeks. On Power Rankings 26 multipliers rise, mean +0.054 and up to +0.091 —
+a tenth of a player's strength handed back. On the Waiver Wire 19 players cross a
+duration bucket, twelve of them from 0.70 to **1.00**: full drop protection for
+players who miss nothing, Mitoma among them.
+
+`analytics.gameweek_deadlines()` is the single reader (a cached bootstrap fetch,
+failure-tolerant — no calendar falls back to the old arithmetic rather than
+clearing every injury). Two details:
+
+- **`team_strength` uses the *full* estimator, chance buckets included**, where
+  the horizon cap uses `stated_games_to_miss`. A discount on a doubtful player is
+  the point there; asserting *which* future gameweeks he misses is not.
+- **`_roster_injury_factor` takes a callable and resolves it past its early
+  return.** Reading the calendar is an HTTP fetch, and a fully fit roster — the
+  common case, and every offline test — must not pay for one to be told nobody is
+  injured. A test asserts the fit path never calls it.
 
 One wart fixed on the way in, because the horizon model depends on it:
 `estimate_games_to_miss("", 100, "a")` returned **1**. FPL states an explicit
