@@ -483,8 +483,14 @@ class TestClaimReachabilityIsStampedInsideTheSearch:
         from scripts.draft.waiver_wire import _compute_transfer_suggestions
 
         avail = self._avail_pair()
-        # Make the nominally weaker player the best *adjusted* candidate.
-        avail.loc[avail["Player"] == "Top Mid", "chance_of_playing_next_round"] = 25
+        # Make the nominally weaker player the best candidate *by the ordering
+        # the search walks*. This used to be done with a 25% chance of playing,
+        # back when availability was multiplied into `_adj_value`; that second
+        # discount is gone -- it double-charged what `Transfer Score` already
+        # prices -- so the divergence is created where it actually lives now,
+        # between the score and the raw projection.
+        avail.loc[avail["Player"] == "Top Mid", "Transfer Score"] = 0.60
+        avail.loc[avail["Player"] == "Deep Mid", "Transfer Score"] = 0.88
 
         suggestions, _ = _compute_transfer_suggestions(
             avail, _roster(ROSTER), top_n=3,
@@ -671,3 +677,90 @@ class TestTheHoldFactorReadsTheCalendar:
 
         _roster_injury_factor(25, "d", "Knock", 0.5, deadlines=_deadlines)
         assert calls == [1]
+
+
+class TestAvailabilityIsChargedOnce:
+    """`Transfer Score` already prices availability; multiplying again charged it twice.
+
+    1GW is a percentile of the engine's `Proj` = `Proj_Start x Start_Pct`, and
+    `Start_Pct` carries FPL's availability ceiling. So `Transfer Score x
+    _availability_multiplier` discounted a 75%-doubtful player once inside the
+    score and again on top of it -- the double-charge this codebase keeps paying
+    for, in the one place it had not been looked at.
+    """
+
+    @staticmethod
+    def _avail(rows):
+        return _avail(rows)
+
+    def test_a_doubtful_player_keeps_his_score(self):
+        avail = _avail([
+            {"Player": "Doubtful", "Team": "NEW", "Position": "M", "Points": 7.0,
+             "Transfer Score": 0.90, "Draft_State": "a"},
+        ])
+        avail["chance_of_playing_next_round"] = 50
+        avail["status"] = "d"
+        suggestions, debug = _compute_transfer_suggestions(
+            avail, _roster(ROSTER), top_n=None,
+            roster_candidates=None, avail_candidates=None, one_per_position=False)
+        assert suggestions, "a doubtful player is still a candidate"
+        # 0.90, not 0.90 x 0.50: the doubt is already inside the score.
+        assert suggestions[0]["add_value"] == pytest.approx(0.90)
+
+    def test_a_player_who_cannot_play_is_excluded_not_discounted(self):
+        """Unavailability is an eligibility question, like a locked player.
+
+        The multiplier already made this an exclusion in effect -- `_adj_value`
+        of 0 makes the gap negative, so he could never clear a threshold -- so
+        this states the rule rather than changing a recommendation.
+        """
+        avail = _avail([
+            {"Player": "Injured Star", "Team": "NEW", "Position": "M", "Points": 9.0,
+             "Transfer Score": 0.99, "Draft_State": "a"},
+        ])
+        avail["status"] = "i"
+        avail["chance_of_playing_next_round"] = 0
+        suggestions, debug = _compute_transfer_suggestions(
+            avail, _roster(ROSTER), top_n=None,
+            roster_candidates=None, avail_candidates=None, one_per_position=False)
+        assert not [s for s in suggestions if s["add_player"] == "Injured Star"]
+        assert any(r.get("unavailable_excluded") for r in debug)
+
+
+class TestTheHoldFactorCannotInventValue:
+    """It multiplies a percentile Keep Score, so above 1.0 it manufactures value.
+
+    Reachable the moment return dates were counted against the real calendar: a
+    player back before the next deadline scores `gws_to_miss == 0`, which pairs
+    a `duration_factor` of 1.0 with a quality boost of up to 0.25. Twelve live
+    players were sitting at 1.25 and 1.125.
+    """
+
+    @staticmethod
+    def _deadlines():
+        """A fortnight's break, then weekly for the rest of the season.
+
+        The list has to be long: `gameweeks_until` counts the deadlines it is
+        given, so a truncated one understates a long absence — which is correct
+        at season end, where the gameweeks really have run out, and misleading in
+        a fixture meant to represent mid-season.
+        """
+        from datetime import datetime, timedelta
+        base = datetime.now() + timedelta(days=14)
+        return [base + timedelta(days=7 * i) for i in range(30)]
+
+    def test_an_elite_player_back_immediately_is_capped_at_one(self):
+        from datetime import datetime, timedelta
+        from scripts.draft.waiver_wire import _roster_injury_factor
+
+        back = (datetime.now() + timedelta(days=13)).strftime("%d %b")
+        factor = _roster_injury_factor(0, "i", "Knock - Expected back %s" % back, 1.0,
+                                       deadlines=self._deadlines())
+        assert factor == 1.0
+
+    def test_a_real_absence_still_discounts(self):
+        from scripts.draft.waiver_wire import _roster_injury_factor
+
+        assert _roster_injury_factor(
+            0, "i", "ACL - Expected back 20 May", 0.0,
+            deadlines=self._deadlines()) < 0.5

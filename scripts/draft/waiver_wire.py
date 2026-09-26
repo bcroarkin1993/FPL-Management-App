@@ -1055,8 +1055,16 @@ def _roster_injury_factor(chance, status, news, season_pts_pctile,
 
     hold_factor = duration_factor + quality_boost
 
-    # Effective value = max(immediate, hold)
-    return max(avail, hold_factor)
+    # Effective value = max(immediate, hold), and **never above 1.0**.
+    #
+    # This is a multiplier on a percentile Keep Score, so a value above 1 does
+    # not protect a player -- it invents value he does not have, exactly the
+    # failure `check_transfer_risk()` errors on for the transfer multiplier.
+    # It became reachable the moment return dates started being counted against
+    # the real calendar: a player back before the next deadline now scores
+    # `gws_to_miss == 0`, which pairs `duration_factor` 1.0 with a quality boost
+    # of up to 0.25. Twelve live players were sitting at 1.25 and 1.125.
+    return min(1.0, max(avail, hold_factor))
 
 
 def _format_availability(chance, status, news) -> str:
@@ -1346,6 +1354,28 @@ def _compute_transfer_suggestions(
         if locked_excluded:
             avail_df = avail_df.loc[~_locked_mask].copy()
 
+    # **A player who cannot play is ineligible, not merely worth less.** This sat
+    # in the score as `Transfer Score x _availability_multiplier`, which was a
+    # *second* charge for availability: `Transfer Score` blends 1GW, a percentile
+    # of the engine's `Proj` = `Proj_Start x Start_Pct`, and `Start_Pct` already
+    # carries FPL's availability ceiling. A 75%-doubtful player was discounted
+    # once inside the score and again on top of it.
+    #
+    # For a player the multiplier zeroed the effect was not a discount at all but
+    # an exclusion -- `_adj_value` 0 makes `txn_score` negative, so he could never
+    # clear a threshold -- so saying it here changes no recommendation and states
+    # the rule where the locked filter already states its own. Inside the
+    # function, for the same reason: no future caller can forget it.
+    unavailable_excluded = 0
+    if not avail_df.empty:
+        _cannot_play = avail_df.apply(
+            lambda r: _availability_multiplier(
+                r.get('chance_of_playing_next_round'), r.get('status')) <= 0.0,
+            axis=1)
+        unavailable_excluded = int(_cannot_play.sum())
+        if unavailable_excluded:
+            avail_df = avail_df.loc[~_cannot_play].copy()
+
     # Board rank across the whole available pool, for the claim outlook. Computed
     # after the locked filter, because a locked player is not on the board anyone
     # is claiming from this round.
@@ -1372,18 +1402,15 @@ def _compute_transfer_suggestions(
                 'reason': 'Not enough roster players or no available players',
                 'pairs': [],
                 'locked_excluded': locked_excluded,
+                'unavailable_excluded': unavailable_excluded,
             })
             continue
 
-        # Apply injury adjustments to pre-computed scores
-        for idx in avail_pos.index:
-            row = avail_pos.loc[idx]
-            mult = _availability_multiplier(
-                row.get('chance_of_playing_next_round'),
-                row.get('status')
-            )
-            base_score = float(row.get('Transfer Score', 0) or 0)
-            avail_pos.loc[idx, '_adj_value'] = base_score * mult
+        # The score as the engine produced it. Availability is already inside it
+        # (see the eligibility filter above) and the players it would have zeroed
+        # are gone.
+        avail_pos['_adj_value'] = pd.to_numeric(
+            avail_pos.get('Transfer Score'), errors='coerce').fillna(0.0)
 
         for idx in roster_pos.index:
             row = roster_pos.loc[idx]
@@ -1540,6 +1567,7 @@ def _compute_transfer_suggestions(
             'reason': '',
             'pairs': pos_debug_pairs,
             'locked_excluded': locked_excluded,
+            'unavailable_excluded': unavailable_excluded,
         })
 
     # **Ordered by expected points, not by the percentile gap.** This is the

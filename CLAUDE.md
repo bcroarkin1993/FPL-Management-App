@@ -1863,9 +1863,9 @@ so a one-week number ranks a good fixture above a better player.
 Three boundaries are load-bearing:
 
 - **No availability multiplier on the points side.** `Proj` is expected points
-  and start probability is already inside it; the percentile side applies its
-  own multiplier, and applying one here too is the double-discount this codebase
-  has paid for repeatedly.
+  and start probability is already inside it. (The percentile side used to apply
+  its own multiplier on top; that was the same double-charge, and is gone — see
+  "Availability is charged once" below.)
 - **Only the cross-position sort moved.** The within-position search stays on
   percentiles, because everything it depends on is calibrated there: the
   per-position thresholds, the `break` short-circuit -- sound only because
@@ -1876,6 +1876,37 @@ Three boundaries are load-bearing:
   that.
 - **The percentile gap is the tie-break**, so a gameweek with no published
   projections degrades to the previous ordering rather than to an arbitrary one.
+
+**Availability is charged once, and "cannot play" is eligibility rather than a
+discount.** `_adj_value` was `Transfer Score × _availability_multiplier`, and
+`Transfer Score` already prices availability: 1GW is a percentile of the engine's
+`Proj` = `Proj_Start × Start_Pct`, and `Start_Pct` carries FPL's availability
+ceiling. So a 75%-doubtful player was discounted once inside the score and again
+on top of it.
+
+The multiplier was doing two jobs, and they separate cleanly:
+
+- For a player it **zeroed**, the effect was never a discount but an exclusion —
+  `_adj_value` of 0 makes the gap negative, so he could not clear any threshold.
+  That is now an explicit filter beside the locked-player one (180 players live),
+  which changes no recommendation and states the rule where the other eligibility
+  rule already lives. Inside the function, so no caller can forget it.
+- For a **doubtful** player it was a second discount, and it is gone. Measured at
+  GW6, 26 players' scores rise by a mean of 0.113 (max 0.204) and **nobody else
+  moves at all**: Cole Palmer at 75% went from 0.612 to his honest 0.816, having
+  been pushed out of contention by a doubling. Median rank at forward moves 13 →
+  5, at midfield 78 → 47.
+
+**And a hold factor may never exceed 1.0.** `_roster_injury_factor` returns
+`max(avail, duration + quality)` as a multiplier on a percentile Keep Score, so
+above 1 it invents value rather than protecting it — the failure
+`check_transfer_risk()` errors on for the transfer multiplier. It became
+reachable the moment return dates started being counted against the real
+calendar: a player back before the next deadline scores `gws_to_miss == 0`, which
+pairs a `duration_factor` of 1.0 with a quality boost of up to 0.25. Twelve live
+players were sitting at 1.25 and 1.125. The hold logic itself is unchanged —
+it is not a duplicate of the engine's pricing but a deliberate brake on
+panic-drops — only clamped.
 
 The card badge shows the ranking currency (`+0.42 pts/GW`) with the percentile
 gap as a hover, since two cards reading "+0.10" were not offering the same thing.
