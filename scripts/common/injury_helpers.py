@@ -30,7 +30,86 @@ TOTAL_GWS = 38
 INJURY_FLOOR = 0.10
 
 
-def estimate_games_to_miss(news, chance, status) -> int:
+def _news_duration(news, deadlines=None):
+    """Gameweeks missed *as the news text states*, or ``None`` if it states none.
+
+    Separate from the bucket fallbacks because **zero is an answer**. Once the
+    count comes from the real calendar rather than from days/7, a player back
+    before the next deadline correctly yields 0 — and a caller that reads 0 as
+    "the news said nothing" then falls through to the status default and writes
+    him off. Pau Torres, "Expected back 10 Oct" with the GW6 deadline on 10 Oct,
+    is that exact case: nothing missed, four gameweeks assumed.
+    """
+    news_str = "" if pd.isna(news) else str(news).strip()
+    if not news_str:
+        return None
+
+    # 1. An explicit return date: "Expected back 11 Oct".
+    # "Suspended until 17 Oct" is a date too. Without it the text fell through to
+    # the status default -- 3 gameweeks for `s` -- where the calendar says he
+    # misses one.
+    back_match = re.search(
+        r'(?:expected\s+back|suspended\s+until|return[s]?\s+)'
+        r'\s*(\d{1,2}\s+\w+(?:\s+\d{4})?)',
+        news_str, re.IGNORECASE
+    )
+    if back_match:
+        date_str = back_match.group(1)
+        for fmt in ('%d %b %Y', '%d %B %Y', '%d %b', '%d %B'):
+            try:
+                parsed = datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+            if parsed.year == 1900:         # no year in the format
+                now = datetime.now()
+                parsed = parsed.replace(year=now.year)
+                if parsed < now:
+                    parsed = parsed.replace(year=now.year + 1)
+            # Count real deadlines where the caller supplied them; the seven-day
+            # approximation is the fallback for callers with no fixture list, and
+            # is wrong across a break.
+            if deadlines:
+                return gameweeks_until(parsed, deadlines)
+            days_until = (parsed - datetime.now()).days
+            return max(0, (days_until + 6) // 7)
+
+    # 2. A suspension length: "Suspended for 3 matches". A count of matches, so
+    #    the calendar cannot help and must not interfere.
+    susp_match = re.search(r'suspended\s+(?:for\s+)?(\d+)', news_str, re.IGNORECASE)
+    if susp_match:
+        return int(susp_match.group(1))
+
+    return None
+
+
+def gameweeks_until(target, deadlines) -> int:
+    """How many gameweek deadlines fall before ``target``.
+
+    **A gameweek is not a week.** The season carries international breaks — the
+    live calendar has 14 days before GW6 and 14 more between GW10 and GW11 —
+    so dividing days by seven overstates how many gameweeks an absence covers,
+    and it overstates worst during a break, which is exactly when a
+    three-gameweek horizon reaches furthest into the future. Measured against
+    all 26 players carrying a parseable return date on 2026-09-26, the
+    seven-day arithmetic overstated **26 of 26** by a mean of 2.0 gameweeks:
+    twelve players due back on the GW6 deadline day itself, missing nothing,
+    were counted as missing two.
+
+    A deadline falling on the return date counts as *playable* — "expected back
+    10 Oct" reads as available for the 10 Oct fixtures.
+    """
+    if not deadlines or target is None:
+        return 0
+    target_date = target.date() if hasattr(target, "date") else target
+    missed = 0
+    for deadline in deadlines:
+        day = deadline.date() if hasattr(deadline, "date") else deadline
+        if day < target_date:
+            missed += 1
+    return missed
+
+
+def estimate_games_to_miss(news, chance, status, deadlines=None) -> int:
     """Estimate how many gameweeks a player will miss.
 
     Resolution order, most to least reliable:
@@ -44,33 +123,9 @@ def estimate_games_to_miss(news, chance, status) -> int:
     Moved verbatim from ``scripts/draft/waiver_wire.py`` so Draft waiver logic and
     team-strength scoring share one implementation.
     """
-    news_str = "" if pd.isna(news) else str(news).strip()
-
-    if news_str:
-        # 1. Try "Expected back DD Mon" or similar date patterns
-        back_match = re.search(
-            r'(?:expected\s+back|return[s]?\s+)\s*(\d{1,2}\s+\w+(?:\s+\d{4})?)',
-            news_str, re.IGNORECASE
-        )
-        if back_match:
-            date_str = back_match.group(1)
-            for fmt in ('%d %b %Y', '%d %B %Y', '%d %b', '%d %B'):
-                try:
-                    parsed = datetime.strptime(date_str, fmt)
-                    if parsed.year == 1900:  # no year in format
-                        now = datetime.now()
-                        parsed = parsed.replace(year=now.year)
-                        if parsed < now:
-                            parsed = parsed.replace(year=now.year + 1)
-                    days_until = (parsed - datetime.now()).days
-                    return max(0, (days_until + 6) // 7)  # round up to GWs
-                except ValueError:
-                    continue
-
-        # 2. Try "Suspended for X" matches
-        susp_match = re.search(r'suspended\s+(?:for\s+)?(\d+)', news_str, re.IGNORECASE)
-        if susp_match:
-            return int(susp_match.group(1))
+    from_news = _news_duration(news, deadlines)
+    if from_news is not None:
+        return from_news
 
     # 3. Fallback from chance_of_playing
     if not pd.isna(chance):
@@ -116,7 +171,7 @@ def estimate_games_to_miss(news, chance, status) -> int:
 OUT_OF_SQUAD_STATUSES = ("i", "s", "u", "n")
 
 
-def stated_games_to_miss(news, chance, status):
+def stated_games_to_miss(news, chance, status, deadlines=None):
     """Games missed where the *source states a duration*, else ``None``.
 
     :func:`estimate_games_to_miss` always answers, falling back through
@@ -136,13 +191,13 @@ def stated_games_to_miss(news, chance, status):
     is already priced by his start probability, and nothing is known about the
     two weeks after it.
     """
-    # Ask for the news-derived duration *alone*: with chance and status withheld,
-    # the bucket fallbacks cannot fire, so anything above zero came from a real
-    # date or a suspension length. Matching the keywords by hand instead lets
-    # "Unspecified injury - Unknown return date" through on the word "return",
-    # and then answers from the very buckets this function exists to exclude.
-    from_news = estimate_games_to_miss(news, None, None)
-    if from_news > 0:
+    # `_news_duration` answers None when the text states no duration, which is
+    # what separates "no information" from "back before the next deadline". A
+    # keyword match by hand would instead let "Unspecified injury - Unknown
+    # return date" through on the word "return", and reading its 0 as "nothing
+    # stated" would write off a player who misses nothing.
+    from_news = _news_duration(news, deadlines)
+    if from_news is not None:
         return from_news
 
     if not pd.isna(status) and str(status).lower() in OUT_OF_SQUAD_STATUSES:
@@ -151,7 +206,7 @@ def stated_games_to_miss(news, chance, status):
     return None
 
 
-def games_to_miss_series(news, chance, status, index) -> pd.Series:
+def games_to_miss_series(news, chance, status, index, deadlines=None) -> pd.Series:
     """:func:`stated_games_to_miss` over aligned Series, 0 where nothing is stated.
 
     The scalar version runs regexes over free text, so it is only called for
@@ -171,7 +226,8 @@ def games_to_miss_series(news, chance, status, index) -> pd.Series:
 
     out = pd.Series(0, index=index, dtype="int64")
     for idx in index[flagged.to_numpy()]:
-        stated = stated_games_to_miss(news.get(idx), chance.get(idx), status.get(idx))
+        stated = stated_games_to_miss(news.get(idx), chance.get(idx), status.get(idx),
+                                      deadlines=deadlines)
         if stated is not None:
             out.at[idx] = stated
     return out

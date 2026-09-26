@@ -1405,6 +1405,34 @@ def _reference_horizon(reference_df: Optional[pd.DataFrame]) -> Optional[pd.Data
     return _blend_frame(ref, ref_proj_col)
 
 
+def _gameweek_deadlines():
+    """Upcoming gameweek deadlines, for turning a return date into gameweeks.
+
+    A gameweek is not a week -- the season has international breaks -- so
+    ``estimate_games_to_miss`` needs the real calendar to count an absence. Any
+    failure returns None and the seven-day approximation stands, which is wrong
+    across a break but never fatal.
+    """
+    try:
+        from datetime import datetime, timezone
+        from scripts.common.fpl_classic_api import get_classic_bootstrap_static
+
+        bootstrap = get_classic_bootstrap_static() or {}
+        now = datetime.now(timezone.utc)
+        out = []
+        for event in bootstrap.get("events", []):
+            stamp = event.get("deadline_time")
+            if not stamp:
+                continue
+            when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            if when > now:
+                out.append(when)
+        return sorted(out) or None
+    except Exception as exc:                # pragma: no cover - defensive
+        _logger.warning("Could not read gameweek deadlines: %s", exc)
+        return None
+
+
 def _blend_frame(df: pd.DataFrame, rotowire_col: str = "Points",
                  with_fpl_ep: bool = False, gameweek=None) -> pd.DataFrame:
     """Run the engine over a frame that already carries its sources as columns.
@@ -1470,6 +1498,7 @@ def _blend_frame(df: pd.DataFrame, rotowire_col: str = "Points",
         # `projection_engine.blend_aligned`. Absent on frames that never merged
         # it, which simply means no player has a stated absence.
         news=df.get("news"),
+        deadlines=_gameweek_deadlines(),
         gameweek=gameweek,
         extra=df,
     )

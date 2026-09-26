@@ -13,6 +13,7 @@ import pandas as pd
 
 from scripts.common.injury_helpers import (
     games_to_miss_series,
+    gameweeks_until,
     stated_games_to_miss,
     INJURY_FLOOR,
     estimate_games_to_miss,
@@ -185,3 +186,69 @@ class TestGamesToMissSeries:
         """`blend_aligned` passes whatever the caller had, list included."""
         out = games_to_miss_series(None, None, None, [0, 1])
         assert list(out) == [0, 0]
+
+
+class TestAGameweekIsNotAWeek:
+    """Return dates must be counted against the real calendar.
+
+    `(days + 6) // 7` assumes a gameweek every seven days. The live calendar has
+    14 days before GW6 and 14 more between GW10 and GW11, so the approximation
+    overstates an absence -- worst during a break, which is exactly when a
+    three-gameweek horizon reaches furthest ahead. Measured on 2026-09-26 over
+    all 26 players with a parseable return date, it overstated **26 of 26** by a
+    mean of 2.0 gameweeks: twelve due back on the GW6 deadline day itself,
+    missing nothing, were counted as missing two.
+    """
+
+    @staticmethod
+    def _deadlines():
+        """The real shape: a fortnight's break, then weekly."""
+        base = datetime(2026, 10, 10, 10, 0)
+        return [base, base + timedelta(days=7), base + timedelta(days=13),
+                base + timedelta(days=21)]
+
+    def test_a_deadline_on_the_return_date_is_playable(self):
+        """"Expected back 10 Oct" reads as available for the 10 Oct fixtures."""
+        assert gameweeks_until(datetime(2026, 10, 10), self._deadlines()) == 0
+
+    def test_it_counts_deadlines_not_weeks(self):
+        assert gameweeks_until(datetime(2026, 10, 18), self._deadlines()) == 2
+
+    def test_no_calendar_means_no_count(self):
+        assert gameweeks_until(datetime(2026, 10, 18), None) == 0
+
+    def test_the_estimator_uses_the_calendar_when_given_one(self):
+        """Thirteen days out, but only a break in between: nothing is missed."""
+        news = "Hamstring injury - Expected back 10 Oct"
+        far = estimate_games_to_miss(news, 0, "i", deadlines=self._deadlines())
+        assert far == 0
+
+    def test_it_falls_back_to_the_seven_day_approximation(self):
+        """Callers with no fixture list keep the old behaviour rather than zero."""
+        soon = (datetime.now() + timedelta(days=13)).strftime("%d %b")
+        assert estimate_games_to_miss(
+            "Knee injury - Expected back %s" % soon, 0, "i") == 2
+
+    def test_back_before_the_next_deadline_misses_nothing(self):
+        """Zero is an answer, and must not read as "the news said nothing".
+
+        Once the count comes from the calendar, a player back before the next
+        deadline yields 0 -- and a gate that reads 0 as absent information falls
+        through to the status default and writes him off. Pau Torres, "Expected
+        back 10 Oct" against a GW6 deadline of 10 Oct, is that case: he misses
+        nothing and was assumed out for four.
+        """
+        assert stated_games_to_miss(
+            "Hamstring injury - Expected back 10 Oct", 0, "i",
+            deadlines=self._deadlines()) == 0
+
+    def test_a_suspension_with_an_end_date_reads_the_date(self):
+        """"Suspended until 17 Oct" fell through to the status default of 3."""
+        assert stated_games_to_miss(
+            "Suspended until 17 Oct", 0, "s", deadlines=self._deadlines()) == 1
+
+    def test_a_suspension_length_is_a_count_of_matches_not_a_date(self):
+        """So the calendar cannot help, and must not interfere."""
+        assert estimate_games_to_miss(
+            "Suspended for 3 matches", None, None,
+            deadlines=self._deadlines()) == 3

@@ -408,11 +408,44 @@ withheld — so a non-zero answer provably came from the news. Matching the
 keywords by hand instead let "Unspecified injury - Unknown return date" through
 on the word *return* and then answered from the very buckets the gate excludes.
 
-Measured live at GW6: 180 players carry a stated absence, 10 of them with a
-projection at all; nine are out for the whole window and score 0, and Pau Torres
-("Expected back 10 Oct", two gameweeks) gets one week's worth — 3.34 where he was
-previously written off. **No fit player's horizon changed**, and the
-phantom-neutral cohort went from ten to zero.
+**A gameweek is not a week, and the dates are counted against the real
+calendar.** `estimate_games_to_miss` turned a return date into gameweeks with
+`(days + 6) // 7`. The season has international breaks — live there are 14 days
+before GW6 and 14 more between GW10 and GW11 — so that overstates an absence,
+and it overstates worst *during* a break, which is exactly when a three-gameweek
+horizon reaches furthest ahead. Measured on 2026-09-26 across all 26 players
+carrying a parseable return date, it overstated **26 of 26 by a mean of 2.0
+gameweeks**: twelve due back on the GW6 deadline day itself, missing nothing,
+were counted as missing two — so the new cap zeroed their whole window.
+
+`gameweeks_until()` counts real deadlines instead, supplied by the caller
+(`analytics._gameweek_deadlines()` on the page path, the bootstrap the snapshot
+collector already holds on the other). No calendar falls back to the seven-day
+arithmetic, which is wrong across a break but never fatal. A deadline *on* the
+return date counts as playable: "expected back 10 Oct" reads as available for
+the 10 Oct fixtures.
+
+**Zero is an answer.** Once the count is calendar-based, a player back before the
+next deadline yields 0 — and `stated_games_to_miss` read that as "the news stated
+nothing", fell through to the status default of four gameweeks, and wrote him
+off. `_news_duration()` therefore returns `Optional[int]`: None when the text
+states no duration, 0 when it states one that has already elapsed. Extracting it
+also let `estimate_games_to_miss` and the gate share one parser instead of the
+gate re-deriving what the news said. "Suspended until 17 Oct" is a date too, and
+was previously falling through to the status default of three where the calendar
+says one.
+
+Measured live at GW6: 180 players carry a stated absence, 10 with a projection
+at all. Five are out for the window and score 0; four due back on 11 Oct get two
+weeks' worth (Milenković 8.36, Dean Henderson 7.64, Röhl 6.89, Fatawu 9.82 off
+his suspension end date); and Pau Torres, back by the GW6 deadline, is not capped
+at all. **No fit player's horizon changed**, and the phantom-neutral cohort went
+from ten to one — Pau, whom no source priced, so his window is genuinely unknown
+and now says so through a warning rather than a silent 0.50.
+
+Note `team_strength`'s injury discount calls `estimate_games_to_miss` without a
+calendar, so it keeps the seven-day approximation and is overstated during a
+break. Same fix, different page; not done here.
 
 One wart fixed on the way in, because the horizon model depends on it:
 `estimate_games_to_miss("", 100, "a")` returned **1**. FPL states an explicit

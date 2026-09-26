@@ -112,6 +112,29 @@ def _rotowire_url(gameweek) -> Optional[str]:
         return None
 
 
+def _future_deadlines(bootstrap):
+    """Upcoming deadlines from the bootstrap this run already fetched.
+
+    The horizon model counts gameweeks between now and a stated return date, and
+    a gameweek is not a week -- see ``injury_helpers.gameweeks_until``.
+    """
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    out = []
+    for event in (bootstrap or {}).get("events", []):
+        stamp = event.get("deadline_time")
+        if not stamp:
+            continue
+        try:
+            when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if when > now:
+            out.append(when)
+    return sorted(out) or None
+
+
 def collect_pre(gameweek: int, bootstrap, deadline=None,
                 before_deadline: bool = True) -> bool:
     """Build and store the projection frame for ``gameweek``.
@@ -134,7 +157,8 @@ def collect_pre(gameweek: int, bootstrap, deadline=None,
     ep = fpl_ep_source(bootstrap=bootstrap, gameweek=gameweek)
 
     sources = [rw, ffp, ep]
-    projections = build_projections(sources, gameweek=gameweek, pool=pool)
+    projections = build_projections(sources, gameweek=gameweek, pool=pool,
+                                    deadlines=_future_deadlines(bootstrap))
     if projections.empty:
         _logger.error("GW%s: engine produced no rows", gameweek)
         return False

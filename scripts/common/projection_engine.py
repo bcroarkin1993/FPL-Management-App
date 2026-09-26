@@ -217,6 +217,7 @@ def build_projections(
     gameweek: Optional[int],
     pool: pd.DataFrame,
     weights: Optional[Dict[str, float]] = None,
+    deadlines: Optional[Sequence] = None,
 ) -> pd.DataFrame:
     """Blend every usable source into one canonical projection frame.
 
@@ -324,6 +325,7 @@ def build_projections(
         teams=_pool_col(pool, "Team", out.index),
         chance_of_playing=_pool_col(pool, "chance_of_playing_next_round", out.index),
         news=_pool_col(pool, "news", out.index),
+        deadlines=deadlines,
         status=_pool_col(pool, "status", out.index),
         weights=weights,
         gameweek=gameweek,
@@ -355,6 +357,7 @@ def blend_aligned(
     chance_of_playing: Optional[pd.Series] = None,
     status: Optional[pd.Series] = None,
     news: Optional[pd.Series] = None,
+    deadlines: Optional[Sequence] = None,
     weights: Optional[Dict[str, float]] = None,
     fallback_names: Optional[Sequence[str]] = None,
     gameweek: Optional[int] = None,
@@ -779,7 +782,8 @@ def blend_aligned(
     # Where the horizon is missing entirely the cap *becomes* the value, since
     # "out for the window" is a real number and NaN is not.
     if HORIZON_GWS > 0:
-        gws_out = games_to_miss_series(news, chance_of_playing, status, index)
+        gws_out = games_to_miss_series(news, chance_of_playing, status, index,
+                                       deadlines=deadlines)
         flagged = gws_out.gt(0)
         if flagged.any():
             weeks_available = (HORIZON_GWS - gws_out).clip(lower=0, upper=HORIZON_GWS)
