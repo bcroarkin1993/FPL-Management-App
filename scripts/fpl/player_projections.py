@@ -31,6 +31,7 @@ from scripts.common.utils import (
 )
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import to_display_name
+from scripts.common.text_helpers import compact_html
 from scripts.common.analytics import blend_projections_onto, merge_season_projections
 from scripts.common.fpl_classic_api import get_classic_bootstrap_static
 from scripts.common import projection_accuracy, projection_archive
@@ -970,6 +971,8 @@ def render_accuracy():
             "blend weights." % _gw_list(backfilled)
         )
 
+    _render_verdict()
+
     st.markdown("#### Error by source")
     st.caption(
         "**Starters** compares each source's *if he starts* projection against "
@@ -1035,6 +1038,110 @@ def render_accuracy():
         )
 
     _render_weight_fit(scored)
+
+
+def _render_verdict():
+    """Which source is actually best -- the answer, before the evidence.
+
+    Four rows of numbers to three decimal places is not a conclusion, and the
+    reader's question is "so which one should I believe". Sources are compared
+    *pairwise* on the players both priced, because coverage runs from a third of
+    the pool to all of it, and *paired* per player, which is what lets two
+    gameweeks separate anything at all: differencing per player removes the
+    shared difficulty of the week, so the interval on the difference is far
+    narrower than the interval on either mean.
+    """
+    questions = [
+        (projection_accuracy.SCOPE_START, "Who starts", "Brier", "{:.3f}"),
+        (projection_accuracy.SCOPE_STARTERS, "Points if he starts", "MAE", "{:.2f}"),
+    ]
+    verdicts = [(label, metric, fmt, projection_accuracy.verdict(scope))
+                for scope, label, metric, fmt in questions]
+    if not any(v.get("best") for _, _, _, v in verdicts):
+        return
+
+    st.markdown("#### The short version")
+    cols = st.columns(len(verdicts))
+    for col, (label, metric, fmt, v) in zip(cols, verdicts):
+        with col:
+            if not v.get("best"):
+                st.info(v.get("note") or "Not scoreable yet.")
+                continue
+            name = _SOURCE_LABELS.get(v["best"], v["best"])
+            contenders = [_SOURCE_LABELS.get(c, c) for c in v["contenders"]]
+            if contenders:
+                tail = "level with " + _join(contenders)
+            else:
+                tail = "clear of every other source"
+            st.markdown(
+                compact_html(
+                    f"""
+                    <div style="background:#16213e;border:1px solid #2a2f52;
+                                border-radius:10px;padding:14px 16px;color:#e0e0e0;">
+                      <div style="font-size:0.78rem;letter-spacing:.06em;
+                                  text-transform:uppercase;color:#8fa3c8;">{label}</div>
+                      <div style="font-size:1.25rem;font-weight:700;margin:.25rem 0;
+                                  color:#7ee787;">{name}</div>
+                      <div style="font-size:0.85rem;color:#c8d2e4;">
+                        {metric} {fmt.format(v['value'])} · {tail}
+                      </div>
+                      <div style="font-size:0.78rem;color:#8fa3c8;margin-top:.3rem;">
+                        led in {v['leads_in']} of {v['gameweeks']}
+                        gameweek{'' if v['gameweeks'] == 1 else 's'} ·
+                        {v['n']:,} scored
+                      </div>
+                    </div>
+                    """
+                ),
+                unsafe_allow_html=True,
+            )
+
+    st.caption(
+        "Decided by comparing sources **in pairs, on the players both of them "
+        "priced** — coverage runs from a third of the pool to all of it, so one "
+        "common subset across all four would judge everybody on whatever the "
+        "sparsest source happened to publish. Within a pair the comparison is "
+        "**per player**, which is what lets so few gameweeks separate anything: "
+        "differencing removes the shared difficulty of the week. \"Level with\" "
+        "means the 95% interval on that difference still contains zero."
+    )
+    st.caption(
+        "⚠️ The interval is across *players*, not across *gameweeks*. A source "
+        "that happened to read these particular weeks well looks exactly like a "
+        "better source, which is what the \"led in N of M\" line is there to "
+        "temper — and why the blend weights are still left alone."
+    )
+
+    with st.expander("Head to head"):
+        for scope, label in ((projection_accuracy.SCOPE_START, "Who starts"),
+                             (projection_accuracy.SCOPE_STARTERS, "Points if he starts")):
+            h2h = projection_accuracy.head_to_head(scope)
+            if h2h.empty:
+                continue
+            st.markdown(f"**{label}**")
+            render_styled_table(
+                pd.DataFrame({
+                    "Matchup": [
+                        "%s  vs  %s" % (_SOURCE_LABELS.get(r["a"], r["a"]),
+                                        _SOURCE_LABELS.get(r["b"], r["b"]))
+                        for _, r in h2h.iterrows()],
+                    "Shared players": h2h["n"],
+                    "Better": [_SOURCE_LABELS.get(w, w) if w else "—"
+                               for w in h2h["winner"]],
+                    "By": h2h["difference"].abs(),
+                    "95% interval": ["%+.3f to %+.3f" % (r["ci_low"], r["ci_high"])
+                                     for _, r in h2h.iterrows()],
+                }).reset_index(drop=True),
+                col_formats={"By": "{:.3f}"},
+            )
+
+
+def _join(items) -> str:
+    """'a', 'a and b', 'a, b and c'."""
+    items = list(items)
+    if len(items) <= 1:
+        return items[0] if items else ""
+    return ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def _render_start_model(scored):

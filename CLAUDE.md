@@ -1050,6 +1050,49 @@ would mean the app and its own fallback disagree. Tests assert against the
 constants rather than literals, so the next retune does not break a dozen of
 them — four had hard-coded `0.68` and needed rewriting for this one.
 
+### Which source is best — the tab has to answer, not just report
+
+`verdict()` and `head_to_head()` (`projection_accuracy.py`), rendered as "The
+short version" at the top of the Accuracy tab.
+
+**Four rows of error rates to three decimal places is not a conclusion.** The
+reader's question is "so which one should I believe", and the tab reported
+everything except that. Two things had to be right before it could answer.
+
+**Sources are compared pairwise, on the players both of them priced.** Coverage
+runs from a third of the pool (Rotowire, which lists only expected starters) to
+all of it, and one common subset across all four collapses to whatever the
+sparsest source published — for the start question that is **143 rows**, being
+exactly the doubtful players FPL bothered to rate, which is no basis for a
+verdict about anybody. Pairwise, the same comparison runs on 1,315.
+
+**The comparison is paired per player, which is what lets two gameweeks conclude
+anything.** Comparing two aggregate MAEs discards the fact that both sources were
+scored on the same players; a week where everyone blanked moves both numbers
+together. Differencing per player removes that, and the standard error of the
+difference is several times smaller than that of either mean. It is why the page
+can say something definite while `MIN_GAMEWEEKS_FOR_CONFIDENCE` still, correctly,
+refuses to move the blend weights — the two are answering different questions.
+
+What pairing cannot remove is **week-to-week** variation: the interval is across
+players, not gameweeks, so a source that read these particular weeks well looks
+exactly like a better source. Hence "led in N of M gameweeks" beside every
+verdict, and the warning that says so in as many words.
+
+**What it says today** (GW4–GW5, pre-deadline only):
+
+| Question | Best | Margin |
+|---|---|---|
+| Who starts | **the blend**, Brier 0.068 | clear of all three sources it is built from |
+| Points if he starts | **FFP**, MAE 2.66 | clear of Rotowire (+0.091) and `fpl_ep`; the blend is *level with it* |
+
+Both lead in 2 of 2 gameweeks. Two results are worth carrying into Phase 4b: the
+engine's start model **beats every source it blends**, so the floors and the
+omission signal are earning their keep — and on points the blend is **not**
+distinguishable from FFP alone, while Rotowire, which carries 60% of the weight,
+is clearly worse than FFP. That is a hypothesis for the weight fit, not a
+mandate: it is two gameweeks, and `fit_blend_weights()` stays unapplied.
+
 ### Source Freshness
 
 `get_rotowire_article_updated()` (`scripts/common/scraping.py`) scrapes an

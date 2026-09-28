@@ -86,6 +86,12 @@ MIN_GAMEWEEKS_FOR_CONFIDENCE = 5
 #: all about goalkeepers.
 MIN_ROWS_PER_START_COHORT = 150
 
+#: Shared rows two sources need before a head-to-head between them decides
+#: anything. Coverage varies enormously -- Rotowire prices a third of the pool --
+#: so some pairs barely overlap, and a narrow interval over 40 rows of an odd
+#: population is not a verdict.
+MIN_HEAD_TO_HEAD_ROWS = 100
+
 #: Buckets for the calibration table. Deliberately uneven: the ends are where the
 #: app's decisions are made and where the failures have been (208 players rendered
 #: at exactly 100% is a top-bucket failure), so the ends are narrow.
@@ -580,6 +586,169 @@ def fit_blend_weights(gameweeks: Optional[Sequence[int]] = None,
         "current_mae": current_mae,
         "n": int(len(data)),
         "gameweeks": int(data["gameweek"].nunique()),
+        "note": "",
+    }
+
+
+# --- Which source is actually best -------------------------------------------
+#
+# The tables above report each source's error. They do not answer the question a
+# reader has, which is "so which one should I believe", and four rows of numbers
+# to three decimal places is not an answer -- especially when the sources are not
+# scored on the same players.
+#
+# **Sources are compared pairwise, on the players both of them priced.** Coverage
+# runs from 33% (Rotowire, which lists only expected starters) to 100%, so a
+# single common subset across all four collapses to whatever the sparsest source
+# published: for the start question that is 143 rows of exactly the doubtful
+# players FPL bothered to rate, which is no basis for a verdict about anybody.
+# Pairwise keeps every comparison honest and each one as large as it can be.
+#
+# **The comparison is paired, which is why it can conclude anything at all from
+# two gameweeks.** Comparing two aggregate MAEs throws away the fact that both
+# sources were scored on the same players: a gameweek where everybody blanked
+# moves both numbers together. Differencing per player removes that entirely, and
+# the standard error of the *difference* is several times smaller than the
+# standard error of either mean.
+#
+# What it cannot remove is week-to-week variation -- the interval is across
+# players, not across gameweeks, so a source that happened to read these
+# particular weeks well looks exactly like a better source. That is why the
+# verdict also reports how many of the scored gameweeks the leader actually led,
+# and why it says "on N gameweeks" rather than stating a fact about the season.
+
+#: Confidence level for the head-to-head interval, as a z-multiplier.
+_Z95 = 1.959964
+
+
+def _paired_frame(scope: str, pre_only: bool = True) -> pd.DataFrame:
+    """Every source's prediction and the outcome, one row per player-gameweek."""
+    rows = []
+    for gw in projection_archive.scoreable_gameweeks():
+        joined, meta = _pair(gw)
+        if joined is None or joined.empty:
+            continue
+        if pre_only and not meta.get("captured_before_deadline"):
+            continue
+        if scope == SCOPE_START:
+            keep, outcome = joined, _started(joined)
+            col_scope = SCOPE_START
+        else:
+            # An if-he-starts projection is only scoreable against a player who
+            # did start; anywhere else it measures the minutes model instead.
+            keep = joined[pd.to_numeric(joined["started"], errors="coerce") > 0]
+            outcome = pd.to_numeric(keep["points"], errors="coerce")
+            col_scope = SCOPE_STARTERS
+        if keep.empty:
+            continue
+        one = pd.DataFrame(index=range(len(keep)))
+        for source in SOURCE_COLUMNS:
+            col = _column_for(source, col_scope)
+            if col and col in keep.columns:
+                values = pd.to_numeric(keep[col], errors="coerce")
+                one[source] = (_as_probability(values) if scope == SCOPE_START
+                               else values).values
+        one["_outcome"] = outcome.values
+        one["_gameweek"] = gw
+        rows.append(one)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def _loss(frame: pd.DataFrame, source: str, scope: str) -> pd.Series:
+    """Per-row error, in whichever metric this scope is judged on."""
+    err = frame[source] - frame["_outcome"]
+    # Squared for a probability (Brier, a proper scoring rule), absolute for
+    # points (MAE) -- the two headline metrics the tables already report.
+    return err ** 2 if scope == SCOPE_START else err.abs()
+
+
+def head_to_head(scope: str = SCOPE_STARTERS, pre_only: bool = True) -> pd.DataFrame:
+    """Every pair of sources, compared on the players both of them priced.
+
+    Returns one row per pair with the mean paired difference, its 95% interval,
+    the winner where the interval excludes zero, and the sample size. A pair with
+    fewer than ``MIN_HEAD_TO_HEAD_ROWS`` shared rows is reported with no verdict
+    rather than dropped -- that they barely overlap is itself worth seeing.
+    """
+    frame = _paired_frame(scope, pre_only=pre_only)
+    if frame.empty:
+        return pd.DataFrame()
+    sources = [c for c in frame.columns if not c.startswith("_")]
+
+    rows = []
+    for i, a in enumerate(sources):
+        for b in sources[i + 1:]:
+            both = frame.dropna(subset=[a, b, "_outcome"])
+            n = len(both)
+            if n < 2:
+                continue
+            diff = _loss(both, a, scope) - _loss(both, b, scope)
+            se = float(diff.std(ddof=1)) / np.sqrt(n) if n > 1 else np.nan
+            mean = float(diff.mean())
+            lo, hi = mean - _Z95 * se, mean + _Z95 * se
+            decided = n >= MIN_HEAD_TO_HEAD_ROWS and (lo > 0 or hi < 0)
+            rows.append({
+                "a": a, "b": b, "n": n,
+                "difference": mean, "ci_low": lo, "ci_high": hi,
+                "winner": (b if mean > 0 else a) if decided else None,
+                "verdict": "clear" if decided else "too close to call",
+            })
+    return pd.DataFrame(rows)
+
+
+def verdict(scope: str = SCOPE_STARTERS, pre_only: bool = True) -> dict:
+    """Which source is best at ``scope``, and whether that is settled.
+
+    ``contenders`` are the sources the leader is *not* distinguishable from. A
+    verdict naming one winner while a rival sits inside its interval would be
+    the overclaiming this whole tab exists to avoid.
+    """
+    frame = _paired_frame(scope, pre_only=pre_only)
+    if frame.empty:
+        return {"scope": scope, "best": None, "gameweeks": 0,
+                "note": "No pre-deadline gameweek has both projections and actuals yet."}
+
+    sources = [c for c in frame.columns if not c.startswith("_")]
+    # Ranked on each source's own coverage, which is the only number that exists
+    # for all of them; the pairwise tests below are what actually decide it.
+    scores = {}
+    for source in sources:
+        both = frame.dropna(subset=[source, "_outcome"])
+        if len(both):
+            scores[source] = float(_loss(both, source, scope).mean())
+    if not scores:
+        return {"scope": scope, "best": None, "gameweeks": 0,
+                "note": "No source published anything scoreable."}
+
+    best = min(scores, key=scores.get)
+    h2h = head_to_head(scope, pre_only=pre_only)
+    contenders = []
+    for _, row in h2h.iterrows():
+        if best not in (row["a"], row["b"]):
+            continue
+        if row["winner"] != best:
+            contenders.append(row["b"] if row["a"] == best else row["a"])
+
+    # How many of the scored gameweeks the leader actually led. The interval is
+    # across players, so it says nothing about whether these weeks were typical.
+    leads, weeks = 0, sorted(frame["_gameweek"].unique())
+    for gw in weeks:
+        one = frame[frame["_gameweek"] == gw]
+        per_gw = {s: float(_loss(one.dropna(subset=[s, "_outcome"]), s, scope).mean())
+                  for s in sources if one[s].notna().any()}
+        if per_gw and min(per_gw, key=per_gw.get) == best:
+            leads += 1
+
+    return {
+        "scope": scope,
+        "best": best,
+        "metric": "brier" if scope == SCOPE_START else "mae",
+        "value": scores[best],
+        "scores": scores,
+        "contenders": contenders,
+        "leads_in": leads,
+        "gameweeks": len(weeks),
+        "n": int(frame[best].notna().sum()),
         "note": "",
     }
 

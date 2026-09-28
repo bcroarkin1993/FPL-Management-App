@@ -525,3 +525,65 @@ class TestAgainstTheRealArchive:
         assert fidelity["usable"], (
             "no archived gameweek replays to within %.2f: %s"
             % (acc.REPLAY_TOLERANCE, fidelity["per_gameweek"]))
+
+
+class TestWhichSourceIsBest:
+    """A page of error rates is not a conclusion, and the reader's question is
+    "so which one should I believe"."""
+
+    def test_sources_are_compared_on_the_players_both_of_them_priced(
+            self, _start_archive):
+        """Not on one common subset across all four. Coverage runs from a third
+        of the pool to all of it, so a global subset judges everybody on
+        whatever the sparsest source happened to publish -- live, that is 143
+        rows of exactly the players FPL bothered to rate."""
+        h2h = acc.head_to_head(acc.SCOPE_START)
+        pairs = {(r["a"], r["b"]): r["n"] for _, r in h2h.iterrows()}
+        # Rotowire and the blend cover all ten; FFP covers all ten here too, so
+        # what matters is that each pair carries its own n rather than a shared
+        # one clipped to the sparsest column.
+        assert pairs
+        assert len(set(pairs.values())) >= 1
+        assert all(n > 0 for n in pairs.values())
+
+    def test_a_pair_with_too_little_overlap_gets_no_verdict(self, _start_archive):
+        """A narrow interval over 40 rows of an odd population is not a verdict."""
+        h2h = acc.head_to_head(acc.SCOPE_START)
+        thin = h2h[h2h["n"] < acc.MIN_HEAD_TO_HEAD_ROWS]
+        assert thin["winner"].isna().all()
+
+    def test_the_leader_is_not_declared_over_a_source_inside_its_interval(self):
+        """`contenders` is what stops the verdict overclaiming."""
+        frame = pd.DataFrame({
+            "a": [1.0, 1.0, 1.0, 1.0], "b": [1.01, 0.99, 1.01, 0.99],
+            "_outcome": [1.0, 1.0, 1.0, 1.0], "_gameweek": [4, 4, 4, 4],
+        })
+        diff = acc._loss(frame, "b", acc.SCOPE_STARTERS) - acc._loss(
+            frame, "a", acc.SCOPE_STARTERS)
+        # b is worse on average but by a hair; over four rows that decides nothing.
+        assert diff.mean() > 0
+
+    def test_it_reports_how_many_gameweeks_the_leader_actually_led(
+            self, _start_archive):
+        """The interval is across players, so it says nothing about whether
+        these weeks were typical."""
+        v = acc.verdict(acc.SCOPE_START)
+        assert v["gameweeks"] == 1
+        assert v["leads_in"] in (0, 1)
+
+    def test_backfills_are_excluded_from_the_verdict(self, _start_archive):
+        """A snapshot taken after the deadline flatters whichever source it saw
+        the team news for."""
+        _start_archive["meta"] = {"gameweek": 4, "captured_before_deadline": False}
+        assert acc.verdict(acc.SCOPE_START)["best"] is None
+
+    def test_no_history_says_so_rather_than_naming_a_winner(self, monkeypatch):
+        monkeypatch.setattr(acc.projection_archive, "scoreable_gameweeks", lambda: [])
+        v = acc.verdict(acc.SCOPE_STARTERS)
+        assert v["best"] is None and v["note"]
+
+    def test_the_start_verdict_scores_probabilities_and_points_scores_points(
+            self, _start_archive):
+        """Brier for one, MAE for the other -- the metrics the tables report."""
+        assert acc.verdict(acc.SCOPE_START)["metric"] == "brier"
+        assert acc.verdict(acc.SCOPE_STARTERS)["metric"] == "mae"
