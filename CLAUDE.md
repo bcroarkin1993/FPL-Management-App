@@ -927,7 +927,128 @@ every user sees until a gameweek completes after snapshots began.
 `fit_blend_weights()` grid-searches the simplex and reports the fitted weights,
 their MAE, and the MAE of the currently configured weights for comparison.
 Nothing is applied automatically; Phase 4 is where a measured weight actually
-moves `config.PROJECTION_SOURCE_WEIGHTS`.
+moves `config.PROJECTION_SOURCE_WEIGHTS`. **That half is still blocked on data**:
+only GW4 and GW5 are pre-deadline captures, n=391 starters, and the fit they
+produce (`rotowire 0.0 / ffp 0.6 / fpl_ep 0.4`) is noise the tab already
+disclaims. It is not honest until roughly GW8.
+
+### Scoring the start model — the half with all the evidence in it
+
+`projection_accuracy.py`'s `start` scope, `check_start_calibration()`
+(`data_validation.py`), and the "Will he start?" section of the Accuracy tab.
+
+**The harness scored points and nothing else; `started` appeared in it only as a
+filter.** But `Proj = Proj_Start × Start_Pct`, so the minutes model is on every
+board in the app, and `Start` is its *primary* input — the only continuous 0–100
+start model any source publishes. It had never been scored after the fact.
+
+It is also where the evidence is. A start probability is checked against a binary
+outcome for **every** player in the pool; the points model is only scoreable on
+the couple of hundred who started. The two pre-deadline gameweeks give 1,315 rows
+against the points fit's 391 — so the start half of Phase 4 was settleable while
+the points half was not.
+
+**Three metrics, because they fail differently.** Brier is the mean squared error
+of a probability, AUC is ordering alone, and bias is signed. A source can order
+players perfectly and still state every probability far too high; a source can be
+beautifully calibrated in aggregate and order at random. AUC is the rank form of
+the Mann–Whitney statistic with average ranks, so **a source that says 1.0 for
+everybody scores 0.5** rather than looking good — and it is hand-rolled for the
+same reason `spearman()` is, because scipy is not a dependency.
+
+**The calibration table is the thing no single score can show.** In GW3 the app
+rendered 208 players at exactly 100% — a fallback standing in for a source that
+had stopped publishing — and 27% of them started. Read one row at a time there is
+nothing to see: every value is a plausible probability. Bucketed, it is
+unmissable, and `check_start_calibration()` errors on it. (That bucket is GW3
+alone; the fix is in `69c2e28`.)
+
+**Fitting means replaying the engine, never modelling it.** `blend_aligned()`
+takes `start_floors=` and `omitted_starts=` the way it already took `weights=`,
+and `fit_start_constants()` calls it over archived snapshots with candidate
+values. The archive holds exactly what the engine takes — `proj_start__<source>`,
+`start_pct__<source>`, position, team — so this is the real arithmetic, not a
+copy of it. This app has twice paid for two implementations of one blend
+drifting apart, and a fitter is the worst place for it: the constants would be
+optimal for a model nothing runs. `Start_Pct__rotowire` is deliberately **not**
+fed back in as a source — it is the engine's own decision about a player, so the
+replay would reproduce itself perfectly and measure nothing.
+
+**Fidelity is judged against the constants that built the snapshot, not
+today's.** This is the subtle one. The obvious guard — replay with the current
+constants and require the archived value back — is right until the first retune,
+after which every archived gameweek fails it and the fitter refuses for ever,
+**broken by its own last answer**. Nothing extra needs storing to fix it:
+`Start_Pct__rotowire` already records the decision per player — the positional
+floor where Rotowire listed him, the implied value where it did not — and both
+are constant within a position, so the unique value per cohort *is* the constant.
+A snapshot predating that column cannot prove what built it and is refused; GW3's
+does, and it predates two engine changes besides. Live, GW4 and GW5 replay to
+machine epsilon.
+
+Two known gaps are why this is a tolerance and not equality: `chance_of_playing`
+is not archived, so FPL's availability ceiling cannot be reapplied (9 rows in
+1,315), and `priced` reads a genuine zero projection as unpriced.
+
+**The search is exact rather than greedy, because the constants are separable.**
+Both are applied as `positions.map(...)` and a player is in exactly one position
+and one cohort, so a goalkeeper's floor cannot touch a midfielder's row. One
+replay per candidate *value* therefore scores that value for all four positions
+at once — 56 replays rather than 224, and the whole fit is 2 seconds.
+
+**Gated per cohort, not per gameweek** (`MIN_ROWS_PER_START_COHORT`, 150). A
+gameweek count cannot say whether a particular constant is supported: within one
+gameweek the cohorts differ in size by an order of magnitude. Measured over
+GW4–GW5, 397 omitted midfielders against 39 listed forwards — and the forwards
+carry the largest apparent error in the whole table (94.9% started against 79.7%
+predicted) on the thinnest evidence for one.
+
+**Two guards on the argmin, because an argmin always names something.**
+
+- `FIT_TIE_BAND` — where the configured value's Brier is within 0.5% of the best,
+  the constant is left alone. The defensive floor's minimum is a plateau from
+  0.74 to 0.76 with the configured 0.75 exactly on it; a bare argmin proposed
+  0.74, an improvement of zero at six decimal places.
+- A fitted value at the **edge of the grid** is the search running out of room
+  rather than a measurement. For the floors it is refused. For the implied
+  values the edge is zero, and `MIN_IMPLIED_START` (0.02) is the statement about
+  what zero would mean: Rotowire's silence about a player at a club it covers is
+  usually a benching and sometimes a name this app failed to match, and those are
+  indistinguishable from here. A zero also ends the term's discrimination — a
+  player no other source prices takes the implied value as his whole start
+  probability, so `Proj` becomes exactly 0. Live that would have been 78 further
+  midfielders.
+
+**What moved, and what it cost.** Three of eight cells, all where the evidence
+supports it:
+
+| Constant | Was | Now | Why |
+|---|---|---|---|
+| `ROTOWIRE_START_FLOORS["M"]` | 0.68 | **0.86** | 190 listed midfielders started 89.5% against 82.0% predicted |
+| `ROTOWIRE_OMITTED_START["M"]` | 0.12 | **0.02** | 397 omitted midfielders started 4.8% against 11.4% — the largest miscalibration in the table |
+| `ROTOWIRE_OMITTED_START["D"]` | 0.12 | **0.07** | 259 rows, 8.5% observed; at 0.07 the cohort predicts 8.7% |
+
+Replayed over GW4–GW5: blend Brier **0.0678 → 0.0650**, bias **+0.0105 →
++0.0018**, 503 of 1,315 players moved (404 down, 99 up) and the five untouched
+cohorts are byte-identical. Live at GW6, 274 players' `Start_Pct` move and 195
+`Proj` — only D and M, since G and F were held. The direction is what a floor
+change should do: Rotowire-listed midfielders FFP was pessimistic about go up
+(Tzolis 3.93 → 4.83, Cherki 3.22 → 4.08), Rotowire-omitted ones come down
+(Madueke 1.00 → 0.61). Two changes in the top-10 midfielders by `Proj`, five in
+the top-20, largest positional rank move 29 places. Re-running the fit with the
+new constants in place proposes **no further change** in any cell.
+
+Note the M floor now sits *above* the D floor, inverting the reasoning that
+comment used to carry ("DEF highest because a defender who starts plays 90
+minutes"). That is an argument about points variance, not selection: Rotowire's
+listed midfielders start more reliably than its listed defenders, whose rate is
+dragged down by rotation-prone full-backs.
+
+`DEFAULT_START_FLOORS` / `DEFAULT_OMITTED_STARTS` in `projection_engine.py` are
+the config-unreadable fallback and must track `config.py`; leaving them behind
+would mean the app and its own fallback disagree. Tests assert against the
+constants rather than literals, so the next retune does not break a dozen of
+them — four had hard-coded `0.68` and needed rewriting for this one.
 
 ### Source Freshness
 
@@ -2877,7 +2998,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Projection accuracy harness | Phases 1-3 of 4 complete | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". Remaining: **Phase 4** fit `PROJECTION_SOURCE_WEIGHTS` from measured accuracy, give `fpl_ep` a real weight, and add an odds-derived source from stored match odds. |
+| Projection accuracy harness | Phases 1-3 done, Phase 4a done, 4b blocked on data | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". **Phase 4a** done: the start model is now scored (Brier/AUC/bias, calibration and cohort tables, a "Will he start?" section on the Accuracy tab) and `ROTOWIRE_START_FLOORS` / `ROTOWIRE_OMITTED_START` are fitted from it by replaying the engine over the archive — three of eight cells moved, blend Brier 0.0678 → 0.0650. See "Scoring the start model". **Phase 4b** — fit `PROJECTION_SOURCE_WEIGHTS`, give `fpl_ep` a real weight, add an odds-derived source — is blocked until ~GW8: only 2 pre-deadline gameweeks exist against the harness's own 5-gameweek threshold. The replay harness built for 4a is what will fit the points weights too. |
 | Multi-GW Transfer Planner | Completed | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. The sanity-check gate is shared with Classic — see "Suggestion sanity veto". Classic now has a real multi-transfer planner: an ILP over the whole squad in expected points, solved for every K, with the −4 priced inside the objective — see "Multi-Transfer Planner". The horizon's basis is now the engine's throughout: `Proj_Next3` is converted once, `compute_player_scores()` percentiles it (on both sides of the percentile) instead of the raw mixed `MultiGW_Proj`, and the page-side workaround is gone — see "The ROS score reads `Proj_Next3`". Remaining: only Next3GWs is used (Next2/4–6 fetched but ignored). |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
 | Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |

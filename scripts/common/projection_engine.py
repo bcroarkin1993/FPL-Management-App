@@ -72,16 +72,19 @@ DEFAULT_WEIGHTS = {"rotowire": 0.6, "ffp": 0.4, "fpl_ep": 0.0, "odds": 0.0}
 
 #: A start-probability floor applied when *Rotowire* prices a player. Rotowire
 #: only lists expected starters, so its presence is itself a confidence signal
-#: and stops FFP's uncertainty from fully overriding an expert lineup call. The
-#: DEF floor is highest because a defender who starts plays 90 minutes -- there
-#: is no "came on late for two points" outcome the way there is for MID/FWD.
-DEFAULT_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.68, "F": 0.65}
+#: and stops FFP's uncertainty from fully overriding an expert lineup call.
+#:
+#: These two dicts are the fallback used when ``config`` is unreadable, so they
+#: must track it. The measurement behind each value lives at their definitions in
+#: ``config.py``; both were fitted by ``projection_accuracy.fit_start_constants()``
+#: replaying this module over the archive.
+DEFAULT_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.86, "F": 0.65}
 
 #: The other half of the same signal: what a starters-only source's *silence*
-#: about a player implies, when it covered his club. Measured on the GW3
-#: snapshot -- Rotowire-listed players started 90.5% of the time, omitted ones
-#: 4.2% (G 0.0%, D 6.2%, M 6.2%, F 1.8%).
-DEFAULT_OMITTED_STARTS = {"G": 0.02, "D": 0.12, "M": 0.12, "F": 0.05}
+#: about a player implies, when it covered his club. Never zero -- a player no
+#: other source prices takes this as his whole start probability, and Rotowire's
+#: silence is sometimes a name this app failed to match rather than a benching.
+DEFAULT_OMITTED_STARTS = {"G": 0.02, "D": 0.07, "M": 0.02, "F": 0.05}
 
 #: Players a starters-only source must price at a club before its silence about
 #: one of them is evidence of anything.
@@ -241,7 +244,6 @@ def build_projections(
         snapshot can record it for later accuracy scoring.
     """
     weights = dict(weights) if weights is not None else _weights()
-    floors = _start_floors()
 
     if pool is None or pool.empty or "Player_ID" not in pool.columns:
         _logger.warning("build_projections: no usable player pool")
@@ -359,6 +361,8 @@ def blend_aligned(
     news: Optional[pd.Series] = None,
     deadlines: Optional[Sequence] = None,
     weights: Optional[Dict[str, float]] = None,
+    start_floors: Optional[Dict[str, float]] = None,
+    omitted_starts: Optional[Dict[str, float]] = None,
     fallback_names: Optional[Sequence[str]] = None,
     gameweek: Optional[int] = None,
     source_club_coverage: Optional[Dict[str, Dict[str, int]]] = None,
@@ -378,7 +382,11 @@ def blend_aligned(
     what each one means. Conversion to a common basis happens here, once.
     """
     weights = dict(weights) if weights is not None else _weights()
-    floors = _start_floors()
+    # Overridable for the same reason `weights` is: the accuracy harness fits
+    # these constants by replaying this function over archived snapshots with
+    # candidate values. Fitting a separate model *of* the engine rather than the
+    # engine itself is how two implementations of one blend come to disagree.
+    floors = dict(start_floors) if start_floors is not None else _start_floors()
     source_club_coverage = dict(source_club_coverage or {})
     per_source_startpct = dict(per_source_startpct or {})
     per_source_next3 = dict(per_source_next3 or {})
@@ -428,7 +436,8 @@ def blend_aligned(
     #   * The blend can only ever LOWER. An omission is never evidence that a
     #     player *will* start, so a player FFP already rates below the implied
     #     value keeps FFP's number.
-    omitted_starts = _omitted_starts()
+    omitted_starts = (dict(omitted_starts) if omitted_starts is not None
+                      else _omitted_starts())
     # The start probability as the *sources* see it, before any omission penalty
     # is folded in. An unconditional source with no stated basis of its own is
     # recovered against this, not against the penalised value -- see the basis

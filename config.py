@@ -170,10 +170,29 @@ PROJECTION_SOURCE_WEIGHTS = _parse_projection_weights(
 
 # A floor on start probability for players Rotowire prices. Rotowire projects
 # only expected starters, so its listing a player is itself a confidence signal
-# and stops FFP's uncertainty from fully overriding an expert lineup call. DEF is
-# highest because a defender who starts plays 90 minutes -- there is no "came on
-# late for two points" outcome the way there is for MID/FWD.
-ROTOWIRE_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.68, "F": 0.65}
+# and stops FFP's uncertainty from fully overriding an expert lineup call.
+#
+# Fitted by `projection_accuracy.fit_start_constants()`, which replays the engine
+# over the archived pre-deadline snapshots and minimises Brier -- see "Scoring the
+# start model" in CLAUDE.md. Measured over GW4-GW5 (1,315 rows):
+#
+#   M 0.68 -> 0.86   190 listed midfielders started 89.5% of the time against a
+#                    predicted 82.0%. A real bowl in the Brier curve with a clear
+#                    minimum at 0.86 (0.0937 against 0.0997 at 0.68).
+#   D 0.75           left alone: the minimum is a plateau from 0.74 to 0.76 and
+#                    0.75 sits exactly on it. The argmin named 0.74, an
+#                    improvement of zero at six decimal places.
+#   G, F             held: 40 and 39 rows. F is the largest apparent error in the
+#                    whole table (listed forwards started 94.9% against a
+#                    predicted 79.7%) and the thinnest evidence for one, which is
+#                    why the fit is gated per cohort rather than per gameweek.
+#
+# Note this inverts the old reasoning here, which had DEF highest because a
+# defender who starts plays 90 minutes. That is an argument about points
+# variance, not about selection: measured, Rotowire's listed midfielders start
+# *more* reliably than its listed defenders, whose number is dragged down by
+# rotation-prone full-backs.
+ROTOWIRE_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.86, "F": 0.65}
 
 # The other half of the same signal. Rotowire publishes ~11 players per club --
 # its expected XI -- so a player it *omits* from a club it covered is a lineup
@@ -184,15 +203,30 @@ ROTOWIRE_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.68, "F": 0.65}
 # These are blended with the other sources' start probabilities rather than
 # clipped, so FFP still orders the omitted players among themselves: a cap
 # flattens an FFP-90% player and an FFP-20% player onto the same number.
-# Calibrated on bias, not MAE -- a cohort that mostly scores zero always
-# rewards projecting zero, so MAE alone drives this constant to 0. Replaying
-# GW3 through the engine, bias on the omitted cohort moves +0.129 -> -0.097 and
-# their MAE 0.655 -> 0.497, with the 220 listed players untouched. The values
-# are the observed start rates roughly doubled, which is deliberate: they are
-# one gameweek's measurement, and an unmatched name inside a covered club is
-# indistinguishable from a benched one. Loosening further (D/M 0.22) trades a
-# better bias for a worse MAE; the accuracy harness is what should settle it.
-ROTOWIRE_OMITTED_START = {"G": 0.02, "D": 0.12, "M": 0.12, "F": 0.05}
+#
+# The accuracy harness has now settled these, which the previous note said was
+# what should happen. `fit_start_constants()` scores candidates on **Brier**
+# rather than the bias these were first calibrated on -- Brier is a proper
+# scoring rule, so unlike MAE it cannot be won by always answering zero, which is
+# the failure mode a mostly-benched cohort invites. Measured over GW4-GW5:
+#
+#   M 0.12 -> 0.02   397 omitted midfielders started 4.8% of the time against a
+#                    predicted 11.4% -- the largest miscalibration in the table.
+#   D 0.12 -> 0.07   259 rows, 8.5% observed against 10.7% predicted. At 0.07 the
+#                    cohort predicts 8.7%, which is calibration to a fifth of a
+#                    point.
+#   G, F             held at 102 and 117 rows, under the 150 this is gated on.
+#
+# **Neither is fitted to zero, however much the Brier wants it.** The M curve is
+# monotone down to the grid boundary, so the unclamped argmin is 0.00;
+# MIN_IMPLIED_START holds it at 0.02. Rotowire's silence about a player at a club
+# it covers is usually a benching and sometimes a name this app failed to match,
+# and those are indistinguishable from here -- a zero says a player certainly
+# will not start, which for a matching failure is certainly wrong. It is also
+# where the term stops discriminating: a player no other source prices takes the
+# implied value as his whole start probability, so a zero puts his `Proj` at
+# exactly 0. Live, that would have been 78 further midfielders.
+ROTOWIRE_OMITTED_START = {"G": 0.02, "D": 0.07, "M": 0.02, "F": 0.05}
 
 # How many players Rotowire must price at a club before its silence about one
 # of them means anything. Observed: exactly 11 per club, all 20 clubs. A club

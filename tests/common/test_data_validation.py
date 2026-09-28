@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from scripts.common.data_validation import (
+    check_start_calibration,
     check_ffp_feed,
     check_transfer_risk,
     check_transfer_windows,
@@ -1361,3 +1362,60 @@ class TestCheckDraftGameSettings:
         assert issues
         assert {i.severity for i in issues} == {"warning"}
         assert "waivers_before_deadline_hours_event" in issues[0].hint
+
+
+class TestStartCalibration:
+    """Every other check here asks whether one number is possible. This one asks
+    a question no single row can answer: a start probability is only right or
+    wrong in aggregate.
+
+    The fixtures are the real thing. In GW3 the app rendered 208 players at
+    exactly 100% -- a fallback standing in for a source that had stopped
+    publishing -- and 27% of them started.
+    """
+
+    def _calib(self, rows):
+        df = pd.DataFrame(rows, columns=["n", "predicted", "actual"])
+        df["gap"] = df["predicted"] - df["actual"]
+        return df
+
+    def test_a_confident_claim_that_is_wrong_is_an_error(self):
+        issues = check_start_calibration(self._calib([(70, 0.998, 0.275)]))
+        assert any(i.severity == "error" for i in issues)
+
+    def test_a_well_calibrated_table_passes(self):
+        """The live GW4-GW5 numbers, which are what a working model looks like."""
+        issues = check_start_calibration(self._calib([
+            (419, 0.005, 0.005), (243, 0.108, 0.033), (156, 0.197, 0.160),
+            (113, 0.786, 0.850), (263, 0.907, 0.928),
+        ]))
+        assert not [i for i in issues if i.severity == "error"]
+
+    def test_a_thin_bucket_says_nothing(self):
+        """One unlucky benching moves a small bucket by several points."""
+        assert not check_start_calibration(self._calib([(3, 1.0, 0.0)]))
+
+    def test_a_percentage_scale_is_caught(self):
+        issues = check_start_calibration(self._calib([(200, 85.0, 0.9)]))
+        assert any("outside 0-1" in i.message for i in issues)
+
+    def test_a_drifting_band_is_a_warning_not_an_error(self):
+        """A constant to retune is not a number that cannot be right."""
+        issues = check_start_calibration(self._calib([(93, 0.409, 0.183)]))
+        assert issues and all(i.severity == "warning" for i in issues)
+
+    def test_a_cohort_priced_at_more_than_double_its_rate_is_surfaced(self):
+        """The live finding: 397 omitted midfielders predicted 11.4%, started 4.8%."""
+        cohorts = pd.DataFrame([
+            {"position": "M", "cohort": "omitted", "n": 397,
+             "predicted": 0.114, "actual": 0.048},
+            {"position": "D", "cohort": "listed", "n": 171,
+             "predicted": 0.858, "actual": 0.860},
+        ])
+        issues = check_start_calibration(cohorts=cohorts)
+        assert len(issues) == 1
+        assert "M players" in issues[0].message
+
+    def test_nothing_to_check_is_an_error(self):
+        """A broken harness renders a page identical to a working one."""
+        assert any(i.severity == "error" for i in check_start_calibration(None))

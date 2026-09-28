@@ -46,6 +46,7 @@ __all__ = [
     "check_resolved_squad",
     "check_free_transfers",
     "check_transfer_plan",
+    "check_start_calibration",
     "format_issues",
     "raise_on_error",
 ]
@@ -2249,6 +2250,110 @@ _MAX_PLAUSIBLE_GAIN_PER_TRANSFER_PER_GW = 4.0
 
 #: Above this a "price" is in tenths, not millions.
 _MAX_PLAUSIBLE_PLAYER_PRICE = 30.0
+
+
+# A bucket of the start-probability calibration table needs this many rows before
+# it says anything. Below it a single unlucky benching moves the observed rate by
+# several points.
+MIN_CALIBRATION_BUCKET_ROWS = 40
+# Above this predicted probability the app is telling a manager a player is
+# nailed on -- it is the band the lineup cards colour as "very likely" and the
+# band every recommendation at the top of a board sits in.
+HIGH_CONFIDENCE_START = 0.85
+# How far a high-confidence bucket may sit above its observed rate. Wide on
+# purpose: the failure this exists for was 0.998 predicted against 0.275
+# observed. A well-calibrated app runs at a couple of points.
+MAX_HIGH_CONFIDENCE_GAP = 0.35
+# Any bucket drifting further than this is worth saying out loud, but it is a
+# warning: one cohort being 20 points off is a constant that needs retuning, not
+# a number that cannot be right.
+MAX_BUCKET_GAP = 0.20
+
+
+def check_start_calibration(calibration: Optional[pd.DataFrame] = None,
+                            cohorts: Optional[pd.DataFrame] = None,
+                            min_rows: int = MIN_CALIBRATION_BUCKET_ROWS) -> List[Issue]:
+    """Do players start as often as the app says they will?
+
+    Every other check in this file asks whether one number is possible. This one
+    asks a question no single row can answer: a start probability is only right
+    or wrong *in aggregate*, and every individual value in the failure it was
+    written for was entirely plausible. In GW3 the engine rendered 208 players at
+    exactly 100% -- not because any source said so, but because a fallback stood
+    in for a source that had stopped publishing -- and 27% of them started. Read
+    one row at a time there is nothing to see. Bucketed, it is unmissable.
+
+    `calibration` is a frame of `n` / `predicted` / `actual` per probability
+    bucket, as produced by `projection_accuracy.start_calibration()`; `cohorts`
+    is the per-position, per-Rotowire-cohort version.
+    """
+    check = "start_calibration"
+    issues: List[Issue] = []
+
+    if calibration is None or not isinstance(calibration, pd.DataFrame) or calibration.empty:
+        if cohorts is None or not isinstance(cohorts, pd.DataFrame) or cohorts.empty:
+            return [Issue(check, "error", "No start-probability calibration to check.",
+                          "Needs a scoreable gameweek: a pre-deadline projection "
+                          "snapshot and the actual minutes for the same week.")]
+        calibration = pd.DataFrame()
+
+    if not calibration.empty:
+        pred = pd.to_numeric(calibration.get("predicted"), errors="coerce")
+        act = pd.to_numeric(calibration.get("actual"), errors="coerce")
+        rows = pd.to_numeric(calibration.get("n"), errors="coerce").fillna(0)
+
+        out_of_range = pred[(pred < 0) | (pred > 1)]
+        if len(out_of_range):
+            issues.append(Issue(
+                check, "error",
+                "Start probability outside 0-1: %s"
+                % ", ".join("%.3f" % v for v in out_of_range.head(3)),
+                "A probability on a percentage scale. The engine works in 0-1 "
+                "and FFP publishes 0-100."))
+
+        big = rows >= min_rows
+        for idx in calibration.index[big & pred.ge(HIGH_CONFIDENCE_START)]:
+            gap = float(pred[idx]) - float(act[idx])
+            if gap > MAX_HIGH_CONFIDENCE_GAP:
+                issues.append(Issue(
+                    check, "error",
+                    "%d players rated %.0f%% to start actually started %.0f%% "
+                    "of the time." % (int(rows[idx]), pred[idx] * 100, act[idx] * 100),
+                    "The app's most confident claim, and it is wrong by more "
+                    "than a third. The known cause is a fallback standing in "
+                    "for a source that stopped publishing -- every player a "
+                    "source listed resolving to exactly 1.00."))
+
+        for idx in calibration.index[big]:
+            gap = float(pred[idx]) - float(act[idx])
+            if abs(gap) > MAX_BUCKET_GAP and not (gap > MAX_HIGH_CONFIDENCE_GAP
+                                                  and pred[idx] >= HIGH_CONFIDENCE_START):
+                issues.append(Issue(
+                    check, "warning",
+                    "Players rated %.0f%% to start did so %.0f%% of the time "
+                    "(n=%d)." % (pred[idx] * 100, act[idx] * 100, int(rows[idx])),
+                    "A whole band of the start model is off in one direction, "
+                    "which is a constant to retune rather than a broken value."))
+
+    if cohorts is not None and isinstance(cohorts, pd.DataFrame) and not cohorts.empty:
+        for _, row in cohorts.iterrows():
+            n = float(pd.to_numeric(row.get("n"), errors="coerce") or 0)
+            p = float(pd.to_numeric(row.get("predicted"), errors="coerce") or 0)
+            a = float(pd.to_numeric(row.get("actual"), errors="coerce") or 0)
+            if n < min_rows or a <= 0 or abs(p - a) < 0.03:
+                continue
+            ratio = p / a
+            if ratio >= 2.0 or ratio <= 0.5:
+                issues.append(Issue(
+                    check, "warning",
+                    "%s players Rotowire %s: predicted %.1f%% to start, "
+                    "observed %.1f%% (n=%d)."
+                    % (row.get("position"), row.get("cohort"), p * 100, a * 100, int(n)),
+                    "ROTOWIRE_START_FLOORS and ROTOWIRE_OMITTED_START are the "
+                    "two constants this cohort is priced by; "
+                    "projection_accuracy.fit_start_constants() fits them."))
+
+    return issues
 
 
 def check_transfer_plan(plan: Optional[dict],

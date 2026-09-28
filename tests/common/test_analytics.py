@@ -1529,10 +1529,14 @@ class TestFixtureBlendBasis:
             "FFP_GW": [3],
         })
         out = blend_fixture_projections(players, ffp, expected_gw=3)
-        # 0.6*5.0 + 0.4*6.0 = 5.4, then x the 0.68 MID floor (start 50% < floor).
-        assert out.loc[0, "Proj_Blended"] == pytest.approx(5.4 * 0.68, abs=0.01)
+        # 0.6*5.0 + 0.4*6.0 = 5.4, then x the MID floor (start 50% is below it).
+        # Against the constant, not a literal: the floors are fitted from the
+        # archive and move.
+        from scripts.common.projection_engine import DEFAULT_START_FLOORS
+        floor = DEFAULT_START_FLOORS["M"]
+        assert out.loc[0, "Proj_Blended"] == pytest.approx(5.4 * floor, abs=0.01)
         # The old behaviour blended Predicted (3.0) instead: 0.6*5 + 0.4*3 = 4.2.
-        assert out.loc[0, "Proj_Blended"] > 4.2 * 0.68
+        assert out.loc[0, "Proj_Blended"] > 4.2 * floor
 
 
 # =============================================================================

@@ -1021,6 +1021,8 @@ def render_accuracy():
         c2.metric("Bias", f"{row['bias']:+.2f}")
         c3.metric("Rank correlation", f"{row['spearman']:.2f}")
 
+    _render_start_model(scored)
+
     with st.expander("Per gameweek"):
         detail = scored.copy()
         detail["Source"] = detail["source"].map(_SOURCE_LABELS).fillna(detail["source"])
@@ -1033,6 +1035,116 @@ def render_accuracy():
         )
 
     _render_weight_fit(scored)
+
+
+def _render_start_model(scored):
+    """How good is the app at the other half of the question -- who plays?
+
+    `Proj = Proj_Start x Start_Pct`, so this half is on every board in the app,
+    and until now nothing scored it. It is also where the evidence is: a start
+    probability is checked against a binary outcome for every player in the pool,
+    where the points model is only scoreable on the couple of hundred who started.
+    """
+    start = scored[scored["scope"] == projection_accuracy.SCOPE_START]
+    if start.empty:
+        return
+
+    st.markdown("#### Will he start?")
+    st.caption(
+        "The minutes model on its own, scored against whether each player "
+        "actually started. **Brier** is the mean squared error of a probability — "
+        "lower is better, and 0.25 is what you get by answering 50% to "
+        "everything. **AUC** is ordering alone: whether the players it rated "
+        "higher did start more often. The two fail differently — a source can "
+        "order players perfectly and still state every probability far too high — "
+        "which is why **bias** is here as well."
+    )
+
+    summary = projection_accuracy.summarise(scored)
+    rows = summary[summary["scope"] == projection_accuracy.SCOPE_START]
+    if not rows.empty:
+        render_styled_table(
+            pd.DataFrame({
+                "Source": rows["source"].map(_SOURCE_LABELS).fillna(rows["source"]),
+                "GWs": rows["gameweeks"],
+                "Players scored": rows["n"],
+                "Coverage": rows["coverage"] * 100,
+                "Brier": rows["brier"],
+                "Bias": rows["bias"],
+                "AUC": rows["auc"],
+            }).reset_index(drop=True),
+            col_formats={"Coverage": "{:.0f}%", "Brier": "{:.3f}",
+                         "Bias": "{:+.3f}", "AUC": "{:.3f}"},
+            negative_color_cols=["Brier"],
+            positive_color_cols=["AUC"],
+        )
+        st.caption(
+            "FFP and FPL are scored only on the players they publish a number "
+            "for, which is why their coverage is well under 100% — the blend "
+            "has an opinion about everybody."
+        )
+
+    calib = projection_accuracy.start_calibration()
+    if not calib.empty:
+        st.markdown("**Calibration**")
+        st.caption(
+            "Whether a stated probability means what it says. This is the table "
+            "a single score cannot show you: in GW3 the app rendered 208 players "
+            "at exactly 100% — not because any source said so, but because a "
+            "fallback stood in for one that had stopped publishing — and a "
+            "quarter of them started. Every individual number looked fine."
+        )
+        render_styled_table(
+            pd.DataFrame({
+                "Rated to start": calib["bucket"].map(_band_label),
+                "Players": calib["n"],
+                "Predicted": calib["predicted"] * 100,
+                "Actually started": calib["actual"] * 100,
+                "Gap": calib["gap"] * 100,
+            }).reset_index(drop=True),
+            col_formats={"Predicted": "{:.0f}%", "Actually started": "{:.0f}%",
+                         "Gap": "{:+.0f}"},
+        )
+
+    cohorts = projection_accuracy.start_cohort_rates()
+    if not cohorts.empty:
+        with st.expander("What Rotowire's silence is worth"):
+            st.caption(
+                "Rotowire lists about eleven players a club, so it *omitting* "
+                "someone is a lineup call rather than a missing value. These "
+                "eight cells are what the engine's two tunable constants act "
+                "on: a floor under the players it lists, an implied probability "
+                "for the ones it does not. The cells differ in size by an order "
+                "of magnitude, so each is retuned on its own sample — not on a "
+                "gameweek count."
+            )
+            render_styled_table(
+                pd.DataFrame({
+                    "Position": cohorts["position"],
+                    "Rotowire": cohorts["cohort"],
+                    "Players": cohorts["n"],
+                    "Predicted": cohorts["predicted"] * 100,
+                    "Started": cohorts["actual"] * 100,
+                    "Constant": cohorts["constant"] * 100,
+                    "Enough to fit": cohorts["enough_rows"].map({True: "yes", False: "no"}),
+                }).reset_index(drop=True),
+                col_formats={"Predicted": "{:.1f}%", "Started": "{:.1f}%",
+                             "Constant": "{:.0f}%"},
+            )
+            st.caption(
+                "Backfills are excluded here, unlike the tables above: a "
+                "snapshot taken after kickoff may have seen the team sheet, and "
+                "a start model scored against the answer is not measuring "
+                "anything."
+            )
+
+
+def _band_label(interval) -> str:
+    """'70-85%' for a calibration bucket."""
+    try:
+        return "%d–%d%%" % (max(0, round(interval.left * 100)), round(interval.right * 100))
+    except Exception:
+        return str(interval)
 
 
 def _render_weight_fit(scored):

@@ -320,14 +320,22 @@ class TestRotowireOmission:
         assert out.loc[9, "Start_Pct"] < 0.70
 
     def test_listed_players_are_untouched(self):
-        """Re-deriving the listed side as a blend was measured and is worse."""
+        """Re-deriving the listed side as a blend was measured and is worse.
+
+        A listed player takes FFP's number or the positional floor, whichever is
+        higher -- never the omission blend, which is what the other players here
+        get. Written against the constant rather than a literal: the floors are
+        fitted from the archive and move.
+        """
         out = self._run(_covered_pool(), _covered_sources())
-        assert out.loc[1, "Start_Pct"] == pytest.approx(0.80)
+        assert out.loc[1, "Start_Pct"] == pytest.approx(
+            max(0.80, DEFAULT_START_FLOORS["M"]))
 
     def test_it_can_only_lower(self):
         """An omission is never evidence that a player *will* start."""
-        out = self._run(_covered_pool(), _covered_sources(omitted_ffp_start=0.03))
-        assert out.loc[9, "Start_Pct"] == pytest.approx(0.03)
+        below = DEFAULT_OMITTED_STARTS["M"] / 2
+        out = self._run(_covered_pool(), _covered_sources(omitted_ffp_start=below))
+        assert out.loc[9, "Start_Pct"] == pytest.approx(below)
 
     def test_ffp_still_orders_the_omitted_players(self):
         """The reason this blends instead of capping.
@@ -350,13 +358,24 @@ class TestRotowireOmission:
         assert out.loc[9, "Start_Pct"] - out.loc[10, "Start_Pct"] == pytest.approx(
             0.4 * (0.90 - 0.20))
 
-    def test_a_goalkeeper_is_discounted_hardest(self):
-        """Keepers do not rotate: 0 of 51 omitted GKs started in GW3."""
-        gk = self._run(_covered_pool(position="G"),
-                       _covered_sources(position="G", omitted_ffp_start=0.70))
-        mid = self._run(_covered_pool(position="M"),
-                        _covered_sources(position="M", omitted_ffp_start=0.70))
-        assert gk.loc[9, "Start_Pct"] < mid.loc[9, "Start_Pct"]
+    def test_the_implied_value_is_positional(self):
+        """An omitted goalkeeper and an omitted defender are not the same claim.
+
+        This was written as "a goalkeeper is discounted hardest", against
+        midfield. That no longer separates them: fitting the constants on GW4-GW5
+        brought the midfield value down to the same floor the keepers sit on --
+        397 omitted midfielders started 4.8% of the time -- so the two are now
+        equal by measurement rather than by accident. Defence is the position
+        that still differs, and it differs in the direction it should: a bench
+        defender is likelier to start than a backup keeper.
+        """
+        def omitted(position):
+            return self._run(_covered_pool(position=position),
+                             _covered_sources(position=position,
+                                              omitted_ffp_start=0.70)).loc[9, "Start_Pct"]
+
+        assert omitted("G") < omitted("D")
+        assert DEFAULT_OMITTED_STARTS["G"] <= DEFAULT_OMITTED_STARTS["D"]
 
     def test_an_uncovered_club_is_not_punished(self):
         """Below the coverage threshold, silence is an outage, not a lineup."""
