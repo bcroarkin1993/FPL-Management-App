@@ -12,7 +12,7 @@ tests and from GitHub Actions.
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -30,7 +30,69 @@ TOTAL_GWS = 38
 INJURY_FLOOR = 0.10
 
 
-def _news_duration(news, deadlines=None):
+def _naive(moment):
+    """``moment`` with any timezone dropped, so it can be compared to a parsed date.
+
+    Return dates are parsed naive, while callers hand us whatever they have --
+    ``gameweek_deadlines()`` reads tz-aware UTC stamps off the bootstrap.
+    Subtracting one from the other raises, and this is the only place the two
+    meet.
+    """
+    return moment.replace(tzinfo=None) if moment.tzinfo is not None else moment
+
+
+#: How far into the past a year-less return date is still read as *this* year.
+#:
+#: Two bounds set it. FPL keeps `news` fresh: across all 25 players carrying a
+#: parseable return date on 2026-10-12, the furthest any elapsed date had been
+#: left unrevised was **2 days** (Dasilva, "back 10 Oct") -- and both of that
+#: day's elapsed dates had been rewritten to "Unknown return date" within 24
+#: hours. The other bound is the long-lag case that must *not* read as elapsed,
+#: a season-ending injury: "ACL - Expected back 20 May" read in October is 145
+#: days past. Thirty days sits an order of magnitude above the observed
+#: staleness and well clear of that.
+NEWS_DATE_GRACE_DAYS = 30
+
+
+def _resolve_year(parsed, now, grace_days=NEWS_DATE_GRACE_DAYS):
+    """Put a year-less return date in the right calendar year.
+
+    **An elapsed return date means he is back, not that he is back in a year.**
+    The year used to be inferred by rolling any past date *forward*. Measured on
+    2026-10-12, "Expected back 10 Oct" became 10 Oct **2027**, so
+    :func:`gameweeks_until` counted all 33 remaining deadlines as missed: two
+    live players were written off for the rest of the season -- Dasilva and
+    Eccles -- while both were in fact available. It reaches the ``Proj_Next3``
+    cap, ``Injury_Mult`` and Waiver Wire drop protection alike, and every number
+    it produced was individually plausible.
+
+    But the roll-forward was there for a real case, and simply preferring the
+    *nearest* year breaks it: "ACL - Expected back 20 May" read in October is
+    145 days past and means next May, not nothing. Both readings are needed, and
+    what separates them is **how far past** the date is -- days means stale news
+    about a player who is back, months means a date that always belonged to next
+    year.
+
+    So the year is chosen to land the date in a window that opens
+    ``grace_days`` before ``now``: the earliest candidate year not before that.
+    A wheel with its cut point in the recent past wraps correctly in both
+    directions, which a cut point at ``now`` does not -- "back 28 Dec" read on 7
+    January is the mirror of the October bug, and rolling *forward* there writes
+    a returning player off for nearly a season.
+    """
+    earliest = now - timedelta(days=grace_days)
+    best = None
+    for year in range(earliest.year - 1, earliest.year + 3):
+        try:
+            candidate = parsed.replace(year=year)
+        except ValueError:          # 29 Feb in a non-leap year
+            continue
+        if candidate >= earliest and (best is None or candidate < best):
+            best = candidate
+    return best if best is not None else parsed
+
+
+def _news_duration(news, deadlines=None, now=None):
     """Gameweeks missed *as the news text states*, or ``None`` if it states none.
 
     Separate from the bucket fallbacks because **zero is an answer**. Once the
@@ -43,6 +105,12 @@ def _news_duration(news, deadlines=None):
     news_str = "" if pd.isna(news) else str(news).strip()
     if not news_str:
         return None
+
+    # Injectable so the tests can pin a reference date. They assert against real
+    # dates off the live calendar, and judging those against the wall clock is
+    # what had two of them failing sixteen days after they were written -- the
+    # same defect as the production one below, seen from the test side.
+    now = _naive(now if now is not None else datetime.now())
 
     # 1. An explicit return date: "Expected back 11 Oct".
     # "Suspended until 17 Oct" is a date too. Without it the text fell through to
@@ -61,16 +129,13 @@ def _news_duration(news, deadlines=None):
             except ValueError:
                 continue
             if parsed.year == 1900:         # no year in the format
-                now = datetime.now()
-                parsed = parsed.replace(year=now.year)
-                if parsed < now:
-                    parsed = parsed.replace(year=now.year + 1)
+                parsed = _resolve_year(parsed, now)
             # Count real deadlines where the caller supplied them; the seven-day
             # approximation is the fallback for callers with no fixture list, and
             # is wrong across a break.
             if deadlines:
                 return gameweeks_until(parsed, deadlines)
-            days_until = (parsed - datetime.now()).days
+            days_until = (parsed - now).days
             return max(0, (days_until + 6) // 7)
 
     # 2. A suspension length: "Suspended for 3 matches". A count of matches, so
@@ -109,7 +174,7 @@ def gameweeks_until(target, deadlines) -> int:
     return missed
 
 
-def estimate_games_to_miss(news, chance, status, deadlines=None) -> int:
+def estimate_games_to_miss(news, chance, status, deadlines=None, now=None) -> int:
     """Estimate how many gameweeks a player will miss.
 
     Resolution order, most to least reliable:
@@ -123,7 +188,7 @@ def estimate_games_to_miss(news, chance, status, deadlines=None) -> int:
     Moved verbatim from ``scripts/draft/waiver_wire.py`` so Draft waiver logic and
     team-strength scoring share one implementation.
     """
-    from_news = _news_duration(news, deadlines)
+    from_news = _news_duration(news, deadlines, now=now)
     if from_news is not None:
         return from_news
 
@@ -171,7 +236,7 @@ def estimate_games_to_miss(news, chance, status, deadlines=None) -> int:
 OUT_OF_SQUAD_STATUSES = ("i", "s", "u", "n")
 
 
-def stated_games_to_miss(news, chance, status, deadlines=None):
+def stated_games_to_miss(news, chance, status, deadlines=None, now=None):
     """Games missed where the *source states a duration*, else ``None``.
 
     :func:`estimate_games_to_miss` always answers, falling back through
@@ -196,7 +261,7 @@ def stated_games_to_miss(news, chance, status, deadlines=None):
     # keyword match by hand would instead let "Unspecified injury - Unknown
     # return date" through on the word "return", and reading its 0 as "nothing
     # stated" would write off a player who misses nothing.
-    from_news = _news_duration(news, deadlines)
+    from_news = _news_duration(news, deadlines, now=now)
     if from_news is not None:
         return from_news
 
@@ -206,7 +271,7 @@ def stated_games_to_miss(news, chance, status, deadlines=None):
     return None
 
 
-def games_to_miss_series(news, chance, status, index, deadlines=None) -> pd.Series:
+def games_to_miss_series(news, chance, status, index, deadlines=None, now=None) -> pd.Series:
     """:func:`stated_games_to_miss` over aligned Series, 0 where nothing is stated.
 
     The scalar version runs regexes over free text, so it is only called for
@@ -227,7 +292,7 @@ def games_to_miss_series(news, chance, status, index, deadlines=None) -> pd.Seri
     out = pd.Series(0, index=index, dtype="int64")
     for idx in index[flagged.to_numpy()]:
         stated = stated_games_to_miss(news.get(idx), chance.get(idx), status.get(idx),
-                                      deadlines=deadlines)
+                                      deadlines=deadlines, now=now)
         if stated is not None:
             out.at[idx] = stated
     return out

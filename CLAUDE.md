@@ -435,6 +435,38 @@ gate re-deriving what the news said. "Suspended until 17 Oct" is a date too, and
 was previously falling through to the status default of three where the calendar
 says one.
 
+**And zero is an answer about the *year*, too.** A year-less return date had its
+year inferred by rolling any past date *forward*, so an elapsed one named next
+year: measured 2026-10-12, "Expected back 10 Oct" became 10 Oct **2027** and
+`gameweeks_until()` counted all 33 remaining deadlines as missed. Dasilva and
+Eccles were written off for the rest of the season while both were available —
+reaching the `Proj_Next3` cap, `Injury_Mult` and Waiver Wire drop protection
+alike, with every number it produced individually plausible.
+
+The roll-forward existed for a real case, though, and preferring the **nearest**
+year breaks that one instead: "ACL - Expected back 20 May" read in October is 145
+days past and means next May, not nothing. What separates them is *how far* past
+— days is stale news about a player who is back, months is a date that always
+belonged to next year — so `_resolve_year()` lands the date in a window opening
+`NEWS_DATE_GRACE_DAYS` (30) before now. A cut point in the recent past wraps in
+both directions, which a cut point at *now* does not: "back 28 Dec" read on 7
+January is the October bug mirrored, and rolling forward there writes a returning
+player off for nearly a season.
+
+The constant sits between two bounds. FPL keeps `news` fresh — of the 25 players
+carrying a parseable return date on 2026-10-12 the furthest any elapsed date had
+been left unrevised was **2 days**, and both of that day's elapsed dates read
+"Unknown return date" within 24 hours — and the long-lag case that must not read
+as elapsed is 145 days. So the exposure is intermittent by construction: it fires
+on any player whose stated date passes before FPL revises the text, and 18
+players' dates elapse within a fortnight of that measurement.
+
+`now` is injectable through `_news_duration`, `estimate_games_to_miss`,
+`stated_games_to_miss` and `games_to_miss_series` because the tests assert
+against real calendar dates, and judging those against the wall clock is the same
+defect seen from the test side — it had two of them failing sixteen days after
+they were written.
+
 Measured live at GW6: 180 players carry a stated absence, 10 with a projection
 at all. Five are out for the window and score 0; four due back on 11 Oct get two
 weeks' worth (Milenković 8.36, Dean Henderson 7.64, Röhl 6.89, Fatawu 9.82 off

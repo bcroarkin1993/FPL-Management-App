@@ -4,7 +4,7 @@
 these tests pin its behaviour so the shared version cannot drift.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
@@ -16,6 +16,7 @@ from scripts.common.injury_helpers import (
     gameweeks_until,
     stated_games_to_miss,
     INJURY_FLOOR,
+    NEWS_DATE_GRACE_DAYS,
     estimate_games_to_miss,
     gameweeks_remaining,
     injury_multiplier,
@@ -179,7 +180,8 @@ class TestGamesToMissSeries:
         idx = pd.Index([7])
         out = games_to_miss_series(
             pd.Series(["Hamstring injury - Expected back 11 Oct"], index=idx),
-            pd.Series([0], index=idx), pd.Series(["i"], index=idx), idx)
+            pd.Series([0], index=idx), pd.Series(["i"], index=idx), idx,
+            now=datetime(2026, 10, 1))
         assert out.iloc[0] > 0
 
     def test_a_bare_list_index_is_accepted(self):
@@ -220,7 +222,8 @@ class TestAGameweekIsNotAWeek:
     def test_the_estimator_uses_the_calendar_when_given_one(self):
         """Thirteen days out, but only a break in between: nothing is missed."""
         news = "Hamstring injury - Expected back 10 Oct"
-        far = estimate_games_to_miss(news, 0, "i", deadlines=self._deadlines())
+        far = estimate_games_to_miss(news, 0, "i", deadlines=self._deadlines(),
+                                     now=datetime(2026, 9, 27))
         assert far == 0
 
     def test_it_falls_back_to_the_seven_day_approximation(self):
@@ -240,15 +243,115 @@ class TestAGameweekIsNotAWeek:
         """
         assert stated_games_to_miss(
             "Hamstring injury - Expected back 10 Oct", 0, "i",
-            deadlines=self._deadlines()) == 0
+            deadlines=self._deadlines(), now=datetime(2026, 9, 27)) == 0
 
     def test_a_suspension_with_an_end_date_reads_the_date(self):
         """"Suspended until 17 Oct" fell through to the status default of 3."""
         assert stated_games_to_miss(
-            "Suspended until 17 Oct", 0, "s", deadlines=self._deadlines()) == 1
+            "Suspended until 17 Oct", 0, "s", deadlines=self._deadlines(),
+            now=datetime(2026, 9, 27)) == 1
 
     def test_a_suspension_length_is_a_count_of_matches_not_a_date(self):
         """So the calendar cannot help, and must not interfere."""
         assert estimate_games_to_miss(
             "Suspended for 3 matches", None, None,
             deadlines=self._deadlines()) == 3
+
+
+class TestAnElapsedReturnDateMeansHeIsBack:
+    """A year-less return date belongs to whichever year sits nearest.
+
+    FPL leaves a return date in `news` for days after it passes, and the year
+    was inferred by rolling any past date *forward*. Measured on 2026-10-12,
+    "Expected back 10 Oct" became 10 Oct **2027**, so `gameweeks_until` counted
+    all 33 remaining deadlines as missed: Dasilva and Eccles were written off
+    for the rest of the season while both were in fact available. It reaches the
+    `Proj_Next3` cap, `Injury_Mult` and Waiver Wire drop protection, and every
+    number it produced was individually plausible.
+
+    The roll-forward existed for a genuine case, though, so both readings have
+    to work and the cases come in pairs. Preferring the *nearest* year was tried
+    and is wrong in the other direction: "ACL - Expected back 20 May" read in
+    October is 145 days past and means next May, not nothing. What separates the
+    two is how far past the date is -- days is stale news, months is next year.
+    """
+
+    @staticmethod
+    def _deadlines(base):
+        return [base + timedelta(days=7 * i) for i in range(1, 6)]
+
+    def test_a_date_two_days_past_misses_nothing(self):
+        """The live bug: he is back, not back in twelve months."""
+        now = datetime(2026, 10, 12)
+        assert stated_games_to_miss(
+            "Hamstring injury - Expected back 10 Oct", 0, "i",
+            deadlines=self._deadlines(now), now=now) == 0
+
+    def test_it_does_not_write_off_the_rest_of_the_season(self):
+        """The symptom was the *magnitude*, which no single-value check sees."""
+        now = datetime(2026, 10, 12)
+        deadlines = [now + timedelta(days=7 * i) for i in range(1, 34)]
+        assert stated_games_to_miss(
+            "Unspecified injury - Expected back 12 Oct", 0, "i",
+            deadlines=deadlines, now=now) < len(deadlines)
+
+    def test_december_news_about_january_still_wraps_forward(self):
+        """The case the roll-forward was written for, and must keep handling.
+
+        Without the wrap the target is 10 Jan *2026*, which precedes every
+        deadline and so reads as nothing missed -- the benign direction, but
+        still wrong.
+        """
+        now = datetime(2026, 12, 20)
+        assert stated_games_to_miss(
+            "Knee injury - Expected back 10 Jan", 0, "i",
+            deadlines=self._deadlines(now), now=now) == 2
+
+    def test_january_news_about_december_wraps_backward(self):
+        """The mirror of the live bug, and why `now.year - 1` is a candidate."""
+        now = datetime(2027, 1, 7)
+        assert stated_games_to_miss(
+            "Calf injury - Expected back 28 Dec", 0, "i",
+            deadlines=self._deadlines(now), now=now) == 0
+
+    def test_a_future_date_is_unaffected(self):
+        """The ordinary case has to be byte-identical to before."""
+        now = datetime(2026, 10, 12)
+        assert stated_games_to_miss(
+            "Leg injury - Expected back 28 Nov", 0, "i",
+            deadlines=self._deadlines(now), now=now) == 5
+
+    def test_an_explicit_year_is_never_second_guessed(self):
+        """Only a year-less date is inferred."""
+        now = datetime(2026, 10, 12)
+        assert stated_games_to_miss(
+            "Knee injury - Expected back 24 Oct 2026", 0, "i",
+            deadlines=self._deadlines(now), now=now) == 1
+
+    def test_a_season_ending_date_still_wraps_forward(self):
+        """Nearest-year read this as elapsed; it means next May."""
+        now = datetime(2026, 10, 13)
+        deadlines = [now + timedelta(days=7 * i) for i in range(1, 31)]
+        assert stated_games_to_miss(
+            "ACL - Expected back 20 May", 0, "i",
+            deadlines=deadlines, now=now) == len(deadlines)
+
+    def test_the_grace_window_is_where_the_two_readings_part(self):
+        """Just inside it he is back; just outside, the date meant next year."""
+        now = datetime(2026, 10, 13)
+        inside = (now - timedelta(days=NEWS_DATE_GRACE_DAYS - 1)).strftime("%d %b")
+        outside = (now - timedelta(days=NEWS_DATE_GRACE_DAYS + 1)).strftime("%d %b")
+        deadlines = [now + timedelta(days=7 * i) for i in range(1, 6)]
+        assert stated_games_to_miss(
+            "Knock - Expected back %s" % inside, 0, "i",
+            deadlines=deadlines, now=now) == 0
+        assert stated_games_to_miss(
+            "Knock - Expected back %s" % outside, 0, "i",
+            deadlines=deadlines, now=now) == len(deadlines)
+
+    def test_a_tz_aware_now_is_accepted(self):
+        """`gameweek_deadlines()` reads tz-aware UTC stamps off the bootstrap."""
+        now = datetime(2026, 10, 12, tzinfo=timezone.utc)
+        assert stated_games_to_miss(
+            "Hamstring injury - Expected back 10 Oct", 0, "i",
+            deadlines=self._deadlines(datetime(2026, 10, 12)), now=now) == 0
