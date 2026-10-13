@@ -566,6 +566,153 @@ def fetch_ffp_table(timeout: int = ffp_feed.DEFAULT_TIMEOUT, gameweek=None):
             "unavailable.")
 
 
+#: Columns a horizon row carries. The long schema's set; the archive is in the
+#: sheet schema and so supplies all of them but ``Difficulty``.
+HORIZON_COLUMNS = [
+    "Name", "Web_Name", "Display_Name", "Team", "Position", "Fixture",
+    "Price", "Ownership", "Start", "StartingPredicted", "Predicted",
+    "FFP_GW", "Player_Code", "Player_ID", "Fixture_Count", "Difficulty",
+]
+
+#: FFP publishes the current gameweek plus ``ffp_feed._HORIZON`` ahead.
+MAX_HORIZON_WEEKS = 6
+
+
+def _horizon_rows_from_archive(archived, gameweek: int):
+    """One archived sheet-schema table as horizon rows for its own gameweek.
+
+    An archive file's *forward* columns are empty whenever its gameweek was the
+    tail of the capture window, but its own-week ``Predicted`` /
+    ``StartingPredicted`` / ``Start`` are always intact -- which is exactly what
+    makes the archive a sound per-gameweek fill rather than a horizon source.
+    """
+    if archived is None or archived.empty:
+        return None
+    out = pd.DataFrame(index=archived.index)
+    for col in HORIZON_COLUMNS:
+        out[col] = archived[col] if col in archived.columns else float("nan")
+    out["FFP_GW"] = int(gameweek)
+    return out
+
+
+def fetch_ffp_horizon(timeout: int = ffp_feed.DEFAULT_TIMEOUT, start_gw=None,
+                      weeks: int = MAX_HORIZON_WEEKS):
+    """FFP's forecasts for ``start_gw`` and the following ``weeks - 1`` gameweeks.
+
+    Returns ``(df, start_gw, window_gw, updated, provenance, per_gw_provenance,
+    note)``, where ``df`` is long -- one row per (player, gameweek) with
+    ``FFP_GW`` the **absolute** gameweek. ``scraping.get_ffp_horizon()`` wraps
+    this in ``@st.cache_data``; kept pure so the Actions collector could read it
+    too.
+
+    Every forecast here has been fetched on every page load for a year and
+    thrown away: ``to_sheet_schema()`` keeps one gameweek of the payload's six
+    and folds the rest into relative-offset columns that only
+    ``blend_multi_gw_projections`` reads, and only as ``Next3GWs``.
+
+    **Per-gameweek provenance, because the window rolls.** FFP publishes GW N+1
+    the moment GW N kicks off, so for most of every gameweek the live payload
+    does not cover the week the app is scoring. That week is filled from the
+    archive instead, and ``per_gw_provenance`` records which weeks came from
+    where so the page can say so -- an archived forecast presented as a live one
+    is the failure ``_ffp_caption`` already had.
+
+    The spreadsheet is deliberately **not** a fallback here. Its columns are
+    offsets relative to a gameweek it cannot state reliably, and
+    ``recover_from_sheet_offsets()`` drops every one of them by design. A
+    horizon that cannot name its own gameweeks is worse than no horizon, so a
+    total failure returns ``df=None`` and ``provenance="none"``.
+    """
+    from scripts.common import ffp_archive
+
+    weeks = max(1, min(int(weeks or MAX_HORIZON_WEEKS), MAX_HORIZON_WEEKS))
+
+    parts = []
+    per_gw = {}
+    window_gw = None
+    updated = None
+    live_gw = None
+
+    try:
+        rows, gw, live_updated = ffp_feed.fetch_points_predictor()
+        if rows:
+            live_gw = window_gw = gw
+            updated = live_updated
+            code_to_id = ffp_feed.bootstrap_code_to_id(timeout=timeout)
+            # Archive the whole window first, exactly as fetch_ffp_table does,
+            # so a week this call serves live is still there once FFP rolls past.
+            try:
+                ffp_archive.archive_payload(rows, gw, live_updated, code_to_id)
+            except Exception as e:                  # never let archiving break a read
+                _logger.warning("FFP: could not archive payload: %s", e)
+
+            long = ffp_feed.to_long_schema(rows, code_to_id)
+            if long is not None and not long.empty:
+                if start_gw is None:
+                    start_gw = int(long["FFP_GW"].min())
+                targets = [start_gw + i for i in range(weeks) if start_gw + i <= 38]
+                live = long[long["FFP_GW"].isin(targets)]
+                if not live.empty:
+                    for col in HORIZON_COLUMNS:
+                        if col not in live.columns:
+                            live = live.assign(**{col: float("nan")})
+                    parts.append(live[HORIZON_COLUMNS])
+                    for g in sorted(live["FFP_GW"].unique()):
+                        per_gw[int(g)] = "site"
+    except Exception as e:
+        _logger.warning("FFP horizon: site payload failed: %s", e)
+
+    if start_gw is None:
+        # No live payload to take a window from, so there is nothing to anchor
+        # on but the caller's own gameweek -- and it did not give one.
+        return (None, None, None, None, "none", {},
+                "Fantasy Football Pundit's site could not be read and no "
+                "gameweek was given to read the archive for.")
+
+    start_gw = int(start_gw)
+    targets = [start_gw + i for i in range(weeks) if start_gw + i <= 38]
+
+    for g in targets:
+        if g in per_gw:
+            continue
+        try:
+            archived, meta = ffp_archive.load_gameweek(g)
+        except Exception as e:                      # load_gameweek is already
+            _logger.warning("FFP horizon: archive read failed for GW%s: %s", g, e)
+            continue                                # failure-tolerant; belt and braces
+        block = _horizon_rows_from_archive(archived, g)
+        if block is None:
+            continue
+        parts.append(block)
+        per_gw[g] = "archive"
+        if updated is None:
+            updated = ffp_archive.parse_updated(meta.get("updated"))
+
+    if not parts:
+        return (None, start_gw, window_gw, None, "none", {},
+                "No Fantasy Football Pundit forecasts could be read for "
+                f"GW{start_gw} onwards, from their site or our archive.")
+
+    df = pd.concat(parts, ignore_index=True).sort_values(
+        ["FFP_GW", "Predicted"], ascending=[True, False]).reset_index(drop=True)
+
+    kinds = set(per_gw.values())
+    provenance = kinds.pop() if len(kinds) == 1 else "mixed"
+
+    archived_gws = sorted(g for g, k in per_gw.items() if k == "archive")
+    missing = [g for g in targets if g not in per_gw]
+    bits = []
+    if archived_gws:
+        label = ", ".join("GW%d" % g for g in archived_gws)
+        if live_gw is not None:
+            bits.append(f"{label} from our archive — FFP's live window starts at GW{live_gw}")
+        else:
+            bits.append(f"{label} from our archive — FFP's site was unreachable")
+    if missing:
+        bits.append("no forecast for " + ", ".join("GW%d" % g for g in missing))
+    return df, start_gw, window_gw, updated, provenance, per_gw, "; ".join(bits)
+
+
 def ffp_source(ffp_df=None, gameweek=None, updated=None, note="") -> SourceResult:
     """Fantasy Football Pundit's points predictor.
 

@@ -240,3 +240,88 @@ class TestGameweekResolution:
     def test_an_empty_frame_is_survivable(self):
         assert ffp_feed.resolve_ffp_gameweek(None) is None
         assert ffp_feed.resolve_ffp_gameweek(pd.DataFrame()) is None
+
+
+class TestLongSchema:
+    """The long schema and the sheet schema must never disagree.
+
+    These two are the same payload read two ways, and this codebase has three
+    times paid for two implementations of one piece of arithmetic drifting
+    apart. The sheet's forward columns are *relative offsets* and the long
+    frame's ``FFP_GW`` is absolute, so a drift here is a grid whose columns are
+    labelled with the wrong gameweeks -- and every number in it stays plausible.
+    """
+
+    def test_one_row_per_player_per_gameweek(self, payload_rows):
+        long = ffp_feed.to_long_schema(payload_rows)
+        assert len(long) == len(payload_rows)
+        assert sorted(long["FFP_GW"].unique().tolist()) == [3, 4, 5]
+        assert long.groupby("FFP_GW")["Player_Code"].nunique().tolist() == [2, 2, 2]
+
+    def test_gameweek_is_absolute_not_an_offset(self, payload_rows):
+        long = ffp_feed.to_long_schema(payload_rows)
+        saka = long[long["Web_Name"] == "Saka"].set_index("FFP_GW")
+        # The GW4 row must carry GW4's own projection, not GW3's.
+        assert saka.loc[4, "StartingPredicted"] == pytest.approx(6.089, abs=1e-3)
+        assert saka.loc[3, "StartingPredicted"] == pytest.approx(5.889, abs=1e-3)
+
+    @pytest.mark.parametrize("offset", [1, 2])
+    def test_sheet_offsets_resolve_to_the_same_absolute_gameweeks(self, payload_rows, offset):
+        """``GW{n}s`` at offset n-1 is the long frame's ``Predicted`` at gw+n-1.
+
+        This is the test that would catch the drift the shared ``_gameweek_block``
+        exists to prevent. The sheet says "the 2nd week of my window"; the long
+        frame says "GW4". If those two ever stop meaning the same thing, the
+        horizon grid silently shows one week's numbers under another's heading.
+        """
+        gw = 3
+        sheet = ffp_feed.to_sheet_schema(payload_rows, gw)
+        long = ffp_feed.to_long_schema(payload_rows)
+
+        label = "GW%d" % (offset + 1)
+        target = gw + offset
+        sheet_rows = sheet.set_index(sheet["Player_Code"].astype("int64"))
+        long_rows = long[long["FFP_GW"] == target]
+        long_rows = long_rows.set_index(long_rows["Player_Code"].astype("int64"))
+
+        # Unconditional on both sides...
+        assert sheet_rows[label + "s"].astype(float).round(4).tolist() == \
+            long_rows["Predicted"].astype(float).round(4).tolist()
+        # ...and conditional on both sides.
+        assert sheet_rows[label].astype(float).round(4).tolist() == \
+            long_rows["StartingPredicted"].astype(float).round(4).tolist()
+
+    def test_both_schemas_invert_the_basis_identically(self, payload_rows):
+        """``Predicted`` is the discounted one on both paths, for every week."""
+        sheet = ffp_feed.to_sheet_schema(payload_rows, 3)
+        long = ffp_feed.to_long_schema(payload_rows)
+        assert (sheet["Predicted"] <= sheet["StartingPredicted"] + 1e-9).all()
+        assert (long["Predicted"] <= long["StartingPredicted"] + 1e-9).all()
+        gw3 = long[long["FFP_GW"] == 3].reset_index(drop=True)
+        for col in ("Predicted", "StartingPredicted", "Start"):
+            assert sheet[col].astype(float).round(4).tolist() == \
+                gw3[col].astype(float).round(4).tolist()
+
+    def test_start_pct_recovery_is_shared(self):
+        """A week FFP publishes no start_pct for recovers on both paths alike."""
+        rows = []
+        for gw in (5, 6):
+            row = _row(gw, 223340, "Saka", "Bukayo", "Saka", 3, "Arsenal", "CHE", 6.0, 75)
+            if gw == 5:                     # the current week, as FFP publishes it
+                row["start_pct"] = None
+            rows.append(row)
+        sheet = ffp_feed.to_sheet_schema(rows, 5)
+        long = ffp_feed.to_long_schema(rows)
+        assert sheet["Start"].iloc[0] == pytest.approx(75.0, abs=0.05)
+        assert long[long["FFP_GW"] == 5]["Start"].iloc[0] == pytest.approx(75.0, abs=0.05)
+
+    def test_difficulty_rides_the_long_schema_only(self, payload_rows):
+        """The sheet schema is a compatibility seam; its columns do not move."""
+        long = ffp_feed.to_long_schema(payload_rows)
+        assert "Difficulty" in long.columns
+        assert (long["Difficulty"] == 3).all()
+        assert "Difficulty" not in ffp_feed.to_sheet_schema(payload_rows, 3).columns
+
+    def test_an_unusable_payload_returns_empty_rather_than_raising(self):
+        assert ffp_feed.to_long_schema([]).empty
+        assert ffp_feed.to_long_schema([{"nope": 1}]).empty

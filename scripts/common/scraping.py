@@ -446,6 +446,63 @@ def get_ffp_feed(gameweek: Optional[int] = None) -> FFPFeed:
     return FFPFeed(df, gw, updated, provenance, note)
 
 
+class FFPHorizon(NamedTuple):
+    """FFP's multi-gameweek forecasts, long, plus how to judge each week.
+
+    ``per_gw_provenance`` is why this is a NamedTuple and not a bare frame. The
+    weeks in a horizon do not all come from the same place: FFP's live window
+    rolls forward mid-gameweek, so the week the app is scoring is routinely
+    served from our archive while the weeks after it are live. Presenting the
+    two identically is the same failure ``FFPFeed.provenance`` exists to stop,
+    one dimension wider.
+    """
+
+    df: Optional[pd.DataFrame]
+    start_gw: Optional[int]
+    window_gw: Optional[int]            # the gameweek FFP's live window opens on
+    updated: Optional[datetime]
+    provenance: str                     # "site" | "archive" | "mixed" | "none"
+    per_gw_provenance: Optional[dict] = None
+    note: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.df is not None and not self.df.empty
+
+    def gameweeks(self) -> list:
+        """The absolute gameweeks actually present, in order."""
+        if not self.ok or "FFP_GW" not in self.df.columns:
+            return []
+        return sorted(int(g) for g in self.df["FFP_GW"].dropna().unique())
+
+    def archived_gameweeks(self) -> list:
+        return sorted(int(g) for g, kind in (self.per_gw_provenance or {}).items()
+                      if kind == "archive")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_ffp_horizon(start_gw: Optional[int] = None,
+                    weeks: int = projection_sources.MAX_HORIZON_WEEKS) -> FFPHorizon:
+    """FFP's forecasts for ``start_gw`` and the following gameweeks.
+
+    Defaults to the gameweek the app is scoring, like :func:`get_ffp_feed`, so a
+    caller never has to resolve the window itself.
+
+    **A failure is never cached as a success**, the lesson ``get_ffp_feed``
+    records: on failure this returns ``provenance="none"`` with the reason in
+    ``note`` rather than an empty frame that reads like "FFP has no forecasts".
+    """
+    if start_gw is None:
+        try:
+            start_gw = config.CURRENT_GAMEWEEK
+        except Exception:                           # pragma: no cover - defensive
+            start_gw = None
+    (df, resolved_gw, window_gw, updated, provenance,
+     per_gw, note) = projection_sources.fetch_ffp_horizon(
+        start_gw=start_gw, weeks=weeks)
+    return FFPHorizon(df, resolved_gw, window_gw, updated, provenance, per_gw, note)
+
+
 def get_ffp_projections_data() -> Optional[pd.DataFrame]:
     """Fetch Fantasy Football Pundit projections.
 

@@ -1544,6 +1544,157 @@ def check_ffp_feed(df: Optional[pd.DataFrame],
     return issues
 
 
+# --- FFP multi-gameweek horizon ---------------------------------------------
+
+#: A healthy FFP table prices 340-380 players, and the sheet-offset recovery in
+#: ``archive/ffp/GW03.json`` legitimately carries 561 — so the upper bound is a
+#: warning pitched above the real FPL pool, not an error. The *error* for two
+#: gameweeks stacked under one label is a duplicate player within a gameweek,
+#: which a row count cannot distinguish from a source that simply priced more
+#: players. A check that fires on a working archive file gets muted.
+MIN_PLAUSIBLE_HORIZON_ROWS_PER_GW = 150
+MAX_PLAUSIBLE_HORIZON_ROWS_PER_GW = 700
+
+
+def check_ffp_horizon(df: Optional[pd.DataFrame],
+                      start_gw: Optional[int] = None,
+                      per_gw_provenance: Optional[dict] = None) -> List[Issue]:
+    """Is this horizon a contiguous run of real gameweeks, each on one basis?
+
+    The single-gameweek feed's failure mode is a table that is for the wrong
+    week. A horizon has a second one available to it: a grid whose *columns* are
+    mislabelled. Every cell stays plausible — a 6.8 is a 6.8 — and the only
+    symptom is one week's projections appearing under another week's heading,
+    which is exactly what ``GW2..GW6`` being *relative offsets* invites. A gap
+    in the run means the grid is silently showing GW+2 in the GW+1 column.
+
+    So the gameweeks are checked for contiguity rather than merely presence, and
+    the basis relation ``check_ffp_feed`` guards is re-checked **per gameweek**:
+    the long frame is six tables stacked, and an inversion could affect one.
+    """
+    check = "ffp_horizon"
+    issues: List[Issue] = []
+
+    if df is None or getattr(df, "empty", True):
+        return [Issue(check, "error", "FFP horizon is empty",
+                      "The horizon grid renders nothing, which reads as 'FFP has "
+                      "no forecasts' rather than 'we could not read them'. Check "
+                      "projection_sources.fetch_ffp_horizon().")]
+
+    if "FFP_GW" not in df.columns:
+        return [Issue(check, "error", "horizon carries no FFP_GW column",
+                      "Without an absolute gameweek per row the grid cannot label "
+                      "its own columns, and a relative offset is exactly the "
+                      "inference that made FFP wrong in this app before.")]
+
+    gws = sorted(int(g) for g in pd.to_numeric(df["FFP_GW"], errors="coerce").dropna().unique())
+    if not gws:
+        return [Issue(check, "error", "no gameweek on any horizon row",
+                      "FFP_GW is present but entirely unparseable.")]
+
+    expected = list(range(gws[0], gws[-1] + 1))
+    if gws != expected:
+        missing = [g for g in expected if g not in gws]
+        issues.append(Issue(check, "error",
+            "horizon gameweeks are not contiguous — missing %s"
+            % ", ".join("GW%d" % g for g in missing),
+            "A gap shifts every later column one week left of its heading. Every "
+            "number stays plausible, so nothing else will catch it."))
+
+    if start_gw is not None and gws and int(gws[0]) != int(start_gw):
+        issues.append(Issue(check, "error",
+            "horizon starts at GW%d but GW%d was asked for" % (gws[0], int(start_gw)),
+            "The first column is labelled with the gameweek being scored, so a "
+            "horizon that starts elsewhere mislabels every column in the grid."))
+
+    for gw in gws:
+        block = df[pd.to_numeric(df["FFP_GW"], errors="coerce") == gw]
+        n = len(block)
+        if n < MIN_PLAUSIBLE_HORIZON_ROWS_PER_GW:
+            issues.append(Issue(check, "warning",
+                "only %d rows for GW%d (expected a few hundred)" % (n, gw),
+                "A short week usually means the payload parser captured a "
+                "fragment, not that FFP priced fewer players."))
+        elif n > MAX_PLAUSIBLE_HORIZON_ROWS_PER_GW:
+            issues.append(Issue(check, "warning",
+                "%d rows for GW%d — more than the FPL player pool" % (n, gw),
+                "Either the source priced unusually many players or two tables "
+                "have been stacked. The duplicate-player check below is what "
+                "tells those apart."))
+
+        # The sharp detector for two gameweeks under one label. One player
+        # cannot appear twice in one gameweek unless it is a double gameweek --
+        # which FFP represents with Fixture_Count, on a single row -- so a
+        # duplicate means two tables were concatenated, and the grid's cell
+        # would then be a sum or a mean of two different weeks.
+        key = "Player_ID" if "Player_ID" in block.columns else "Player_Code"
+        if key in block.columns:
+            ids = block[key].dropna()
+            dupes = int(len(ids) - ids.nunique())
+            if dupes:
+                issues.append(Issue(check, "error",
+                    "GW%d lists %d player(s) more than once" % (gw, dupes),
+                    "Two gameweeks have almost certainly been concatenated under "
+                    "one label, which makes that column a blend of both weeks."))
+
+        if "Predicted" in block.columns:
+            pred = pd.to_numeric(block["Predicted"], errors="coerce")
+            if pred.notna().sum() == 0:
+                issues.append(Issue(check, "error",
+                    "GW%d has no projections at all" % gw,
+                    "An all-null week renders as an empty column while the weeks "
+                    "either side look fine. Either drop the week or say why it is "
+                    "blank."))
+            elif float(pred.fillna(0).abs().max()) == 0.0:
+                issues.append(Issue(check, "error",
+                    "every GW%d projection is zero" % gw,
+                    "A column of zeros reads as 'nobody scores' rather than as a "
+                    "source that failed."))
+
+        if {"Predicted", "StartingPredicted"}.issubset(block.columns):
+            pred = pd.to_numeric(block["Predicted"], errors="coerce")
+            cond = pd.to_numeric(block["StartingPredicted"], errors="coerce")
+            both = pred.notna() & cond.notna() & (cond > 0)
+            if both.any():
+                inverted = pred[both] > cond[both] + 0.05
+                if inverted.mean() > 0.10:
+                    issues.append(Issue(check, "error",
+                        "GW%d: Predicted exceeds StartingPredicted for %.0f%% of players"
+                        % (gw, 100 * inverted.mean()),
+                        "Predicted is StartingPredicted x Start%, so it can never be "
+                        "the larger. The two bases have been mapped across by name "
+                        "instead of by basis for this gameweek."))
+
+    if "Start" in df.columns:
+        start = pd.to_numeric(df["Start"], errors="coerce").dropna()
+        if not start.empty:
+            if not start.between(0, 100).all():
+                issues.append(Issue(check, "error",
+                    "Start%% outside 0-100 (min %.1f, max %.1f)"
+                    % (start.min(), start.max()),
+                    "The grid scales projections by this, so an out-of-range value "
+                    "silently rescales a whole column."))
+            # The signature recorded for the single-gameweek feed: a primary
+            # source contributing nothing looks like a page of identical 100%s.
+            elif float((start >= 99.5).mean()) > 0.5:
+                issues.append(Issue(check, "warning",
+                    "%.0f%% of horizon rows read 100%% to start"
+                    % (100 * (start >= 99.5).mean()),
+                    "FFP's model never rates anybody above 95%, so a column of "
+                    "100%s is the app's own fallback rather than anyone's opinion."))
+
+    archived = sorted(g for g, kind in (per_gw_provenance or {}).items()
+                      if kind == "archive")
+    if archived:
+        issues.append(Issue(check, "warning",
+            "served from our archive: %s" % ", ".join("GW%d" % g for g in archived),
+            "Expected once FFP's window rolls past the gameweek being scored. The "
+            "page must say so -- an archived forecast shown as a live one is the "
+            "thing provenance exists to prevent."))
+
+    return issues
+
+
 # --- Classic squad resolution -----------------------------------------------
 
 # A Classic squad is 15 players, at most 3 from any one club, and its value sits

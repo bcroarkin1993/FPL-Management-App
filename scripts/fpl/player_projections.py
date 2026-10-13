@@ -20,6 +20,7 @@ from scripts.common.scraping import (
     FFP_GOAL_ASSIST_URL,
     FFP_POINTS_PREDICTOR_URL,
     get_ffp_feed,
+    get_ffp_horizon,
     get_rotowire_article_updated,
 )
 from scripts.common.utils import (
@@ -35,6 +36,10 @@ from scripts.common.text_helpers import compact_html
 from scripts.common.analytics import blend_projections_onto, merge_season_projections
 from scripts.common.fpl_classic_api import get_classic_bootstrap_static
 from scripts.common import projection_accuracy, projection_archive
+from scripts.common.data_validation import check_ffp_horizon
+from scripts.common.error_helpers import get_logger
+
+_logger = get_logger("fpl_app.projections_hub")
 
 
 # =============================================================================
@@ -85,6 +90,14 @@ def _ffp_caption(feed):
         bits.append(f"published {format_last_updated(feed.updated)}")
     if feed.provenance == "sheet":
         bits.append("read from FFP's published spreadsheet (their site was unreachable)")
+    elif feed.provenance == "archive":
+        # Every other page says this via render_ffp_status(). The Hub did not,
+        # so an archived table read here exactly like a live one -- and FFP
+        # rolls its window forward mid-gameweek, so this is the normal state
+        # for most of every week rather than an edge case.
+        bits.append("from our archive of FFP's last publication for this gameweek")
+        if feed.note:
+            bits.append(feed.note)
     return " · ".join(bits)
 
 
@@ -420,6 +433,315 @@ def render_ffp_data():
     )
     st.caption(f"Showing {len(result)} of {len(df)} players. Data from Fantasy Football Pundit"
                + (f" · {_ffp_caption(feed)}." if _ffp_caption(feed) else "."))
+
+
+# =============================================================================
+# Horizon — FFP's six-gameweek forecasts, which nothing has ever shown
+# =============================================================================
+
+def _horizon_fixture_cell(fixtures, count) -> str:
+    """One cell for the fixtures view: the opponent(s), or an explicit blank.
+
+    A blank gameweek must not render as an empty string beside a column of real
+    fixtures -- it reads as missing data rather than as the fact that the club
+    is not playing, which is the single most important thing a horizon can tell
+    you. Same reasoning as ``attach_matchups()`` writing "No fixture" rather
+    than leaving the cell to be read as "N/A".
+    """
+    if not fixtures:
+        return "—"
+    label = " / ".join(fixtures)
+    try:
+        if int(count) > len(fixtures):
+            # FFP priced a double but published one opponent for it.
+            label += " ×%d" % int(count)
+    except (TypeError, ValueError):
+        pass
+    return label
+
+
+def _horizon_frames(horizon, blended, current_gw):
+    """Wide points / fixture / FDR grids keyed on element id.
+
+    FFP's horizon rows carry ``Player_ID`` resolved from the bootstrap ``code``,
+    and the blend is keyed on the element id too, so this whole path joins on an
+    integer. That is the point of FFP publishing ``player_code`` at all -- every
+    other cross-source join in this app is a name match with a tier ladder
+    behind it, and this one needs none.
+    """
+    h = horizon.df.copy()
+    h = h[h["Player_ID"].notna()]
+    if h.empty:
+        return None, None, None, None
+    h["Player_ID"] = pd.to_numeric(h["Player_ID"], errors="coerce").astype("int64")
+    h["FFP_GW"] = pd.to_numeric(h["FFP_GW"], errors="coerce").astype("int64")
+
+    # Expected points, which is the chosen basis: `Predicted` already carries
+    # the start discount (the site's `predicted_points_start`). Summed, so a
+    # double gameweek counts twice rather than being averaged away.
+    points = h.pivot_table(index="Player_ID", columns="FFP_GW",
+                           values="Predicted", aggfunc="sum")
+    fdr = h.pivot_table(index="Player_ID", columns="FFP_GW",
+                        values="Difficulty", aggfunc="mean")
+    counts = h.pivot_table(index="Player_ID", columns="FFP_GW",
+                           values="Fixture_Count", aggfunc="max")
+    fixtures = (h.groupby(["Player_ID", "FFP_GW"])["Fixture"]
+                 .apply(lambda s: [x for x in dict.fromkeys(s.dropna()) if x])
+                 .unstack())
+
+    # The current gameweek's column comes from the engine, not from FFP. These
+    # are the same two calls the Blended tab makes, so the first column *is*
+    # the number the rest of the app scores on rather than a re-derivation of
+    # it that can drift -- the failure this codebase has paid for three times.
+    if current_gw in points.columns and blended is not None and not blended.empty:
+        engine = blended[blended["Player_ID"].notna()].copy()
+        engine["Player_ID"] = pd.to_numeric(engine["Player_ID"], errors="coerce").astype("int64")
+        proj = pd.to_numeric(engine.set_index("Player_ID")["Proj"], errors="coerce")
+        points[current_gw] = proj.reindex(points.index).combine_first(points[current_gw])
+
+    return points, fixtures, fdr, counts
+
+
+def render_horizon():
+    """FFP's forecasts for the next six gameweeks, as a player x gameweek grid.
+
+    **The data for this has been fetched and discarded on every page load for a
+    year.** FFP's payload carries six gameweeks of forecasts per player -- about
+    2,274 rows -- and ``to_sheet_schema()`` keeps one gameweek's 347 of them,
+    folding the rest into ten relative-offset columns that only
+    ``blend_multi_gw_projections`` reads, and only as ``Next3GWs``.
+
+    What that cost is the question this tab answers. A single-gameweek
+    projection is a noisy read on a player's value, because most of its
+    variance is the fixture: live at GW7, Haaland is 7.6 at home to Ipswich and
+    4.6 away at Arsenal five weeks later, and Mbeumo swings 3.9 to 7.0 the other
+    way. Every other projection surface in the app shows one of those numbers
+    and one three-week aggregate, with no way to see which weeks carry it.
+    """
+    current_gw = config.CURRENT_GAMEWEEK
+    horizon = get_ffp_horizon()
+
+    _render_source_banner(
+        "Fantasy Football Pundit — multi-gameweek forecasts",
+        "Expected points per gameweek for the next six gameweeks, with each "
+        "week's fixture.",
+        "#fef3c7", "#f59e0b",
+        FFP_POINTS_PREDICTOR_URL,
+        updated=horizon.updated,
+    )
+
+    if not horizon.ok:
+        st.warning(
+            "No multi-gameweek forecasts could be read. "
+            + (horizon.note or "Fantasy Football Pundit's site was unreachable "
+                               "and we hold no archived forecasts for this gameweek.")
+        )
+        return
+
+    # Plausibility, logged rather than raised: a horizon that looks wrong should
+    # degrade the tab, never take the page down. The contiguity check is the one
+    # worth having -- a gap shifts every later column one week left of its own
+    # heading and every number in the grid stays perfectly plausible.
+    for issue in check_ffp_horizon(horizon.df, horizon.start_gw,
+                                   horizon.per_gw_provenance):
+        if issue.severity == "error":
+            _logger.error("FFP horizon: %s — %s", issue.message, issue.hint)
+        else:
+            _logger.info("FFP horizon: %s", issue.message)
+
+    gws = horizon.gameweeks()
+    if not gws:
+        st.warning("The forecasts carry no gameweek, so they cannot be laid out "
+                   "in gameweek order.")
+        return
+
+    # Column 1 is the blend. Assembled exactly as render_blended_projections()
+    # does it, so a player's first column matches that tab to the digit.
+    blended = pd.DataFrame()
+    bootstrap = get_classic_bootstrap_static()
+    if bootstrap:
+        pool = _build_pool(bootstrap)
+        if not pool.empty:
+            rotowire_df = pd.DataFrame()
+            if config.ROTOWIRE_URL:
+                rotowire_df = get_rotowire_player_projections(config.ROTOWIRE_URL)
+            feed = get_ffp_feed()
+            pool = merge_season_projections(pool, rotowire_df, output_col="Points")
+            blended = blend_projections_onto(pool, feed.df, expected_gw=current_gw)
+
+    built = _horizon_frames(horizon, blended, current_gw)
+    if built[0] is None:
+        st.warning("None of FFP's forecast rows resolved to an FPL player, so "
+                   "there is nothing to join the grid onto.")
+        return
+    points, fixtures, fdr, counts = built
+
+    # Identity comes from the blend where we have it (it carries Display_Name
+    # for the whole pool) and from FFP's own rows otherwise.
+    ident = (horizon.df[horizon.df["FFP_GW"] == gws[0]]
+             .dropna(subset=["Player_ID"]).copy())
+    ident["Player_ID"] = pd.to_numeric(ident["Player_ID"], errors="coerce").astype("int64")
+    ident = ident.set_index("Player_ID")[["Display_Name", "Team", "Position"]]
+    if not blended.empty:
+        b = blended[blended["Player_ID"].notna()].copy()
+        b["Player_ID"] = pd.to_numeric(b["Player_ID"], errors="coerce").astype("int64")
+        b = b.set_index("Player_ID")
+        ident = pd.DataFrame({
+            "Display_Name": b.get("Display_Name", b.get("Player")).reindex(points.index)
+                             .combine_first(ident["Display_Name"].reindex(points.index)),
+            "Team": b["Team"].reindex(points.index).combine_first(
+                ident["Team"].reindex(points.index)),
+            "Position": b["Position"].reindex(points.index).combine_first(
+                ident["Position"].reindex(points.index)),
+        })
+    ident = ident.reindex(points.index)
+
+    # --- Controls ----------------------------------------------------------
+    max_weeks = len(gws)
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        weeks = st.select_slider(
+            "Gameweeks", options=list(range(2, max_weeks + 1)), value=max_weeks,
+            key="horizon_weeks",
+            help="How far ahead to show. The total is over exactly these weeks.",
+        ) if max_weeks > 2 else max_weeks
+    with c2:
+        view = st.radio("Show", ["Points", "Fixtures"], horizontal=True,
+                        key="horizon_view",
+                        help="Points is expected points per gameweek. Fixtures "
+                             "shows each week's opponent, coloured by difficulty.")
+
+    shown = [g for g in gws if g in points.columns][:int(weeks)]
+    gw_labels = {g: "GW%d" % g for g in shown}
+
+    grid = pd.DataFrame({
+        "Player": ident["Display_Name"].fillna(""),
+        "Team": ident["Team"].fillna(""),
+        "Pos": ident["Position"].fillna(""),
+    }, index=points.index)
+    for g in shown:
+        grid[gw_labels[g]] = pd.to_numeric(points[g], errors="coerce")
+    label_cols = [gw_labels[g] for g in shown]
+    grid["Total"] = grid[label_cols].sum(axis=1, min_count=1)
+
+    # A player with nothing but zeros across the whole window is a declared
+    # non-starter, not a row worth a line on a board about long-term value.
+    grid = grid[grid[label_cols].fillna(0).abs().sum(axis=1) > 0]
+
+    # One colour range, taken over every gameweek column of the *whole* board
+    # and fixed before any filtering. Two things depend on that. Per-column
+    # ranges would make each week self-normalising, so a 6.8 in an easy week and
+    # a 6.8 in a hard one would render differently -- which destroys the only
+    # thing a grid is for, which is reading across a row. And a range re-derived
+    # from the filtered rows would grade a selection against itself: filter to
+    # one club and its best player goes pure green whatever he is worth, which
+    # is the trap render_styled_table's own docstring documents.
+    finite = pd.concat([pd.to_numeric(grid[c], errors="coerce")
+                        for c in label_cols]).replace(
+        [float("inf"), float("-inf")], float("nan")).dropna()
+    span = (float(finite.min()), float(finite.max())) if not finite.empty else None
+
+    with st.expander("Filters", expanded=False):
+        f1, f2, f3 = st.columns(3)
+        search = f1.text_input("Search by name", placeholder="e.g., Salah",
+                               key="horizon_search")
+        positions = f2.multiselect(
+            "Position", sorted(p for p in grid["Pos"].dropna().unique() if p),
+            default=[], key="horizon_pos")
+        teams = f3.multiselect(
+            "Team", sorted(t for t in grid["Team"].dropna().unique() if t),
+            default=[], key="horizon_team",
+            help="Leave empty for every club.")
+        s1, s2 = st.columns(2)
+        sort_by = s1.selectbox("Sort by", ["Total"] + label_cols, key="horizon_sort")
+        descending = s2.selectbox("Order", ["Highest first", "Lowest first"],
+                                  key="horizon_order") == "Highest first"
+
+    if search:
+        grid = grid[grid["Player"].str.contains(search, case=False, na=False)]
+    if positions:
+        grid = grid[grid["Pos"].isin(positions)]
+    if teams:
+        grid = grid[grid["Team"].isin(teams)]
+
+    grid = grid.sort_values(sort_by, ascending=not descending)
+    if grid.empty:
+        st.info("No players match those filters.")
+        return
+
+    ids = list(grid.index)
+
+    st.markdown("#### GW%d–GW%d %s" % (
+        shown[0], shown[-1],
+        "expected points" if view == "Points" else "fixtures"))
+
+    if view == "Points":
+        display = grid.reset_index(drop=True)
+        display.insert(0, "#", range(1, len(display) + 1))
+        render_styled_table(
+            display.head(300),
+            col_formats={**{c: "{:.1f}" for c in label_cols}, "Total": "{:.1f}"},
+            positive_color_cols=label_cols + ["Total"],
+            color_range_overrides=({c: span for c in label_cols} if span else None),
+            max_height=640,
+        )
+    else:
+        rows = []
+        colour = {c: [] for c in label_cols}
+        for pid in ids:
+            row = {"Player": grid.at[pid, "Player"], "Team": grid.at[pid, "Team"],
+                   "Pos": grid.at[pid, "Pos"]}
+            for g in shown:
+                fx = fixtures[g].get(pid) if g in fixtures.columns else None
+                cnt = counts[g].get(pid) if g in counts.columns else None
+                row[gw_labels[g]] = _horizon_fixture_cell(
+                    fx if isinstance(fx, list) else [], cnt)
+                colour[gw_labels[g]].append(
+                    fdr[g].get(pid) if g in fdr.columns else float("nan"))
+            # The points total rides along: a fixture run and what it is
+            # actually worth belong on the same line, not a click apart.
+            row["Total"] = grid.at[pid, "Total"]
+            rows.append(row)
+        display = pd.DataFrame(rows)
+        display.insert(0, "#", range(1, len(display) + 1))
+        display = display.head(300)
+        render_styled_table(
+            display,
+            col_formats={"Total": "{:.1f}"},
+            positive_color_cols=["Total"],
+            # Colour comes from FFP's own published difficulty rather than the
+            # text in the cell, and 1-5 is fixed so the scale means the same
+            # thing in every column and on every rerun.
+            negative_color_cols=label_cols,
+            color_values={c: colour[c][:len(display)] for c in label_cols},
+            color_range_overrides={c: (1.0, 5.0) for c in label_cols},
+            text_align={c: "center" for c in label_cols},
+            max_height=640,
+        )
+        st.caption("Green is an easy fixture, red a hard one (FFP's own "
+                   "difficulty rating). **—** is a blank gameweek; **×2** a double. "
+                   "Rows keep the order set above, so this reads against the "
+                   "Points view row for row.")
+
+    bits = [
+        "Showing %d of %d players." % (min(len(grid), 300), len(grid)),
+        "**GW%d is the app's blended projection** (Rotowire + FFP + FPL xP); "
+        "GW%d onwards are FFP's own forecasts, which is the only source that "
+        "publishes beyond the next gameweek." % (shown[0], shown[0] + 1)
+        if shown[0] == current_gw and len(shown) > 1 else
+        "Every column is FFP's own forecast.",
+        "Both are expected points — allowing for the chance he does not start — "
+        "so a row sums. **Total** therefore differs slightly from FFP's own "
+        "\"Next %d GW\" on the FFP Data tab, which uses FFP for the first week too."
+        % len(shown),
+    ]
+    archived = horizon.archived_gameweeks()
+    if archived:
+        bits.append("From our archive: %s."
+                    % ", ".join("GW%d" % g for g in archived))
+    if horizon.updated is not None:
+        bits.append("FFP published %s." % format_last_updated(horizon.updated))
+    st.caption(" ".join(bits))
 
 
 # =============================================================================
@@ -791,6 +1113,8 @@ def _blended_source_status(rotowire_df, feed, blended, current_gw) -> None:
         ffp_note = f"published for GW{feed.gameweek} — excluded"
     elif feed.ok and feed.provenance == "sheet":
         ffp_note = "read from their spreadsheet"
+    elif feed.ok and feed.provenance == "archive":
+        ffp_note = "from our archive of their last publication"
     rows.append(_row(
         "Fantasy Football Pundit", feed.ok, len(feed.df) if feed.ok else 0,
         ffp_note, feed.updated, "ffp",
@@ -1324,11 +1648,12 @@ def show_player_projections_page():
     # Blended leads. The individual sources stay one click away rather than
     # being hidden: the blend is the answer, but seeing what fed it is how you
     # judge whether to trust it on a particular player.
-    tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab0, tab1, tab2, tab3, tab_h, tab4, tab5, tab6 = st.tabs([
         "Blended",
         "Accuracy",
         "Rotowire",
         "FFP Data",
+        "Horizon",
         "Goal/Assist Odds",
         "Clean Sheet Odds",
         "Match Odds"
@@ -1345,6 +1670,9 @@ def show_player_projections_page():
 
     with tab3:
         render_ffp_data()
+
+    with tab_h:
+        render_horizon()
 
     with tab4:
         render_goalscorer_odds()

@@ -161,12 +161,24 @@ class _SessionState(dict):
 
 
 class _MockColumn:
-    """Mock for st.columns() return values that support context manager."""
+    """Mock for st.columns() return values that support context manager.
+
+    Widget calls delegate to the patched ``streamlit`` attribute, because in
+    real Streamlit ``col.text_input`` *is* ``st.text_input`` scoped to the
+    container. Returning a bare MagicMock instead meant a filter written as
+    ``col1.text_input(...)`` came back truthy-but-unusable, so every page test
+    silently skipped the filtering branches -- and a page that puts its controls
+    in columns (most of them) had its control flow untested.
+    """
     def __enter__(self):
         return self
     def __exit__(self, *args):
         pass
     def __getattr__(self, name):
+        import streamlit as _st
+        attr = getattr(_st, name, None)
+        if attr is not None and callable(attr):
+            return attr
         return MagicMock()
 
 
@@ -220,10 +232,18 @@ def mock_streamlit():
     def mock_multiselect(label="", options=None, *args, **kwargs):
         return kwargs.get("default", [])
 
+    def mock_select_slider(label="", options=None, *args, **kwargs):
+        value = kwargs.get("value")
+        if value is not None:
+            return value
+        opts = list(options or kwargs.get("options", []) or [])
+        return opts[0] if opts else None
+
     for name, side_eff in [
         ("selectbox", mock_selectbox),
         ("radio", mock_radio),
         ("multiselect", mock_multiselect),
+        ("select_slider", mock_select_slider),
     ]:
         p = patch(f"streamlit.{name}", side_effect=side_eff)
         active_patches.append(p)

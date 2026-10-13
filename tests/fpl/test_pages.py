@@ -15,6 +15,40 @@ def _empty_ffp_feed():
     return FFPFeed(pd.DataFrame(), None, None, "none", "unavailable in tests")
 
 
+def _empty_ffp_horizon():
+    """A horizon that loaded nothing."""
+    from scripts.common.scraping import FFPHorizon
+    return FFPHorizon(pd.DataFrame(), None, None, None, "none", {},
+                      "unavailable in tests")
+
+
+def _ffp_horizon(start_gw=7, weeks=6, n=40):
+    """A horizon shaped like the live one: six gameweeks, one row per player
+    per gameweek, fixtures and difficulty varying by week."""
+    from scripts.common.scraping import FFPHorizon
+    rows = []
+    for w in range(weeks):
+        gw = start_gw + w
+        for i in range(n):
+            cond = 6.0 - 0.1 * i + 0.3 * w
+            rows.append({
+                "Name": "First%d Last%d" % (i, i),
+                "Display_Name": "Player %d" % i,
+                "Web_Name": "P%d" % i,
+                "Team": "T%d" % (i % 20),
+                "Position": ["GK", "DEF", "MID", "FWD"][i % 4],
+                "Fixture": "OPP%d (%s)" % (w, "H" if w % 2 else "a"),
+                "Price": 7.5, "Ownership": 5.0,
+                "Start": 80.0,
+                "StartingPredicted": round(cond, 3),
+                "Predicted": round(cond * 0.8, 3),
+                "FFP_GW": gw, "Player_Code": 1000 + i, "Player_ID": i + 1,
+                "Fixture_Count": 1, "Difficulty": 1 + (w + i) % 5,
+            })
+    return FFPHorizon(pd.DataFrame(rows), start_gw, start_gw, None, "site",
+                      {start_gw + w: "site" for w in range(weeks)}, "")
+
+
 
 
 class TestFixturesPage:
@@ -224,11 +258,73 @@ class TestPlayerProjectionsPage:
         with patch("scripts.fpl.player_projections.get_rotowire_player_projections", return_value=pd.DataFrame()), \
              patch("scripts.fpl.player_projections.get_rotowire_rankings_url", return_value="https://example.com"), \
              patch("scripts.fpl.player_projections.get_ffp_feed", return_value=_empty_ffp_feed()), \
+             patch("scripts.fpl.player_projections.get_ffp_horizon", return_value=_empty_ffp_horizon()), \
              patch("scripts.fpl.player_projections.get_ffp_goalscorer_odds", return_value=pd.DataFrame()), \
              patch("scripts.fpl.player_projections.get_ffp_clean_sheet_odds", return_value=pd.DataFrame()), \
              patch("scripts.fpl.player_projections.get_odds_api_match_odds", return_value=pd.DataFrame()):
             from scripts.fpl.player_projections import show_player_projections_page
             show_player_projections_page()
+
+
+class TestHorizonTab:
+    """The grid has to survive the states the live feed actually produces."""
+
+    def _bootstrap(self, n=40):
+        return {
+            "teams": [{"id": i % 20 + 1, "short_name": "T%d" % (i % 20)}
+                      for i in range(20)],
+            "elements": [{
+                "id": i + 1, "first_name": "First%d" % i, "second_name": "Last%d" % i,
+                "web_name": "P%d" % i, "team": i % 20 + 1,
+                "element_type": (i % 4) + 1, "ep_next": "3.0", "status": "a",
+                "chance_of_playing_next_round": 100, "news": "",
+            } for i in range(n)],
+        }
+
+    def test_it_renders_a_populated_grid(self, mock_all_utils):
+        with patch("scripts.fpl.player_projections.get_ffp_horizon",
+                   return_value=_ffp_horizon()), \
+             patch("scripts.fpl.player_projections.get_ffp_feed",
+                   return_value=_empty_ffp_feed()), \
+             patch("scripts.fpl.player_projections.get_rotowire_player_projections",
+                   return_value=pd.DataFrame()), \
+             patch("scripts.fpl.player_projections.get_classic_bootstrap_static",
+                   return_value=self._bootstrap()):
+            from scripts.fpl.player_projections import render_horizon
+            render_horizon()
+
+    def test_an_unavailable_horizon_does_not_raise(self, mock_all_utils):
+        with patch("scripts.fpl.player_projections.get_ffp_horizon",
+                   return_value=_empty_ffp_horizon()):
+            from scripts.fpl.player_projections import render_horizon
+            render_horizon()
+
+    def test_it_survives_a_horizon_whose_rows_resolve_to_no_player(self, mock_all_utils):
+        """Player_ID is the join key; without it there is nothing to render."""
+        horizon = _ffp_horizon()
+        df = horizon.df.copy()
+        df["Player_ID"] = None
+        with patch("scripts.fpl.player_projections.get_ffp_horizon",
+                   return_value=horizon._replace(df=df)), \
+             patch("scripts.fpl.player_projections.get_ffp_feed",
+                   return_value=_empty_ffp_feed()), \
+             patch("scripts.fpl.player_projections.get_rotowire_player_projections",
+                   return_value=pd.DataFrame()), \
+             patch("scripts.fpl.player_projections.get_classic_bootstrap_static",
+                   return_value=self._bootstrap()):
+            from scripts.fpl.player_projections import render_horizon
+            render_horizon()
+
+    def test_a_blank_gameweek_renders_as_a_blank_not_an_empty_cell(self):
+        """A missing fixture must read as "the club is not playing", not as
+        missing data — that is the most important thing a horizon can say."""
+        from scripts.fpl.player_projections import _horizon_fixture_cell
+        assert _horizon_fixture_cell([], 0) == "—"
+        assert _horizon_fixture_cell([], 1) == "—"
+        assert _horizon_fixture_cell(["IPS (H)"], 1) == "IPS (H)"
+        assert _horizon_fixture_cell(["IPS (H)", "ARS (a)"], 2) == "IPS (H) / ARS (a)"
+        # FFP priced a double but published only one opponent for it.
+        assert _horizon_fixture_cell(["IPS (H)"], 2) == "IPS (H) ×2"
 
 
 class TestPriceChangesPage:

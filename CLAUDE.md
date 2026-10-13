@@ -813,6 +813,122 @@ the archived and spreadsheet tables. Measured on the recovered GW3 archive: it
 cost 32 of 543 matches, silently. `_resolve_ids()` now normalises both sides and
 retries on `Web_Name`.
 
+### Horizon — the five gameweeks we were already fetching and throwing away
+
+`ffp_feed.to_long_schema()` (pure), `projection_sources.fetch_ffp_horizon()`
+(fetch, pure), `scraping.get_ffp_horizon()` (cached), rendered as the
+**Horizon** tab on the Projections Hub.
+
+**FFP's payload carries six gameweeks per player and the app kept one.** About
+2,274 rows arrive per fetch; `to_sheet_schema()` projects 347 of them and folds
+the other five weeks into ten *relative-offset* columns — `GW2..GW6`
+(conditional) and `GW2s..GW6s` (unconditional). Of those ten, `ffp_source()`
+reads none, `blend_multi_gw_projections()` reads only the derived `Next3GWs`,
+and the FFP Data tab rendered three cumulative totals. So the per-gameweek
+detail was fetched on every page load and discarded, and **no surface in the app
+had ever shown a forward view**: every projection answered "this week", plus one
+three-week aggregate that cannot say which week carries it.
+
+That matters because most of a single-gameweek projection's variance is the
+fixture. Live at GW7: Haaland is 7.0 at home to Ipswich (FDR 1) and 4.6 away at
+Arsenal (FDR 5) five weeks later; Mbeumo runs the other way, 3.9 at Liverpool
+against 7.0 at home to Brentford. A board ranked on the next gameweek alone
+ranks the fixture, not the player.
+
+**One `_gameweek_block()`, two schemas.** `to_long_schema()` is not a second
+parser. The per-gameweek projection — the **basis inversion** (the site's
+`predicted_points` is conditional, `predicted_points_start` is not) and the
+**`start_pct` recovery** (FFP publishes none for the week it is on) — was
+extracted out of `to_sheet_schema()` into a shared block that both call. A
+hand-written second copy of a basis conversion is the failure this codebase has
+paid for three times (the FFP double discount, `compute_player_scores` against
+`blend_fixture_projections`, the `Proj_Next3` assembly), and a fourth copy in a
+*horizon* is the worst place for it: a drift there mislabels the grid's columns
+while every number in it stays plausible.
+
+`test_sheet_offsets_resolve_to_the_same_absolute_gameweeks` is what pins them
+together — the sheet's `GW3s` must equal the long frame's `Predicted` at
+`FFP_GW == gw + 2`, on both bases — and a live test asserts the same against
+whatever FFP is actually serving. `FFP_GW` in the long frame is **absolute**, so
+no consumer resolves an offset; inferring a gameweek is exactly what made FFP
+wrong in this app before.
+
+`to_sheet_schema()` keeps its exact column list, because it is the seam every
+existing consumer reads and the archive serialises. The block emits
+`Difficulty` — an FDR per fixture the payload has published all along and
+nothing ever read — and `to_sheet_schema()` drops it.
+
+**The first column is the blend, not FFP.** `render_horizon()` calls
+`_build_pool()` + `merge_season_projections()` + `blend_projections_onto()`,
+which is literally what `render_blended_projections()` calls, so the current
+gameweek's column *is* the number the rest of the app scores on. Verified live:
+identical to the Blended tab for all 347 players, max absolute difference
+**0.000000**. Later columns are FFP alone, since it is the only source that
+publishes past the next gameweek — and the caption says which is which, because
+a row that mixes sources should not pretend otherwise. Both are expected points
+(unconditional), so the row sums; the `Total` therefore differs slightly from
+FFP's own `Next N GW` on the FFP Data tab, which uses FFP for the first week too.
+
+The whole join is on `Player_ID`. FFP publishes `player_code` — the bootstrap
+`code` — so this is the one cross-source join in the app that needs no name
+matching at all (2,082 of 2,082 rows resolved live).
+
+**Per-gameweek provenance, because the window rolls.** FFP publishes GW N+1 the
+moment GW N kicks off, so the week the app is scoring routinely falls out of the
+live payload — the documented failure that lost GW3 permanently. Each
+`archive/ffp/GWNN.json` holds its *own* week's `Predicted` intact even where its
+forward columns are empty (that is the window-tail effect), which makes the
+archive a sound **per-week fill** rather than a horizon source. `per_gw_provenance`
+records which weeks came from where and the page names them. The spreadsheet is
+deliberately not a fallback here: its columns are offsets relative to a gameweek
+it cannot state reliably, and a horizon that cannot name its own gameweeks is
+worse than none.
+
+**Two rendering rules, both load-bearing.** `render_styled_table` normalises
+colour per column from the rows it is given, and either default is wrong here:
+
+- **One range across every gameweek column**, so a 6.8 in an easy week and a 6.8
+  in a hard one are the same green. Per-column ranges make each week
+  self-normalising and destroy the only thing a grid is for, which is reading
+  across a row.
+- **Fixed before filtering.** A range re-derived from the filtered rows grades a
+  selection against itself — filter to one club and its best player goes pure
+  green whatever he is worth, the trap `render_styled_table`'s own docstring
+  documents. Filtering to Arsenal leaves Saka's 5.0 a mid-green, which is what
+  it is worth league-wide.
+
+The Fixtures view renders opponent text coloured by FFP's `Difficulty` through
+`color_values` + a fixed `(1, 5)` override, so the scale means the same thing in
+every column and on every rerun. A blank gameweek renders **—** rather than an
+empty cell: a missing fixture must read as "the club is not playing", which is
+the most useful thing a horizon can say, not as missing data. A double shows
+both opponents, or `×2` where FFP priced a double but published one opponent.
+
+**`check_ffp_horizon()`** is the tripwire, and the check that earns its keep is
+**contiguity**: a gap in the run shifts every later column one week left of its
+own heading, and no individual value can reveal it. It also re-checks the basis
+relation **per gameweek** (the long frame is six tables stacked, so an inversion
+can hit one) and errors on an all-null or all-zero week.
+
+Two calibration notes. The concatenation detector is a **duplicate player within
+a gameweek**, not a row-count ceiling: `archive/ffp/GW03.json` legitimately
+carries 561 rows from the spreadsheet recovery, so an error on row count fired
+on a working archive file every time it was read — and a check that cries wolf
+gets muted. And an archived gameweek is a **warning**, not an error: it is the
+expected state for most of every week.
+
+Nothing here feeds the projection engine — no `Start_Pct`, no `Proj`, no weight.
+The forward weeks are information, introduced the way `fpl_ep` and the Premier
+League's predicted XIs were. Giving the horizon a weight is Phase 4b work, and
+it needs the accuracy harness to have an opinion first.
+
+One test-infrastructure fix went with this: `_MockColumn.__getattr__` in
+`tests/conftest.py` returned a bare `MagicMock` for everything, so a filter
+written as `col1.text_input(...)` came back truthy-but-unusable and every page
+test silently skipped its filtering branches. It now delegates to the patched
+`streamlit` attribute, which is what a real column does. `select_slider` was
+also unmocked.
+
 ### Projection snapshots — the record that makes measurement possible
 
 `scripts/common/projection_archive.py` (store), `projection_snapshot.py`
@@ -1600,6 +1716,7 @@ to import from GitHub Actions.
 | `check_element_states()` | Draft player states changing shape — an unknown `status` code, `owner` disagreeing with the status, an owned count that isn't teams x 15. Every one makes locked players read as available, so the Waiver Wire suggests players who cannot be picked up |
 | `check_waiver_order()` | A waiver queue that is not a queue — a gap or repeat in the 1..N picks, a manager missing from it, or **your own entry absent**, which is the two-id-space trap whose only other symptom is an empty join that reads on the page as "you have no waiver pick". Disagreement with the standings is a *warning*: a successful claim rotates its manager to the back mid-gameweek |
 | `check_draft_game_settings()` | FPL changing a Draft rule this codebase hardcodes — the squad quota, the 50%/24h veto, the locked-player window, captains becoming a thing. Every one of these is a constant written down from the documentation, so a real change is otherwise invisible. An unreachable bootstrap is a **warning** (unknown), never an error (wrong) |
+| `check_ffp_horizon()` | A multi-gameweek grid whose **columns are mislabelled** — a gap in the gameweek run shifts every later column one week left of its heading, and no individual cell can reveal it. Also an all-null or all-zero week, a basis inversion in one gameweek of six, and two tables stacked under one label (detected as a duplicate player, never as a row count — the real `archive/ffp/GW03.json` carries 561 rows and is fine) |
 | `check_league_trade_config()` | The league's trade rules changing shape — `league.trades` vanishing or coming back null, `trades_time_for_approval` ceasing to be a bool. Both make the Trade Analyzer fall back to "assume approval is required", which is safe but is no longer a statement about *this* league and looks identical on screen. An **unrecognised** trades code is only a warning: three of the four codes are genuinely unknown, and a check that fires on expected ignorance gets muted |
 
 Ranges are deliberately wide — these are "this cannot be right" boundaries, not
@@ -1755,6 +1872,8 @@ Score = α × 1GW + (1-α) × ROS
 | `compute_dynamic_alpha()` | `scripts/common/analytics.py` | Per-player alpha based on context |
 | `merge_ffp_single_gw_data()` | `scripts/common/analytics.py` | Merges FFP Predicted/Start/LongStart onto player DataFrames |
 | `blend_multi_gw_projections()` | `scripts/common/analytics.py` | Merges FFP Next3GWs (falls back to PPG×3 if unpublished) |
+| `to_long_schema()` | `scripts/common/ffp_feed.py` | FFP's payload as one row per (player, **absolute** gameweek). Shares `_gameweek_block()` with `to_sheet_schema()`. |
+| `fetch_ffp_horizon()` / `get_ffp_horizon()` | `projection_sources.py` / `scraping.py` | FFP's forecasts for the current gameweek and the next five, with per-gameweek provenance |
 | `blend_projections_onto()` | `scripts/common/analytics.py` | The app-facing entry point to the projection engine. Attaches `Proj`, `Proj_Start`, `Start_Pct`, `Proj_Src`, `Proj_Spread`. |
 | `blend_fixture_projections()` | `scripts/common/analytics.py` | Thin wrapper that additionally writes the legacy `Proj_Blended` / `_proj_source`. Prefer `blend_projections_onto()`. `Proj_Blended` stays distinct from `Blended_Points`, the *live* in-gameweek blend. |
 | `blend_aligned()` | `scripts/common/projection_engine.py` | The blend itself — the only implementation. |
@@ -3074,7 +3193,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Task | Status | Notes |
 |------|--------|-------|
 | Projection accuracy harness | Phases 1-3 done, Phase 4a done, 4b blocked on data | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". **Phase 4a** done: the start model is now scored (Brier/AUC/bias, calibration and cohort tables, a "Will he start?" section on the Accuracy tab) and `ROTOWIRE_START_FLOORS` / `ROTOWIRE_OMITTED_START` are fitted from it by replaying the engine over the archive — three of eight cells moved, blend Brier 0.0678 → 0.0650. See "Scoring the start model". **Phase 4b** — fit `PROJECTION_SOURCE_WEIGHTS`, give `fpl_ep` a real weight, add an odds-derived source — is blocked until ~GW8: only 2 pre-deadline gameweeks exist against the harness's own 5-gameweek threshold. The replay harness built for 4a is what will fit the points weights too. |
-| Multi-GW Transfer Planner | Completed | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. The sanity-check gate is shared with Classic — see "Suggestion sanity veto". Classic now has a real multi-transfer planner: an ILP over the whole squad in expected points, solved for every K, with the −4 priced inside the objective — see "Multi-Transfer Planner". The horizon's basis is now the engine's throughout: `Proj_Next3` is converted once, `compute_player_scores()` percentiles it (on both sides of the percentile) instead of the raw mixed `MultiGW_Proj`, and the page-side workaround is gone — see "The ROS score reads `Proj_Next3`". Remaining: only Next3GWs is used (Next2/4–6 fetched but ignored). |
+| Multi-GW Transfer Planner | Completed | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. The sanity-check gate is shared with Classic — see "Suggestion sanity veto". Classic now has a real multi-transfer planner: an ILP over the whole squad in expected points, solved for every K, with the −4 priced inside the objective — see "Multi-Transfer Planner". The horizon's basis is now the engine's throughout: `Proj_Next3` is converted once, `compute_player_scores()` percentiles it (on both sides of the percentile) instead of the raw mixed `MultiGW_Proj`, and the page-side workaround is gone — see "The ROS score reads `Proj_Next3`". The per-gameweek detail FFP publishes is no longer discarded: `to_long_schema()` exposes all six gameweeks and the Projections Hub's **Horizon** tab renders them (see "Horizon"). Remaining: the *scoring* model still uses only `Next3GWs` -- giving the wider horizon a weight is Phase 4b, and needs the accuracy harness to have an opinion first. |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
 | Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |
 
@@ -3102,7 +3221,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | League Setup Admin Page | In-app "🆔 League Setup" page (FPL App Home) to set/validate/lock Draft and Classic league & team IDs instead of hand-editing `.env`. Draft: enter league ID, look it up, pick your team from a resolved dropdown (no need to know your entry ID). Classic: add/remove multiple leagues, resolve team via entry ID lookup. Locked read-only view with two-step "Unlock to Edit" confirmation. Persisted to gitignored `league_settings.json` (repo is public — not committed, unlike `alert_settings.json`). `config.py`'s 4 ID attributes (`FPL_DRAFT_LEAGUE_ID`, `FPL_DRAFT_TEAM_ID`, `FPL_CLASSIC_TEAM_ID`, `FPL_CLASSIC_LEAGUE_IDS`) converted from eager to lazy PEP 562 resolution (same pattern as `CURRENT_GAMEWEEK`), prioritizing locked JSON settings over `.env`, so saved changes take effect immediately without an app restart. |
 | Gameweek Fixtures GW38 Cap | Auto-constrain FDR Horizon and "How many weeks?" sliders to never exceed GW38; defensive cap added inside `get_fixture_difficulty_grid()`; fetch range hard-capped at `end_gw = min(start_gw + weeks - 1, 38)` |
 | Team Difficulty Visualizations | FDR heatmap, defensive stats, attack vs defense ratings (inspired by fpl.page/team-dds) |
-| Projections Hub | Unified projections page with 5 data source tabs: Rotowire expert rankings, FFP Points Predictor (start %, multi-GW forecasts), Goal/Assist Odds, Clean Sheet Odds, Match Odds (The Odds API). Each tab has data source attribution, filters, and usage tips. |
+| Projections Hub | Unified projections page with tabs per data source: Rotowire expert rankings, FFP Points Predictor (start %, multi-GW forecasts), Goal/Assist Odds, Clean Sheet Odds, Match Odds (The Odds API). Each tab has data source attribution, filters, and usage tips. A **Horizon** tab renders FFP's six-gameweek forecasts as a player x gameweek grid -- see "Horizon" -- with the current gameweek carrying the engine's blend and a Points/Fixtures toggle. |
 | Live Score Integration & Gameweek Refresh | TTL-based gameweek caching (5 min) with manual refresh; live points from FPL API blended with Rotowire projections; actual starting 11 from Draft picks API (not optimal projections); styled overview table showing live/blended/original scores; player cards with played/upcoming status; win probability updates in real-time |
 | Enhanced Lineup Visualizations | Fixed duplicate team bug (matchup index tracking); start likelihood indicator (opacity + border color based on injury status, FPL chance_of_playing, historical starts); robust player name matching (abbreviated names, nicknames, Nordic characters); team name mapping (Rotowire → FPL); Squad Details cards with form, points, goals/assists |
 | Rotowire scraping robustness | Fallback table selectors (exact → partial → any); row validation before indexing; multiple regex patterns for URL discovery; proper logging throughout; replaced bare except clauses |

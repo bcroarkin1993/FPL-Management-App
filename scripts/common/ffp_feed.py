@@ -273,47 +273,45 @@ def _numeric(df: pd.DataFrame, col: str) -> pd.Series:
     return pd.to_numeric(df[col], errors="coerce")
 
 
-def to_sheet_schema(rows: List[dict], gw: Optional[int] = None,
-                    code_to_id: Optional[Dict[int, int]] = None) -> pd.DataFrame:
-    """Project the site payload onto the legacy Google Sheet column names.
+def _prepare_frame(rows: List[dict]) -> Optional[pd.DataFrame]:
+    """The payload as a frame, with every numeric column coerced.
 
-    This is the compatibility seam — the same role ``normalise_my_team()`` plays
-    for the Classic squad resolver. Every downstream consumer keeps reading
-    ``Name`` / ``Team`` / ``Predicted`` / ``StartingPredicted`` / ``Start`` /
-    ``NextNGWs`` and needs no change.
-
-    Sheet semantics, pinned against live data so the two sources agree:
-      * ``GW2..GW6`` are **relative offsets** — the 2nd..6th gameweek of the
-        window, on the conditional (if-he-starts) basis.
-      * ``GW2s..GW6s`` are those same weeks discounted by start likelihood.
-      * ``NextNGWs`` **includes** the current gameweek:
-        ``Next2GWsStart == StartingPredicted + GW2`` (MAE 0.029), not
-        ``GW2 + GW3`` (MAE 0.45).
-
-    ``LongStart`` is deliberately **not** emitted. The site publishes one
-    ``start_pct`` per player, identical across all six forecast gameweeks, so
-    there is no independent long-run rate to report.  ``compute_player_scores()``
-    already falls back to the FPL ``starts`` count for start consistency;
-    emitting a copy of ``Start`` would instead spend 10% of ROS on a signal that
-    1GW already carries.
+    Returns None when the payload cannot carry a projection at all — no rows, or
+    missing the two fields every downstream path keys on.
     """
     if not rows:
-        return pd.DataFrame()
+        return None
 
     frame = pd.DataFrame(rows)
     if "gw" not in frame.columns or "player_code" not in frame.columns:
-        _logger.warning("FFP: payload missing gw/player_code — cannot build sheet schema")
-        return pd.DataFrame()
+        _logger.warning("FFP: payload missing gw/player_code — cannot build schema")
+        return None
 
     frame["gw"] = pd.to_numeric(frame["gw"], errors="coerce")
-    if gw is None:
-        gw = int(frame["gw"].min())
-
     for col in ("predicted_points", "predicted_points_start", "start_pct",
-                "price", "selected_by_percent"):
+                "price", "selected_by_percent", "difficulty"):
         if col in frame.columns:
             frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    return frame
 
+
+def _gameweek_block(frame: pd.DataFrame, gw: int,
+                    code_to_id: Optional[Dict[int, int]] = None) -> pd.DataFrame:
+    """One row per player for a single **absolute** gameweek, keyed on player_code.
+
+    This is the sole implementation of the two things FFP has made this app get
+    wrong before: the **basis inversion** — the site's two point columns are
+    named the opposite way round from the sheet's — and the **start_pct
+    recovery**, since FFP stops publishing it for the gameweek it is currently
+    on. ``to_sheet_schema()`` and ``to_long_schema()`` both go through here, so
+    there is exactly one copy of each.
+
+    That matters more than the line count suggests. This codebase has three
+    times paid for two implementations of one piece of arithmetic drifting
+    apart (the FFP double discount, ``compute_player_scores`` against
+    ``blend_fixture_projections``, the ``Proj_Next3`` assembly). A second
+    hand-written copy of a basis conversion is that failure set up again.
+    """
     current = frame[frame["gw"] == gw].copy()
     if current.empty:
         _logger.warning("FFP: payload carries no rows for GW%s", gw)
@@ -383,14 +381,88 @@ def to_sheet_schema(rows: List[dict], gw: Optional[int] = None,
     out["StartingPredicted"] = current.get("predicted_points")
     out["Predicted"] = current.get("predicted_points_start")
 
-    out["FFP_GW"] = gw
+    out["FFP_GW"] = int(gw)
     out["Player_Code"] = pd.to_numeric(current["player_code"], errors="coerce").astype("Int64")
     out["Fixture_Count"] = pd.to_numeric(
         current.get("fixture_count", 1), errors="coerce").fillna(1).astype(int)
     if code_to_id:
         out["Player_ID"] = out["Player_Code"].map(code_to_id).astype("Int64")
 
-    out = out.set_index(pd.Index(current["player_code"].astype("int64"), name="player_code"))
+    # The payload has published an FDR per fixture all along and nothing has
+    # ever read it. The horizon grid colours its fixtures view with it, which
+    # saves the six live HTTP calls `get_fixture_difficulty_grid()` would cost.
+    out["Difficulty"] = _numeric(current, "difficulty")
+
+    return out.set_index(pd.Index(current["player_code"].astype("int64"),
+                                  name="player_code"))
+
+
+def to_long_schema(rows: List[dict],
+                   code_to_id: Optional[Dict[int, int]] = None) -> pd.DataFrame:
+    """Every gameweek in the payload, one row per (player, gameweek).
+
+    ``to_sheet_schema()`` keeps one gameweek and folds the other five into ten
+    *relative-offset* columns, discarding ~1,895 of the payload's ~2,274 rows on
+    every fetch. An offset cannot say which absolute gameweek it describes
+    without also knowing the window it was built from — and inferring a
+    gameweek is precisely what made FFP wrong in this app before.
+
+    So here ``FFP_GW`` is the **absolute** gameweek and no consumer has to
+    resolve anything. Same columns as the sheet block plus ``Difficulty``, and
+    none of the offset or cumulative columns: a long frame needs neither.
+    """
+    frame = _prepare_frame(rows)
+    if frame is None:
+        return pd.DataFrame()
+
+    blocks = []
+    for gw in sorted(frame["gw"].dropna().unique()):
+        block = _gameweek_block(frame, int(gw), code_to_id)
+        if not block.empty:
+            blocks.append(block.reset_index(drop=True))
+    if not blocks:
+        return pd.DataFrame()
+    return pd.concat(blocks, ignore_index=True)
+
+
+def to_sheet_schema(rows: List[dict], gw: Optional[int] = None,
+                    code_to_id: Optional[Dict[int, int]] = None) -> pd.DataFrame:
+    """Project the site payload onto the legacy Google Sheet column names.
+
+    This is the compatibility seam — the same role ``normalise_my_team()`` plays
+    for the Classic squad resolver. Every downstream consumer keeps reading
+    ``Name`` / ``Team`` / ``Predicted`` / ``StartingPredicted`` / ``Start`` /
+    ``NextNGWs`` and needs no change.
+
+    Sheet semantics, pinned against live data so the two sources agree:
+      * ``GW2..GW6`` are **relative offsets** — the 2nd..6th gameweek of the
+        window, on the conditional (if-he-starts) basis.
+      * ``GW2s..GW6s`` are those same weeks discounted by start likelihood.
+      * ``NextNGWs`` **includes** the current gameweek:
+        ``Next2GWsStart == StartingPredicted + GW2`` (MAE 0.029), not
+        ``GW2 + GW3`` (MAE 0.45).
+
+    ``LongStart`` is deliberately **not** emitted. The site publishes one
+    ``start_pct`` per player, identical across all six forecast gameweeks, so
+    there is no independent long-run rate to report.  ``compute_player_scores()``
+    already falls back to the FPL ``starts`` count for start consistency;
+    emitting a copy of ``Start`` would instead spend 10% of ROS on a signal that
+    1GW already carries.
+    """
+    frame = _prepare_frame(rows)
+    if frame is None:
+        return pd.DataFrame()
+    if gw is None:
+        gw = int(frame["gw"].min())
+
+    out = _gameweek_block(frame, gw, code_to_id)
+    if out.empty:
+        return pd.DataFrame()
+
+    # `Difficulty` is carried by the block for the horizon grid. This function
+    # is the compatibility seam every existing consumer reads and the archive
+    # serialises, so its column list stays exactly as it was.
+    out = out.drop(columns=["Difficulty"])
 
     # Forward gameweeks, on both bases.
     cond = frame.pivot_table(index="player_code", columns="gw",

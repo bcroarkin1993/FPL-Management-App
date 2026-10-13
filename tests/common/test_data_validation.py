@@ -29,6 +29,7 @@ from scripts.common.data_validation import (
     check_blended_projections,
     check_free_transfers,
     check_transfer_plan,
+    check_ffp_horizon,
 )
 
 
@@ -1419,3 +1420,115 @@ class TestStartCalibration:
     def test_nothing_to_check_is_an_error(self):
         """A broken harness renders a page identical to a working one."""
         assert any(i.severity == "error" for i in check_start_calibration(None))
+
+
+class TestCheckFfpHorizon:
+    """A horizon's distinctive failure is a grid whose columns are mislabelled.
+
+    Every cell stays a plausible projection -- the only symptom is one week's
+    numbers appearing under another week's heading, which is exactly what FFP
+    publishing *relative offsets* invites.
+    """
+
+    @staticmethod
+    def _horizon(gws=(7, 8, 9, 10, 11, 12), n=347, start=70.0, cond=5.0,
+                 invert_gw=None, zero_gw=None, null_gw=None):
+        frames = []
+        for gw in gws:
+            conditional = [cond] * n
+            unconditional = [round(c * start / 100.0, 3) for c in conditional]
+            if gw == invert_gw:
+                conditional, unconditional = unconditional, conditional
+            if gw == zero_gw:
+                conditional = [0.0] * n
+                unconditional = [0.0] * n
+            if gw == null_gw:
+                unconditional = [float("nan")] * n
+            frames.append(pd.DataFrame({
+                "Name": ["Player %d" % i for i in range(n)],
+                "Player_ID": list(range(n)),
+                "Team": ["Arsenal"] * n,
+                "Position": ["MID"] * n,
+                "FFP_GW": [gw] * n,
+                "Start": [start] * n,
+                "StartingPredicted": conditional,
+                "Predicted": unconditional,
+            }))
+        return pd.concat(frames, ignore_index=True)
+
+    def test_a_healthy_horizon_is_clean(self):
+        assert not check_ffp_horizon(self._horizon(), start_gw=7)
+
+    def test_an_empty_horizon_is_an_error(self):
+        assert _errors(check_ffp_horizon(pd.DataFrame(), start_gw=7))
+        assert _errors(check_ffp_horizon(None, start_gw=7))
+
+    def test_a_horizon_with_no_gameweek_column_is_an_error(self):
+        df = self._horizon().drop(columns=["FFP_GW"])
+        issues = _errors(check_ffp_horizon(df, start_gw=7))
+        assert issues and "FFP_GW" in issues[0].message
+
+    def test_a_gap_in_the_run_is_an_error(self):
+        """The one that matters: GW10 missing shifts GW11 and GW12 left."""
+        df = self._horizon(gws=(7, 8, 9, 11, 12))
+        issues = _errors(check_ffp_horizon(df, start_gw=7))
+        assert issues and "contiguous" in issues[0].message
+        assert "GW10" in issues[0].message
+
+    def test_starting_on_the_wrong_gameweek_is_an_error(self):
+        issues = _errors(check_ffp_horizon(self._horizon(gws=(8, 9, 10)), start_gw=7))
+        assert any("asked for" in i.message for i in issues)
+
+    def test_an_all_null_gameweek_is_an_error(self):
+        issues = _errors(check_ffp_horizon(self._horizon(null_gw=9), start_gw=7))
+        assert any("GW9 has no projections" in i.message for i in issues)
+
+    def test_an_all_zero_gameweek_is_an_error(self):
+        issues = _errors(check_ffp_horizon(self._horizon(zero_gw=11), start_gw=7))
+        assert any("every GW11 projection is zero" in i.message for i in issues)
+
+    def test_a_basis_inversion_in_one_gameweek_is_an_error(self):
+        """The long frame is six tables stacked, so an inversion can hit one."""
+        issues = _errors(check_ffp_horizon(self._horizon(invert_gw=8), start_gw=7))
+        assert any("GW8" in i.message and "Predicted exceeds" in i.message
+                   for i in issues)
+
+    def test_two_gameweeks_concatenated_under_one_label_is_an_error(self):
+        """Caught by the duplicate player, not by the row count.
+
+        A row-count ceiling cannot tell a stacked table from a source that
+        simply priced more players -- ``archive/ffp/GW03.json`` legitimately
+        carries 561 rows from the spreadsheet recovery, and an error there would
+        fire on a working archive file every time it was read.
+        """
+        df = pd.concat([self._horizon(gws=(7,), n=347),
+                        self._horizon(gws=(7,), n=347)], ignore_index=True)
+        issues = _errors(check_ffp_horizon(df, start_gw=7))
+        assert any("more than once" in i.message for i in issues)
+
+    def test_a_large_but_unduplicated_week_is_not_an_error(self):
+        """The real archived GW3 table, which has 561 rows and is fine."""
+        issues = check_ffp_horizon(self._horizon(gws=(7,), n=561), start_gw=7)
+        assert not _errors(issues)
+
+    def test_a_short_week_warns_rather_than_failing(self):
+        issues = check_ffp_horizon(self._horizon(n=40), start_gw=7)
+        assert not _errors(issues)
+        assert any("expected a few hundred" in i.message for i in issues)
+
+    def test_a_column_of_hundred_percent_start_warns(self):
+        """The silent-degradation signature: a primary source contributing nothing."""
+        issues = check_ffp_horizon(self._horizon(start=100.0), start_gw=7)
+        assert any("100% to start" in i.message for i in issues)
+
+    def test_start_outside_zero_to_one_hundred_is_an_error(self):
+        issues = _errors(check_ffp_horizon(self._horizon(start=140.0), start_gw=7))
+        assert any("outside 0-100" in i.message for i in issues)
+
+    def test_archived_gameweeks_are_reported_as_a_warning(self):
+        issues = check_ffp_horizon(
+            self._horizon(), start_gw=7,
+            per_gw_provenance={7: "archive", 8: "site", 9: "site", 10: "site",
+                               11: "site", 12: "site"})
+        assert not _errors(issues)
+        assert any("archive" in i.message and "GW7" in i.message for i in issues)
