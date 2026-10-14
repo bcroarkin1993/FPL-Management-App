@@ -101,6 +101,65 @@ _ELEMENT_TYPE_TO_POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
 
 # =============================================================================
+# In-process memo
+# =============================================================================
+#
+# Streamlit's cache is not available here -- this module is Streamlit-free by
+# hard constraint, because the Actions snapshot collector imports it. But the
+# two fetches below are each called by several *separately* cached Streamlit
+# wrappers, so on one cold page load the same page was downloaded more than
+# once: measured, the FFP payload twice and bootstrap-static twice, and the
+# payload fetch also re-ran `archive_payload`, writing six JSON files each time.
+#
+#: How long a successful fetch is reused within one process.
+#:
+#: Deliberately far shorter than the 300s ``@st.cache_data`` TTL on
+#: ``get_ffp_feed`` / ``get_ffp_horizon`` that sits above it. That ordering is
+#: what makes this memo invisible: it can never serve a payload older than the
+#: Streamlit cache above it would have served anyway, so it cannot make any page
+#: staler, and it cannot outlive a Refresh click in a way that matters. A cache
+#: surviving the very click meant to escape it is a bug this app has already
+#: paid for once -- see ``purge_cache_prefix`` -- and the fix there was a
+#: *permanent* (``ttl=None``) entry, which this is not.
+MEMO_TTL_SECONDS = 60
+
+_memo: Dict[str, tuple] = {}
+
+
+def _memoised(key: str, fn, ttl: int = MEMO_TTL_SECONDS):
+    """Reuse ``fn()``'s result for ``ttl`` seconds -- **successes only**.
+
+    Caching a failure is the bug this app has already paid for once:
+    ``get_ffp_feed`` returning a bare ``None`` from ``@st.cache_data`` pinned a
+    transient timeout for five minutes, and FFP read "temporarily unavailable"
+    in the app while the website plainly worked. So an empty result is returned
+    to the caller and *not* stored, and the next caller retries.
+    """
+    now = time.time()
+    hit = _memo.get(key)
+    if hit is not None and now - hit[0] < ttl:
+        return hit[1]
+    value = fn()
+    if _memo_worth_keeping(value):
+        _memo[key] = (now, value)
+    return value
+
+
+def _memo_worth_keeping(value) -> bool:
+    """True for a result that actually carries data."""
+    if value is None:
+        return False
+    if isinstance(value, tuple):
+        return bool(value and value[0])
+    return bool(value)
+
+
+def clear_memo() -> None:
+    """Drop the in-process memo. For tests and for a manual refresh."""
+    _memo.clear()
+
+
+# =============================================================================
 # Transport
 # =============================================================================
 
@@ -234,8 +293,16 @@ def _fetch_page(url: str, key: str = '"rows":[') -> Tuple[List[dict], Optional[i
 
 
 def fetch_points_predictor():
-    """Rows for the points predictor, plus its gameweek and publish time."""
-    return _fetch_page(FFP_POINTS_PREDICTOR_URL)
+    """Rows for the points predictor, plus its gameweek and publish time.
+
+    Memoised, because two separately-cached Streamlit wrappers need this one
+    payload: ``fetch_ffp_table`` for the gameweek being scored and
+    ``fetch_ffp_horizon`` for the window. Without it a cold page load downloaded
+    the same ~400KB page twice *and* ran ``archive_payload`` twice, writing six
+    JSON files each time.
+    """
+    return _memoised("points_predictor",
+                     lambda: _fetch_page(FFP_POINTS_PREDICTOR_URL))
 
 
 def fetch_goal_assist():
@@ -679,7 +746,15 @@ def bootstrap_code_to_id(timeout: int = DEFAULT_TIMEOUT) -> Dict[int, int]:
 
     FFP publishes the stable ``code``; every frame in this app keys on the
     per-season element ``id``.
+
+    Memoised: both ``fetch_ffp_table`` and ``fetch_ffp_horizon`` need this map,
+    and each used to download the whole 667-player bootstrap for it.
     """
+    return _memoised("bootstrap_code_to_id",
+                     lambda: _bootstrap_code_to_id_uncached(timeout))
+
+
+def _bootstrap_code_to_id_uncached(timeout: int = DEFAULT_TIMEOUT) -> Dict[int, int]:
     resp = _get(BOOTSTRAP_URL, timeout=timeout)
     if resp is None:
         return {}

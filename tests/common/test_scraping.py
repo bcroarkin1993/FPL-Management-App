@@ -260,6 +260,10 @@ class TestRotowireArticleUpdated:
     def _resp(self, html, status=200):
         resp = MagicMock()
         resp.text = html
+        # The parser is handed `.content`, not `.text`: bytes let BeautifulSoup
+        # read the page's own charset declaration instead of trusting requests'
+        # guess, which is what keeps accented player names intact.
+        resp.content = html.encode("utf-8")
         resp.status_code = status
         resp.raise_for_status = MagicMock()
         return resp

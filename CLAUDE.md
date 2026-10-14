@@ -962,6 +962,46 @@ it, a player the blend does not price keeps FFP's number (it is a
 `combine_first`, not an overwrite), and no blend at all still renders FFP's own
 forecasts.
 
+**Three duplicate fetches, and the one that hid behind a cache key.** A cold
+Projections Hub load was 8.23s, 5.93s of it network across **12 requests** --
+and `st.tabs` renders every tab body on every load, so all of it is paid
+whichever tab you are looking at. Three of those requests were the same page
+twice:
+
+| Duplicate | Cause |
+|---|---|
+| Rotowire article x2 | `get_rotowire_article_updated()` re-downloaded the page purely to scrape its "Updated on" stamp, which `get_rotowire_player_projections()` had just fetched for the table |
+| FFP payload x2 | `fetch_ffp_table()` and `fetch_ffp_horizon()` each fetch it -- and each then re-ran `archive_payload()`, writing six JSON files |
+| `bootstrap-static` x3 | `ffp_feed.bootstrap_code_to_id()` cannot use `@st.cache_data` (this module is Streamlit-free by hard constraint) and both FFP fetchers call it |
+
+Fixed with `_rotowire_article_html()` -- one cached page serving both consumers,
+with `fetch_rotowire_projections(html=...)` to skip the second request -- and
+`ffp_feed._memoised()`, a 60s in-process memo for the two pure fetches.
+
+**The memo's TTL sitting under the Streamlit cache above it is what makes it
+safe.** 60s against the 300s on `get_ffp_feed` / `get_ffp_horizon`, so it can
+never serve a payload older than that cache would have served anyway and cannot
+outlive a Refresh click in a way that matters -- the bug `purge_cache_prefix`
+exists for was a *permanent* (`ttl=None`) entry. And **only successes are
+stored**: memoising a failure is how `get_ffp_feed` once pinned a transient
+timeout for five minutes while the website plainly worked, so an empty result is
+returned and not kept, and the next caller retries.
+
+**The Rotowire dedupe silently did nothing at first**, which is the detail worth
+remembering: Streamlit hashes *every* argument into the cache key, and the two
+consumers called the shared helper with `timeout=30` and `timeout=15`. Two cache
+entries, two downloads, a dedupe that measured as no improvement at all. The
+timeout is now a module constant rather than a parameter.
+
+Result: median cold load **8.23s to 4.38s**, 12 requests to 7-9, warm rerun
+0.92s. One duplicate remains by choice -- `bootstrap-static` is fetched once by
+`get_classic_bootstrap_static()` and once by `bootstrap_code_to_id()`, which are
+on opposite sides of the Streamlit-free boundary, and at 0.16s it is not worth
+crossing it. The larger remaining cost is structural: because `st.tabs` renders
+every body, a load still pays for the Odds API call and Accuracy's archive read
+even when neither tab is open. Avoiding that needs a stateful control instead of
+`st.tabs`, which changes how the tabs look.
+
 **The Hub is grouped by question, not by source** (`show_player_projections_page`).
 Eight flat tabs had three answering "how many points this gameweek" and three
 more answering "what is likely to happen". Now: **GW Projections** (Blended /
@@ -980,11 +1020,12 @@ weakening every page test:
   every page test skipped its filtering branches. It now delegates to the
   patched `streamlit` attribute, which is what a real column does.
   `select_slider` was also unmocked.
-- `mock_streamlit` now clears `st.cache_data`. A page helper cached on something
-  coarse -- a gameweek, a URL -- gets the same key in every test, so a test that
-  patched its own fixtures could be served the frame a *previous* test's
-  fixtures produced. It still passed, because pages degrade on an empty frame,
-  and quietly stopped testing the thing it named.
+Note that `tests/conftest.py` replaces `st.cache_data` with a **pass-through
+decorator** before any app module is imported, so nothing in the suite is
+cached. That is worth knowing in both directions: a cached helper is exercised
+fresh on every call, so cross-test reuse of a coarsely-keyed one is not a
+hazard — and a `cache_data.clear()` in a fixture is not a safeguard but a
+no-op that raises `AttributeError` on a plain function.
 
 ### Projection snapshots — the record that makes measurement possible
 

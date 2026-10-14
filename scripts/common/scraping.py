@@ -45,6 +45,38 @@ _map_rotowire_header_row = projection_sources._map_rotowire_header_row
 _rotowire_row_from_header_map = projection_sources._rotowire_row_from_header_map
 
 
+#: One timeout for the shared article fetch. It is **not** a parameter, and that
+#: is the whole point: Streamlit hashes every argument into the cache key, so
+#: the two consumers passing 30 and 15 got separate entries and the page was
+#: still downloaded twice -- the dedupe silently did nothing. Measured, that was
+#: 1.4s of a 5.8s cold Projections Hub load. The longer of the two values, since
+#: the table parse is the consumer that actually needs the page.
+_ROTOWIRE_PAGE_TIMEOUT = 30
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _rotowire_article_html(url: str):
+    """The article page itself, cached, so it is downloaded once per hour.
+
+    Two things read this page -- the rankings table and the "Updated on" stamp
+    beside it -- and they were separate cached functions each doing their own
+    request.
+
+    Returns None rather than raising; both consumers already degrade on a page
+    they cannot read.
+    """
+    if not url:
+        return None
+    try:
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"},
+                            timeout=_ROTOWIRE_PAGE_TIMEOUT)
+        resp.raise_for_status()
+        return resp.content
+    except Exception as e:
+        _logger.warning("Rotowire: could not fetch %s: %s", url, e)
+        return None
+
+
 @st.cache_data(ttl=3600)
 def get_rotowire_player_projections(url, limit=None):
     """Fetch Rotowire's weekly rankings table (cached).
@@ -52,7 +84,8 @@ def get_rotowire_player_projections(url, limit=None):
     Thin wrapper over ``projection_sources.fetch_rotowire_projections``. See
     there for the table-shape handling and the multi-gameweek article refusal.
     """
-    return projection_sources.fetch_rotowire_projections(url, limit=limit)
+    html = _rotowire_article_html(url)
+    return projection_sources.fetch_rotowire_projections(url, limit=limit, html=html)
 
 
 # Rotowire stamps every article with "Updated on August 20, 2026 10:54AM EST" in
@@ -67,6 +100,10 @@ _ROTOWIRE_UPDATED_RE = re.compile(
 @st.cache_data(ttl=1800)
 def get_rotowire_article_updated(url: str, timeout: int = 15):
     """Scrape an article's "Updated on ..." timestamp.
+
+    ``timeout`` is accepted for backwards compatibility and ignored: the page
+    comes from the shared ``_rotowire_article_html`` cache, whose timeout is a
+    constant so that both consumers hit one cache entry.
 
     Rotowire labels the time "EST" year-round; it is really wall-clock New York
     time, so it is localized to America/New_York rather than a fixed offset.
@@ -83,9 +120,10 @@ def get_rotowire_article_updated(url: str, timeout: int = 15):
     if not url:
         return None
     try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        html = _rotowire_article_html(url)
+        if html is None:
+            return None
+        soup = BeautifulSoup(html, "html.parser")
 
         node = soup.find("div", class_="article__date")
         text = node.get_text(" ", strip=True) if node else soup.get_text(" ", strip=True)

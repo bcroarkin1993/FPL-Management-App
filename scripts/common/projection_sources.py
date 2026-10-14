@@ -207,13 +207,18 @@ def rotowire_club_coverage() -> Dict[str, int]:
     return dict(_ROTOWIRE_CLUB_COVERAGE)
 
 
-def fetch_rotowire_projections(url, limit=None):
+def fetch_rotowire_projections(url, limit=None, html=None):
     """
     Fetches fantasy rankings and projected points for players from RotoWire.
 
     Parameters:
     - url (str): URL to fetch the data from.
     - limit (int, optional): Number of players to display. Defaults to None (displays all players).
+    - html (str|bytes, optional): Already-downloaded page, to skip the request.
+      The article's "Updated on" stamp is scraped from this same page by
+      ``scraping.get_rotowire_article_updated``, so without this the page was
+      downloaded twice per cold page load -- the most expensive duplicate on
+      the Projections Hub at ~1.0s.
 
     Returns:
     - DataFrame: A DataFrame containing player rankings, projected points, and calculated value.
@@ -235,15 +240,17 @@ def fetch_rotowire_projections(url, limit=None):
         except ValueError:
             return default
 
-    # Download the page
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        _logger.warning("Failed to fetch Rotowire projections from %s: %s", url, e)
-        return pd.DataFrame()
+    # Download the page, unless the caller already has it.
+    if html is None:
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            html = response.content
+        except requests.RequestException as e:
+            _logger.warning("Failed to fetch Rotowire projections from %s: %s", url, e)
+            return pd.DataFrame()
 
-    soup = BeautifulSoup(response.content, 'html.parser')
+    soup = BeautifulSoup(html, 'html.parser')
 
     # Find table with fallback selectors (most specific to least specific)
     table = soup.select_one("table.article-table__tablesorter.article-table__standard.article-table__figure")

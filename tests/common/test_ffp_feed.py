@@ -325,3 +325,89 @@ class TestLongSchema:
     def test_an_unusable_payload_returns_empty_rather_than_raising(self):
         assert ffp_feed.to_long_schema([]).empty
         assert ffp_feed.to_long_schema([{"nope": 1}]).empty
+
+
+class TestFetchMemo:
+    """The in-process memo that stops one payload being downloaded twice.
+
+    Two separately-cached Streamlit wrappers need the same FFP payload --
+    ``fetch_ffp_table`` for the gameweek being scored, ``fetch_ffp_horizon`` for
+    the window -- and this module cannot use ``@st.cache_data`` because it is
+    Streamlit-free by hard constraint.
+    """
+
+    def setup_method(self):
+        ffp_feed.clear_memo()
+
+    def teardown_method(self):
+        ffp_feed.clear_memo()
+
+    def test_a_successful_result_is_fetched_once(self):
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            return (["row"], 7, None)
+
+        first = ffp_feed._memoised("k", fetch)
+        second = ffp_feed._memoised("k", fetch)
+        assert first == second
+        assert len(calls) == 1, "the second caller must not re-fetch"
+
+    def test_a_failure_is_never_memoised(self):
+        """The rule this app has already paid for breaking.
+
+        ``get_ffp_feed`` returning a bare ``None`` from ``@st.cache_data`` pinned
+        a transient timeout for five minutes, and FFP read "temporarily
+        unavailable" in the app while the website plainly worked. An empty result
+        must be handed back and *not* stored, so the next caller retries.
+        """
+        calls = []
+
+        def failing():
+            calls.append(1)
+            return ([], None, None)
+
+        assert ffp_feed._memoised("k", failing) == ([], None, None)
+        assert ffp_feed._memoised("k", failing) == ([], None, None)
+        assert len(calls) == 2, "a failed fetch must be retried, not pinned"
+
+    def test_a_later_success_replaces_the_unstored_failure(self):
+        results = [([], None, None), (["row"], 7, None)]
+
+        def flaky():
+            return results.pop(0)
+
+        assert ffp_feed._memoised("k", flaky)[0] == []
+        assert ffp_feed._memoised("k", flaky)[0] == ["row"]
+        # And that success is now held.
+        assert ffp_feed._memoised("k", lambda: (["other"], 9, None))[0] == ["row"]
+
+    def test_none_and_empty_dicts_count_as_failures(self):
+        """`bootstrap_code_to_id` returns {} when the bootstrap is unreachable."""
+        assert not ffp_feed._memo_worth_keeping(None)
+        assert not ffp_feed._memo_worth_keeping({})
+        assert not ffp_feed._memo_worth_keeping(([], None, None))
+        assert ffp_feed._memo_worth_keeping({1: 2})
+        assert ffp_feed._memo_worth_keeping((["row"], 7, None))
+
+    def test_the_entry_expires(self):
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            return (["row"], 7, None)
+
+        ffp_feed._memoised("k", fetch, ttl=0)
+        ffp_feed._memoised("k", fetch, ttl=0)
+        assert len(calls) == 2
+
+    def test_different_keys_do_not_share(self):
+        assert ffp_feed._memoised("a", lambda: (["a"], 1, None))[0] == ["a"]
+        assert ffp_feed._memoised("b", lambda: (["b"], 2, None))[0] == ["b"]
+
+    def test_the_memo_ttl_sits_under_the_streamlit_cache_above_it(self):
+        """What makes the memo invisible: it is strictly shorter-lived than the
+        300s cache on get_ffp_feed, so it can never serve a staler payload than
+        that cache would have served anyway."""
+        assert ffp_feed.MEMO_TTL_SECONDS < 300

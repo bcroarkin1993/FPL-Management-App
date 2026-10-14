@@ -191,18 +191,13 @@ def mock_streamlit():
     """
     patches = {}
 
-    # Page tests must not inherit each other's @st.cache_data results. A page
-    # helper cached on something coarse -- a gameweek, a URL -- gets the same
-    # key in every test, so without this a test that patches its own fixtures
-    # can be served the frame a *previous* test's fixtures produced. It still
-    # passes, because pages are written to degrade on an empty frame, and
-    # quietly stops testing the thing it names.
-    try:
-        import streamlit as _st
-        _st.cache_data.clear()
-    except Exception:                       # pragma: no cover - bare env
-        pass
-
+    # No cache clearing here, deliberately. `st.cache_data` is replaced with a
+    # pass-through decorator at the top of this file, before any app module is
+    # imported, so nothing in the suite is cached and there is nothing to clear
+    # -- a `.clear()` call here raises AttributeError on a plain function and,
+    # wrapped in a try/except, silently does nothing while reading as a
+    # safeguard. If caching is ever re-enabled for tests, cross-test reuse of a
+    # coarsely-keyed helper becomes a real hazard and this is where to handle it.
     display_funcs = [
         "title", "header", "subheader", "markdown", "write", "text",
         "dataframe", "table", "json", "metric", "caption",
