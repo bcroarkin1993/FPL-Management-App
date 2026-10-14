@@ -571,8 +571,16 @@ the app: `classic/transfers.py` wrote it straight into `Projected_Points` — th
 Rotowire slot — whenever Rotowire had not published, so it took Rotowire's 60%
 weight while reading as Rotowire everywhere downstream. It is now a *fallback*
 source: it fills only players no weighted source priced, and shows as `xP` in
-`Proj_Src`. Weight 0 until the accuracy harness has an opinion; carried through
-for display either way.
+`Proj_Src`. Weight 0 until the accuracy harness has an opinion.
+
+It is deliberately **not** a column on the Blended tab. Sitting beside Rotowire
+and FFP it read as a third contributor to the blend, which at weight 0 it is
+not: live it is the projection for 29 of 667 players and moves nobody else.
+`Proj_Src` naming `xP`, and the Data Sources panel counting those players, is
+the honest surface for a fallback — and the Accuracy tab is where its quality
+belongs. Measured over four gameweeks it is the weakest of the four on points
+(MAE 2.760 against FFP's 2.499) and the most biased on the start model (+0.280),
+so the zero is currently earning its keep.
 
 **`fpl_ep_source()` picks `ep_this` or `ep_next` by target gameweek.** FPL
 publishes both and they describe different weeks. Taking `ep_next`
@@ -897,12 +905,25 @@ colour per column from the rows it is given, and either default is wrong here:
   documents. Filtering to Arsenal leaves Saka's 5.0 a mid-green, which is what
   it is worth league-wide.
 
-The Fixtures view renders opponent text coloured by FFP's `Difficulty` through
-`color_values` + a fixed `(1, 5)` override, so the scale means the same thing in
-every column and on every rerun. A blank gameweek renders **—** rather than an
-empty cell: a missing fixture must read as "the club is not playing", which is
-the most useful thing a horizon can say, not as missing data. A double shows
-both opponents, or `×2` where FFP priced a double but published one opponent.
+The Fixtures view prints `OPP (H)` and then FFP's own `Difficulty`, coloured
+through `color_values` + a fixed `(1, 5)` override so the scale means the same
+thing in every column and on every rerun. **The number is printed, not only
+coloured**, because `render_styled_table` colours *text* rather than the cell
+background -- difficulty as colour alone is the weakest signal on the page and
+carries nothing at all for a colour-blind reader. A blank gameweek renders **—**
+rather than an empty cell: a missing fixture must read as "the club is not
+playing", which is the most useful thing a horizon can say, not as missing data.
+A double shows both opponents, or `×2` where FFP priced a double but published
+one opponent, and its averaged FDR is shown to 1dp so it does not read as a
+single week's rating.
+
+That view carries **both** summaries -- `Avg FDR` over the shown weeks and the
+same `Total` points as the Points view -- because it answers two questions that
+can disagree: a soft run for a player who does not start is still worth nothing,
+and a brutal run for a premium can still out-score it. Live at GW7, Haaland's
+six weeks average 2.67 against Mbeumo's 3.33 while the points run the other way
+in GW12. `Avg FDR` shares the fixed 1-5 scale, so a column average and a single
+week read alike.
 
 **`check_ffp_horizon()`** is the tripwire, and the check that earns its keep is
 **contiguity**: a gap in the run shifts every later column one week left of its

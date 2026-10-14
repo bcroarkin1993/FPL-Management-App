@@ -11,6 +11,8 @@ A unified projections page that aggregates data from multiple sources:
 Each data source is displayed in its own tab with clear attribution.
 """
 
+import math
+
 import config
 import pandas as pd
 import streamlit as st
@@ -439,14 +441,27 @@ def render_ffp_data():
 # Horizon — FFP's six-gameweek forecasts, which nothing has ever shown
 # =============================================================================
 
-def _horizon_fixture_cell(fixtures, count) -> str:
-    """One cell for the fixtures view: the opponent(s), or an explicit blank.
+def _is_finite_number(val) -> bool:
+    """True only for a real, finite number -- NaN and inf are not averageable."""
+    try:
+        return math.isfinite(float(val))
+    except (TypeError, ValueError):
+        return False
+
+
+def _horizon_fixture_cell(fixtures, count, fdr=None) -> str:
+    """One cell for the fixtures view: the opponent(s) and the difficulty.
 
     A blank gameweek must not render as an empty string beside a column of real
     fixtures -- it reads as missing data rather than as the fact that the club
     is not playing, which is the single most important thing a horizon can tell
     you. Same reasoning as ``attach_matchups()`` writing "No fixture" rather
     than leaving the cell to be read as "N/A".
+
+    **The FDR is printed, not only coloured.** ``render_styled_table`` colours
+    *text*, not the cell background, so difficulty encoded as colour alone is
+    the weakest signal on the page and carries nothing at all for a colour-blind
+    reader. The number is the data; the colour is the shortcut.
     """
     if not fixtures:
         return "—"
@@ -455,6 +470,11 @@ def _horizon_fixture_cell(fixtures, count) -> str:
         if int(count) > len(fixtures):
             # FFP priced a double but published one opponent for it.
             label += " ×%d" % int(count)
+    except (TypeError, ValueError):
+        pass
+    try:
+        if fdr is not None and math.isfinite(float(fdr)):
+            label += "  %g" % round(float(fdr), 1)
     except (TypeError, ValueError):
         pass
     return label
@@ -684,15 +704,23 @@ def render_horizon():
         for pid in ids:
             row = {"Player": grid.at[pid, "Player"], "Team": grid.at[pid, "Team"],
                    "Pos": grid.at[pid, "Pos"]}
+            week_fdrs = []
             for g in shown:
                 fx = fixtures[g].get(pid) if g in fixtures.columns else None
                 cnt = counts[g].get(pid) if g in counts.columns else None
+                this_fdr = fdr[g].get(pid) if g in fdr.columns else float("nan")
                 row[gw_labels[g]] = _horizon_fixture_cell(
-                    fx if isinstance(fx, list) else [], cnt)
-                colour[gw_labels[g]].append(
-                    fdr[g].get(pid) if g in fdr.columns else float("nan"))
-            # The points total rides along: a fixture run and what it is
-            # actually worth belong on the same line, not a click apart.
+                    fx if isinstance(fx, list) else [], cnt, this_fdr)
+                colour[gw_labels[g]].append(this_fdr)
+                week_fdrs.append(this_fdr)
+            # Both summaries, because this view answers two questions that can
+            # disagree: how hard the run is, and what it is projected to be
+            # worth. A soft run for a player who does not start is still worth
+            # nothing, and a brutal run for a premium can still out-score it.
+            finite_fdrs = [f for f in week_fdrs
+                           if f is not None and _is_finite_number(f)]
+            row["Avg FDR"] = (sum(finite_fdrs) / len(finite_fdrs)
+                              if finite_fdrs else float("nan"))
             row["Total"] = grid.at[pid, "Total"]
             rows.append(row)
         display = pd.DataFrame(rows)
@@ -700,27 +728,32 @@ def render_horizon():
         display = display.head(300)
         render_styled_table(
             display,
-            col_formats={"Total": "{:.1f}"},
+            col_formats={"Total": "{:.1f}", "Avg FDR": "{:.2f}"},
             positive_color_cols=["Total"],
             # Colour comes from FFP's own published difficulty rather than the
             # text in the cell, and 1-5 is fixed so the scale means the same
-            # thing in every column and on every rerun.
-            negative_color_cols=label_cols,
+            # thing in every column and on every rerun. Avg FDR shares that
+            # scale, so a column average and a single week read alike.
+            negative_color_cols=label_cols + ["Avg FDR"],
             color_values={c: colour[c][:len(display)] for c in label_cols},
-            color_range_overrides={c: (1.0, 5.0) for c in label_cols},
+            color_range_overrides={**{c: (1.0, 5.0) for c in label_cols},
+                                   "Avg FDR": (1.0, 5.0)},
             text_align={c: "center" for c in label_cols},
             max_height=640,
         )
-        st.caption("Green is an easy fixture, red a hard one (FFP's own "
-                   "difficulty rating). **—** is a blank gameweek; **×2** a double. "
-                   "Rows keep the order set above, so this reads against the "
-                   "Points view row for row.")
+        st.caption("Each cell is the opponent, **H** home or **a** away, then "
+                   "FFP's own fixture difficulty — 1 easiest, 5 hardest, green "
+                   "to red. **—** is a blank gameweek; **×2** a double. "
+                   "**Total** is the same projected points as the Points view, "
+                   "and rows keep the order set above, so the two views read "
+                   "against each other line for line.")
 
     bits = [
         "Showing %d of %d players." % (min(len(grid), 300), len(grid)),
-        "**GW%d is the app's blended projection** (Rotowire + FFP + FPL xP); "
-        "GW%d onwards are FFP's own forecasts, which is the only source that "
-        "publishes beyond the next gameweek." % (shown[0], shown[0] + 1)
+        "**GW%d is the app's blended projection**, from Rotowire and FFP with "
+        "FPL's own expected points filling players neither priced; GW%d onwards "
+        "are FFP's forecasts alone, as the only source publishing beyond the "
+        "next gameweek." % (shown[0], shown[0] + 1)
         if shown[0] == current_gw and len(shown) > 1 else
         "Every column is FFP's own forecast.",
         "Both are expected points — allowing for the chance he does not start — "
@@ -1215,7 +1248,12 @@ def render_blended_projections():
         "Start %": pd.to_numeric(blended["Start_Pct"], errors="coerce") * 100,
         "Rotowire": pd.to_numeric(blended.get("Proj_Start__rotowire"), errors="coerce"),
         "FFP": pd.to_numeric(blended.get("Proj_Start__ffp"), errors="coerce"),
-        "FPL xP": pd.to_numeric(blended.get("Proj_Start__fpl_ep"), errors="coerce"),
+        # FPL's own xP is deliberately not a column. It carries weight 0, so it
+        # never moves the blend for a player either weighted source priced --
+        # live, 29 of 667 -- and a column sitting beside Rotowire and FFP read
+        # as a third contributor to it. It is still a declared source: `Src`
+        # shows `xP` where it filled a player nobody else priced, the Data
+        # Sources panel counts them, and the Accuracy tab scores it.
         "Spread": pd.to_numeric(blended.get("Proj_Spread"), errors="coerce"),
         "Src": blended["Proj_Src"],
     })
@@ -1249,7 +1287,7 @@ def render_blended_projections():
         display.head(300),
         col_formats={
             "Proj": "{:.2f}", "If Starts": "{:.2f}", "Start %": "{:.0f}%",
-            "Rotowire": "{:.2f}", "FFP": "{:.2f}", "FPL xP": "{:.2f}",
+            "Rotowire": "{:.2f}", "FFP": "{:.2f}",
             "Spread": "{:.2f}",
         },
         positive_color_cols=["Proj", "If Starts"],

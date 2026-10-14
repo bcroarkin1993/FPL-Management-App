@@ -326,6 +326,21 @@ class TestHorizonTab:
         # FFP priced a double but published only one opponent for it.
         assert _horizon_fixture_cell(["IPS (H)"], 2) == "IPS (H) ×2"
 
+    def test_the_difficulty_is_printed_not_only_coloured(self):
+        """render_styled_table colours text, so FDR as colour alone carries
+        nothing for a colour-blind reader. The number is the data."""
+        from scripts.fpl.player_projections import _horizon_fixture_cell
+        assert _horizon_fixture_cell(["IPS (H)"], 1, 1) == "IPS (H)  1"
+        assert _horizon_fixture_cell(["ARS (a)"], 1, 5) == "ARS (a)  5"
+        # A double gameweek averages to a fraction; it must not read as "3".
+        assert _horizon_fixture_cell(["ARS (a)", "CHE (H)"], 2, 3.5) == \
+            "ARS (a) / CHE (H)  3.5"
+        # No difficulty published is a missing suffix, never a fabricated one.
+        assert _horizon_fixture_cell(["IPS (H)"], 1, None) == "IPS (H)"
+        assert _horizon_fixture_cell(["IPS (H)"], 1, float("nan")) == "IPS (H)"
+        # A blank gameweek has no fixture to rate.
+        assert _horizon_fixture_cell([], 0, 3) == "—"
+
 
 class TestPriceChangesPage:
     def test_smoke(self, mock_all_utils):
