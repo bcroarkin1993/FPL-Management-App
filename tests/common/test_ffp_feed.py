@@ -60,14 +60,79 @@ class TestFlightExtraction:
         assert ffp_feed.extract_rows("") == []
         assert ffp_feed.extract_rows('"rows":[ not json') == []
 
-    def test_updated_stamp_is_read_with_its_gameweek(self):
+    #: The shape FFP's UpdatedStamp component renders today, trimmed.
+    CURRENT_STAMP = (
+        '["$","span",null,{"className":"UpdatedStamp-module__x__label",'
+        '"children":"Updated for GW7"}],["$","time",null,'
+        '{"className":"UpdatedStamp-module__x__when",'
+        '"dateTime":"$D2026-10-09T18:12:01.388Z","children":"9 October 2026"}]'
+    )
+
+    def test_the_current_stamp_is_read_with_its_gameweek(self):
+        gw, when = ffp_feed.parse_updated(self.CURRENT_STAMP)
+        assert gw == 7
+        assert when is not None
+        assert (when.year, when.month, when.day) == (2026, 10, 9)
+        assert (when.hour, when.minute, when.second) == (18, 12, 1)
+        assert when.utcoffset().total_seconds() == 0, "FFP serialises UTC"
+
+    def test_the_stamp_is_timezone_aware(self):
+        """``format_last_updated()`` computes an age and needs an aware value;
+        a naive one would be read as local time and shift "3h ago" by hours."""
+        _gw, when = ffp_feed.parse_updated(self.CURRENT_STAMP)
+        assert when.tzinfo is not None
+
+    def test_the_legacy_stamp_still_parses(self):
+        """The pre-2026-10 shape. Kept because the clean-sheet page still uses it."""
         gw, when = ffp_feed.parse_updated('x "Updated for GW",3," · 4 September at 16:18" y')
         assert gw == 3
         assert when is not None
         assert (when.day, when.hour, when.minute) == (4, 16, 18)
 
+    def test_the_two_halves_fall_back_independently(self):
+        """The live clean-sheet page: a gameweek, and a "date" that is prose.
+
+        Discarding both because one is unparseable would throw away a gameweek
+        the page states plainly.
+        """
+        gw, when = ffp_feed.parse_updated(
+            'x "Updated for GW",7," odds entered through GW11" y')
+        assert gw == 7
+        assert when is None
+
+    def test_a_label_with_no_time_falls_back_to_the_legacy_date(self):
+        flight = ('"children":"Updated for GW7"'
+                  ' ... "Updated for GW",7," · 4 September at 16:18"')
+        gw, when = ffp_feed.parse_updated(flight)
+        assert gw == 7
+        assert when is not None and when.day == 4
+
+    def test_a_distant_timestamp_is_not_taken_as_the_stamp(self):
+        """Scoped to a window after the label, so an article publish date
+        elsewhere in the React tree cannot silently stand in for it."""
+        flight = ('"children":"Updated for GW7"' + ' ' * 600
+                  + '"dateTime":"$D2020-01-01T00:00:00.000Z"')
+        gw, when = ffp_feed.parse_updated(flight)
+        assert gw == 7
+        assert when is None, "a dateTime 600 chars away belongs to something else"
+
+    def test_a_malformed_timestamp_is_not_an_error(self):
+        flight = ('"children":"Updated for GW7"'
+                  '"dateTime":"$D2026-13-45Tnot-a-time"')
+        gw, when = ffp_feed.parse_updated(flight)
+        assert gw == 7
+        assert when is None
+
+    def test_a_stamp_without_an_offset_is_read_as_utc(self):
+        """FFP serialises UTC; assuming the reader's zone would shift the age."""
+        when = ffp_feed._parse_iso_datetime("2026-10-09T18:12:01")
+        assert when is not None
+        assert when.utcoffset().total_seconds() == 0
+
     def test_a_missing_stamp_is_not_an_error(self):
         assert ffp_feed.parse_updated("no stamp here") == (None, None)
+        assert ffp_feed.parse_updated("") == (None, None)
+        assert ffp_feed.parse_updated(None) == (None, None)
 
 
 class TestSheetSchema:

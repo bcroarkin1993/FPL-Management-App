@@ -11,6 +11,8 @@ Nothing here asserts an exact value; upstream numbers change every week. They
 assert that the numbers are *possible*.
 """
 
+from datetime import datetime, timezone
+
 import config
 import pandas as pd
 import pytest
@@ -90,6 +92,57 @@ class TestFfpSource:
             "FFP feed carries no gameweek (provenance=%s). Either their payload "
             "changed shape or the spreadsheet fallback's fixtures no longer "
             "resolve to a gameweek." % ffp_feed.provenance
+        )
+
+    def test_the_site_publishes_a_parseable_update_stamp(self):
+        """The gap that let FFP's stamp rewrite go unnoticed.
+
+        FFP replaced their UpdatedStamp component (observed 2026-10-14) and
+        ``updated`` silently became None app-wide: the Projections Hub rendered
+        "—" where a publish time belongs, and the archive wrote ``updated: null``
+        for three gameweeks. Nothing failed, because a missing timestamp is
+        cosmetic *by design* -- the scraper returns None on any failure and must
+        never take a page down. That is exactly why it needs a test: the cost is
+        that a table written before the last team-news cycle becomes
+        indistinguishable from one written after it, which is the whole reason
+        the stamp is surfaced.
+
+        Asserted against the site payload rather than the feed, because the
+        archive and spreadsheet paths legitimately carry no stamp of their own.
+        """
+        from scripts.common import ffp_feed as ffp_module
+
+        resp = skip_if_unreachable(
+            lambda: ffp_module._get(ffp_module.FFP_POINTS_PREDICTOR_URL),
+            "FFP points predictor",
+        )
+        flight = ffp_module.flight_payload(resp.text)
+        if not flight:
+            pytest.skip("FFP served no RSC flight payload for this request")
+
+        gw, when = ffp_module.parse_updated(flight)
+        assert gw is not None, (
+            "FFP's page states no gameweek in its update stamp -- the component "
+            "has changed shape again. Check _UPDATED_GW_RE against the payload."
+        )
+        assert when is not None, (
+            "FFP's page carries no parseable publish time, so every surface that "
+            "shows FFP freshness renders a dash. Check _UPDATED_ISO_RE and the "
+            "legacy _UPDATED_RE fallback against the payload."
+        )
+        assert when.tzinfo is not None, (
+            "the stamp must be timezone-aware: format_last_updated() computes an "
+            "age from it, and a naive value is read as local time"
+        )
+        age_days = (datetime.now(timezone.utc) - when).total_seconds() / 86400.0
+        assert age_days > -1, (
+            "FFP's publish stamp is %.1f days in the future -- the offset or the "
+            "year was parsed wrongly" % -age_days
+        )
+        assert age_days < 60, (
+            "FFP's last publication reads %.0f days old. Either they have "
+            "stopped publishing or the stamp is being parsed as the wrong "
+            "year." % age_days
         )
 
     def test_feed_is_for_the_current_gameweek(self, ffp_feed):

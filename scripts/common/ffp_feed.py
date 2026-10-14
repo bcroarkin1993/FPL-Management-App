@@ -48,7 +48,7 @@ import os
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -94,7 +94,36 @@ DEFAULT_ATTEMPTS = 3
 _HORIZON = 5
 
 _FLIGHT_RE = re.compile(r'self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)')
-#: "Updated for GW",3," - 4 September at 16:18"  (an RSC-rendered React child list)
+
+# FFP rewrote their UpdatedStamp component (observed 2026-10-14). The label is
+# now a single string and the time sits in a sibling <time> element carrying a
+# **machine-readable** attribute:
+#
+#   "children":"Updated for GW7"
+#   "dateTime":"$D2026-10-09T18:12:01.388Z","children":"9 October 2026"
+#
+# The old pattern matched neither, so `updated` silently went None across the
+# app -- the FFP Data and Horizon tabs rendered "—" where a publish time belongs,
+# and the archive wrote `updated: null` for GW10-GW12. Nothing failed, because a
+# missing timestamp is cosmetic by design; the cost is that a table written
+# before the last team-news cycle became indistinguishable from one written
+# after it, which is the entire reason the stamp is surfaced.
+#
+#: `"children":"Updated for GW7"` — the label, which also states the gameweek.
+_UPDATED_GW_RE = re.compile(r'"Updated for GW\s*(\d+)"')
+
+#: `"dateTime":"$D2026-10-09T18:12:01.388Z"` — `$D` is React's RSC Date marker.
+_UPDATED_ISO_RE = re.compile(r'"dateTime":"\$?D?([0-9]{4}-[0-9]{2}-[0-9]{2}[T ][^"]*)"')
+
+#: How far past the label to look for its own <time>. Scoped rather than
+#: searching the whole payload: live there is exactly one of each, 86 characters
+#: apart, but an article publish date elsewhere in the tree would be
+#: indistinguishable from the stamp and silently stand in for it.
+_UPDATED_WINDOW = 400
+
+#: The pre-2026-10 shape: `"Updated for GW",3," - 4 September at 16:18"` (an
+#: RSC-rendered React child list). Kept as a fallback -- it still matches the
+#: clean-sheet page, which carries a gameweek and no date.
 _UPDATED_RE = re.compile(r'"Updated for GW",(\d+),"\s*[^\w"]{0,4}\s*([^"]*)"')
 
 _ELEMENT_TYPE_TO_POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
@@ -230,19 +259,67 @@ def extract_rows(flight: str, key: str = '"rows":[') -> List[dict]:
 
 
 def parse_updated(flight: str) -> Tuple[Optional[int], Optional[datetime]]:
-    """Read the page's "Updated for GW N - <date>" stamp.
+    """Read the page's "Updated for GW N" stamp and its publish time.
 
-    Returns ``(gameweek, datetime)``; either may be None. FFP prints a UK
-    wall-clock time with no year, so the year is inferred as the one that puts
-    the stamp closest to now — a stamp is never more than a season old in
-    practice, and guessing forward across New Year would render "11 months ago".
+    Returns ``(gameweek, datetime)``; either may be None.
+
+    Two shapes, newest first. The current one gives an **ISO 8601 instant with a
+    UTC offset**, which is strictly better than what it replaced: the old stamp
+    was a UK wall-clock time with *no year*, so the year had to be inferred by
+    whichever candidate landed nearest now. That class of inference is the one
+    this codebase has already paid for in ``_resolve_year`` -- a year-less date
+    read on the wrong side of a boundary silently names the wrong one. Here
+    there is nothing to infer.
+
+    Either half can fall back independently, because the two FFP pages differ:
+    the clean-sheet page still matches the legacy pattern and states a gameweek
+    with no parseable date, so taking its gameweek while leaving ``when`` None is
+    the right answer rather than discarding both.
     """
-    match = _UPDATED_RE.search(flight or "")
-    if not match:
-        return None, None
-    gw = int(match.group(1))
-    when = _parse_uk_datetime(match.group(2))
+    flight = flight or ""
+    gw = None
+    when = None
+
+    label = _UPDATED_GW_RE.search(flight)
+    if label:
+        gw = int(label.group(1))
+        window = flight[label.end():label.end() + _UPDATED_WINDOW]
+        iso = _UPDATED_ISO_RE.search(window)
+        if iso:
+            when = _parse_iso_datetime(iso.group(1))
+
+    if gw is None or when is None:
+        legacy = _UPDATED_RE.search(flight)
+        if legacy:
+            if gw is None:
+                gw = int(legacy.group(1))
+            if when is None:
+                when = _parse_uk_datetime(legacy.group(2))
+
     return gw, when
+
+
+def _parse_iso_datetime(text: str) -> Optional[datetime]:
+    """Parse an ISO 8601 stamp into an aware datetime, or None.
+
+    ``format_last_updated()`` needs an aware datetime to compute an age, so a
+    stamp without an offset is read as UTC rather than as local time -- FFP
+    serialises in UTC, and guessing the reader's zone would shift the "3h ago"
+    by hours.
+    """
+    if not text:
+        return None
+    raw = text.strip().replace(" ", "T", 1)
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        _logger.warning("FFP: could not parse publish stamp %r", text)
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _parse_uk_datetime(text: str) -> Optional[datetime]:

@@ -1339,6 +1339,52 @@ distinguishable from FFP alone, while Rotowire, which carries 60% of the weight,
 is clearly worse than FFP. That is a hypothesis for the weight fit, not a
 mandate: it is two gameweeks, and `fit_blend_weights()` stays unapplied.
 
+### FFP's update stamp — their component changed and nothing noticed
+
+`ffp_feed.parse_updated()` reads FFP's "Updated for GW N" stamp. Observed
+2026-10-14, they had rewritten it, and the old pattern matched **neither** half:
+
+```
+before:  "Updated for GW",3," - 4 September at 16:18"      (an RSC child list)
+after:   "children":"Updated for GW7"                       (the label)
+         "dateTime":"$D2026-10-09T18:12:01.388Z"            ($D = React's Date marker)
+```
+
+So `updated` silently became None app-wide. The Projections Hub rendered "—"
+where a publish time belongs on both FFP tabs, and the archive wrote
+`updated: null` for GW10-GW12. **Nothing failed, because a missing timestamp is
+cosmetic by design** — the scraper returns None on any failure and must never
+take a page down. That is precisely why it needed a test: the cost is that a
+table written before the last team-news cycle becomes indistinguishable from one
+written after it, which is the entire reason the stamp is surfaced.
+
+**The new stamp is strictly better than what it replaced.** It is an ISO 8601
+instant with a UTC offset, where the old one was a UK wall-clock time with *no
+year* whose year had to be inferred by whichever candidate landed nearest now —
+the same class of inference `_resolve_year()` records paying for twice. There is
+nothing left to infer. A stamp carrying no offset is read as UTC rather than
+local time, since `format_last_updated()` computes an age from it.
+
+Three details:
+
+- **The timestamp is scoped to a window after the label** (`_UPDATED_WINDOW`,
+  400 chars). Live there is exactly one of each, 86 characters apart, but an
+  article publish date elsewhere in the React tree is indistinguishable from the
+  stamp and would silently stand in for it.
+- **The two halves fall back independently.** The legacy pattern is kept because
+  the *clean-sheet* page still matches it — and there its date group is the prose
+  "odds entered through GW11", which parses to None. Taking that page's stated
+  gameweek while leaving `when` None is the right answer; discarding both would
+  throw away a gameweek the page states plainly.
+- **The archive self-healed.** `_is_newer()`'s rule that a dated publication
+  always beats an undated one rewrote GW07-GW12 on the next fetch, and GW07-GW09
+  moved from a GW4-window capture to the far better-informed GW7 one.
+
+`tests/live/` now fails if the stamp stops parsing, if it is naive, or if it
+reads as being in the future or more than 60 days old — the shapes a year or
+offset misparse produces. Asserted against the site payload rather than the
+feed, because the archive and spreadsheet paths legitimately carry no stamp.
+
 ### Source Freshness
 
 `get_rotowire_article_updated()` (`scripts/common/scraping.py`) scrapes an
