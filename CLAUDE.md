@@ -1012,6 +1012,51 @@ already shows. Accuracy stays top level on purpose: it scores every source after
 the fact, including the ones Horizon uses, so nesting it under GW Projections
 would scope it to one of the things it measures.
 
+**The top level is a radio, not `st.tabs`, so that it can be lazy.** `st.tabs`
+renders every one of its bodies on every rerun -- the switch is client-side CSS
+-- so the page computed all four sections on every interaction regardless of
+which was open. Measured warm, **Accuracy alone was 0.61s of a 0.92s rerun**,
+entirely for a report nobody was looking at.
+
+| Landing section | Cold | Warm rerun |
+|---|---|---|
+| GW Projections (default) | 3.03s | **0.11s** |
+| Horizon | 2.37s | 0.21s |
+| Odds | 0.96s | 0.02s |
+| Accuracy | 0.61s (no network at all) | 0.61s |
+
+Against 4.38s / 0.92s for the eager version: a third off the cold load and
+**8.4x off every filter change, search keystroke and slider move**, which is the
+cost a user actually feels. Across the whole of this work the warm path went
+6.17s to 0.11s.
+
+Two things this cost, both accepted knowingly:
+
+- **A radio does not look like a tab strip.** It is the only lazy control
+  available: `st.segmented_control` and `st.pills` arrived in Streamlit 1.40 and
+  this app pins 1.38, and styling the radio to look like tabs means a blind
+  selector against Streamlit's internal DOM -- which would also restyle the
+  Horizon view toggle on the same page. `st.fragment` *is* available in 1.38 and
+  would keep the tab strip while making interactions cheap, but it does not help
+  the initial render, since a fragment still runs on first paint.
+- **Three of the four sections nearly lost their smoke test.** One test covered
+  all of them for free while `st.tabs` rendered every body; a mocked radio hands
+  back only its first option, so the test would have passed having quietly
+  narrowed to a quarter of the page. `_render_hub_section()` exists as the seam
+  that makes each section renderable -- and testable -- alone, and
+  `TestHubSections` parametrises over `HUB_SECTIONS` with a guard that fails if
+  a section is added without a test.
+
+`test_a_section_renders_only_its_own_tabs` is the lazy contract itself: it
+asserts that rendering one section calls *exactly* its own renderers and no
+others. That is the assertion a revert to `st.tabs` would break, and the saving
+is entirely that property.
+
+The *inner* grouping stays `st.tabs`, which renders all of its bodies. A whole
+inner group costs 0.02-0.11s warm, because its sub-tabs share one cached blend
+and one cached FFP payload -- so making them lazy too would trade a
+native-looking tab strip for nothing.
+
 Two test-infrastructure fixes went with this, both of which were silently
 weakening every page test:
 

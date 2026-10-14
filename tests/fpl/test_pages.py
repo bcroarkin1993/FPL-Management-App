@@ -4,6 +4,8 @@ Each test calls the page's show_*() function with all dependencies mocked,
 verifying no exception is raised.
 """
 
+import contextlib
+
 import pandas as pd
 import pytest
 from unittest.mock import patch, MagicMock
@@ -670,3 +672,91 @@ class TestHorizonBlendedColumn:
         points, _f, _d, _c = _horizon_frames(horizon, pd.DataFrame(), current_gw=7)
         assert points.shape == (3, 3)
         assert points[7].notna().all()
+
+
+class TestHubSections:
+    """The Hub's top level is lazy, so each section needs its own coverage.
+
+    When the nav was ``st.tabs`` every body rendered on every load and one smoke
+    test covered all four. A radio hands back only its first option under the
+    mock, so without these three of the four sections would silently stop being
+    exercised -- the test would still pass, having quietly narrowed to one quarter
+    of the page.
+    """
+
+    def _patches(self):
+        from scripts.fpl import player_projections as pp
+        return [
+            patch.object(pp, "get_rotowire_player_projections", return_value=pd.DataFrame()),
+            patch.object(pp, "get_rotowire_rankings_url", return_value="https://example.com"),
+            patch.object(pp, "get_ffp_feed", return_value=_empty_ffp_feed()),
+            patch.object(pp, "get_ffp_horizon", return_value=_empty_ffp_horizon()),
+            patch.object(pp, "get_ffp_goalscorer_odds", return_value=pd.DataFrame()),
+            patch.object(pp, "get_ffp_clean_sheet_odds", return_value=pd.DataFrame()),
+            patch.object(pp, "get_odds_api_match_odds", return_value=pd.DataFrame()),
+        ]
+
+    @pytest.mark.parametrize("section", [
+        "GW Projections", "Horizon", "Odds", "Accuracy",
+    ])
+    def test_every_section_renders(self, section, mock_all_utils):
+        from scripts.fpl.player_projections import _render_hub_section
+        with contextlib.ExitStack() as stack:
+            for p in self._patches():
+                stack.enter_context(p)
+            _render_hub_section(section)
+
+    def test_the_parametrisation_covers_every_declared_section(self):
+        """So adding a section cannot skip adding its test."""
+        from scripts.fpl.player_projections import HUB_SECTIONS
+        covered = {"GW Projections", "Horizon", "Odds", "Accuracy"}
+        assert set(HUB_SECTIONS) == covered, (
+            "HUB_SECTIONS changed to %s -- add the new section to "
+            "test_every_section_renders" % (HUB_SECTIONS,)
+        )
+
+    def test_an_unknown_section_falls_back_rather_than_rendering_nothing(self, mock_all_utils):
+        """A stale session_state value must not produce a blank page."""
+        from scripts.fpl import player_projections as pp
+        with contextlib.ExitStack() as stack:
+            for p in self._patches():
+                stack.enter_context(p)
+            called = []
+            stack.enter_context(patch.object(
+                pp, "render_blended_projections", side_effect=lambda: called.append(1)))
+            pp._render_hub_section("Something Removed")
+        assert called, "an unrecognised section should fall back to the default"
+
+    @pytest.mark.parametrize("section,expected", [
+        ("GW Projections", {"render_blended_projections",
+                            "render_rotowire_projections", "render_ffp_data"}),
+        ("Horizon", {"render_horizon"}),
+        ("Odds", {"render_goalscorer_odds", "render_clean_sheet_odds",
+                  "render_match_odds"}),
+        ("Accuracy", {"render_accuracy"}),
+    ])
+    def test_a_section_renders_only_its_own_tabs(self, section, expected, mock_all_utils):
+        """The lazy contract, and the thing a revert to st.tabs would break.
+
+        Accuracy costs 0.61s of what used to be a 0.92s rerun, every time,
+        whether or not anyone had it open. The saving *is* this assertion: if
+        rendering one section ever calls another's renderer again, the page is
+        back to paying for all four.
+        """
+        from scripts.fpl import player_projections as pp
+        all_renderers = {
+            "render_blended_projections", "render_rotowire_projections",
+            "render_ffp_data", "render_horizon", "render_goalscorer_odds",
+            "render_clean_sheet_odds", "render_match_odds", "render_accuracy",
+        }
+        called = set()
+        with contextlib.ExitStack() as stack:
+            for name in all_renderers:
+                stack.enter_context(patch.object(
+                    pp, name,
+                    side_effect=(lambda n: lambda *a, **k: called.add(n))(name)))
+            pp._render_hub_section(section)
+        assert called == expected, (
+            "%s rendered %s; it must render exactly %s"
+            % (section, sorted(called), sorted(expected))
+        )
