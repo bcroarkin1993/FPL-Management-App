@@ -595,3 +595,63 @@ class TestSettingsPage:
              patch("scripts.fpl.settings.requests.get", return_value=MagicMock(content=b"<html></html>", status_code=200)):
             from scripts.fpl.settings import show_settings_page
             show_settings_page()
+
+
+class TestHorizonBlendedColumn:
+    """The current gameweek's column must be the engine's blend, not FFP's own.
+
+    This is the guarantee the Horizon tab rests on -- a player's first column
+    has to be the number every other page in the app scores on, or the Hub
+    disagrees with itself about this gameweek. Asserted on ``_horizon_frames``
+    directly, because the rendered HTML can only show that *a* number arrived.
+    """
+
+    def _horizon(self):
+        return _ffp_horizon(start_gw=7, weeks=3, n=3)
+
+    def _blended(self):
+        return pd.DataFrame({
+            "Player_ID": [1, 2, 3],
+            "Display_Name": ["A", "B", "C"],
+            "Team": ["T0", "T1", "T2"],
+            "Position": ["GK", "DEF", "MID"],
+            # Deliberately unlike FFP's own values for GW7.
+            "Proj": [9.99, 8.88, 7.77],
+        })
+
+    def test_the_current_gameweek_column_comes_from_the_blend(self):
+        from scripts.fpl.player_projections import _horizon_frames
+        points, _fixtures, _fdr, _counts = _horizon_frames(
+            self._horizon(), self._blended(), current_gw=7)
+        assert points[7].tolist() == [9.99, 8.88, 7.77]
+
+    def test_later_gameweeks_are_untouched_by_the_blend(self):
+        """The blend prices one gameweek; it must not leak into the others."""
+        from scripts.fpl.player_projections import _horizon_frames
+        horizon = self._horizon()
+        ffp = horizon.df
+        expected = {
+            gw: ffp[ffp["FFP_GW"] == gw].sort_values("Player_ID")["Predicted"].tolist()
+            for gw in (8, 9)
+        }
+        points, _f, _d, _c = _horizon_frames(horizon, self._blended(), current_gw=7)
+        for gw in (8, 9):
+            assert points[gw].tolist() == pytest.approx(expected[gw])
+
+    def test_a_player_the_blend_does_not_price_keeps_ffps_number(self):
+        """combine_first, not an overwrite: the blend covers the FPL pool, and a
+        player missing from it must not have his gameweek blanked."""
+        from scripts.fpl.player_projections import _horizon_frames
+        horizon = self._horizon()
+        partial = self._blended().iloc[:1]           # only Player_ID 1
+        ffp_gw7 = horizon.df[horizon.df["FFP_GW"] == 7].set_index("Player_ID")
+        points, _f, _d, _c = _horizon_frames(horizon, partial, current_gw=7)
+        assert points.at[1, 7] == 9.99               # blended
+        assert points.at[2, 7] == pytest.approx(ffp_gw7.at[2, "Predicted"])
+
+    def test_no_blend_at_all_still_renders_ffps_own_forecasts(self):
+        from scripts.fpl.player_projections import _horizon_frames
+        horizon = self._horizon()
+        points, _f, _d, _c = _horizon_frames(horizon, pd.DataFrame(), current_gw=7)
+        assert points.shape == (3, 3)
+        assert points[7].notna().all()

@@ -555,19 +555,12 @@ def render_horizon():
                    "in gameweek order.")
         return
 
-    # Column 1 is the blend. Assembled exactly as render_blended_projections()
-    # does it, so a player's first column matches that tab to the digit.
-    blended = pd.DataFrame()
-    bootstrap = get_classic_bootstrap_static()
-    if bootstrap:
-        pool = _build_pool(bootstrap)
-        if not pool.empty:
-            rotowire_df = pd.DataFrame()
-            if config.ROTOWIRE_URL:
-                rotowire_df = get_rotowire_player_projections(config.ROTOWIRE_URL)
-            feed = get_ffp_feed()
-            pool = merge_season_projections(pool, rotowire_df, output_col="Points")
-            blended = blend_projections_onto(pool, feed.df, expected_gw=current_gw)
+    # Column 1 is the blend -- the very frame the Blended sub-tab renders, not a
+    # second assembly of it, so a player's first column matches that tab to the
+    # digit and the work is done once per page load.
+    blended = _blended_pool(current_gw, config.ROTOWIRE_URL)
+    if blended is None:
+        blended = pd.DataFrame()
 
     built = _horizon_frames(horizon, blended, current_gw)
     if built[0] is None:
@@ -1074,6 +1067,44 @@ def _build_pool(bootstrap) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _blended_pool(current_gw: int, rotowire_url: str):
+    """The blended projection for ``current_gw``, built once per page load.
+
+    Two tabs need this frame -- GW Projections renders it directly and Horizon
+    takes its first column from it -- and ``st.tabs`` runs every tab body on
+    every rerun, so without a cache the same blend is assembled twice on each
+    interaction. Measured warm, that was 4.4s for the first and a further ~0.9s
+    for the second; the name-matched ``merge_season_projections`` is most of it.
+
+    Cached on ``(gameweek, rotowire_url)`` rather than on the frames it reads:
+    both are small and hashable, and the fetches inside are themselves cached,
+    so a miss here is cheap. The TTL matches ``get_ffp_feed``'s so the blend and
+    the feed it was built from roll over together rather than the blend pinning
+    a feed that has since been refreshed.
+
+    ``st.cache_data`` returns a fresh object per call, so a caller mutating the
+    result cannot corrupt the other's copy -- which ``cache_resource`` would.
+    """
+    bootstrap = get_classic_bootstrap_static()
+    if not bootstrap:
+        return pd.DataFrame()
+    pool = _build_pool(bootstrap)
+    if pool.empty:
+        return pd.DataFrame()
+
+    rotowire_df = pd.DataFrame()
+    if rotowire_url:
+        rotowire_df = get_rotowire_player_projections(rotowire_url)
+    feed = get_ffp_feed()
+
+    # Rotowire values land on the pool by name (merge_season_projections is the
+    # app's tiered name-matched merge); FFP joins on the element id inside
+    # blend_projections_onto.
+    pool = merge_season_projections(pool, rotowire_df, output_col="Points")
+    return blend_projections_onto(pool, feed.df, expected_gw=current_gw)
+
+
 def _blended_source_status(rotowire_df, feed, blended, current_gw) -> None:
     """One row per source: is it up, how many players, how fresh, what weight.
 
@@ -1160,21 +1191,10 @@ def render_blended_projections():
         )
         return
 
-    bootstrap = get_classic_bootstrap_static()
-    if not bootstrap:
+    blended = _blended_pool(current_gw, rotowire_url)
+    if blended is None or blended.empty:
         st.error("Could not load the FPL player pool, so projections cannot be assembled.")
         return
-
-    pool = _build_pool(bootstrap)
-    if pool.empty:
-        st.error("The FPL bootstrap carried no players.")
-        return
-
-    # Rotowire values land on the pool by name (merge_season_projections is the
-    # app's tiered name-matched merge); FFP joins on the element id inside
-    # blend_projections_onto.
-    pool = merge_season_projections(pool, rotowire_df, output_col="Points")
-    blended = blend_projections_onto(pool, feed.df, expected_gw=current_gw)
 
     _blended_source_status(rotowire_df, feed, blended, current_gw)
 
@@ -1637,51 +1657,71 @@ def _gw_list(gws) -> str:
 
 
 def show_player_projections_page():
-    """Main projections hub page with tabbed interface."""
+    """Main projections hub page, grouped by the question each tab answers.
+
+    Eight flat tabs grew into a list nobody could scan, and the grouping that
+    fixes it is by *question*, not by source. "How many points this gameweek"
+    had three tabs answering it -- and Rotowire and FFP are not alternatives to
+    the blend, they are the detail behind the per-source columns the Blended
+    tab already shows, so they belong underneath it. The three odds tabs were
+    three more answering "what is likely to happen", which is a different
+    question from "how many points" and reads as one group.
+
+    **Accuracy stays top level deliberately.** It is not a projection for this
+    gameweek: it scores every source after the fact, including the ones Horizon
+    uses, and it is the page's credibility content. Nesting it under GW
+    Projections would scope it to one of the things it measures.
+
+    Note that ``st.tabs`` renders every tab body on each rerun -- the switch is
+    client-side CSS -- so the grouping buys legibility, not load time. What buys
+    load time is ``_blended_pool()``, which stops GW Projections and Horizon
+    building the same blend twice.
+    """
     st.title("Projections Hub")
     st.caption(
-        "The **Blended** tab is the projection the rest of the app uses. The "
-        "other tabs show each source on its own, unblended."
+        "**GW Projections** is the projection the rest of the app uses, with "
+        "the sources that fed it alongside. **Horizon** is the same question "
+        "over the next six gameweeks, **Odds** is the betting markets, and "
+        "**Accuracy** is how wrong each source has actually been."
     )
 
-    # Create tabs for different data sources
-    # Blended leads. The individual sources stay one click away rather than
-    # being hidden: the blend is the answer, but seeing what fed it is how you
-    # judge whether to trust it on a particular player.
-    tab0, tab1, tab2, tab3, tab_h, tab4, tab5, tab6 = st.tabs([
-        "Blended",
-        "Accuracy",
-        "Rotowire",
-        "FFP Data",
+    tab_proj, tab_horizon, tab_odds, tab_accuracy = st.tabs([
+        "GW Projections",
         "Horizon",
-        "Goal/Assist Odds",
-        "Clean Sheet Odds",
-        "Match Odds"
+        "Odds",
+        "Accuracy",
     ])
 
-    with tab0:
-        render_blended_projections()
+    with tab_proj:
+        # Blended leads. The individual sources stay one click away rather than
+        # being hidden: the blend is the answer, but seeing what fed it is how
+        # you judge whether to trust it on a particular player.
+        sub_blended, sub_rotowire, sub_ffp = st.tabs([
+            "Blended", "Rotowire", "FFP Data",
+        ])
+        with sub_blended:
+            render_blended_projections()
+        with sub_rotowire:
+            render_rotowire_projections()
+        with sub_ffp:
+            render_ffp_data()
 
-    with tab1:
-        render_accuracy()
-
-    with tab2:
-        render_rotowire_projections()
-
-    with tab3:
-        render_ffp_data()
-
-    with tab_h:
+    with tab_horizon:
         render_horizon()
 
-    with tab4:
-        render_goalscorer_odds()
+    with tab_odds:
+        sub_goals, sub_cs, sub_match = st.tabs([
+            "Goal/Assist", "Clean Sheet", "Match Odds",
+        ])
+        with sub_goals:
+            render_goalscorer_odds()
+        with sub_cs:
+            render_clean_sheet_odds()
+        with sub_match:
+            render_match_odds()
 
-    with tab5:
-        render_clean_sheet_odds()
-
-    with tab6:
-        render_match_odds()
+    with tab_accuracy:
+        render_accuracy()
 
     # Footer with data source summary
     st.markdown("---")

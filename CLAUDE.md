@@ -922,12 +922,48 @@ The forward weeks are information, introduced the way `fpl_ep` and the Premier
 League's predicted XIs were. Giving the horizon a weight is Phase 4b work, and
 it needs the accuracy harness to have an opinion first.
 
-One test-infrastructure fix went with this: `_MockColumn.__getattr__` in
-`tests/conftest.py` returned a bare `MagicMock` for everything, so a filter
-written as `col1.text_input(...)` came back truthy-but-unusable and every page
-test silently skipped its filtering branches. It now delegates to the patched
-`streamlit` attribute, which is what a real column does. `select_slider` was
-also unmocked.
+**`_blended_pool()` is why the first column is free.** GW Projections renders
+the blend and Horizon takes its first column from it, and **`st.tabs` runs every
+tab body on every rerun** -- the switch is client-side CSS -- so the same
+name-matched `merge_season_projections` + `blend_projections_onto` was assembled
+twice per interaction. One `@st.cache_data(ttl=300)` helper keyed on
+`(gameweek, rotowire_url)` serves both: measured warm, the whole page went
+**6.17s to 0.95s** a rerun (Blended 4.37 to 0.04, Horizon 0.95 to 0.17), and
+Accuracy's archive read at 0.62s is now the largest single cost. The TTL matches
+`get_ffp_feed`'s so the blend cannot pin a feed that has since refreshed, and
+`cache_data` rather than `cache_resource` because it returns a fresh object per
+call -- two tabs holding one mutable frame is a bug waiting to happen.
+
+Because that frame is shared rather than rebuilt, the two tabs *cannot* disagree
+about the current gameweek. `TestHorizonBlendedColumn` pins the four cases
+anyway: the current column comes from the blend, later columns are untouched by
+it, a player the blend does not price keeps FFP's number (it is a
+`combine_first`, not an overwrite), and no blend at all still renders FFP's own
+forecasts.
+
+**The Hub is grouped by question, not by source** (`show_player_projections_page`).
+Eight flat tabs had three answering "how many points this gameweek" and three
+more answering "what is likely to happen". Now: **GW Projections** (Blended /
+Rotowire / FFP), **Horizon**, **Odds** (Goal-Assist / Clean Sheet / Match), and
+**Accuracy**. Rotowire and FFP sit *under* Blended because they are not
+alternatives to it -- they are the detail behind the per-source columns it
+already shows. Accuracy stays top level on purpose: it scores every source after
+the fact, including the ones Horizon uses, so nesting it under GW Projections
+would scope it to one of the things it measures.
+
+Two test-infrastructure fixes went with this, both of which were silently
+weakening every page test:
+
+- `_MockColumn.__getattr__` returned a bare `MagicMock` for everything, so a
+  filter written as `col1.text_input(...)` came back truthy-but-unusable and
+  every page test skipped its filtering branches. It now delegates to the
+  patched `streamlit` attribute, which is what a real column does.
+  `select_slider` was also unmocked.
+- `mock_streamlit` now clears `st.cache_data`. A page helper cached on something
+  coarse -- a gameweek, a URL -- gets the same key in every test, so a test that
+  patched its own fixtures could be served the frame a *previous* test's
+  fixtures produced. It still passed, because pages degrade on an empty frame,
+  and quietly stopped testing the thing it named.
 
 ### Projection snapshots — the record that makes measurement possible
 
@@ -3221,7 +3257,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | League Setup Admin Page | In-app "🆔 League Setup" page (FPL App Home) to set/validate/lock Draft and Classic league & team IDs instead of hand-editing `.env`. Draft: enter league ID, look it up, pick your team from a resolved dropdown (no need to know your entry ID). Classic: add/remove multiple leagues, resolve team via entry ID lookup. Locked read-only view with two-step "Unlock to Edit" confirmation. Persisted to gitignored `league_settings.json` (repo is public — not committed, unlike `alert_settings.json`). `config.py`'s 4 ID attributes (`FPL_DRAFT_LEAGUE_ID`, `FPL_DRAFT_TEAM_ID`, `FPL_CLASSIC_TEAM_ID`, `FPL_CLASSIC_LEAGUE_IDS`) converted from eager to lazy PEP 562 resolution (same pattern as `CURRENT_GAMEWEEK`), prioritizing locked JSON settings over `.env`, so saved changes take effect immediately without an app restart. |
 | Gameweek Fixtures GW38 Cap | Auto-constrain FDR Horizon and "How many weeks?" sliders to never exceed GW38; defensive cap added inside `get_fixture_difficulty_grid()`; fetch range hard-capped at `end_gw = min(start_gw + weeks - 1, 38)` |
 | Team Difficulty Visualizations | FDR heatmap, defensive stats, attack vs defense ratings (inspired by fpl.page/team-dds) |
-| Projections Hub | Unified projections page with tabs per data source: Rotowire expert rankings, FFP Points Predictor (start %, multi-GW forecasts), Goal/Assist Odds, Clean Sheet Odds, Match Odds (The Odds API). Each tab has data source attribution, filters, and usage tips. A **Horizon** tab renders FFP's six-gameweek forecasts as a player x gameweek grid -- see "Horizon" -- with the current gameweek carrying the engine's blend and a Points/Fixtures toggle. |
+| Projections Hub | Unified projections page, grouped by the question each tab answers rather than by source: **GW Projections** (Blended / Rotowire / FFP Points Predictor), **Horizon**, **Odds** (Goal/Assist, Clean Sheet, Match Odds from The Odds API) and **Accuracy**. Each source carries attribution, filters and freshness. The **Horizon** tab renders FFP's six-gameweek forecasts as a player x gameweek grid with a Points/Fixtures toggle, its first column carrying the engine's blend from the shared `_blended_pool()` -- see "Horizon". |
 | Live Score Integration & Gameweek Refresh | TTL-based gameweek caching (5 min) with manual refresh; live points from FPL API blended with Rotowire projections; actual starting 11 from Draft picks API (not optimal projections); styled overview table showing live/blended/original scores; player cards with played/upcoming status; win probability updates in real-time |
 | Enhanced Lineup Visualizations | Fixed duplicate team bug (matchup index tracking); start likelihood indicator (opacity + border color based on injury status, FPL chance_of_playing, historical starts); robust player name matching (abbreviated names, nicknames, Nordic characters); team name mapping (Rotowire → FPL); Squad Details cards with form, points, goals/assists |
 | Rotowire scraping robustness | Fallback table selectors (exact → partial → any); row validation before indexing; multiple regex patterns for URL discovery; proper logging throughout; replaced bare except clauses |
