@@ -674,6 +674,57 @@ class TestHorizonBlendedColumn:
         assert points[7].notna().all()
 
 
+class TestHorizonPosRank:
+    """Pos RK on the Horizon grid, in both views and over the whole board.
+
+    The horizon is where a positional rank earns the most: the grid's job is
+    reading across a row, and "4.2 a week" says nothing until you know whether
+    that is a leading goalkeeper or a replaceable forward.
+    """
+
+    def _render(self, view, search=""):
+        from scripts.fpl import player_projections as pp
+        captured = []
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(pp, "get_ffp_horizon",
+                                             return_value=_ffp_horizon()))
+            stack.enter_context(patch.object(pp, "_blended_pool",
+                                             return_value=pd.DataFrame()))
+            stack.enter_context(patch.object(
+                pp, "render_styled_table",
+                side_effect=lambda df, **k: captured.append((df, k))))
+            stack.enter_context(patch("streamlit.radio", return_value=view))
+            stack.enter_context(patch("streamlit.text_input", return_value=search))
+            pp.render_horizon()
+        assert captured, "the Horizon tab rendered no table"
+        return captured[-1]
+
+    @pytest.mark.parametrize("view", ["Points", "Fixtures"])
+    def test_both_views_carry_it(self, view, mock_streamlit):
+        df, kwargs = self._render(view)
+        assert "Pos RK" in df.columns
+        assert kwargs["col_formats"].get("Pos RK") == "{:.0f}"
+        # Ranked within position: every position's board starts at 1, and the
+        # best overall row is not the only 1 on the page.
+        for pos, grp in df.groupby("Pos"):
+            assert grp["Pos RK"].min() == 1.0, pos
+        assert (df["Pos RK"] == 1.0).sum() == df["Pos"].nunique()
+
+    def test_filtering_does_not_re_rank(self, mock_streamlit):
+        """The board's rank, not the selection's. Same trap as the colour range.
+
+        ``_ffp_horizon`` scores players in descending order, so "Player 12" is
+        the fourth-best of his position (every 4th row shares a position) and
+        must still read 4 when he is the only row on screen.
+        """
+        full, _ = self._render("Points")
+        expected = full.loc[full["Player"] == "Player 12", "Pos RK"].iloc[0]
+        assert expected > 1.0, "fixture no longer exercises the trap"
+        filtered, _ = self._render("Points", search="Player 12")
+        assert filtered["Player"].tolist() == ["Player 12"]
+        assert filtered["Pos RK"].iloc[0] == expected
+
+
 class TestHubSections:
     """The Hub's top level is lazy, so each section needs its own coverage.
 

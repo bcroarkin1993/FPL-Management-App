@@ -1057,6 +1057,28 @@ inner group costs 0.02-0.11s warm, because its sub-tabs share one cached blend
 and one cached FFP payload -- so making them lazy too would trade a
 native-looking tab strip for nothing.
 
+**`Pos RK` is on every projection table, and it is computed before filtering.**
+`_positional_rank()` ranks a player on the table's own primary number against
+every player at his position: `Proj` on Blended, FFP's `Pred Pts` (or its goal
+odds, when FFP has published no predictions) on FFP Data, the window `Total` on
+Horizon -- Rotowire keeps its own published `Pos Rank`. A projection is not
+interpretable without it, since 4.2 is a leading goalkeeper and a replaceable
+forward, and the overall `#` column cannot say which. Live at GW7 the Blended
+board's four positions hold 73 / 217 / 298 / 79 players, so the same `Proj`
+sits in a different place in each.
+
+The rank is taken over the whole board, *before* the search and position
+filters, for the reason the Horizon grid's colour range is fixed before them:
+a rank re-derived from the filtered rows ranks a selection against itself, so
+searching one name makes him "1" whatever he is worth. Three
+`test_filtering_does_not_re_rank` tests pin it -- one per table, each of which
+fails if the rank moves below its filters. Ties share a rank (`method="min"`),
+matching `analytics.positional_rank()`'s "strictly better, plus one", so the
+block of declared non-starters the engine scores 0 all reads as one rank rather
+than an arbitrary ordering of nothing. The Horizon rank is over exactly the
+weeks shown, so shortening the window legitimately changes it -- which the
+caption says, next to the fact that filtering does not.
+
 Two test-infrastructure fixes went with this, both of which were silently
 weakening every page test:
 

@@ -44,6 +44,34 @@ from scripts.common.error_helpers import get_logger
 _logger = get_logger("fpl_app.projections_hub")
 
 
+def _positional_rank(df: pd.DataFrame, value_col: str,
+                     position_col: str = "Pos") -> pd.Series:
+    """1-based rank within position, best first, over *every* row of ``df``.
+
+    A projection is only interpretable against the other players who could fill
+    that slot: 4.2 points is a fine goalkeeper and a poor forward, and the
+    overall ``#`` column cannot say which. This is the same quantity
+    ``analytics.positional_rank()`` reports on the squad pages, as a bare
+    integer rather than a "#8 MID" label, because here the position is already
+    its own column and the value has to sort.
+
+    **Call this before filtering.** A rank re-derived from the filtered rows
+    ranks a selection against itself -- filter to one club and its best
+    midfielder reads "1" whatever he is worth league-wide -- which is the trap
+    ``render_styled_table``'s colour ranges document, one column over.
+
+    Ties share a rank (``method="min"``), matching ``positional_rank()``'s
+    "number of players strictly better, plus one". A row with no value ranks
+    nowhere and comes back NaN, which renders as an empty cell rather than as a
+    confident last place.
+    """
+    if value_col not in df.columns or position_col not in df.columns:
+        return pd.Series(float("nan"), index=df.index)
+    vals = pd.to_numeric(df[value_col], errors="coerce")
+    return vals.groupby(df[position_col].astype("object"),
+                        dropna=False).rank(method="min", ascending=False)
+
+
 # =============================================================================
 # Data Freshness
 # =============================================================================
@@ -364,6 +392,14 @@ def render_ffp_data():
     if sort_col and sort_col in df.columns:
         df = df.sort_values(sort_col, ascending=False)
 
+    # Ranked on whatever this table is actually about -- FFP's points prediction
+    # normally, its goal odds when they have published no predictions -- and
+    # ranked here, over the whole board, so the user filters below narrow the
+    # rows without re-ranking them against each other.
+    if sort_col and 'Position' in df.columns:
+        df.insert(df.columns.get_loc('Position') + 1, 'Pos RK',
+                  _positional_rank(df, sort_col, position_col='Position'))
+
     # Filters
     with st.expander("Filters", expanded=False):
         col1, col2, col3 = st.columns(3)
@@ -419,7 +455,7 @@ def render_ffp_data():
     positive_cols = [c for c in gradient_cols.keys() if gradient_cols.get(c, True) and c in display_df.columns]
 
     # Build col_formats with % suffix for percentage columns
-    col_fmts = {'Price': '{:.1f}'}
+    col_fmts = {'Price': '{:.1f}', 'Pos RK': '{:.0f}'}
     for col in pct_cols:
         if col in display_df.columns:
             col_fmts[col] = '{:.0f}%'
@@ -434,7 +470,10 @@ def render_ffp_data():
         max_height=600,
     )
     st.caption(f"Showing {len(result)} of {len(df)} players. Data from Fantasy Football Pundit"
-               + (f" · {_ffp_caption(feed)}." if _ffp_caption(feed) else "."))
+               + (f" · {_ffp_caption(feed)}." if _ffp_caption(feed) else ".")
+               + (f" **Pos RK** is his rank on **{sort_col}** among every player "
+                  "at his position, and does not change when you filter."
+                  if sort_col and 'Pos RK' in display_df.columns else ""))
 
 
 # =============================================================================
@@ -641,6 +680,13 @@ def render_horizon():
     # non-starter, not a row worth a line on a board about long-term value.
     grid = grid[grid[label_cols].fillna(0).abs().sum(axis=1) > 0]
 
+    # Rank on the window total, within position, over the whole board -- so it
+    # answers "where does this run put him among the players who could fill
+    # that slot", and narrowing to one club does not re-rank him against his
+    # own team-mates. It is a rank over exactly the weeks shown, so shortening
+    # the window legitimately changes it.
+    grid.insert(3, "Pos RK", _positional_rank(grid, "Total"))
+
     # One colour range, taken over every gameweek column of the *whole* board
     # and fixed before any filtering. Two things depend on that. Per-column
     # ranges would make each week self-normalising, so a 6.8 in an easy week and
@@ -693,7 +739,8 @@ def render_horizon():
         display.insert(0, "#", range(1, len(display) + 1))
         render_styled_table(
             display.head(300),
-            col_formats={**{c: "{:.1f}" for c in label_cols}, "Total": "{:.1f}"},
+            col_formats={**{c: "{:.1f}" for c in label_cols},
+                         "Total": "{:.1f}", "Pos RK": "{:.0f}"},
             positive_color_cols=label_cols + ["Total"],
             color_range_overrides=({c: span for c in label_cols} if span else None),
             max_height=640,
@@ -703,7 +750,8 @@ def render_horizon():
         colour = {c: [] for c in label_cols}
         for pid in ids:
             row = {"Player": grid.at[pid, "Player"], "Team": grid.at[pid, "Team"],
-                   "Pos": grid.at[pid, "Pos"]}
+                   "Pos": grid.at[pid, "Pos"],
+                   "Pos RK": grid.at[pid, "Pos RK"]}
             week_fdrs = []
             for g in shown:
                 fx = fixtures[g].get(pid) if g in fixtures.columns else None
@@ -728,7 +776,8 @@ def render_horizon():
         display = display.head(300)
         render_styled_table(
             display,
-            col_formats={"Total": "{:.1f}", "Avg FDR": "{:.2f}"},
+            col_formats={"Total": "{:.1f}", "Avg FDR": "{:.2f}",
+                         "Pos RK": "{:.0f}"},
             positive_color_cols=["Total"],
             # Colour comes from FFP's own published difficulty rather than the
             # text in the cell, and 1-5 is fixed so the scale means the same
@@ -760,6 +809,9 @@ def render_horizon():
         "so a row sums. **Total** therefore differs slightly from FFP's own "
         "\"Next %d GW\" on the FFP Data tab, which uses FFP for the first week too."
         % len(shown),
+        "**Pos RK** ranks **Total** against every player at the same position "
+        "over these same weeks, so it moves when you change the window but not "
+        "when you filter.",
     ]
     archived = horizon.archived_gameweeks()
     if archived:
@@ -1259,6 +1311,10 @@ def render_blended_projections():
     })
     display = display[display["Proj"].notna()]
 
+    # Ranked here, over the whole board, so filtering to a club or a position
+    # narrows the rows without re-ranking them against each other.
+    display.insert(3, "Pos RK", _positional_rank(display, "Proj"))
+
     with st.expander("Filters", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
@@ -1286,6 +1342,7 @@ def render_blended_projections():
     render_styled_table(
         display.head(300),
         col_formats={
+            "Pos RK": "{:.0f}",
             "Proj": "{:.2f}", "If Starts": "{:.2f}", "Start %": "{:.0f}%",
             "Rotowire": "{:.2f}", "FFP": "{:.2f}",
             "Spread": "{:.2f}",
@@ -1296,6 +1353,8 @@ def render_blended_projections():
     )
     st.caption(
         f"Showing {min(len(display), 300)} of {len(display)} projected players. "
+        "**Pos RK** is his rank on **Proj** among every player at his position, "
+        "league-wide — it does not change when you filter. "
         "The per-source columns are on the *if he starts* basis, so they are "
         "directly comparable with each other and with **If Starts**."
     )
