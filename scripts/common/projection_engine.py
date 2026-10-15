@@ -345,6 +345,59 @@ def _pool_col(pool, col, index, default=None):
     return by_id[col].reindex(index)
 
 
+#: How the start model resolves a probability. **Bump this whenever a change to
+#: that resolution would make an older snapshot unreplayable** -- not for a
+#: constant retune, which `projection_accuracy._snapshot_constants` already
+#: recovers from the snapshot itself.
+#:
+#: The accuracy harness refuses to fit constants on a snapshot it cannot
+#: reproduce, which is right, and until this existed it could only report the
+#: refusal as a numeric deviation -- indistinguishable from the archive and the
+#: engine having silently parted company. `projection_accuracy` names the
+#: revision instead, and the snapshot collector stamps it.
+#:
+#: 1. The original model: FFP, then FPL's `chance_of_playing`, then 1.0, with
+#:    Rotowire's positional floor clipping upward and its omission blending down.
+#: 2. A bare `chance_of_playing = 100` stops counting as an opinion -- neither
+#:    resolving `Start_Pct` nor standing as the "other opinion" the omission
+#:    penalty blends against -- and a Rotowire-listed player no start model
+#:    priced takes the positional floor as his *value* rather than as a lower
+#:    bound on a fabricated 1.0.
+START_MODEL_REVISION = 2
+
+#: Sources that may resolve a player's start probability, in precedence order.
+START_MODEL_SOURCES = ("ffp", "fpl_ep", "odds")
+
+#: Of those, the ones whose "start percentage" is FPL's own availability figure
+#: rather than a selection model. **A 1.0 from one of these is the absence of a
+#: doubt, not a statement that he starts**, so it is not treated as an opinion
+#: -- see the start-probability block in `blend_aligned`.
+AVAILABILITY_SOURCES = ("fpl_ep",)
+
+
+def _start_opinion(name: str, sp: pd.Series, index) -> pd.Series:
+    """A source's start percentage, with non-opinions dropped.
+
+    FPL publishes `chance_of_playing = 100` for every fit player, bench
+    included, so that value carries no information about selection. Masking it
+    here is what keeps it from outranking a real opinion while leaving every
+    *stated doubt* exactly where it was -- which is the half the basis
+    recovery, the omission blend and the ceiling all depend on.
+    """
+    sp = pd.to_numeric(sp.reindex(index), errors="coerce")
+    return sp.where(sp.lt(1.0)) if name in AVAILABILITY_SOURCES else sp
+
+
+def _priced_mask(raw: pd.Series, index) -> pd.Series:
+    """True where this source published a usable value for the player.
+
+    One definition, because it is read twice -- once to fill the start
+    probability from a starters-only source's positional floor, once to clip
+    it -- and those two must agree about who the source listed.
+    """
+    return raw.reindex(index).gt(0).fillna(False)
+
+
 def blend_aligned(
     *,
     index,
@@ -399,18 +452,91 @@ def blend_aligned(
     positions = positions.reindex(index)
 
     # --- Start probability --------------------------------------------------
-    # FFP first (continuous 0-100, the only real start model any source gives
-    # us), then FPL's own chance_of_playing, then "no news means he plays".
-    # The chance_of_playing step is the fallback that existed in
-    # compute_player_scores and was missing from blend_fixture_projections;
-    # unifying on the version that has it is the point of this module.
+    # The sources that publish a real start model first -- FFP above all, being
+    # the only continuous 0-100 one -- then a starters-only source's listing,
+    # then "no news means he plays".
+    #
+    # **FPL's `chance_of_playing = 100` is not an opinion about starting.** The
+    # ceiling block further down sets out the measurement: as a *predictor* of
+    # starting FPL's chance is dreadful (Brier 0.486, bias +0.49 where it
+    # disagrees with FFP) precisely because it reads 100 for every fit bench
+    # player -- it measures availability, not selection. Yet a bare 100 was
+    # filling this chain and outranking every real signal, which is the
+    # reported bug: **Phil Foden at 100% to start**, from FFP not pricing him
+    # and FPL having no news about him.
+    #
+    # `_start_opinion` drops those, and *only* those. Every stated doubt is
+    # still consumed here, which matters in three places that would otherwise
+    # change meaning: an unconditional source's basis recovery divides by the
+    # resolved value, the omission blend needs a real opinion to blend against,
+    # and the round trip `Proj == Proj_Start x Start_Pct` has to return a
+    # single-source number unchanged.
+    #
+    # Note `fpl_ep`'s declared start percentage *is* `chance_of_playing` -- it
+    # must declare one, being unconditional (rule 1 of the Joao Pedro fix) --
+    # so the same mask has to apply there or availability walks back in through
+    # the front door. That is why this is keyed on the source, not on which
+    # argument the number arrived in.
     start_pct = pd.Series(np.nan, index=index, dtype="float64")
-    for name in ("ffp", "fpl_ep", "odds"):
+    for name in START_MODEL_SOURCES:
         if name in per_source_startpct:
-            start_pct = start_pct.fillna(per_source_startpct[name].reindex(index))
+            start_pct = start_pct.fillna(
+                _start_opinion(name, per_source_startpct[name], index))
     if chance_of_playing is not None:
         chance = pd.to_numeric(chance_of_playing.reindex(index), errors="coerce") / 100.0
-        start_pct = start_pct.fillna(chance)
+        start_pct = start_pct.fillna(_start_opinion("fpl_ep", chance, index))
+
+    # Where no start model priced the player at all, a starters-only source
+    # *listing* him is the only opinion there is, and the positional floor is
+    # that opinion's fitted value -- so it fills the gap rather than merely
+    # bounding the 1.0 below.
+    #
+    # The clip further down cannot do this job. `clip(lower=floor)` on a value
+    # already filled to 1.0 is a no-op, so the engine was recording its own
+    # calibrated decision in `Start_Pct__rotowire` and then rendering a number
+    # that contradicted it. Reported from the app: **Phil Foden at 100%**, on
+    # Rotowire alone, with `Start_Pct__rotowire` reading 0.86.
+    #
+    # Measured live at GW7, that was the whole cohort above 0.95: 12 of 667
+    # players, every one Rotowire-listed and priced by nothing else, against a
+    # 75th percentile of 0.90 among the 219 listed players. FFP's model never
+    # rates anybody above 95%, so each of those 100%s was this fallback rather
+    # than any source's confidence -- the same silent degradation recorded
+    # under "FFP stops publishing `start_pct` for the gameweek it is on", where
+    # 208 of 220 players read 100% for the same structural reason.
+    #
+    # It is a fill, never an override: a player FFP or FPL *did* price keeps
+    # that value and is then clipped by the floor exactly as before, which is
+    # the calibration the bias measurements rest on.
+    #
+    # **And it is gated on a start model existing at all** -- the same shape of
+    # gate as the omission penalty's club-coverage test, for the same reason. A
+    # floor is calibrated as a *lower bound* on a blend, not as a point
+    # estimate, and the four positions' floors differ by up to 1.32x. Where
+    # some model published and simply missed this player, filling the gap with
+    # his floor is the best available answer. Where *nothing* published for
+    # anybody -- a dead feed, or the preseason pool the Initial Squad Optimizer
+    # builds, which has a Rotowire article and no FFP at all -- it would
+    # instead reprice every position against every other out of numbers that
+    # were never meant to carry that, and that page's whole objective is
+    # expected points per pound. So the gate fails open to the old 1.0.
+    has_start_model = any(
+        name not in AVAILABILITY_SOURCES
+        and _start_opinion(name, sp, index).notna().any()
+        for name, sp in per_source_startpct.items())
+    if has_start_model:
+        listed_floor = pd.Series(np.nan, index=index, dtype="float64")
+        for name in starters_only:
+            if name not in per_source_raw:
+                continue
+            listed = _priced_mask(per_source_raw[name], index)
+            listed_floor = listed_floor.fillna(
+                positions.map(floors).astype("float64").where(listed))
+        start_pct = start_pct.fillna(listed_floor)
+
+    # "No news means he plays" -- the last resort, and not a start model. It now
+    # only reaches players no source listed or priced, whose projection the
+    # engine zeroes anyway.
     start_pct = start_pct.fillna(1.0).clip(0, 1)
 
     # Rotowire's presence as a confidence signal: it lists only expected
@@ -448,7 +574,7 @@ def blend_aligned(
     for name in starters_only:
         if name not in per_source_raw:
             continue
-        priced = per_source_raw[name].reindex(index).gt(0).fillna(False)
+        priced = _priced_mask(per_source_raw[name], index)
         for pos_code, floor_val in floors.items():
             mask = priced & (positions == pos_code)
             start_pct[mask] = start_pct[mask].clip(lower=floor_val)
@@ -497,13 +623,22 @@ def blend_aligned(
         w_rest = sum(float(w) for n, w in weights.items() if n != name and float(w) > 0)
         share = w_self / (w_self + w_rest) if (w_self + w_rest) > 0 else 1.0
 
+        # "Another opinion" is judged by the same rule as the resolution above:
+        # a bare `chance_of_playing = 100` is not one. Counting it left the
+        # blend averaging the fitted implied value against a 1.0 that nobody
+        # had asserted -- live that moved seven Rotowire-omitted players *up*,
+        # including Joe Gomez and Dan Burn, two of the players this constant
+        # was fitted on (0 of 16 such players started).
         has_other = pd.Series(False, index=index)
         for other, sp in per_source_startpct.items():
             if other != name:
-                has_other |= sp.reindex(index).notna()
+                has_other |= _start_opinion(other, sp, index).notna()
         if chance_of_playing is not None:
-            has_other |= pd.to_numeric(
-                chance_of_playing.reindex(index), errors="coerce").notna()
+            has_other |= _start_opinion(
+                "fpl_ep",
+                pd.to_numeric(chance_of_playing.reindex(index),
+                              errors="coerce") / 100.0,
+                index).notna()
         eff_share = pd.Series(share, index=index).where(has_other, 1.0)
 
         blended = eff_share * implied + (1.0 - eff_share) * start_pct

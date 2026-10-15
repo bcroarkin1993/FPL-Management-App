@@ -851,6 +851,60 @@ class TestCheckBlendedProjections:
     def test_consistent_frame_is_clean(self):
         assert check_blended_projections(self._good()) == []
 
+    def _certain(self):
+        """A Rotowire-listed player rendered certain to start, which is the
+        reported Phil Foden row: 100% on a gameweek no start model priced him
+        for, beside the engine's own 0.86 decision about him."""
+        return pd.DataFrame({
+            "Proj_Start": [5.64, 6.0],
+            "Start_Pct": [1.00, 0.90],
+            "Proj": [5.64, 5.40],
+            "Proj_Start__rotowire": [5.64, 6.2],
+            "Proj_Start__ffp": [np.nan, 5.8],
+            "Start_Pct__rotowire": [0.86, 0.86],
+            "Start_Pct__ffp": [np.nan, 0.90],
+        })
+
+    def test_certainty_contradicting_the_engines_own_decision_is_an_error(self):
+        """The 1.00 is the "no news means he plays" fallback outranking the one
+        source that had an opinion -- and no start model in the app rates
+        anybody above 95%, so a 100% is never anyone's confidence."""
+        issues = check_blended_projections(self._certain())
+        errors = [i for i in issues if i.severity == "error"]
+        assert errors, [str(i) for i in issues]
+        assert "certain to start" in errors[0].message
+        assert "0.86" in errors[0].message
+
+    def test_a_pool_with_no_start_model_at_all_is_not_flagged(self):
+        """The preseason Initial Squad pool is a Rotowire article and no FFP, so
+        everybody legitimately resolves to 1.00 -- a check that fired there
+        would fire on a page that is working, and get muted."""
+        df = self._certain().drop(columns=["Start_Pct__ffp", "Start_Pct__rotowire"])
+        df["Start_Pct"] = 1.0
+        df["Proj"] = df["Proj_Start"]
+        assert check_blended_projections(df) == []
+
+    def test_an_availability_column_alone_does_not_open_the_check(self):
+        """`Start_Pct__fpl_ep` is FPL's `chance_of_playing`: availability, not
+        selection, and it reads 100 for every fit bench player."""
+        df = self._certain().drop(columns=["Start_Pct__ffp", "Start_Pct__rotowire"])
+        df["Start_Pct__fpl_ep"] = [1.0, 1.0]
+        df["Start_Pct"] = 1.0
+        df["Proj"] = df["Proj_Start"]
+        assert check_blended_projections(df) == []
+
+    def test_an_unprojected_player_at_certainty_is_not_flagged(self):
+        """A player the engine scored 0 is a declared non-starter; whatever his
+        start column says, nothing in the app ranks him on it."""
+        df = self._certain()
+        # Zeroed all the way through, as the engine zeroes him -- leaving the
+        # per-source columns populated would put the blend outside its own
+        # sources' range and trip a different check.
+        df.loc[0, ["Proj", "Proj_Start", "Proj_Start__rotowire",
+                   "Proj_Start__ffp"]] = 0.0
+        assert not [i for i in check_blended_projections(df)
+                    if i.severity == "error"]
+
     def test_empty_frame_is_an_error(self):
         issues = check_blended_projections(pd.DataFrame())
         assert any(i.severity == "error" for i in issues)

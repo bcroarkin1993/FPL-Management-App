@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from scripts.common import projection_accuracy as acc
+from scripts.common import projection_engine
 
 
 def _pre(**over):
@@ -290,7 +291,11 @@ def _engine_start_columns(pre: pd.DataFrame) -> pd.DataFrame:
 
 @pytest.fixture
 def _start_archive(monkeypatch):
-    state = {"meta": {"gameweek": 4, "captured_before_deadline": True},
+    # Stamped with the running engine's start-model revision: this fixture
+    # stands in for a snapshot *this* engine wrote, which is the only kind the
+    # fitter will replay. See `projection_engine.START_MODEL_REVISION`.
+    state = {"meta": {"gameweek": 4, "captured_before_deadline": True,
+                      "start_model_revision": projection_engine.START_MODEL_REVISION},
              "pre": _pre_start(self_consistent=True), "actual": _actual_start()}
     monkeypatch.setattr(acc.projection_archive, "load_pre",
                         lambda gw: (state["pre"], state["meta"]))
@@ -510,11 +515,22 @@ class TestAgainstTheRealArchive:
     def test_the_replay_reproduces_what_was_archived(self):
         """The fitter's own precondition, asserted rather than assumed.
 
-        A snapshot that cannot say which constants built it will not replay --
-        GW3's predates the column, and predates two engine changes with it. That
-        is the refusal working. What must not happen is *every* gameweek failing,
-        which would mean the archive and the engine have parted company and the
-        constants are being fitted against nothing.
+        A snapshot the running engine cannot reproduce must be refused, not
+        quietly fitted on. There are two reasons it might be, and only one of
+        them is a defect:
+
+        * It **predates the current start-model revision** -- the engine no
+          longer resolves a start probability the way it did when that file was
+          written. Expected, attributable, and self-healing: the next
+          pre-deadline capture is written by this engine. Every committed
+          snapshot is in this state as of revision 2.
+        * It replays to a *numeric* deviation at the current revision. That is
+          the archive and the engine having silently parted company, which is
+          the thing this test exists to catch.
+
+        So the assertion is on the *reason*, not on the count -- asserting that
+        some gameweek is usable would have to be deleted after every revision
+        bump, which is the "broken by its own last answer" failure one level up.
         """
         if not self._scoreable():
             pytest.skip("no gameweek has both a projection snapshot and actuals")
@@ -522,9 +538,44 @@ class TestAgainstTheRealArchive:
         if not jobs:
             pytest.skip("no pre-deadline snapshot to replay")
         fidelity = acc._replay_fidelity(jobs)
+        current = [j for j in jobs
+                   if j.get("revision") == projection_engine.START_MODEL_REVISION]
+        drifted = {gw: d for gw, d in fidelity["per_gameweek"].items()
+                   if d == d and d > acc.REPLAY_TOLERANCE}
+        assert not drifted, (
+            "these gameweeks were written by the current start-model revision "
+            "(%d) and still do not replay, so the archive and the engine have "
+            "parted company: %s"
+            % (projection_engine.START_MODEL_REVISION, drifted))
+        if not current:
+            pytest.skip(
+                "every committed snapshot predates start-model revision %d, so "
+                "none is replayable yet: %s"
+                % (projection_engine.START_MODEL_REVISION, fidelity["refused"]))
         assert fidelity["usable"], (
-            "no archived gameweek replays to within %.2f: %s"
-            % (acc.REPLAY_TOLERANCE, fidelity["per_gameweek"]))
+            "snapshots at the current revision must replay: %s"
+            % fidelity["refused"])
+
+    def test_a_snapshot_at_the_current_revision_is_not_refused_for_its_revision(self):
+        """The revision gate must not be a blanket refusal.
+
+        Stamping the current revision onto the real archived rows has to leave
+        them judged on their numbers, which is what keeps the gate from quietly
+        disabling the fitter for ever.
+        """
+        if not self._scoreable():
+            pytest.skip("no gameweek has both a projection snapshot and actuals")
+        jobs = acc._start_replay_inputs()
+        if not jobs:
+            pytest.skip("no pre-deadline snapshot to replay")
+        for job in jobs:
+            job["revision"] = projection_engine.START_MODEL_REVISION
+        fidelity = acc._replay_fidelity(jobs)
+        assert not any("revision" in why
+                       for why in fidelity["refused"].values()), fidelity["refused"]
+        # And they are then judged numerically -- a real deviation, reported as
+        # one, for snapshots revision 2 did change the answer for.
+        assert all(d == d for d in fidelity["per_gameweek"].values())
 
 
 class TestWhichSourceIsBest:

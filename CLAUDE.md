@@ -370,6 +370,82 @@ one source's number by another's pessimism is the João Pedro bug above.
 `Proj_Start` is deliberately untouched — he would still score 10 if he played,
 and `team_strength` percentiles that.
 
+**And a bare `chance_of_playing = 100` is not an opinion either, which is the
+half the ceiling left behind.** FPL's chance was *also* still resolving
+`Start_Pct` as a fallback source — the thing the paragraph above says it must
+never be — and a 100 there outranked every real signal. Reported from the app:
+**Phil Foden at 100% to start**, on a gameweek FFP had not priced him for.
+
+Measured live at GW7, the cohort at exactly 1.00 was **12 of 667 players, and
+they were the entire pool above 0.95** — against a 75th percentile of 0.90
+among the 219 Rotowire-listed players, in an app whose only continuous start
+model never rates anybody above 0.95. So every 100% on the page was this
+fallback rather than anyone's confidence, which is the same silent degradation
+recorded under "FFP stops publishing `start_pct` for the gameweek it is on",
+where 208 of 220 read 100% for the same structural reason.
+
+Two changes, and the asymmetry between them matters:
+
+- **`_start_opinion()` drops a 1.0 from an availability source, and only that.**
+  Every *stated doubt* is still consumed exactly where it was, because three
+  things depend on it: an unconditional source's basis recovery divides by the
+  resolved value, the omission penalty needs a real opinion to blend against,
+  and the round trip `Proj == Proj_Start × Start_Pct` must return a
+  single-source number unchanged. Note `fpl_ep`'s declared start percentage *is*
+  `chance_of_playing` — it has to declare one, being unconditional — so the mask
+  is keyed on the **source**, not on which argument the number arrived in.
+  Keyed on the argument, Foden's 100% walked back in through the front door.
+- **A Rotowire-listed player no start model priced takes the positional floor
+  as his *value*.** The floor could previously only *clip* a probability that
+  had already been filled to certainty, so `clip(lower=0.86)` on a 1.0 was a
+  no-op — and the engine was recording 0.86 in `Start_Pct__rotowire` while
+  rendering 1.00. It disagreed with itself in the app's most-read column.
+
+**The floor fill is gated on a start model existing at all**, which is the same
+shape of gate as the omission penalty's club-coverage test and exists for the
+same reason. A floor is calibrated as a *lower bound on a blend*, not as a point
+estimate, and the four positions' floors differ by up to 1.32× — so where
+nothing published for anybody, filling from them would reprice every position
+against every other on no evidence. That case is not hypothetical: the preseason
+Initial Squad pool is a Rotowire article and no FFP, and that page's whole
+objective is expected points per pound. The gate fails open to the old 1.0.
+
+`has_other` in the omission blend follows the same rule, and had to: once a bare
+100 stopped resolving `Start_Pct`, counting it as "another opinion" left the
+blend averaging the fitted implied value against a 1.0 nobody had asserted —
+which moved seven Rotowire-omitted players *up*, Joe Gomez and Dan Burn among
+them, two of the players the constant was fitted on (0 of 16 started).
+
+Live effect, same data both sides: 43 players' `Start_Pct` and 26 players'
+`Proj` move, **every one downward**, and `Proj_Start` / `Proj_Next3` are
+byte-identical. Twelve are the listed-but-unpriced cohort (Foden 5.64 → 4.85 at
+0.86); the rest are Rotowire-omitted players whose penalty now lands on the
+fitted value (Joe Gelhardt 1.85 → 0.09, Gomez and Burn 0.44 → 0.07). Max
+`Start_Pct` across the pool is 0.95, which is FFP's own model ceiling.
+
+**`check_blended_projections()` gained the tripwire, and it is a
+self-contradiction rather than a threshold.** A player carrying a resolved 1.00
+and a `Start_Pct__rotowire` below 1.00 is the engine disagreeing with itself —
+cheap, unambiguous, and it fires on exactly the 12 pre-fix rows. It abstains
+where no start model spoke, and **`Start_Pct__rotowire` is deliberately not
+evidence that one did**: it is the engine's own decision and the column being
+compared against, so counting it would have the check open itself and then fire
+on the engine working as designed. `projection_accuracy._start_replay_inputs`
+withholds it from the replay for the same reason.
+
+**`START_MODEL_REVISION` is what makes a change like this honest to the accuracy
+harness.** `fit_start_constants()` refuses to fit on a snapshot it cannot
+replay, which is right — but a *logic* change is not recoverable from the
+snapshot the way a constant retune is (`_snapshot_constants` reads the
+constants back out of `Start_Pct__rotowire`). Before this, the refusal surfaced
+only as a numeric deviation, indistinguishable from the archive and the engine
+having silently parted company. The collector now stamps the revision, the
+fitter names it, and the live test asserts the *reason*: a snapshot at the
+current revision must replay, one from an older revision is refused as such.
+Every committed snapshot predates revision 2, so the start-constant fitter is
+offline until the next pre-deadline capture — which the hourly workflow writes
+with this engine.
+
 **A return date is information about the window, not just about this week.**
 The ceiling above is a statement about one gameweek, and the three paths into
 `Proj_Next3` each mishandled the other two. FFP publishes **one** `start_pct`
@@ -1927,6 +2003,7 @@ to import from GitHub Actions.
 | `check_element_states()` | Draft player states changing shape — an unknown `status` code, `owner` disagreeing with the status, an owned count that isn't teams x 15. Every one makes locked players read as available, so the Waiver Wire suggests players who cannot be picked up |
 | `check_waiver_order()` | A waiver queue that is not a queue — a gap or repeat in the 1..N picks, a manager missing from it, or **your own entry absent**, which is the two-id-space trap whose only other symptom is an empty join that reads on the page as "you have no waiver pick". Disagreement with the standings is a *warning*: a successful claim rotates its manager to the back mid-gameweek |
 | `check_draft_game_settings()` | FPL changing a Draft rule this codebase hardcodes — the squad quota, the 50%/24h veto, the locked-player window, captains becoming a thing. Every one of these is a constant written down from the documentation, so a real change is otherwise invisible. An unreachable bootstrap is a **warning** (unknown), never an error (wrong) |
+| `check_blended_projections()` (start certainty) | A start probability of exactly **1.00** — the "no news means he plays" fallback outranking a source that had an opinion. Caught as a *self-contradiction*: the engine's own `Start_Pct__rotowire` decision sitting below the 1.00 it rendered. Abstains where no start model spoke at all, since the preseason pool legitimately resolves everyone to 1.00 |
 | `check_ffp_horizon()` | A multi-gameweek grid whose **columns are mislabelled** — a gap in the gameweek run shifts every later column one week left of its heading, and no individual cell can reveal it. Also an all-null or all-zero week, a basis inversion in one gameweek of six, and two tables stacked under one label (detected as a duplicate player, never as a row count — the real `archive/ffp/GW03.json` carries 561 rows and is fine) |
 | `check_league_trade_config()` | The league's trade rules changing shape — `league.trades` vanishing or coming back null, `trades_time_for_approval` ceasing to be a bool. Both make the Trade Analyzer fall back to "assume approval is required", which is safe but is no longer a statement about *this* league and looks identical on screen. An **unrecognised** trades code is only a warning: three of the four codes are genuinely unknown, and a check that fires on expected ignorance gets muted |
 

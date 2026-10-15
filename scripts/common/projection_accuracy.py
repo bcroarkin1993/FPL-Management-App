@@ -44,7 +44,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from scripts.common import projection_archive
+from scripts.common import projection_archive, projection_engine
 
 _logger = logging.getLogger("fpl_app.projections")
 
@@ -430,6 +430,10 @@ def start_frame(gameweeks: Optional[Sequence[int]] = None,
         one = joined.copy()
         one["gameweek"] = int(gw)
         one["capture"] = "pre-deadline" if before else "backfill"
+        # Which engine wrote it. A snapshot predating the current start-model
+        # revision cannot be replayed, and saying *that* is far more use than
+        # reporting the deviation it produces.
+        one["start_model_revision"] = meta.get("start_model_revision")
         one["y"] = _started(one)
         # The engine's own test for "this source priced him", so the cohorts here
         # are the cohorts the constants are applied to and not an approximation
@@ -823,8 +827,12 @@ def _start_replay_inputs(gameweeks: Optional[Sequence[int]] = None) -> List[dict
         coverage = one.loc[priced, "team"].astype(str).value_counts().to_dict() \
             if "team" in one.columns else {}
         as_built = _snapshot_constants(one, priced)
+        revisions = pd.to_numeric(
+            one.get("start_model_revision"), errors="coerce").dropna().unique() \
+            if "start_model_revision" in one.columns else []
         out.append({
             "gameweek": int(gw),
+            "revision": int(revisions[0]) if len(revisions) == 1 else None,
             "index": one.index,
             "per_source_raw": raw,
             "per_source_startpct": startpct,
@@ -918,21 +926,39 @@ def _replay_fidelity(jobs: List[dict]) -> dict:
     reapplied (it moved 9 rows in 1,315), and ``priced`` reads a genuine zero
     projection as unpriced.
     """
-    per_gw, usable = {}, []
+    per_gw, usable, refused = {}, [], {}
     for job in jobs:
+        gw = job["gameweek"]
+        # A *constant* retune is recoverable from the snapshot (that is what
+        # `_snapshot_constants` is for). A change to how the model resolves a
+        # probability at all is not, so it is refused by name rather than left
+        # to show up as a deviation -- which reads identically to the archive
+        # and the engine having silently parted company.
+        if job.get("revision") != projection_engine.START_MODEL_REVISION:
+            per_gw[gw] = float("nan")
+            refused[gw] = (
+                "written by start-model revision %s; the engine is on %d"
+                % (job.get("revision") if job.get("revision") is not None
+                   else "an unrecorded revision",
+                   projection_engine.START_MODEL_REVISION))
+            continue
         floors, omitted = job.get("as_built_floors"), job.get("as_built_omitted")
         if floors is None or omitted is None:
             # Nothing in the snapshot says what produced it, so nothing can
             # establish that the engine still would.
-            per_gw[job["gameweek"]] = float("nan")
+            per_gw[gw] = float("nan")
+            refused[gw] = "the snapshot does not record the constants that built it"
             continue
         diff = (_replay_start_pct(job, floors=floors, omitted=omitted)
                 - job["archived"]).abs()
         worst = float(diff.max()) if len(diff) else float("nan")
-        per_gw[job["gameweek"]] = worst
+        per_gw[gw] = worst
         if worst <= REPLAY_TOLERANCE:
             usable.append(job)
-    return {"per_gameweek": per_gw, "usable": usable}
+        else:
+            refused[gw] = ("replays %.3f away from what was stored, against a "
+                           "tolerance of %.2f" % (worst, REPLAY_TOLERANCE))
+    return {"per_gameweek": per_gw, "usable": usable, "refused": refused}
 
 
 def fit_start_constants(gameweeks: Optional[Sequence[int]] = None,
@@ -971,9 +997,12 @@ def fit_start_constants(gameweeks: Optional[Sequence[int]] = None,
                 "current_floors": floors_now, "current_omitted": omitted_now,
                 "cohorts": pd.DataFrame(), "gameweeks": [], "n": 0,
                 "fidelity": fid["per_gameweek"],
-                "note": ("No archived gameweek replays to within %.2f of what was "
-                         "stored, so there is nothing here the running engine "
-                         "would reproduce. Refusing to fit."% REPLAY_TOLERANCE)}
+                "refused": fid["refused"],
+                "note": ("No archived gameweek is replayable by the running "
+                         "engine, so there is nothing here it would reproduce. "
+                         "Refusing to fit. "
+                         + "; ".join("GW%s %s" % (gw, why)
+                                     for gw, why in sorted(fid["refused"].items())))}
 
     floor_grid = list(floor_grid) if floor_grid else [round(0.50 + 0.02 * i, 2) for i in range(25)]
     omitted_grid = list(omitted_grid) if omitted_grid else [round(0.01 * i, 2) for i in range(31)]

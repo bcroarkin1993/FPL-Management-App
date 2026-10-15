@@ -35,7 +35,7 @@ from typing import List, Optional
 import pandas as pd
 import requests
 
-from scripts.common import projection_archive
+from scripts.common import projection_archive, projection_engine
 from scripts.common.projection_engine import build_projections
 from scripts.common.projection_sources import (
     fetch_ffp_table,
@@ -197,6 +197,11 @@ def collect_pre(gameweek: int, bootstrap, deadline=None,
     meta = {
         "deadline": deadline,
         "captured_before_deadline": bool(before_deadline),
+        # Which start-model revision produced these numbers. The accuracy
+        # harness replays the engine over this file to fit its constants, and a
+        # replay is only evidence if the engine still resolves start probability
+        # the way it did here -- see `projection_engine.START_MODEL_REVISION`.
+        "start_model_revision": int(projection_engine.START_MODEL_REVISION),
         "sources": source_status,
         "ffp_provenance": ffp_prov,
         # Odds describe whatever fixtures are *upcoming*, so they only line up

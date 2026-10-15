@@ -1243,19 +1243,88 @@ class TestNew1GWScore:
         assert result["1GW"].iloc[0] <= 1
 
     def test_start_likelihood_reduces_effective_proj(self):
-        """Low start % reduces effective projection → lower 1GW."""
+        """Low start % reduces effective projection -> lower 1GW.
+
+        Compared against a *high* FFP start percentage rather than against the
+        default, and on a player Rotowire does not list. Both halves matter:
+
+        * Rotowire listing a player floors his start probability at
+          `ROTOWIRE_START_FLOORS` -- presence clips, by design and by
+          measurement -- so on a listed player FFP's 30% is raised to the floor
+          and the comparison tests nothing about FFP.
+        * The old version compared against the *default*, which used to be a
+          bare 1.0. So it passed by measuring the gap between the floor and a
+          number no source had asserted, and stopped meaning anything the
+          moment that default stopped being 1.0.
+        """
+        import config
         pool = self._make_pool()
-        # Take a mid-range MID player
-        mid_player = pool[pool["Position"] == "M"].iloc[10:11].copy()
+        # Rotowire prices nobody here, so FFP's start percentage is the only
+        # opinion and nothing clips it.
+        unlisted = pool[pool["Position"] == "M"].iloc[10:11].copy()
+        unlisted["Projected_Points"] = 0.0
+        unlisted["FFP_Starting_Predicted"] = 7.0
 
-        result_full = compute_player_scores(mid_player.copy(), pool, current_gw=20)
+        def _score(start_pct):
+            row = unlisted.copy()
+            row["FFP_Start"] = start_pct
+            return compute_player_scores(row, pool, current_gw=20)
 
-        mid_low_start = mid_player.copy()
-        mid_low_start["FFP_Start"] = 30.0  # Only 30% chance of starting
-        result_low_start = compute_player_scores(mid_low_start, pool, current_gw=20)
+        low, high = _score(30.0), _score(90.0)
+        assert low["Start_Pct"].iloc[0] < high["Start_Pct"].iloc[0]
+        assert low["1GW"].iloc[0] < high["1GW"].iloc[0]
 
-        # Player with 30% start chance should score lower than default (100%)
-        assert result_low_start["1GW"].iloc[0] < result_full["1GW"].iloc[0]
+    def test_a_listed_players_low_ffp_start_is_raised_to_the_positional_floor(self):
+        """Presence clips, which is the half the test above cannot cover.
+
+        Rotowire lists only expected starters, and the floors are calibrated
+        against the 90.5% rate at which its listed players actually start -- so
+        a listed player is never priced below the floor whatever FFP says.
+        Asserted against the constant, not a literal, so a retune does not
+        break it.
+        """
+        import config
+        pool = self._make_pool()
+        listed = pool[pool["Position"] == "M"].iloc[10:11].copy()
+        listed["FFP_Start"] = 30.0
+        got = compute_player_scores(listed, pool, current_gw=20)
+        assert got["Start_Pct"].iloc[0] == pytest.approx(
+            config.ROTOWIRE_START_FLOORS["M"])
+
+    def test_a_listed_player_a_start_model_missed_gets_the_floor_not_certainty(self):
+        """The reported bug: Phil Foden rendered at 100% to start.
+
+        FFP published 347 of 667 players and he was not among them; FPL had no
+        news about him, so `chance_of_playing` read 100. The only opinion about
+        him was Rotowire listing him, whose fitted value is the positional
+        floor -- which the engine recorded in `Start_Pct__rotowire` while
+        rendering 1.00.
+
+        The frame carries an FFP-priced team-mate because the fill is gated on
+        a start model existing at all: a floor is a lower bound on a blend, not
+        a point estimate, so with no model anywhere it would reprice the four
+        positions against each other on nothing. That gate is what keeps the
+        preseason Initial Squad pool -- a Rotowire article and no FFP -- intact.
+        """
+        import config
+        pool = self._make_pool()
+        two = pool[pool["Position"] == "M"].iloc[10:12].copy()
+        two.loc[two.index[1], "FFP_Start"] = 92.0
+        two.loc[two.index[1], "FFP_Starting_Predicted"] = 6.0
+        got = compute_player_scores(two, pool, current_gw=20)
+        assert got["Start_Pct"].iloc[0] == pytest.approx(
+            config.ROTOWIRE_START_FLOORS["M"])
+        assert got["Start_Pct"].iloc[0] < 1.0
+
+    def test_with_no_start_model_at_all_nothing_is_floored(self):
+        """The gate, asserted from the other side. The preseason pool has a
+        Rotowire article and no FFP, and its objective is expected points per
+        pound -- so inventing a positional spread out of lower bounds would
+        reprice every position against every other."""
+        pool = self._make_pool()
+        listed = pool[pool["Position"] == "M"].iloc[10:11].copy()
+        got = compute_player_scores(listed, pool, current_gw=20)
+        assert got["Start_Pct"].iloc[0] == pytest.approx(1.0)
 
     def test_fpl_chance_of_playing_fallback(self):
         """FPL chance_of_playing used as fallback when FFP_Start missing."""

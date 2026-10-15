@@ -1988,7 +1988,86 @@ def check_blended_projections(df: Optional[pd.DataFrame],
                 "was converted to the wrong basis before blending.",
             ))
 
+    issues.extend(_check_start_certainty(df, proj, check))
     issues.extend(_check_horizon(df, proj, check))
+    return issues
+
+
+def _check_start_certainty(df: pd.DataFrame, proj: pd.Series,
+                           check: str) -> List[Issue]:
+    """A start probability of exactly 1.00 is the fallback, not an opinion.
+
+    "No news means he plays" is the engine's last resort, and nothing in the
+    app could tell it apart from confidence. Reported from the app: **Phil
+    Foden at 100% to start**, on a gameweek FFP had not priced him for -- one
+    of 12 such players, who were the entire cohort above 0.95 in a pool whose
+    only continuous start model never rates anybody above 0.95.
+
+    The sharp test is a *self-contradiction* rather than a threshold, which is
+    what makes it cheap and unambiguous: the engine records its own decision
+    about a Rotowire-listed player in ``Start_Pct__rotowire`` -- the fitted
+    positional floor -- so a player carrying a floor below 1.00 and a resolved
+    1.00 is the engine disagreeing with itself in the app's most-read column.
+
+    A pool with no start model at all legitimately resolves everyone to 1.00
+    (the preseason Initial Squad pool is a Rotowire article and no FFP), so the
+    check abstains unless the frame carries a start model's opinion somewhere --
+    the same gate the engine's floor fill uses.
+    """
+    issues: List[Issue] = []
+    if "Start_Pct" not in df.columns:
+        return issues
+    start = pd.to_numeric(df["Start_Pct"], errors="coerce")
+    scored = proj.notna() & proj.gt(0)
+    if not scored.any():
+        return issues
+
+    # Did any start *model* speak about anybody here? Two columns are
+    # deliberately not evidence of that, and both exclusions are load-bearing:
+    #
+    #   * `Start_Pct__rotowire` is the engine's own decision about a player --
+    #     the positional floor, or the implied value where Rotowire omitted him
+    #     -- not anything Rotowire published. It is the very column this check
+    #     compares *against*, so counting it as an opinion would make the check
+    #     open itself and then fire on the engine behaving exactly as designed.
+    #     `projection_accuracy._start_replay_inputs` withholds it from the
+    #     replay for the same reason.
+    #   * `Start_Pct__fpl_ep` is FPL's `chance_of_playing`: availability, which
+    #     reads 100 for every fit bench player.
+    _not_a_model = ("Start_Pct__rotowire", "Start_Pct__fpl_ep")
+    opinion = pd.Series(False, index=df.index)
+    for col in df.columns:
+        if not str(col).startswith("Start_Pct__") or str(col) in _not_a_model:
+            continue
+        opinion |= pd.to_numeric(df[col], errors="coerce").notna()
+    if not opinion.any():
+        return issues
+
+    certain = scored & start.ge(1.0)
+    floor = pd.to_numeric(df.get("Start_Pct__rotowire"), errors="coerce") \
+        if "Start_Pct__rotowire" in df.columns else None
+    if floor is not None:
+        contradicted = certain & floor.notna() & floor.lt(1.0)
+        if contradicted.any():
+            issues.append(Issue(
+                check, "error",
+                "%d players are rendered certain to start (Start_Pct 1.00) "
+                "while the engine's own decision about them is %.2f-%.2f."
+                % (int(contradicted.sum()), float(floor[contradicted].min()),
+                   float(floor[contradicted].max())),
+                "The 1.00 is the 'no news means he plays' fallback outranking "
+                "a source that actually had an opinion. A positional floor must "
+                "fill the gap where no start model priced the player, not "
+                "merely bound a fabricated certainty from below.",
+            ))
+    if certain.any():
+        issues.append(Issue(
+            check, "warning",
+            "%d projected players are at exactly 100%% to start."
+            % int(certain.sum()),
+            "No start model in this app rates anybody above 95%, so a 100% is "
+            "the fallback rather than anyone's confidence.",
+        ))
     return issues
 
 

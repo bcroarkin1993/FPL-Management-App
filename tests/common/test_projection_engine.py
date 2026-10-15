@@ -252,7 +252,14 @@ class TestStartProbability:
 
     def test_a_fit_player_with_a_double_gameweek_is_not_clipped(self):
         """The cap would bind at `3 x Proj_Start`, and a double gameweek can
-        legitimately exceed that -- so it is skipped where nothing is stated."""
+        legitimately exceed that -- so it is skipped where nothing is stated.
+
+        Rotowire is the only source here, so no start model published for
+        anybody and the positional-floor fill is gated off -- his start
+        probability is 1.0 and the conditional 30.0 converts to itself. The
+        case where a start model *does* exist is
+        `test_a_listed_player_a_start_model_missed_takes_the_floor`.
+        """
         rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
                   {"Player": ["Cole Palmer"], "Team": ["CHE"], "Position": ["M"],
                    "Proj_Start": [6.0], "Proj_Next3": [30.0]})
@@ -274,6 +281,65 @@ class TestStartProbability:
         # Cole Palmer is omitted, but Rotowire priced nobody else at CHE, so
         # there is no evidence it covered the club. FFP's 30% stands.
         assert out.loc[4, "Start_Pct"] == pytest.approx(0.30)
+
+    def test_a_listed_player_a_start_model_missed_takes_the_floor(self):
+        """The reported bug: **Phil Foden rendered at 100% to start.**
+
+        FFP published 347 of 667 players at GW7 and Foden was not one of them;
+        FPL had no news about him, so `chance_of_playing` read 100. The only
+        opinion about him in the game was Rotowire listing him, whose fitted
+        value is the positional floor -- which the engine was already recording
+        in `Start_Pct__rotowire` while rendering 1.00, because the floor could
+        only *clip* a value that had already been filled to certainty.
+
+        Live, those were the only 12 players in the pool above 0.95, in a
+        population whose 75th percentile is 0.90 and whose only real start model
+        never rates anybody above 0.95.
+        """
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player": ["Cole Palmer", "Erling Haaland"],
+                   "Team": ["CHE", "MCI"], "Position": ["M", "F"],
+                   "Proj_Start": [6.0, 10.0]})
+        # FFP priced Haaland and missed Palmer -- a working feed with a gap in
+        # it, which is what opens the floor-fill gate.
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL,
+                   {"Player_ID": [1], "Proj_Start": [9.0], "Start_Pct": [0.92]})
+        out = build_projections([rw, ffp], gameweek=3, pool=_pool(),
+                                weights={"rotowire": 0.6, "ffp": 0.4})
+        assert out.loc[4, "Start_Pct"] == pytest.approx(DEFAULT_START_FLOORS["M"])
+        assert out.loc[4, "Start_Pct"] < 1.0
+        # The player FFP did price is untouched: a fill, never an override.
+        assert out.loc[1, "Start_Pct"] == pytest.approx(0.92)
+
+    def test_a_bare_chance_of_playing_of_100_is_not_an_opinion(self):
+        """It reads 100 for every fit bench player, so it carries nothing about
+        selection -- and it must not outrank the one source that spoke."""
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player": ["Cole Palmer", "Erling Haaland"],
+                   "Team": ["CHE", "MCI"], "Position": ["M", "F"],
+                   "Proj_Start": [6.0, 10.0]})
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL,
+                   {"Player_ID": [1], "Proj_Start": [9.0], "Start_Pct": [0.92]})
+        pool = _pool()
+        pool["chance_of_playing_next_round"] = 100
+        out = build_projections([rw, ffp], gameweek=3, pool=pool,
+                                weights={"rotowire": 0.6, "ffp": 0.4})
+        assert out.loc[4, "Start_Pct"] == pytest.approx(DEFAULT_START_FLOORS["M"])
+
+    def test_a_stated_doubt_still_binds(self):
+        """The other half: a real `chance_of_playing` is a ceiling, and
+        dropping the bare 100s must not drop the doubts with them."""
+        rw = _src("rotowire", BASIS_CONDITIONAL, COVERS_STARTERS,
+                  {"Player": ["Cole Palmer", "Erling Haaland"],
+                   "Team": ["CHE", "MCI"], "Position": ["M", "F"],
+                   "Proj_Start": [6.0, 10.0]})
+        ffp = _src("ffp", BASIS_CONDITIONAL, COVERS_ALL,
+                   {"Player_ID": [1], "Proj_Start": [9.0], "Start_Pct": [0.92]})
+        pool = _pool()
+        pool["chance_of_playing_next_round"] = [100, 100, 100, 25]
+        out = build_projections([rw, ffp], gameweek=3, pool=pool,
+                                weights={"rotowire": 0.6, "ffp": 0.4})
+        assert out.loc[4, "Start_Pct"] == pytest.approx(0.25)
 
 
 def _covered_pool(club="CHE", n=8, position="M"):
