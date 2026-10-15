@@ -40,7 +40,7 @@ from scripts.common.text_helpers import compact_html
 from scripts.common.transfer_sanity import (horizon_column, horizon_points,
                                              sanity_check_suggestion)
 from scripts.common.analytics import (
-    _claim_reference_rows,
+    attach_weekly_projections,
     compute_player_scores,
     numeric_col,
     compute_healthy_form,
@@ -275,70 +275,24 @@ def _get_fdr_color(fdr: float) -> str:
 def _add_projections(df: pd.DataFrame, projections_df: pd.DataFrame) -> pd.DataFrame:
     """Attach Rotowire's weekly `Points` and `Pos Rank` to a player frame.
 
-    Goes through `_claim_reference_rows()` -- the shared tiered matcher -- for
-    the reasons CLAUDE.md's "Player Matching" section gives, and this callsite
-    was the last one in the app that did not.
+    The matching is ``analytics.attach_weekly_projections`` -- the shared
+    tiered matcher -- whose docstring carries the measurements this callsite
+    produced when it had a ladder of its own, and the reasons the two
+    properties it lacked are load-bearing.
 
-    What it replaces was a hand-rolled ladder that scanned the whole
-    projections frame per player, scored every row with `fuzz.ratio` and
-    accepted any hit at **60**, with team and position contributing a +15 nudge
-    rather than scoping the search. Two consequences, measured live against a
-    659-player pool and Rotowire's 220 rows:
-
-    * **It matched more players than there were rows to match.** 323 players
-      were given a projection from a 220-row table: 172 of them were wearing
-      another player's numbers, because nothing stopped one reference row being
-      claimed over and over. David Raya (ARS, GK) shared a row with Rayan,
-      Allan and Gray; Ødegaard with Merino, Martinelli and Nørgaard; eight
-      goalkeepers shared one row between them. Every value on screen was
-      plausible.
-    * **It cost ~6 seconds per page load**, twice -- once for the squad and
-      once for the pool -- which is most of why logging a transfer froze: with
-      no `st.form`, every dropdown change paid it again.
-
-    `_claim_reference_rows` scopes every tier below the first two by position
-    and team, and gives one reference row to at most one player, resolving
-    contention in favour of the stronger tier.
+    This page's frames carry the full legal name under `Full Name` and the
+    short form under `Player`, which is the reverse of what the matcher
+    expects, so both columns are named explicitly rather than defaulted.
     """
-    if projections_df is None or projections_df.empty:
-        df["Projected_Points"] = None
-        df["Pos_Rank"] = None
-        return df
-
-    # The matcher expects the full legal name in `Player` and the short form in
-    # `Web_Name`; this page's frames carry them the other way round, under
-    # `Full Name` and `Player`. Probe with the names it expects rather than
-    # renaming the real frame, which every merge on this page keys on.
-    probe = pd.DataFrame({
-        "Player": df["Full Name"] if "Full Name" in df.columns else df["Player"],
-        "Web_Name": df["Player"],
-        "Team": df.get("Team"),
-        "Position": df.get("Position"),
-    }, index=df.index)
-
-    stats: Dict = {}
-    mapping = _claim_reference_rows(
-        probe, projections_df,
-        name_col="Player", ref_name_col="Player",
-        ref_team_col="Team" if "Team" in projections_df.columns else None,
+    attached = attach_weekly_projections(
+        df, projections_df,
+        name_col="Full Name" if "Full Name" in df.columns else "Player",
+        web_col="Player",
+        cols=("Points", "Pos Rank"),
         source_name="Rotowire weekly (classic transfers)",
-        stats=stats,
     )
-    if stats:
-        _logger.info("Rotowire weekly: matched %s of %s rows (%.0f%%)",
-                     stats.get("matched"), stats.get("total"),
-                     100 * stats.get("rate", 0.0))
-
-    points = pd.Series(index=df.index, dtype="float64")
-    ranks = pd.Series(index=df.index, dtype="object")
-    for player_idx, ref_idx in mapping.items():
-        points.at[player_idx] = pd.to_numeric(
-            projections_df.at[ref_idx, "Points"], errors="coerce")
-        if "Pos Rank" in projections_df.columns:
-            ranks.at[player_idx] = projections_df.at[ref_idx, "Pos Rank"]
-
-    df["Projected_Points"] = points
-    df["Pos_Rank"] = ranks
+    df["Projected_Points"] = attached["Points"]
+    df["Pos_Rank"] = attached["Pos Rank"]
     return df
 
 

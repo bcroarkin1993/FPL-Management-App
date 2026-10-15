@@ -398,7 +398,6 @@ def mock_all_utils(mock_streamlit):
         "pull_fpl_player_stats": pd.DataFrame(),
         "normalize_fpl_players_to_rotowire_schema": pd.DataFrame(),
         "normalize_rotowire_players": pd.DataFrame(),
-        "clean_fpl_player_names": pd.DataFrame(),
         "find_optimal_lineup": pd.DataFrame(),
         "position_converter": "M",
         # Fixtures

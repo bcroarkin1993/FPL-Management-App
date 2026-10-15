@@ -390,109 +390,23 @@ def _backfill_player_ids(roster_df: pd.DataFrame, fpl_stats: pd.DataFrame) -> pd
     return df.drop(columns=["__name_norm"], errors="ignore")
 
 
-def _fuzzy_match_player(fpl_player, fpl_team, fpl_position, candidates, projections_df,
-                        fuzzy_threshold=80, lower_fuzzy_threshold=60):
-    """
-    Consolidated fuzzy matching function for player names.
-
-    Finds the best match for a player using fuzzy matching with context-aware thresholds.
-    If team and position match, uses a lower threshold; otherwise requires higher confidence.
-
-    Parameters:
-    - fpl_player: Player name to match.
-    - fpl_team: Player's team.
-    - fpl_position: Player's position.
-    - candidates: List of candidate player names.
-    - projections_df: DataFrame with projection data containing 'Player', 'Team', 'Position'.
-    - fuzzy_threshold: Default threshold for matches (default: 80).
-    - lower_fuzzy_threshold: Threshold when team+position match (default: 60).
-
-    Returns:
-    - Matched player name or None if no good match found.
-    """
-    if not candidates:
-        return None
-
-    result = process.extractOne(str(fpl_player), candidates)
-    if not result:
-        return None
-
-    match, score = result[0], result[1]
-
-    matched_row = projections_df[projections_df['Player'] == match]
-    if not matched_row.empty:
-        match_team = matched_row.iloc[0]['Team']
-        match_position = matched_row.iloc[0]['Position']
-
-        # Lower threshold if team and position match
-        if match_team == fpl_team and match_position == fpl_position and score >= lower_fuzzy_threshold:
-            return match
-
-    # Higher threshold for general matches
-    if score >= fuzzy_threshold:
-        return match
-
-    return None
-
-
-def clean_fpl_player_names(fpl_players_df, projections_df, fuzzy_threshold=80, lower_fuzzy_threshold=60):
-    """
-    Cleans the player names in the FPL DataFrame by replacing them with their best matches from the projections DataFrame.
-
-    Parameters:
-    - fpl_players_df: DataFrame with FPL players ['Player', 'Team', 'Position'].
-    - projections_df: DataFrame with Rotowire projections ['Player', 'Team', 'Position'].
-    - fuzzy_threshold: Default fuzzy matching threshold for player names.
-    - lower_fuzzy_threshold: Lower threshold if team and position match.
-
-    Returns:
-    - fpl_players_df: Updated FPL DataFrame with cleaned player names.
-    """
-    # No projections to match against (e.g. Rotowire hasn't published a usable
-    # rankings table yet — common preseason) — nothing to clean against, so
-    # return the FPL names unchanged rather than KeyError on a missing 'Player'
-    # column.
-    if projections_df is None or projections_df.empty or "Player" not in projections_df.columns:
-        return fpl_players_df
-
-    # Extract candidate names from projections
-    projection_names = projections_df['Player'].tolist()
-
-    def find_best_match_row(row):
-        result = _fuzzy_match_player(
-            row['player'], row['team_name'], row['position_abbrv'],
-            projection_names, projections_df,
-            fuzzy_threshold, lower_fuzzy_threshold
-        )
-        return result if result else row['player']
-
-    # Update FPL DataFrame with cleaned player names
-    fpl_players_df['player'] = fpl_players_df.apply(find_best_match_row, axis=1)
-
-    return fpl_players_df
-
-
-def find_best_match(fpl_player, fpl_team, fpl_position, candidates, projections_df,
-                    fuzzy_threshold=80, lower_fuzzy_threshold=60):
-    """
-    Finds the best match for a player using fuzzy matching.
-
-    Note: This is a public wrapper around _fuzzy_match_player for backward compatibility.
-
-    Parameters:
-    - fpl_player: Player name to match.
-    - fpl_team: Player's team.
-    - fpl_position: Player's position.
-    - candidates: List of candidate names.
-    - projections_df: DataFrame with Rotowire projections.
-    - fuzzy_threshold: Default fuzzy matching threshold for player names.
-    - lower_fuzzy_threshold: Lower threshold if team and position match.
-
-    Returns:
-    - Matched player name or None.
-    """
-    return _fuzzy_match_player(fpl_player, fpl_team, fpl_position, candidates, projections_df,
-                               fuzzy_threshold, lower_fuzzy_threshold)
+# ``_fuzzy_match_player()``, ``find_best_match()`` and
+# ``clean_fpl_player_names()`` were removed here. They fuzzy-matched a player
+# against a projection source's name list and *renamed* him to the best hit,
+# scored with ``fuzzywuzzy.WRatio`` at a threshold of 80. WRatio falls back to
+# partial-token ratios once two strings differ enough in length, so one shared
+# token carries it: "Maxim De Cuyper" scores 86 against "João Pedro Junqueira
+# de Jesus" on the word *de*. Measured live on their only remaining callsite,
+# 87 of 667 players were renamed and 66 ended up sharing a name with another
+# player -- eleven of them rendered as "Maxim De Cuyper", and Alex Palmer
+# rendered as Cole Palmer.
+#
+# Nothing needs a name match to *display* a name: ``to_display_name()`` builds
+# the common name from the bootstrap's own fields. Nothing needs a hand-rolled
+# ladder to match one either: ``ReferenceMatcher`` /
+# ``analytics._claim_reference_rows()`` scope every loose tier by team and
+# position and give one reference row to at most one player. They are left
+# deleted rather than deprecated so a future caller cannot reach for them.
 
 
 def merge_fpl_players_and_projections(fpl_players_df, projections_df,

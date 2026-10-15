@@ -10,6 +10,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from scripts.common.error_helpers import show_api_error
+from scripts.common.analytics import attach_weekly_projections
+from scripts.common.text_helpers import to_display_name
 from scripts.common.utils import (
     get_classic_bootstrap_static,
     get_classic_team_picks,
@@ -26,7 +28,6 @@ from scripts.common.utils import (
 from scripts.common.team_analysis_helpers import render_season_highlights, build_classic_season_history_df
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.bench_analysis import compute_classic_bench_data, render_bench_analysis
-from fuzzywuzzy import fuzz
 
 
 def _format_money(value: int) -> str:
@@ -74,6 +75,12 @@ def _build_squad_dataframe(picks: list, bootstrap: dict) -> pd.DataFrame:
         rows.append({
             "element_id": element_id,
             "Player": player.get("web_name", "Unknown"),
+            # `web_name` is frequently too terse to stand alone ("B.Fernandes",
+            # "A.Becker"), so render the common name -- CLAUDE.md's "Player
+            # Display Names". `Full Name` stays the matching key.
+            "Display_Name": to_display_name(
+                player.get("first_name", ""), player.get("second_name", ""),
+                player.get("web_name", "")) or player.get("web_name", "Unknown"),
             "Full Name": f"{player.get('first_name', '')} {player.get('second_name', '')}".strip(),
             "Team": teams.get(player.get("team"), "???"),
             "Position": position_converter(player.get("element_type")),
@@ -86,56 +93,29 @@ def _build_squad_dataframe(picks: list, bootstrap: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _lookup_projection(player_name: str, team: str, position: str, projections_df: pd.DataFrame) -> dict:
-    """Look up projection for a player using fuzzy matching."""
-    if projections_df is None or projections_df.empty:
-        return {"Points": None, "Pos Rank": None}
-
-    best_match = None
-    best_score = 0
-
-    for _, row in projections_df.iterrows():
-        proj_name = str(row.get("Player", ""))
-        proj_team = str(row.get("Team", ""))
-        proj_pos = str(row.get("Position", ""))
-
-        # Calculate name similarity
-        score = fuzz.ratio(player_name.lower(), proj_name.lower())
-
-        # Boost score if team and position match
-        if proj_team == team and proj_pos == position:
-            score += 15
-
-        if score > best_score and score >= 60:
-            best_score = score
-            best_match = row
-
-    if best_match is not None:
-        return {
-            "Points": best_match.get("Points"),
-            "Pos Rank": best_match.get("Pos Rank", "N/A"),
-        }
-
-    return {"Points": None, "Pos Rank": None}
-
-
 def _add_projections_to_squad(squad_df: pd.DataFrame, projections_df: pd.DataFrame) -> pd.DataFrame:
-    """Add Rotowire projections to squad dataframe."""
-    points_list = []
-    rank_list = []
+    """Attach Rotowire's weekly ``Points`` and ``Pos Rank``.
 
-    for _, row in squad_df.iterrows():
-        proj = _lookup_projection(
-            row["Player"],
-            row["Team"],
-            row["Position"],
-            projections_df
-        )
-        points_list.append(proj["Points"])
-        rank_list.append(proj["Pos Rank"])
-
-    squad_df["Points"] = points_list
-    squad_df["Pos Rank"] = rank_list
+    Goes through ``analytics.attach_weekly_projections`` -- the shared tiered
+    matcher -- whose docstring records what the hand-rolled ladder this
+    replaces did. This page's version was the loosest of the three: it scored
+    ``fuzz.ratio`` against the **web name** and accepted anything from 60 up,
+    with team and position contributing a nudge rather than a scope, so
+    "Raya" matched team-mate-of-nobody "Rayan" at 89 and the Arsenal
+    goalkeeper carried a Bournemouth midfielder's ``Pos Rank``.
+    """
+    attached = attach_weekly_projections(
+        squad_df, projections_df,
+        # This frame carries the legal name under `Full Name` and the short
+        # form under `Player`, which is the opposite of what the matcher
+        # expects -- hence the explicit columns rather than the defaults.
+        name_col="Full Name" if "Full Name" in squad_df.columns else "Player",
+        web_col="Player",
+        cols=("Points", "Pos Rank"),
+        source_name="Rotowire weekly (classic team analysis)",
+    )
+    squad_df["Points"] = attached["Points"]
+    squad_df["Pos Rank"] = attached["Pos Rank"]
     return squad_df
 
 
@@ -531,7 +511,7 @@ def show_classic_team_analysis_page():
 
     # Format player names with captain indicators
     def format_player_name(row):
-        name = row["Player"]
+        name = row.get("Display_Name") or row["Player"]
         if row["is_captain"]:
             return f"{name} (C)"
         elif row["is_vice_captain"]:

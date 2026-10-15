@@ -13,8 +13,8 @@ import random
 import streamlit as st
 import streamlit.components.v1 as components
 from datetime import datetime, timezone
-from fuzzywuzzy import fuzz
 from scripts.common.error_helpers import show_api_error
+from scripts.common.text_helpers import to_display_name
 from scripts.common.player_matching import canonical_normalize
 from scripts.common.cache import purge_cache_prefix
 from scripts.common.fpl_classic_api import get_classic_team_history
@@ -23,7 +23,9 @@ from scripts.common.classic_squad import (
     SOURCE_MY_TEAM,
     resolve_classic_squad,
 )
-from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections
+from scripts.common.analytics import (
+    attach_weekly_projections, simulate_auto_subs, blend_fixture_projections,
+)
 from scripts.common.scraping import get_ffp_feed, render_ffp_status
 from scripts.common.fixture_helpers import (
     attach_matchups, compute_key_differentials, live_player_status,
@@ -52,6 +54,20 @@ from scripts.common.styled_tables import render_styled_table
 # =============================================================================
 # Helper Functions
 # =============================================================================
+
+def _row_display_name(rows: pd.DataFrame) -> str:
+    """The rendered name of a one-row selection: ``Display_Name``, else ``Player``.
+
+    Both are present on every squad frame this page builds, but the live and
+    H2H paths pass frames through merges that do not all carry the display
+    column, so the legal name stays as the fallback.
+    """
+    row = rows.iloc[0]
+    name = row.get("Display_Name")
+    if isinstance(name, str) and name.strip():
+        return name
+    return row.get("Player", "N/A")
+
 
 def _strip_accents(name: str) -> str:
     """Strip diacritics from a name while preserving case and spacing.
@@ -239,10 +255,17 @@ def _build_squad_from_elements(element_ids: list, bootstrap: dict) -> pd.DataFra
             continue
 
         raw_name = f"{player.get('first_name', '')} {player.get('second_name', '')}".strip()
-        display_name = _strip_accents(raw_name) if raw_name else player.get("web_name", "Unknown")
         rows.append({
             "element_id": element_id,
-            "Player": display_name,
+            # `Player` is the full legal name because that is what every
+            # cross-source merge keys on; `Display_Name` is what renders. See
+            # CLAUDE.md's "Player Display Names" -- swapping them silently
+            # degrades match rates, and it used to be the accent-stripped legal
+            # name doing both jobs badly.
+            "Player": raw_name or player.get("web_name", "Unknown"),
+            "Display_Name": to_display_name(
+                player.get("first_name", ""), player.get("second_name", ""),
+                player.get("web_name", "")) or player.get("web_name", "Unknown"),
             "Web Name": player.get("web_name", "Unknown"),
             "Team": teams.get(player.get("team"), "???"),
             "Position": position_converter(player.get("element_type")),
@@ -410,7 +433,7 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
         """
 
         for _, row in pos_players.iterrows():
-            player_name = row.get("Player", "Unknown")
+            player_name = row.get("Display_Name") or row.get("Player", "Unknown")
             team = row.get("Team", "")
             matchup = row.get("Matchup", "")
             proj_pts = pd.to_numeric(row.get("Points", 0), errors="coerce") or 0
@@ -551,7 +574,7 @@ def _render_classic_bench_section(bench_df: pd.DataFrame, is_live: bool = False,
 
     for i, (_, row) in enumerate(ordered.iterrows()):
         label = labels[i] if i < len(labels) else f'{i}th Sub'
-        player_name = row.get('Player', 'Unknown')
+        player_name = row.get('Display_Name') or row.get('Player', 'Unknown')
         team = row.get('Team', '')
         position = row.get('Position', '')
         proj_pts = row.get('Points', 0) or 0
@@ -595,63 +618,6 @@ def _render_classic_bench_section(bench_df: pd.DataFrame, is_live: bool = False,
     components.html(html, height=height, scrolling=False)
 
 
-def _lookup_projection(player_name: str, team: str, position: str, projections_df: pd.DataFrame,
-                       web_name: str = None) -> dict:
-    """Look up projection for a player using fuzzy matching.
-
-    Tries multiple matching strategies:
-    1. Full name fuzzy match (e.g. "Djordje Petrovic" vs "Djordje Petrovic")
-    2. Web name fuzzy match (e.g. "Gabriel" vs "Gabriel") - catches single-name players
-    3. Team+position boost to disambiguate common names
-    """
-    if projections_df is None or projections_df.empty:
-        return {"Points": None, "Pos Rank": None, "Matched Name": None, "Matchup": ""}
-
-    best_match = None
-    best_score = 0
-
-    # Normalize the input names for comparison
-    norm_player = canonical_normalize(player_name)
-    norm_web = canonical_normalize(web_name) if web_name else ""
-
-    for _, row in projections_df.iterrows():
-        proj_name = str(row.get("Player", ""))
-        proj_team = str(row.get("Team", ""))
-        proj_pos = str(row.get("Position", ""))
-        norm_proj = canonical_normalize(proj_name)
-
-        # Score using normalized full name
-        score = fuzz.ratio(norm_player, norm_proj)
-
-        # Also try web_name (handles single-name players like "Gabriel")
-        if norm_web:
-            web_score = fuzz.ratio(norm_web, norm_proj)
-            score = max(score, web_score)
-
-        # Boost score if team and position match
-        same_team_pos = proj_team == team and proj_pos == position
-        if same_team_pos:
-            score += 15
-
-        # Require higher threshold for cross-team/cross-position matches
-        # to prevent false positives like "Wilson" matching "Alisson" (score 62)
-        threshold = 60 if same_team_pos else 80
-
-        if score > best_score and score >= threshold:
-            best_score = score
-            best_match = row
-
-    if best_match is not None:
-        return {
-            "Points": best_match.get("Points"),
-            "Pos Rank": best_match.get("Pos Rank", "N/A"),
-            "Matched Name": best_match.get("Player"),
-            "Matchup": best_match.get("Matchup", ""),
-        }
-
-    return {"Points": None, "Pos Rank": None, "Matched Name": None, "Matchup": ""}
-
-
 def _apply_auto_subs(squad_df: pd.DataFrame, live_stats: dict, bootstrap: dict, gw: int = None) -> tuple:
     """
     Apply FPL auto-substitution rules to a squad during a live gameweek.
@@ -683,10 +649,17 @@ def _build_squad_dataframe(picks: list, bootstrap: dict) -> pd.DataFrame:
         player = elements.get(element_id, {})
 
         raw_name = f"{player.get('first_name', '')} {player.get('second_name', '')}".strip()
-        display_name = _strip_accents(raw_name) if raw_name else player.get("web_name", "Unknown")
         rows.append({
             "element_id": element_id,
-            "Player": display_name,
+            # `Player` is the full legal name because that is what every
+            # cross-source merge keys on; `Display_Name` is what renders. See
+            # CLAUDE.md's "Player Display Names" -- swapping them silently
+            # degrades match rates, and it used to be the accent-stripped legal
+            # name doing both jobs badly.
+            "Player": raw_name or player.get("web_name", "Unknown"),
+            "Display_Name": to_display_name(
+                player.get("first_name", ""), player.get("second_name", ""),
+                player.get("web_name", "")) or player.get("web_name", "Unknown"),
             "Web Name": player.get("web_name", "Unknown"),
             "Team": teams.get(player.get("team"), "???"),
             "Position": position_converter(player.get("element_type")),
@@ -700,38 +673,29 @@ def _build_squad_dataframe(picks: list, bootstrap: dict) -> pd.DataFrame:
 
 
 def _add_projections_to_squad(squad_df: pd.DataFrame, projections_df: pd.DataFrame) -> pd.DataFrame:
-    """Add Rotowire projections to squad dataframe.
+    """Attach Rotowire's weekly ``Points``, ``Pos Rank`` and ``Matchup``.
 
-    When a Rotowire match is found, uses the Rotowire player name for display
-    (matching Draft behavior) and adds the Matchup column.
+    Goes through ``analytics.attach_weekly_projections`` -- the shared tiered
+    matcher -- whose docstring records what the hand-rolled ladder this
+    replaces actually did on this page: it rendered the Arsenal goalkeeper as
+    "Rayan", on 4.72 points, against Bournemouth's fixture.
+
+    **The player's name is no longer overwritten with the matched source's.**
+    It used to be, "matching Draft behavior", and that is what turned a bad
+    match from a wrong number into a wrong *person*: the card was captioned
+    with whichever row the ladder had picked. The name belongs to the FPL
+    bootstrap -- the same rule as CLAUDE.md's "Waiver Wire names come from the
+    bootstrap, not the frame" -- so ``Display_Name`` is what renders and
+    ``Player`` stays the legal name the merges key on.
     """
-    points_list = []
-    rank_list = []
-    matchup_list = []
-    matched_names = []
-
-    for _, row in squad_df.iterrows():
-        proj = _lookup_projection(
-            row["Player"],
-            row["Team"],
-            row["Position"],
-            projections_df,
-            web_name=row.get("Web Name"),
-        )
-        points_list.append(proj["Points"])
-        rank_list.append(proj["Pos Rank"])
-        matchup_list.append(proj.get("Matchup", ""))
-        matched_names.append(proj.get("Matched Name"))
-
-    squad_df["Points"] = points_list
-    squad_df["Pos Rank"] = rank_list
-    squad_df["Matchup"] = matchup_list
-
-    # Use Rotowire name when matched (matches Draft behavior)
-    for i, name in enumerate(matched_names):
-        if name:
-            squad_df.iloc[i, squad_df.columns.get_loc("Player")] = name
-
+    attached = attach_weekly_projections(
+        squad_df, projections_df,
+        name_col="Player", web_col="Web Name",
+        source_name="Rotowire weekly (classic fixture projections)",
+    )
+    squad_df["Points"] = attached["Points"]
+    squad_df["Pos Rank"] = attached["Pos Rank"]
+    squad_df["Matchup"] = attached["Matchup"].fillna("")
     return squad_df
 
 
@@ -1525,10 +1489,10 @@ def _show_h2h_fixture_projections(league_id: int, league_name: str, current_gw: 
     cap_2_rows = squad_2[squad_2['is_captain'] == True] if 'is_captain' in squad_2.columns else pd.DataFrame()
     if not cap_1_rows.empty or not cap_2_rows.empty:
         cap_pts_col = 'Blended_Points' if (gw_is_live and 'Blended_Points' in squad_1.columns) else 'Points'
-        t1_cap_name = cap_1_rows.iloc[0]['Player'] if not cap_1_rows.empty else "N/A"
+        t1_cap_name = _row_display_name(cap_1_rows) if not cap_1_rows.empty else "N/A"
         t1_cap_pts = float(cap_1_rows.iloc[0].get(cap_pts_col, 0) or 0) if not cap_1_rows.empty else 0
         t1_mult = int(cap_1_rows.iloc[0].get('multiplier', 2) or 2) if not cap_1_rows.empty else 2
-        t2_cap_name = cap_2_rows.iloc[0]['Player'] if not cap_2_rows.empty else "N/A"
+        t2_cap_name = _row_display_name(cap_2_rows) if not cap_2_rows.empty else "N/A"
         t2_cap_pts = float(cap_2_rows.iloc[0].get(cap_pts_col, 0) or 0) if not cap_2_rows.empty else 0
         t2_mult = int(cap_2_rows.iloc[0].get('multiplier', 2) or 2) if not cap_2_rows.empty else 2
         captain_info = {

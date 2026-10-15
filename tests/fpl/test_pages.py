@@ -129,9 +129,7 @@ class TestPlayerStatisticsPage:
         # Need a minimal DataFrame with position_abbrv column
         stats_df = pd.DataFrame({"position_abbrv": [], "team_name_short": []})
         with patch("scripts.fpl.player_statistics.pull_fpl_player_stats", return_value=stats_df), \
-             patch("scripts.fpl.player_statistics.get_fixture_difficulty_grid", return_value=pd.DataFrame()), \
-             patch("scripts.fpl.player_statistics.get_rotowire_player_projections", return_value=pd.DataFrame()), \
-             patch("scripts.fpl.player_statistics.clean_fpl_player_names", return_value=pd.DataFrame()):
+             patch("scripts.fpl.player_statistics.get_fixture_difficulty_grid", return_value=pd.DataFrame()):
             from scripts.fpl.player_statistics import show_player_stats_page
             try:
                 show_player_stats_page()

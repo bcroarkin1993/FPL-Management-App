@@ -1317,7 +1317,7 @@ def pull_fpl_player_stats():
     Returns:
     - player_df: DataFrame with player statistics sorted by total_points.
     """
-    from scripts.common.text_helpers import remove_duplicate_words
+    from scripts.common.text_helpers import remove_duplicate_words, to_display_name
 
     # Set Classic FPL API endpoint (has more comprehensive data than Draft API)
     fpl_api = 'https://fantasy.premierleague.com/api/bootstrap-static/'
@@ -1360,6 +1360,17 @@ def pull_fpl_player_stats():
     # Apply the remove_duplicate_words function to the 'Player' column
     player_df['player'] = player_df['player'].apply(remove_duplicate_words)
 
+    # `player` is the full legal name, which is the right matching key and the
+    # wrong thing to render: it is what nobody says out loud ("João Pedro
+    # Junqueira de Jesus", "Rúben dos Santos Gato Alves Dias"). `display_name`
+    # is the common name -- CLAUDE.md's "Player Display Names". Both are
+    # carried so a consumer never has to choose between matching and reading.
+    player_df['display_name'] = [
+        to_display_name(f, s_, w)
+        for f, s_, w in zip(player_df['first_name'], player_df['second_name'],
+                            player_df['web_name'])
+    ]
+
     # Merge in team_name
     player_df = pd.merge(player_df, team_df, left_on='team', right_on='team_id')
 
@@ -1367,7 +1378,7 @@ def pull_fpl_player_stats():
     player_df = pd.merge(player_df, position_df, left_on='element_type', right_on='position_id')
 
     # Organize columns
-    cols = ['id', 'code', 'web_name', 'player', 'position_abbrv', 'team_name', 'team_name_abbrv', 'clean_sheets', 'goals_scored',
+    cols = ['id', 'code', 'web_name', 'player', 'display_name', 'position_abbrv', 'team_name', 'team_name_abbrv', 'clean_sheets', 'goals_scored',
             'assists', 'minutes', 'own_goals', 'penalties_missed', 'penalties_saved', 'red_cards', 'yellow_cards',
             'starts', 'expected_goals', 'expected_assists', 'expected_goal_involvements', 'expected_goals_conceded',
             'creativity', 'influence', 'threat', 'ict_index', 'bonus', 'bps', 'form', 'points_per_game', 'total_points',

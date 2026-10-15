@@ -1,12 +1,9 @@
-import config
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 from scripts.common.utils import (
-    clean_fpl_player_names,
     get_fixture_difficulty_grid,
-    get_rotowire_player_projections,
     pull_fpl_player_stats,
 )
 from scripts.common.styled_tables import render_styled_table
@@ -801,12 +798,32 @@ def show_player_stats_page():
     # Pull FPL player stats
     fpl_player_statistics = pull_fpl_player_stats()
 
-    # Pull FPL player projections from Rotowire (if available), for player name cleaning
-    if config.ROTOWIRE_URL:
-        fpl_player_projections = get_rotowire_player_projections(config.ROTOWIRE_URL)
-
-        # Clean FPL player names
-        fpl_player_statistics = clean_fpl_player_names(fpl_player_statistics, fpl_player_projections)
+    # Render the common name. Every surface on this page reads `player`, so the
+    # display name is written into it -- this frame is display-only, and the
+    # legal name stays available as `display_name`'s sibling for anything that
+    # needs to match on it.
+    #
+    # **What this replaces was a name *match*, and it was wrong 87 times.**
+    # `clean_fpl_player_names()` fuzzy-matched every FPL player against
+    # Rotowire's 220-row weekly table and renamed him to the best hit at a
+    # threshold of 80, scored with `fuzzywuzzy.WRatio`. WRatio falls back to
+    # partial-token ratios once the two strings differ enough in length, and a
+    # single shared token is then enough: "Maxim De Cuyper" scores **86**
+    # against "João Pedro Junqueira de Jesus" on the word *de*. Measured live,
+    # 87 of 667 players were renamed and 66 rows ended up sharing a name with
+    # another player -- "Maxim De Cuyper" was applied to eleven different
+    # players, "Bruno Fernandes" and "Gabriel" to three each, and Alex Palmer
+    # was renamed Cole Palmer. João Pedro, the reason this was found, rendered
+    # as Maxim De Cuyper while three other players rendered as "Joao Pedro".
+    #
+    # `to_display_name()` needs no matching at all, which is why it is the
+    # app-wide rule.
+    if "display_name" in fpl_player_statistics.columns:
+        _display = fpl_player_statistics["display_name"].astype("object")
+        fpl_player_statistics = fpl_player_statistics.copy()
+        fpl_player_statistics["player"] = _display.where(
+            _display.notna() & (_display.astype(str).str.strip() != ""),
+            fpl_player_statistics["player"])
 
     # Create tabs for different views
     tab_advanced, tab_charts, tab_set_pieces = st.tabs(["Advanced Stats Table", "Visual Charts", "Set Piece Takers"])

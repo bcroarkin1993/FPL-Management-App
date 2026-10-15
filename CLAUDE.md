@@ -2523,6 +2523,71 @@ named as the owners.
 
 **`_effective_proj` column**: `compute_player_scores()` retains `_effective_proj` (blended_proj × start_likelihood) in its output. Consumers (Waiver Wire suggestion engine, card rendering) rely on it for GW projection display and sanity checking. Do not drop it from the result.
 
+**Every page attaches Rotowire's weekly numbers through
+`analytics.attach_weekly_projections()`.** Five callsites had each hand-rolled
+the same ladder -- scan the projections frame per player, score every row with
+`fuzz.ratio`/`token_set_ratio`, accept the best hit over a threshold -- and
+`classic/transfers.py` was fixed in isolation, so the bug it was fixed for
+stayed live on the other four. Reported from the app: **the Arsenal goalkeeper
+rendered as "Rayan", on 4.72 points, against Bournemouth's fixture.**
+
+Two properties the ladders lacked, both load-bearing:
+
+- **One reference row belongs to at most one player.** Nothing stopped a row
+  being claimed repeatedly, so a better score simply won: `fuzz.ratio("raya",
+  "rayan")` is 89 where Raya's own row scores 74 on his full legal name.
+  Measured live per callsite -- Free Hit priced **241 players off a 220-row
+  table** with 46 wearing a team-mate's number (Gabriel Magalhães, Martinelli
+  and Jesus all on the defender's 5.32; Ødegaard and Zubimendi sharing 4.79 on
+  the word *Martin*), Wildcard 217 with 19 shared (Harry Maguire and Harry
+  Amass both 4.66, Lewis and Mason Miley both 4.36). Afterwards both match 219
+  of 220 rows, none shared.
+- **Every loose tier is scoped by team and position.** The ladders' `+15`/`+10`
+  nudge *rewarded* agreement instead of *requiring* it, so a cross-club,
+  cross-position guess needed only to out-score the real row.
+
+It also costs ~0.05s where the ladder cost ~6s per frame, since the reference
+is indexed once instead of rescanned per player.
+
+**On the two optimizer pages a phantom projection does not merely render
+wrongly -- it buys a player.** Rotowire's silence is the "not expected to
+start" signal and both pools *filter* on it, so a borrowed 5.32 put Gabriel
+Jesus -- 0 minutes all season -- into the Free Hit candidate pool at a
+starter's rate. That is why the AST guard
+(`test_no_page_scores_a_projection_name_with_fuzz_ratio`) walks every module
+under `scripts/` rather than the pages the bug was reported on: it is what
+found those two.
+
+**A match is a number, never a rename.** Classic Fixture Projections
+overwrote the player's name with the matched Rotowire row's name, "matching
+Draft behavior" -- which is what turned a bad match from a wrong number into a
+wrong *person*, since the card was then captioned with whichever row the ladder
+picked. Both pages now carry `Display_Name` from `to_display_name()` and keep
+the legal name in `Player` for matching, per "Player Display Names" and the
+same reasoning as "Waiver Wire names come from the bootstrap, not the frame".
+Fixture Projections' `Player` was additionally accent-*stripped* for display
+("Joao Pedro Junqueira de Jesus"), which helped nothing: `canonical_normalize`
+strips accents during matching anyway.
+
+**`clean_fpl_player_names()` is deleted, along with `find_best_match()` and
+`_fuzzy_match_player()`.** Player Statistics called it to "clean" names: it
+fuzzy-matched all 667 FPL players against Rotowire's 220 rows and renamed each
+to the best hit at 80, scored with `fuzzywuzzy.WRatio`. **WRatio falls back to
+partial-token ratios once two strings differ enough in length, and one shared
+token then carries it** -- "Maxim De Cuyper" scores 86 against "João Pedro
+Junqueira de Jesus" on the word *de*. Measured live, 87 players were renamed
+and 66 rows ended up sharing a name with another player: "Maxim De Cuyper" was
+applied to **eleven** of them, "Bruno Fernandes" and "Gabriel" to three each,
+and Alex Palmer rendered as Cole Palmer. The reported symptom was the mildest
+reading of it -- João Pedro "missing from the tables", while three other
+players rendered as "Joao Pedro".
+
+Nothing needs a name match to *display* a name. `pull_fpl_player_stats()` now
+carries `display_name` beside `player` (the legal name stays the matching key)
+and the page renders it, so that page fetches no projection source at all.
+The helpers are left **deleted rather than deprecated** so a future caller
+cannot reach for them; zero duplicate rendered names afterwards, against 66.
+
 **FFP name matching goes through `ReferenceMatcher`.** `merge_ffp_single_gw_data()`,
 `blend_multi_gw_projections()` and `merge_season_projections()` all call
 `_claim_reference_rows()` — see "Player Matching" for the tiers.

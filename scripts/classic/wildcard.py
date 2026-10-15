@@ -14,6 +14,7 @@ import config
 
 from scripts.common.classic_squad import get_squad_budget as _get_user_budget
 from scripts.common.error_helpers import show_api_error
+from scripts.common.analytics import attach_weekly_projections
 from scripts.common.optimization import solve_squad_ilp
 from scripts.common.utils import (
     get_rotowire_player_projections,
@@ -27,7 +28,6 @@ from scripts.common.utils import (
     get_fixture_difficulty_grid,
     position_converter,
 )
-from fuzzywuzzy import fuzz
 from scripts.common.styled_tables import render_styled_table
 
 
@@ -66,42 +66,6 @@ def _get_fdr_color(fdr: float) -> str:
         return "#ff9800"
     else:
         return "#dc3545"
-
-
-def _lookup_projection(player_name: str, team: str, position: str, projections_df: pd.DataFrame) -> Optional[float]:
-    """Look up projection for a player using fuzzy matching.
-
-    Requires team to match to avoid false positives.
-    """
-    if projections_df is None or projections_df.empty:
-        return None
-
-    best_match = None
-    best_score = 0
-
-    for _, row in projections_df.iterrows():
-        proj_name = str(row.get("Player", ""))
-        proj_team = str(row.get("Team", ""))
-        proj_pos = str(row.get("Position", ""))
-
-        # REQUIRE team to match
-        if proj_team != team:
-            continue
-
-        score = fuzz.ratio(player_name.lower(), proj_name.lower())
-
-        # Boost if position matches
-        if proj_pos == position:
-            score += 10
-
-        if score > best_score and score >= 65:
-            best_score = score
-            best_match = row
-
-    if best_match is not None:
-        return best_match.get("Points")
-
-    return None
 
 
 def _get_player_fdr_for_horizon(
@@ -242,49 +206,63 @@ def _build_player_pool(
             if news and any(word in news.lower() for word in ['injured', 'illness', 'suspended', 'unavailable', 'out']):
                 continue
 
-        # Get Rotowire projection for current GW
-        rotowire_proj = _lookup_projection(
-            p.get("web_name", ""),
-            team_short,
-            position,
-            projections_df
-        )
-
-        # Get FDR values for this team over horizon
-        fdr_values = _get_player_fdr_for_horizon(team_short, fdr_diffs, current_gw, horizon)
-
-        # Calculate multi-GW projection
-        # Exclude backup players who have no realistic chance of playing.
-        # A player without a Rotowire projection must have recent form to be included.
-        # No Rotowire + no recent form = backup who isn't playing, skip them.
-        if rotowire_proj is None and form <= 0:
-            continue
-
-        total_proj, per_gw_proj = _calculate_multi_gw_projection(rotowire_proj, ppg, form, fdr_values)
-
-        # Skip players with no projection potential
-        if total_proj <= 0:
-            continue
-
         rows.append({
             "Player_ID": p.get("id"),
             "Player": p.get("web_name"),
+            # The matcher wants the full legal name; `Player` here is the web
+            # name because that is what this page renders, so the legal one
+            # rides alongside purely to be matched on.
+            "Full_Name": f"{p.get('first_name', '')} {p.get('second_name', '')}".strip(),
             "Team": team_short,
             "Team_ID": team_id,
             "Position": position,
             "Price": price,
-            "Rotowire_Proj": rotowire_proj if rotowire_proj is not None else 0.0,
             "PPG": ppg,
-            "Total_Points": total_proj,
-            "Per_GW_Points": per_gw_proj,
-            "FDR_Values": fdr_values,
-            "form": float(p.get("form", 0) or 0),
+            "FDR_Values": _get_player_fdr_for_horizon(
+                team_short, fdr_diffs, current_gw, horizon),
+            "form": form,
             "total_season_points": p.get("total_points", 0),
             "chance_of_playing": chance_of_playing,
             "news": news,
         })
 
-    return pd.DataFrame(rows)
+    pool = pd.DataFrame(rows)
+    if pool.empty:
+        return pool
+
+    # Projections are attached for the whole pool at once, through the shared
+    # tiered matcher -- see `analytics.attach_weekly_projections`.
+    #
+    # What this replaced scored `fuzz.ratio` on the **web name** and accepted
+    # any hit at 65, scoped to the club but with position only nudging, and
+    # with nothing stopping one row being claimed repeatedly. Measured live it
+    # priced 217 players off a 220-row table with 19 wearing a team-mate's
+    # number: Harry Maguire and Harry Amass both on 4.66, Lewis and Mason Miley
+    # both on 4.36, Nilson and Juan Angulo both on 3.63 -- a shared first name
+    # or surname was enough. A projection is what buys a player here, so a
+    # phantom one puts a reserve into the optimizer at a starter's rate.
+    attached = attach_weekly_projections(
+        pool, projections_df, name_col="Full_Name", web_col="Player",
+        cols=("Points",), source_name="Rotowire weekly (wildcard pool)",
+    )
+    pool["Rotowire_Proj"] = attached["Points"]
+
+    # A player Rotowire did not price and who has no recent form is a backup
+    # who is not playing.
+    pool = pool[pool["Rotowire_Proj"].notna() | (pool["form"] > 0)].copy()
+
+    projected = [
+        _calculate_multi_gw_projection(
+            None if pd.isna(r.Rotowire_Proj) else float(r.Rotowire_Proj),
+            r.PPG, r.form, r.FDR_Values)
+        for r in pool.itertuples()
+    ]
+    pool["Total_Points"] = [t for t, _ in projected]
+    pool["Per_GW_Points"] = [g for _, g in projected]
+    pool["Rotowire_Proj"] = pool["Rotowire_Proj"].fillna(0.0)
+
+    pool = pool[pool["Total_Points"] > 0]
+    return pool.drop(columns=["Full_Name"]).reset_index(drop=True)
 
 
 def solve_wildcard_squad(

@@ -14,8 +14,8 @@ import config
 
 from scripts.common.classic_squad import get_squad_budget as _get_user_budget
 from scripts.common.error_helpers import show_api_error
+from scripts.common.analytics import attach_weekly_projections
 from scripts.common.optimization import solve_squad_ilp
-from scripts.common.player_matching import canonical_normalize
 from scripts.common.utils import (
     get_rotowire_player_projections,
     get_ffp_feed,
@@ -27,7 +27,6 @@ from scripts.common.utils import (
     get_classic_team_picks,
     position_converter,
 )
-from fuzzywuzzy import fuzz
 from scripts.common.styled_tables import render_styled_table
 
 
@@ -84,59 +83,6 @@ def _get_fdr_color(fdr: int) -> str:
         return "#dc3545"
 
 
-def _lookup_projection(
-    web_name: str,
-    full_name: str,
-    team: str,
-    position: str,
-    projections_df: pd.DataFrame,
-) -> Optional[float]:
-    """Look up projection for a player using fuzzy matching.
-
-    Tries both web_name (e.g. "Guehi") and full_name (e.g. "Marc Guehi") against
-    Rotowire using token_set_ratio so that "Guehi" vs "Marc Guehi" scores 100.
-    Uses canonical_normalize to strip accents for consistent comparison.
-
-    Requires team to match to avoid false positives (e.g., matching 'Ortega' to wrong player).
-    """
-    if projections_df is None or projections_df.empty:
-        return None
-
-    norm_web = canonical_normalize(web_name)
-    norm_full = canonical_normalize(full_name)
-
-    best_match = None
-    best_score = 0
-
-    for _, row in projections_df.iterrows():
-        proj_name = canonical_normalize(str(row.get("Player", "")))
-        proj_team = str(row.get("Team", ""))
-        proj_pos = str(row.get("Position", ""))
-
-        # Require team match to avoid cross-team false positives
-        if proj_team != team:
-            continue
-
-        # Score against both web_name and full_name; take the best
-        score = max(
-            fuzz.token_set_ratio(norm_web, proj_name),
-            fuzz.token_set_ratio(norm_full, proj_name),
-        )
-
-        # Boost if position matches
-        if proj_pos == position:
-            score += 10
-
-        if score > best_score and score >= 65:
-            best_score = score
-            best_match = row
-
-    if best_match is not None:
-        return best_match.get("Points")
-
-    return None
-
-
 def _build_player_pool(
     bootstrap: dict,
     projections_df: pd.DataFrame,
@@ -178,36 +124,54 @@ def _build_player_pool(
             if news and any(word in news.lower() for word in ['injured', 'illness', 'suspended', 'unavailable', 'out']):
                 continue
 
-        # Get projection — use both web_name ("Guehi") and full name ("Marc Guehi")
         full_name = f"{p.get('first_name', '')} {p.get('second_name', '')}".strip()
-        proj_points = _lookup_projection(
-            web_name=p.get("web_name", ""),
-            full_name=full_name,
-            team=team_short,
-            position=position,
-            projections_df=projections_df,
-        )
-
-        # Skip players without projections (they likely won't play)
-        # But keep very cheap players as potential bench fodder
-        if proj_points is None and not is_cheap_fodder:
-            continue
-
         rows.append({
             "Player_ID": p.get("id"),
             "Player": full_name or p.get("web_name"),
+            "Web_Name": p.get("web_name", ""),
             "Team": team_short,
             "Team_ID": team_id,
             "Position": position,
             "Price": price,
-            "Points": proj_points if proj_points is not None else 0.0,
             "form": float(p.get("form", 0) or 0),
             "total_points": p.get("total_points", 0),
             "chance_of_playing": chance_of_playing,
             "news": news,
+            "_is_cheap_fodder": is_cheap_fodder,
         })
 
-    return pd.DataFrame(rows)
+    pool = pd.DataFrame(rows)
+    if pool.empty:
+        return pool
+
+    # Projections are attached for the whole pool at once, through the shared
+    # tiered matcher -- see `analytics.attach_weekly_projections`.
+    #
+    # What this replaced scored `token_set_ratio` against both name forms and
+    # accepted any hit at 65, scoped to the club but with position only
+    # nudging. A shared *token* carries token_set_ratio, and first names are
+    # tokens: measured live, it priced **241 players off a 220-row table**,
+    # with 46 of them wearing a team-mate's number. Gabriel Magalhães (DEF),
+    # Gabriel Martinelli (MID) and Gabriel Jesus (FWD) were all given the
+    # defender's 5.32, and Ødegaard and Zubimendi shared 4.79 on the word
+    # *Martin*.
+    #
+    # That is worse here than on a display page, because a projection is what
+    # buys a player: a phantom 5.32 put Gabriel Jesus -- 0 minutes all season
+    # -- into the optimizer's candidate pool at a starter's rate.
+    attached = attach_weekly_projections(
+        pool, projections_df, name_col="Player", web_col="Web_Name",
+        cols=("Points",), source_name="Rotowire weekly (free hit pool)",
+    )
+    pool["Points"] = attached["Points"]
+
+    # Absence from Rotowire's weekly table is the "not expected to start"
+    # signal, so an unpriced player leaves the pool -- unless he is cheap
+    # enough to be bench fodder, where that is exactly what he is for.
+    keep = pool["Points"].notna() | pool["_is_cheap_fodder"]
+    pool = pool[keep].copy()
+    pool["Points"] = pool["Points"].fillna(0.0)
+    return pool.drop(columns=["_is_cheap_fodder"]).reset_index(drop=True)
 
 
 def solve_optimal_squad(

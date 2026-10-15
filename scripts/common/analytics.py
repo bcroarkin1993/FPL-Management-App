@@ -8,7 +8,7 @@ and related analytics.
 
 import requests
 from dataclasses import dataclass
-from typing import Optional, Callable, Dict
+from typing import Optional, Callable, Dict, Sequence
 
 import numpy as np
 import pandas as pd
@@ -898,6 +898,95 @@ def _claim_reference_rows(
                      rate=len(resolved) / len(ref_df) if len(ref_df) else 0.0,
                      tiers=dict(matcher.tier_counts))
     return resolved
+
+
+#: The columns a weekly Rotowire rankings table publishes that squad pages
+#: attach to their own frames.
+WEEKLY_PROJECTION_COLS = ("Points", "Pos Rank", "Matchup")
+
+
+def attach_weekly_projections(
+    player_df: pd.DataFrame,
+    projections_df: pd.DataFrame,
+    *,
+    name_col: str = "Player",
+    web_col: Optional[str] = "Web_Name",
+    cols: Sequence[str] = WEEKLY_PROJECTION_COLS,
+    numeric: Sequence[str] = ("Points",),
+    source_name: str = "Rotowire weekly",
+) -> pd.DataFrame:
+    """Rotowire's weekly columns for each player, as a frame on ``player_df``'s index.
+
+    The caller assigns the result under whatever names its page already uses,
+    so this is the one place the *matching* happens. It exists because three
+    Classic pages each hand-rolled the same ladder -- scan the whole
+    projections frame per player, score every row with ``fuzz.ratio``, accept
+    any hit at 60 with a +15 nudge where team and position agree -- and that
+    ladder is wrong in a way no individual number reveals.
+
+    Two properties it lacked, both load-bearing:
+
+    * **One reference row belongs to at most one player.** Nothing stopped a
+      row being claimed over and over: measured live against a 659-player pool
+      and Rotowire's 220 rows, 323 players held a projection and 172 of them
+      were wearing another player's numbers. David Raya (ARS, GK) shared a row
+      with Rayan, Allan and Gray -- ``fuzz.ratio("raya", "rayan")`` is 89, and
+      Raya's own row scores 74 on his full legal name -- so the Fixture
+      Projections card for the Arsenal goalkeeper read "Rayan", 4.72 points,
+      "BOU v. SUN".
+    * **Every loose tier is scoped by team and position.** The +15 nudge
+      *rewarded* agreement instead of *requiring* it, so a cross-club,
+      cross-position guess needed only to out-score the real row. That is the
+      Alex/Cole Palmer failure recorded in CLAUDE.md's "Player Matching".
+
+    ``_claim_reference_rows`` has both. It also costs ~0.05s where the ladder
+    cost ~6s per frame, since it indexes the reference once instead of
+    rescanning it per player.
+
+    The matcher wants the full legal name in ``Player`` and the short form in
+    ``Web_Name``; pages carry them under assorted headings, so they are probed
+    through a renamed copy rather than by renaming the frame every other merge
+    on the page keys on.
+    """
+    out = pd.DataFrame(index=player_df.index)
+    for col in cols:
+        out[col] = pd.Series(
+            index=player_df.index,
+            dtype="float64" if col in numeric else "object")
+
+    if (projections_df is None or projections_df.empty
+            or name_col not in player_df.columns or player_df.empty):
+        return out
+
+    probe = pd.DataFrame({
+        "Player": player_df[name_col],
+        "Web_Name": (player_df[web_col] if web_col and web_col in player_df.columns
+                     else player_df[name_col]),
+        "Team": player_df.get("Team"),
+        "Position": player_df.get("Position"),
+    }, index=player_df.index)
+
+    stats: Dict = {}
+    mapping = _claim_reference_rows(
+        probe, projections_df,
+        name_col="Player", ref_name_col="Player",
+        ref_team_col="Team" if "Team" in projections_df.columns else None,
+        source_name=source_name,
+        stats=stats,
+    )
+    if stats:
+        _logger.info("%s: matched %s of %s reference rows (%.0f%%)",
+                     source_name, stats.get("matched"), stats.get("total"),
+                     100 * stats.get("rate", 0.0))
+
+    for player_idx, ref_idx in mapping.items():
+        for col in cols:
+            if col not in projections_df.columns:
+                continue
+            val = projections_df.at[ref_idx, col]
+            out.at[player_idx, col] = (
+                pd.to_numeric(val, errors="coerce") if col in numeric else val)
+    return out
 
 
 _FFP_GW_WARNED = set()
