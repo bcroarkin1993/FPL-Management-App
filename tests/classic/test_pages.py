@@ -701,6 +701,10 @@ class TestClassicTeamAnalysisPage:
 
 class TestClassicLeagueAnalysisPage:
     def test_smoke(self, mock_all_utils):
+        # The Rival Tracker's fetches are patched even though this test
+        # early-returns before the tabs: mock_streamlit's buttons are
+        # unconditionally truthy, so an unpatched gate would reach the network
+        # the moment anything upstream of it starts returning data.
         with patch("scripts.classic.league_analysis.get_league_standings", return_value=None), \
              patch("scripts.classic.league_analysis.get_classic_team_history", return_value=None), \
              patch("scripts.classic.league_analysis.get_current_gameweek", return_value=25), \
@@ -708,9 +712,150 @@ class TestClassicLeagueAnalysisPage:
              patch("scripts.classic.league_analysis.get_classic_team_position_data", return_value={}), \
              patch("scripts.classic.league_analysis.show_api_error"), \
              patch("scripts.classic.league_analysis.compute_classic_league_bench_data", return_value=[]), \
-             patch("scripts.classic.league_analysis.render_league_bench_analysis"):
+             patch("scripts.classic.league_analysis.render_league_bench_analysis"), \
+             patch("scripts.classic.league_analysis._fetch_rival_squads", return_value={}), \
+             patch("scripts.classic.league_analysis._fetch_own_squad", return_value={}), \
+             patch("scripts.classic.league_analysis.blended_pool", return_value=pd.DataFrame()):
             from scripts.classic.league_analysis import show_classic_league_analysis_page
             show_classic_league_analysis_page()
+
+
+class TestClassicRivalTracker:
+    """The Rival Tracker tab.
+
+    The page smoke test above early-returns long before any tab body, so the
+    renderer is driven directly with a populated frame -- the convention the
+    Draft Power Rankings tests follow for the same reason.
+    """
+
+    def _pool(self):
+        return pd.DataFrame([
+            {"Player_ID": 1, "Display_Name": "Erling Haaland", "Position": "F",
+             "Team": "MCI", "Proj": 7.1, "Proj_Next3": 21.3},
+            {"Player_ID": 2, "Display_Name": "Cole Palmer", "Position": "M",
+             "Team": "CHE", "Proj": 4.6, "Proj_Next3": 13.8},
+            {"Player_ID": 3, "Display_Name": "Bukayo Saka", "Position": "M",
+             "Team": "ARS", "Proj": 5.3, "Proj_Next3": 15.9},
+        ] + [
+            {"Player_ID": pid, "Display_Name": f"Filler {pid}", "Position": "D",
+             "Team": "BRE", "Proj": 2.0, "Proj_Next3": 6.0}
+            for pid in range(4, 40)
+        ])
+
+    def _squads(self):
+        def squad(elements, captain):
+            return [{"element": e, "position": slot,
+                     "multiplier": 0 if slot > 11 else (2 if e == captain else 1),
+                     "is_captain": e == captain}
+                    for slot, e in enumerate(elements, start=1)]
+        # Team 500 is "mine": it holds Haaland and Palmer but not Saka.
+        return {
+            500: squad([1, 2] + list(range(4, 17)), captain=1),
+            501: squad([1, 3] + list(range(4, 17)), captain=1),
+            502: squad([1, 3] + list(range(17, 30)), captain=3),
+        }
+
+    def _frames(self, my_team_id=500):
+        from scripts.common.mini_league import (compute_league_ownership,
+                                                projected_team_totals)
+        squads = self._squads()
+        pool = self._pool()
+        names = {500: "Stoned Squirrels", 501: "Narlos", 502: "Jalabeumo"}
+        return (compute_league_ownership(squads, pool, my_team_id),
+                projected_team_totals(squads, pool, names, my_team_id),
+                squads)
+
+    def test_renders_with_data(self, mock_all_utils):
+        ownership, totals, squads = self._frames()
+        meta = {tid: {"picks": p, "is_stale": True, "source_gw": 24,
+                      "source": "picks", "provenance": ""}
+                for tid, p in squads.items()}
+        with patch("scripts.classic.league_analysis.render_styled_table") as render:
+            from scripts.classic.league_analysis import _render_rival_tracker
+            _render_rival_tracker(ownership, totals, 3, 500, meta, (0.0, 12.0))
+        # Differentials, template gaps, full ownership, projected totals.
+        assert render.call_count == 4
+
+    def test_a_stale_league_is_disclosed(self, mock_all_utils):
+        """Rival squads are last-deadline by construction pre-deadline, and
+        every value in one is individually plausible -- so it must be said."""
+        ownership, totals, squads = self._frames()
+        meta = {tid: {"picks": p, "is_stale": True, "source_gw": 24,
+                      "source": "picks", "provenance": ""}
+                for tid, p in squads.items()}
+        with patch("scripts.classic.league_analysis.render_styled_table"), \
+             patch("scripts.classic.league_analysis.st.warning") as warn:
+            from scripts.classic.league_analysis import _render_rival_tracker
+            _render_rival_tracker(ownership, totals, 3, 500, meta)
+        assert warn.called
+        assert "last-deadline" in warn.call_args[0][0]
+        assert "GW24" in warn.call_args[0][0]
+
+    def test_a_live_league_is_not_flagged_stale(self, mock_all_utils):
+        ownership, totals, squads = self._frames()
+        meta = {tid: {"picks": p, "is_stale": False, "source_gw": 25,
+                      "source": "my_team", "provenance": ""}
+                for tid, p in squads.items()}
+        with patch("scripts.classic.league_analysis.render_styled_table"), \
+             patch("scripts.classic.league_analysis.st.warning") as warn:
+            from scripts.classic.league_analysis import _render_rival_tracker
+            _render_rival_tracker(ownership, totals, 3, 500, meta)
+        assert not warn.called
+
+    def test_no_squads_renders_a_message_not_a_table(self, mock_all_utils):
+        with patch("scripts.classic.league_analysis.render_styled_table") as render, \
+             patch("scripts.classic.league_analysis.st.info") as info:
+            from scripts.classic.league_analysis import _render_rival_tracker
+            _render_rival_tracker(pd.DataFrame(), pd.DataFrame(), 0, 500, {})
+        assert not render.called
+        assert info.called
+
+    def test_an_unknown_own_team_drops_the_personal_sections(self, mock_all_utils):
+        """With no squad of ours in the frame there are no differentials to
+        show, and an empty "yours" table would read as "you own nothing"."""
+        ownership, totals, squads = self._frames(my_team_id=None)
+        meta = {tid: {"picks": p, "is_stale": False, "source_gw": 25,
+                      "source": "picks", "provenance": ""}
+                for tid, p in squads.items()}
+        with patch("scripts.classic.league_analysis.render_styled_table") as render, \
+             patch("scripts.classic.league_analysis.st.info") as info:
+            from scripts.classic.league_analysis import _render_rival_tracker
+            _render_rival_tracker(ownership, totals, 3, None, meta)
+        # Only the league table and the projected totals.
+        assert render.call_count == 2
+        assert info.called
+
+    def test_the_league_table_accents_your_own_players(self, mock_all_utils):
+        ownership, totals, squads = self._frames()
+        meta = {tid: {"picks": p, "is_stale": False, "source_gw": 25,
+                      "source": "picks", "provenance": ""}
+                for tid, p in squads.items()}
+        with patch("scripts.classic.league_analysis.render_styled_table") as render:
+            from scripts.classic.league_analysis import _render_rival_tracker
+            _render_rival_tracker(ownership, totals, 3, 500, meta)
+        league_call = render.call_args_list[2]
+        df = league_call[0][0]
+        highlight = league_call[1]["highlight_row"]
+        haaland = df[df["Player"] == "Erling Haaland"].iloc[0]
+        saka = df[df["Player"] == "Bukayo Saka"].iloc[0]
+        assert highlight(haaland)       # mine
+        assert not highlight(saka)      # not mine
+
+    def test_effective_ownership_is_rendered_as_computed(self, mock_all_utils):
+        """Haaland is owned by all three and captained by two:
+        (1 + 2 + 2) / 3 = 166.7%. Past 100, and that is correct."""
+        ownership, totals, squads = self._frames()
+        meta = {tid: {"picks": p, "is_stale": False, "source_gw": 25,
+                      "source": "picks", "provenance": ""}
+                for tid, p in squads.items()}
+        with patch("scripts.classic.league_analysis.render_styled_table") as render:
+            from scripts.classic.league_analysis import _render_rival_tracker
+            _render_rival_tracker(ownership, totals, 3, 500, meta)
+        df = render.call_args_list[2][0][0]
+        row = df[df["Player"] == "Erling Haaland"].iloc[0]
+        assert row["Owned By"] == "3/3"
+        assert row["EO %"] == pytest.approx(500 / 3)
+        assert row["Capt"] == 2
 
 
 class TestClassicTeamAnalysisSeasonHistory:

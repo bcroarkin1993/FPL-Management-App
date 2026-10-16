@@ -1031,6 +1031,12 @@ Accuracy's archive read at 0.62s is now the largest single cost. The TTL matches
 `cache_data` rather than `cache_resource` because it returns a fresh object per
 call -- two tabs holding one mutable frame is a bug waiting to happen.
 
+It now lives in `scripts/common/player_pool.py` as `blended_pool()`, a third
+reader having arrived in the Classic Rival Tracker; `player_projections.py`
+imports it under the old private name, so the cache key and the tests that
+patch `pp._blended_pool` are unchanged. See "Mini-league ownership" for the
+all-zero `Proj_Next3` the move uncovered.
+
 Because that frame is shared rather than rebuilt, the two tabs *cannot* disagree
 about the current gameweek. `TestHorizonBlendedColumn` pins the four cases
 anyway: the current column comes from the blend, later columns are untouched by
@@ -1951,6 +1957,125 @@ in a public repo. Set it on the **🆔 League Setup** page; "Test connection"
 validates a pasted value before saving. Expiry is a distinct, user-visible
 state, never a silent fallback.
 
+### Mini-league ownership — the only question no other page answered
+
+`scripts/common/mini_league.py` (pure), `classic/league_analysis.py`'s
+**🎯 Rival Tracker** tab, `check_mini_league_ownership()`.
+
+**Every projection in this app answers "how many points will he score". None
+answered "how many points will that score me against the twelve people I am
+actually playing against"** — which is the question a mini-league table turns
+on. A seven-point haul from a player eleven of your rivals also own moves you
+nowhere; two points from a player nobody else has can be worth more than a good
+gameweek. The app's only ownership figure was `selected_by_percent`, which is
+*global*: a statement about eleven million managers and not about your twelve.
+
+**Two ownership numbers, because they fail differently.**
+
+```
+Own%(p) = 100 x (squads holding him in the 15) / n_squads
+EO%(p)  = 100 x sum_over_squads(multiplier) / n_squads
+```
+
+`Own%` needs only the fifteen names, which every resolution path supplies.
+`EO%` is the quantity that decides a league, since a captained player pays
+double — but it rests on the `multiplier`, and for every rival that is *last*
+gameweek's captain choice. Both are reported and the page says which squads are
+stale.
+
+`multiplier` is 0 on the bench, 1 for a starter, 2 for the captain, 3 under
+Triple Captain, 1 for the bench under Bench Boost. So **EO legitimately exceeds
+100%** — live at GW7, Haaland was owned by 14 of 20 and captained by 9, which is
+`(5 + 18) / 20 = 115%`. A check bounding it at 100 fires on a correct answer;
+the ceiling is **300**.
+
+**Why this is Classic-only, and the roadmap row is amended rather than left
+half-done.** Draft ownership is *exclusive* — `element-status` resolves to 150
+owned players across 10 teams x 15, one owner each — so every player you own is
+a 100% differential and EO collapses to 0/1. The tab would render numbers that
+are technically correct and say nothing. Draft's rival comparison already
+exists (`_render_explore_tab()` in `draft/trade_analyzer.py`) and Power Rankings
+covers squad strength.
+
+**Rival squads are last-deadline, and saying so is the point.**
+`entry/{id}/event/{gw}/picks/` 404s for any gameweek whose deadline has not
+passed, and `my-team` is the user's own credential. So every rival resolves
+through `resolve_classic_squad()` to `picks` / `picks_replay` with
+`is_stale=True` while the user's own squad may be live — an asymmetry that is
+honest but invisible, which is why the tab renders the stale count and the
+source gameweek. Never reach for `get_classic_team_picks()` here: one resolver
+is the whole point of that module.
+
+That split is also why there are **two fetch helpers with different TTLs**.
+`_fetch_rival_squads()` passes `allow_auth=False` explicitly — redundant, since
+the default already resolves False for anyone but the user — and that is what
+makes its 900s TTL provably safe: no `my-team` payload can enter the cache, and
+CLAUDE.md's rule is that my-team is never cached beyond 60s because it changes
+the instant a transfer is made. `_fetch_own_squad()` is the 60s half. A rival's
+published squad cannot change until a deadline passes, so a long TTL there is
+correct rather than merely convenient.
+
+**The tab is behind a button, because `st.tabs` renders every body.** Resolving
+a 20-team league is ~11s of network even with the picks SQLite cache warm
+(`get_classic_team_history` and `get_classic_transfers` are per team), and
+without a gate someone opening this page for Chip Usage pays all of it for a tab
+they never opened — the cost the Projections Hub removed by making its sections
+lazy, an order of magnitude larger. The Draft Helper's "Scan" button is the
+precedent.
+
+**A player the pool does not carry is kept, not dropped.** The bootstrap can lag
+a new signing, and dropping him would break the one exact invariant available:
+`sum(Owners) == 15 x n_squads`. That is what `check_mini_league_ownership()`
+uses to catch a squad counted twice or silently lost — the failure that matters
+here, since ownership is a *share*, so resolving two of twelve squads still
+renders a full table of plausible percentages over the wrong denominator.
+
+**An un-normalised squad is caught as a flat column, not as a sum.** Every
+multiplier equal to 1 across fifteen picks is precisely the `my-team` payload
+that publishes none (`fpl_auth.normalise_my_team` exists for it), giving the
+captain 1x and the bench 1x. The multiplier *total* cannot discriminate: 12
+normally, 13 under Triple Captain, 16 under Bench Boost, and less where a
+captain was subbed. But there is always a captain, so nothing but 1s cannot be
+right.
+
+**EO is scoped to the squads analysed, and captioned with the count.** The page
+truncates to its existing team slider (`min(n, 15)` above 10 teams), so in a
+50-team league this is EO across the top 15 — a different quantity from EO
+across the league, and one that must not be labelled as the latter.
+
+**The user's own team may be absent from that subset** — unset, not a member of
+the selected league, or truncated out — so it is resolved separately. Where it
+cannot be resolved at all the differential and template sections are dropped
+with a reason, rather than rendering an empty "Yours" column that reads as "you
+own nothing".
+
+**`blended_pool()` moved to `scripts/common/player_pool.py`** so the Hub and
+this tab share one blend and one cache key rather than two assemblies of it —
+the twin-drift failure recorded under "Projection Engine". Moving it surfaced a
+latent bug: `Proj_Next3` on that pool was **all zero**, because nothing merged
+FFP's multi-gameweek table onto it, so the only non-null values were the players
+the engine had zeroed outright. Nothing rendered the column, so nothing caught
+it. `blend_multi_gw_projections()` now runs *before* the blend, which is where
+the engine converts the horizon's basis. Verified on the live GW7 pool: `Proj`,
+`Proj_Start` and `Start_Pct` are byte-identical, and the median
+`(Proj_Next3 / 3) / Proj` is 1.04 — the population ratio
+`check_blended_projections()` tests, which is 1.0 when the two share a basis.
+
+**Moving it also moved where its fetches must be patched**, which quietly
+weakened two Hub tests: `blended_pool()` resolves `get_classic_bootstrap_static`,
+`get_ffp_feed` and `get_rotowire_player_projections` from its *own* module
+namespace, so the patches those tests had on `player_projections` stopped
+controlling the pool -- and `test_it_renders_a_populated_grid` went on passing
+while rendering an empty blend, because `_horizon_frames()` tolerates one by
+design. `test_the_pool_is_really_built_from_the_patched_bootstrap` pins it, and
+pins it **to the fixture's own 40 players** rather than to the pool merely being
+non-empty: with the network up, a patch on the wrong module silently builds a
+real 667-player pool and every "is it populated" assertion passes.
+
+The horizon earns its place on the cards immediately: live, Maxim De Cuyper led
+the differentials on a 5.34 single-gameweek projection with the *worst* three-week
+total of the six (9.99), while Bryan Mbeumo at 4.61 carried 15.56.
+
 ### Caching
 
 Two-tier caching strategy for fast page navigation:
@@ -2005,6 +2130,7 @@ to import from GitHub Actions.
 | `check_draft_game_settings()` | FPL changing a Draft rule this codebase hardcodes — the squad quota, the 50%/24h veto, the locked-player window, captains becoming a thing. Every one of these is a constant written down from the documentation, so a real change is otherwise invisible. An unreachable bootstrap is a **warning** (unknown), never an error (wrong) |
 | `check_blended_projections()` (start certainty) | A start probability of exactly **1.00** — the "no news means he plays" fallback outranking a source that had an opinion. Caught as a *self-contradiction*: the engine's own `Start_Pct__rotowire` decision sitting below the 1.00 it rendered. Abstains where no start model spoke at all, since the preseason pool legitimately resolves everyone to 1.00 |
 | `check_ffp_horizon()` | A multi-gameweek grid whose **columns are mislabelled** — a gap in the gameweek run shifts every later column one week left of its heading, and no individual cell can reveal it. Also an all-null or all-zero week, a basis inversion in one gameweek of six, and two tables stacked under one label (detected as a duplicate player, never as a row count — the real `archive/ffp/GW03.json` carries 561 rows and is fine) |
+| `check_mini_league_ownership()` | A league ownership table computed over the wrong denominator. Ownership is a *share*, so resolving two of twelve rival squads still renders a full table of plausible percentages. Anchored on an exact invariant — `sum(Owners) == 15 x n_squads` — plus the un-normalised `my-team` signature (every multiplier 1, caught as a flat column since the *total* varies legitimately across chips and autosubs). Note EO's ceiling is **300**, not 100 |
 | `check_league_trade_config()` | The league's trade rules changing shape — `league.trades` vanishing or coming back null, `trades_time_for_approval` ceasing to be a bool. Both make the Trade Analyzer fall back to "assume approval is required", which is safe but is no longer a statement about *this* league and looks identical on screen. An **unrecognised** trades code is only a warning: three of the four codes are genuinely unknown, and a check that fires on expected ignorance gets muted |
 
 Ranges are deliberately wide — these are "this cannot be right" boundaries, not
@@ -2168,6 +2294,8 @@ Score = α × 1GW + (1-α) × ROS
 | `_frame_projection_sources()` | `scripts/common/analytics.py` | The per-source series, bases and horizons read off one frame's columns — the only assembly. |
 | `_blend_frame()` | `scripts/common/analytics.py` | The single `blend_aligned()` call for page frames, so scoring and display cannot pass it different arguments. |
 | `_reference_horizon()` | `scripts/common/analytics.py` | The percentile reference pool, carrying a `Proj_Next3` on the same basis as the frame being scored. |
+| `compute_league_ownership()` | `scripts/common/mini_league.py` | Ownership and captaincy-weighted effective ownership within a mini-league |
+| `blended_pool()` | `scripts/common/player_pool.py` | The blended projection over the whole FPL pool, cached on `(gameweek, rotowire_url)`. Shared by the Projections Hub and the Classic Rival Tracker |
 | `positional_percentile()` | `scripts/common/analytics.py` | Within-position percentile against full FPL pool |
 | `season_progress_weight()` | `scripts/common/analytics.py` | Concave GW→weight curve for season quality blend |
 
@@ -3561,7 +3689,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Task | Status | Notes |
 |------|--------|-------|
 | Transfer Risk Tracking | Phases 1-3 complete | Outbound (Google News RSS + bootstrap ground truth + per-region windows), inbound (per-club feeds, arrivals watchlist, minutes competition, fee attribution, `Transfer_Status`) and bookmaker odds are wired into the Draft Helper board and the Availability page. Remaining: Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model" and "Transfer Odds Model". |
-| Mini-League Rival Tracker | Not Started | Tab on League Analysis pages. Show differential players, projected points gap, effective ownership within mini-league. Data available via get_league_player_ownership (Draft) and team picks (Classic). No transfer advice (handled elsewhere). |
+| Mini-League Rival Tracker | Completed (Classic) | **🎯 Rival Tracker** tab on Classic League Analysis: differentials, the template you are missing, effective ownership across the league (captaincy-weighted, so it can exceed 100%), and every rival's projected gameweek total. Deliberately **not** built for Draft — ownership there is exclusive, so every owned player is a 100% differential and EO collapses to 0/1; roster comparison already lives in the Trade Analyzer's Explore Teams tab. No transfer advice (handled elsewhere). See "Mini-league ownership". |
 | Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2/3-for-3 trade discovery (position-matched — see "Draft Transaction Rules"; cross-position and 2-for-1 shapes were removed as FPL forbids them, while N-for-N was added because it never did), acceptance likelihood scoring with veto risk, Explore Teams comparison, Regression Watch (buy-low/sell-high). Reads the league's own trade rules: approval regime, the real trade deadline (24h earlier under approval), and `in_accepted_trade` exclusion |
 | Historical Data Analysis | Completed | Season History section on Classic Team Analysis (rank chart, points chart, data table); League Standing metrics on Draft Team Analysis |
 | Split utils.py | Completed | Split into 7 focused modules (`text_helpers`, `fpl_draft_api`, `fpl_classic_api`, `scraping`, `fixture_helpers`, `analytics`, `optimization`); merged matching functions into `player_matching.py`; `utils.py` is now a thin re-export shim |

@@ -289,9 +289,39 @@ class TestHorizonTab:
              patch("scripts.fpl.player_projections.get_rotowire_player_projections",
                    return_value=pd.DataFrame()), \
              patch("scripts.fpl.player_projections.get_classic_bootstrap_static",
+                   return_value=self._bootstrap()), \
+             patch("scripts.common.player_pool.get_ffp_feed",
+                   return_value=_empty_ffp_feed()), \
+             patch("scripts.common.player_pool.get_rotowire_player_projections",
+                   return_value=pd.DataFrame()), \
+             patch("scripts.common.player_pool.get_classic_bootstrap_static",
                    return_value=self._bootstrap()):
             from scripts.fpl.player_projections import render_horizon
             render_horizon()
+
+    def test_the_pool_is_really_built_from_the_patched_bootstrap(self, mock_all_utils):
+        """Regression: `blended_pool()` moved to `scripts.common.player_pool`,
+        so patching its three fetches on *this* module silently stopped
+        controlling it -- and the populated-grid test above went on passing
+        while rendering an empty blend. Nothing else noticed, because
+        `_horizon_frames` tolerates an empty blend by design.
+        """
+        with patch("scripts.common.player_pool.get_ffp_feed",
+                   return_value=_empty_ffp_feed()), \
+             patch("scripts.common.player_pool.get_rotowire_player_projections",
+                   return_value=pd.DataFrame()), \
+             patch("scripts.common.player_pool.get_classic_bootstrap_static",
+                   return_value=self._bootstrap()):
+            from scripts.common.player_pool import blended_pool
+            pool = blended_pool(7, "https://example.invalid/rotowire")
+
+        # Pinned to the fixture's own identity, not merely to being non-empty:
+        # with the network up, a patch on the wrong module silently builds a
+        # real 667-player pool and every "is it populated" assertion passes.
+        assert len(pool) == 40
+        assert set(pool["Player"]) == {"First%d Last%d" % (i, i) for i in range(40)}
+        assert {"Player_ID", "Proj", "Proj_Next3"} <= set(pool.columns)
+        assert pool["Proj"].notna().any()
 
     def test_an_unavailable_horizon_does_not_raise(self, mock_all_utils):
         with patch("scripts.fpl.player_projections.get_ffp_horizon",
@@ -311,6 +341,12 @@ class TestHorizonTab:
              patch("scripts.fpl.player_projections.get_rotowire_player_projections",
                    return_value=pd.DataFrame()), \
              patch("scripts.fpl.player_projections.get_classic_bootstrap_static",
+                   return_value=self._bootstrap()), \
+             patch("scripts.common.player_pool.get_ffp_feed",
+                   return_value=_empty_ffp_feed()), \
+             patch("scripts.common.player_pool.get_rotowire_player_projections",
+                   return_value=pd.DataFrame()), \
+             patch("scripts.common.player_pool.get_classic_bootstrap_static",
                    return_value=self._bootstrap()):
             from scripts.fpl.player_projections import render_horizon
             render_horizon()

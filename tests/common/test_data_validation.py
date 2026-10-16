@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from scripts.common.data_validation import (
+    check_mini_league_ownership,
     check_start_calibration,
     check_ffp_feed,
     check_transfer_risk,
@@ -1586,3 +1587,110 @@ class TestCheckFfpHorizon:
                                11: "site", 12: "site"})
         assert not _errors(issues)
         assert any("archive" in i.message and "GW7" in i.message for i in issues)
+
+
+class TestCheckMiniLeagueOwnership:
+    """Ownership is a share, so a missing squad changes the denominator rather
+    than blanking the table -- every percentage stays plausible and wrong."""
+
+    def _squad(self, elements, bench_from=12, captain_slot=1):
+        picks = []
+        for slot, element in enumerate(elements, start=1):
+            mult = 0 if slot >= bench_from else (2 if slot == captain_slot else 1)
+            picks.append({"element": element, "position": slot, "multiplier": mult})
+        return picks
+
+    def _league(self, n_teams=4):
+        return {100 + i: self._squad(range(1 + 15 * i, 16 + 15 * i))
+                for i in range(n_teams)}
+
+    def _ownership(self, squads):
+        from scripts.common.mini_league import compute_league_ownership
+        return compute_league_ownership(squads)
+
+    def test_a_healthy_league_passes(self):
+        squads = self._league(4)
+        assert not check_mini_league_ownership(self._ownership(squads), squads, 4)
+
+    def test_no_squad_resolving_is_an_error(self):
+        issues = _errors(check_mini_league_ownership(None, {}, 12))
+        assert any("no squad resolved" in i.message for i in issues)
+
+    def test_under_half_the_league_resolving_is_an_error(self):
+        squads = self._league(4)
+        issues = _errors(check_mini_league_ownership(self._ownership(squads), squads, 12))
+        assert any("only 4 of 12" in i.message for i in issues)
+
+    def test_a_few_missing_squads_only_warn(self):
+        """A rival's picks 404ing between gameweeks is real and recoverable."""
+        squads = self._league(10)
+        issues = check_mini_league_ownership(self._ownership(squads), squads, 12)
+        assert not _errors(issues)
+        assert any("2 of 12 squads did not resolve" in i.message for i in issues)
+
+    def test_owner_counts_not_summing_to_fifteen_per_squad_is_an_error(self):
+        """The exact invariant: a dropped row or a double-counted squad."""
+        squads = self._league(4)
+        own = self._ownership(squads)
+        issues = _errors(check_mini_league_ownership(own.iloc[:-1], squads, 4))
+        assert any("expected 60" in i.message for i in issues)
+
+    def test_a_flat_multiplier_squad_is_the_unnormalised_payload(self):
+        """my-team publishes no multiplier, so the captain reads 1x and the
+        bench 1x -- the bug fpl_auth.normalise_my_team() exists for."""
+        squads = self._league(4)
+        squads[100] = [{"element": e, "position": i + 1, "multiplier": 1}
+                       for i, e in enumerate(range(1, 16))]
+        issues = _errors(check_mini_league_ownership(self._ownership(squads), squads, 4))
+        assert any("every multiplier" in i.message for i in issues)
+
+    def test_a_bench_boost_squad_is_not_mistaken_for_it(self):
+        """Bench Boost pays all fifteen, so fourteen 1s and a 2. The multiplier
+        sum is 16 here, 12 normally and 13 under Triple Captain, which is why
+        this is checked as a flat column and not against any threshold."""
+        squads = self._league(4)
+        squads[100] = self._squad(range(1, 16), bench_from=99)
+        assert sum(p["multiplier"] for p in squads[100]) == 16
+        assert not _errors(check_mini_league_ownership(self._ownership(squads), squads, 4))
+
+    def test_a_short_squad_is_an_error(self):
+        squads = self._league(4)
+        squads[100] = squads[100][:13]
+        issues = _errors(check_mini_league_ownership(self._ownership(squads), squads, 4))
+        assert any("13 picks" in i.message for i in issues)
+
+    def test_effective_ownership_above_one_hundred_is_fine(self):
+        """Everyone owning and captaining the same player is 200%. A check
+        bounding EO at 100 would fire on a correct answer."""
+        squads = {100: self._squad(range(1, 16)), 101: self._squad(range(1, 16))}
+        own = self._ownership(squads)
+        assert own[own["Player_ID"] == 1].iloc[0]["EO_Pct"] == 200.0
+        assert not _errors(check_mini_league_ownership(own, squads, 2))
+
+    def test_effective_ownership_above_three_hundred_is_an_error(self):
+        squads = self._league(4)
+        own = self._ownership(squads)
+        own.loc[0, "EO_Pct"] = 410.0
+        issues = _errors(check_mini_league_ownership(own, squads, 4))
+        assert any("EO_Pct" in i.message for i in issues)
+
+    def test_ownership_above_one_hundred_percent_is_an_error(self):
+        squads = self._league(4)
+        own = self._ownership(squads)
+        own.loc[0, "Own_Pct"] = 140.0
+        issues = _errors(check_mini_league_ownership(own, squads, 4))
+        assert any("Own_Pct" in i.message for i in issues)
+
+    def test_an_all_zero_effective_ownership_column_is_an_error(self):
+        """Every squad looking entirely benched: the multipliers are gone."""
+        squads = self._league(4)
+        own = self._ownership(squads)
+        own["EO_Pct"] = 0.0
+        issues = _errors(check_mini_league_ownership(own, squads, 4))
+        assert any("effective ownership is 0" in i.message for i in issues)
+
+    def test_resolved_squads_but_an_empty_table_is_an_error(self):
+        import pandas as pd
+        squads = self._league(4)
+        issues = _errors(check_mini_league_ownership(pd.DataFrame(), squads, 4))
+        assert any("ownership table is empty" in i.message for i in issues)

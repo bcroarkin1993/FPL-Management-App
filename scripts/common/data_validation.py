@@ -47,6 +47,7 @@ __all__ = [
     "check_free_transfers",
     "check_transfer_plan",
     "check_start_calibration",
+    "check_mini_league_ownership",
     "format_issues",
     "raise_on_error",
 ]
@@ -1241,6 +1242,147 @@ def check_transfer_windows(windows: Optional[dict], today=None) -> List[Issue]:
             "updating. Until then every transfer discount is silently 1.0.",
         )]
     return []
+
+
+def check_mini_league_ownership(ownership: Optional[pd.DataFrame],
+                                squads: Optional[dict] = None,
+                                n_requested: Optional[int] = None) -> List[Issue]:
+    """Assert a mini-league ownership table was computed over the whole league.
+
+    The failure this exists for is the silent one. Ownership is a *share*, so a
+    page that resolved two of twelve rival squads still renders a full table of
+    plausible percentages -- 50%, 100%, a sensible-looking spread -- with every
+    number computed over the wrong denominator. Nothing raises, and the only
+    symptom is advice about a league that was never read.
+
+    Four things are checked, and the useful one is an exact invariant rather
+    than a threshold:
+
+    * **Squads that failed to resolve.** Under half is an error; any at all is a
+      warning naming the count, because between gameweeks a rival squad that
+      404s is a real and recoverable state.
+    * **`sum(Owners) == 15 x n_squads`.** Exact, because a Classic squad is
+      always fifteen. It catches a squad counted twice, a squad silently
+      dropped, and a player quietly discarded for being absent from the
+      projection pool -- which is why `compute_league_ownership()` keeps an
+      unmatched player with a NaN projection instead of dropping his row.
+    * **A fifteen-pick squad whose every multiplier is 1.** That is precisely
+      the un-normalised `my-team` payload (`fpl_auth.normalise_my_team` exists
+      because those picks carry no `multiplier` at all), which gives the captain
+      1x and the bench 1x. Checked as a *flat column* rather than as a sum,
+      because the sum varies legitimately -- 12 normally, 13 under Triple
+      Captain, 16 under Bench Boost, and less wherever a captain was
+      substituted -- so no threshold separates the states. There is always a
+      captain, though, so a squad of nothing but 1s cannot be right.
+    * **Percentages out of range, or an all-zero EO column.** Note the EO
+      ceiling is **300**, not 100: every manager owning *and* triple-captaining
+      a player is 300% effective ownership, and a check that bounded it at 100
+      would fire on a correct answer.
+    """
+    check = "mini_league_ownership"
+    issues: List[Issue] = []
+
+    n_squads = len(squads) if squads else 0
+
+    if n_requested:
+        if n_squads == 0:
+            return [Issue(
+                check, "error",
+                f"no squad resolved for any of the {n_requested} teams requested",
+                "resolve_classic_squad() fell through for every team. Ownership "
+                "cannot be computed at all, and a table rendered from nothing "
+                "reads identically to a working one.",
+            )]
+        if n_squads * 2 < n_requested:
+            issues.append(Issue(
+                check, "error",
+                f"only {n_squads} of {n_requested} squads resolved",
+                "Ownership is a share, so a missing squad does not blank the "
+                "table -- it changes the denominator and leaves every "
+                "percentage plausible but wrong.",
+            ))
+        elif n_squads < n_requested:
+            issues.append(Issue(
+                check, "warning",
+                f"{n_requested - n_squads} of {n_requested} squads did not resolve",
+                "Percentages are computed over the squads that did. Expected "
+                "between gameweeks for a team whose picks 404, but worth "
+                "stating on the page.",
+            ))
+
+    if squads:
+        for team_id, picks in squads.items():
+            picks = picks or []
+            if len(picks) != 15:
+                issues.append(Issue(
+                    check, "error",
+                    f"team {team_id} resolved {len(picks)} picks, not 15",
+                    "A Classic squad is always fifteen. A short squad means the "
+                    "payload changed shape or a replay dropped a pick.",
+                ))
+                continue
+            mults = [p.get("multiplier") for p in picks]
+            if all(m == 1 for m in mults):
+                issues.append(Issue(
+                    check, "error",
+                    f"every multiplier in team {team_id}'s squad is 1",
+                    "This is the un-normalised my-team payload: it publishes no "
+                    "multiplier, so the captain reads 1x and the bench 1x "
+                    "instead of 0. Pass it through "
+                    "fpl_auth.normalise_my_team() first.",
+                ))
+
+    if ownership is None or len(ownership) == 0:
+        if n_squads:
+            issues.append(Issue(
+                check, "error",
+                f"{n_squads} squads resolved but the ownership table is empty",
+                "Fifteen players per squad cannot produce zero owned players. "
+                "The element ids are probably not reaching "
+                "compute_league_ownership().",
+            ))
+        return issues
+
+    if "Owners" in ownership.columns and n_squads:
+        total = int(pd.to_numeric(ownership["Owners"], errors="coerce").fillna(0).sum())
+        expected = 15 * n_squads
+        if total != expected:
+            issues.append(Issue(
+                check, "error",
+                f"owner counts sum to {total}, expected {expected} "
+                f"(15 x {n_squads} squads)",
+                "An exact invariant: every squad holds fifteen players, so the "
+                "counts must account for all of them. A shortfall means rows "
+                "were dropped; an excess means a squad was counted twice.",
+            ))
+
+    for col, hi in (("Own_Pct", 100.0), ("EO_Pct", 300.0)):
+        if col not in ownership.columns:
+            continue
+        vals = pd.to_numeric(ownership[col], errors="coerce").dropna()
+        if vals.empty:
+            continue
+        if vals.min() < 0 or vals.max() > hi:
+            issues.append(Issue(
+                check, "error",
+                f"{col} ranges {vals.min():.1f}..{vals.max():.1f}, outside 0..{hi:.0f}",
+                "Own_Pct is a share of squads and cannot exceed 100. EO_Pct "
+                "weights by multiplier, so its ceiling is 300 (every manager "
+                "triple-captaining the same player) -- but not more.",
+            ))
+
+    if "EO_Pct" in ownership.columns:
+        eo = pd.to_numeric(ownership["EO_Pct"], errors="coerce").fillna(0)
+        if len(eo) and float(eo.max()) == 0.0:
+            issues.append(Issue(
+                check, "error",
+                "every player's effective ownership is 0",
+                "No pick in the league carries a non-zero multiplier, so every "
+                "squad looks entirely benched. The multipliers are missing or "
+                "zeroed upstream.",
+            ))
+
+    return issues
 
 
 def format_issues(issues: Sequence[Issue]) -> str:

@@ -25,6 +25,20 @@ from scripts.common.utils import (
     get_classic_team_position_data,
 )
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.classic_squad import resolve_classic_squad
+from scripts.common.data_validation import check_mini_league_ownership, format_issues
+from scripts.common.error_helpers import get_logger
+from scripts.common.mini_league import (
+    DEFAULT_DIFFERENTIAL_MAX_OWN,
+    compute_league_ownership,
+    differentials,
+    projected_team_totals,
+    template_gaps,
+    template_score,
+)
+from scripts.common.player_pool import blended_pool
+
+_logger = get_logger("fpl_app.classic_league_analysis")
 
 _DARK_CHART_LAYOUT = dict(
     paper_bgcolor="#1a1a2e",
@@ -477,6 +491,297 @@ def plot_scoring_distribution(weekly_scores: pd.DataFrame) -> Optional[go.Figure
 # MAIN PAGE
 # ---------------------------
 
+# ---------------------------
+# RIVAL TRACKER
+# ---------------------------
+
+# Rival squads are last-deadline data -- FPL publishes no picks for a gameweek
+# whose deadline has not passed -- so they only change when a deadline does.
+# Hence a long TTL, which is safe only because `allow_auth=False` below makes it
+# impossible for a `my-team` payload to enter this cache: CLAUDE.md's rule is
+# that my-team is never cached beyond 60s, since it changes the instant the
+# manager makes a transfer.
+_RIVAL_SQUAD_TTL = 900
+_OWN_SQUAD_TTL = 60
+
+
+def _squad_entry(res) -> dict:
+    """The fields the tab needs out of a SquadResolution."""
+    return {
+        "picks": res.picks,
+        "is_stale": bool(res.is_stale),
+        "source_gw": res.source_gw,
+        "source": res.source,
+        "provenance": res.provenance,
+    }
+
+
+@st.cache_data(ttl=_RIVAL_SQUAD_TTL, show_spinner=False)
+def _fetch_rival_squads(team_ids: tuple, current_gw: int) -> dict:
+    """Resolve the other managers' squads.
+
+    Cached, and keyed on plain ints only -- the bootstrap is fetched *inside* so
+    a large dict never has to be hashed into the cache key.
+
+    ``allow_auth=False`` is passed explicitly rather than relying on
+    ``resolve_classic_squad``'s "is this the user's own team" default. The
+    default would already be False for every rival, but stating it is what makes
+    the long TTL above provably safe, and it keeps a credential from ever being
+    spent on someone else's behalf.
+
+    A team that cannot be resolved is *omitted* rather than given an empty
+    squad, so the count reaching ``check_mini_league_ownership()`` is the real
+    one and a shortfall is reported rather than silently changing every
+    percentage's denominator.
+    """
+    bootstrap = get_classic_bootstrap_static()
+    if not bootstrap:
+        return {}
+
+    resolved = {}
+    for team_id in team_ids:
+        try:
+            res = resolve_classic_squad(int(team_id), bootstrap, current_gw,
+                                        allow_auth=False)
+        except Exception:
+            _logger.warning("Could not resolve squad for team %s", team_id, exc_info=True)
+            continue
+        if not res.ok:
+            _logger.info("No squad for team %s: %s", team_id, res.provenance)
+            continue
+        resolved[int(team_id)] = _squad_entry(res)
+    return resolved
+
+
+@st.cache_data(ttl=_OWN_SQUAD_TTL, show_spinner=False)
+def _fetch_own_squad(team_id: int, current_gw: int) -> dict:
+    """Resolve the user's own squad, on a short TTL.
+
+    Separate from the rival loop because this one may come back live from
+    ``my-team``, which must never be cached for long: it changes the moment the
+    manager makes a transfer. ``allow_auth`` is left at its default, which
+    resolves to True for the user's own configured team -- so with credentials
+    set, your own row is live while the rivals' are last-deadline, and the tab
+    says so.
+    """
+    bootstrap = get_classic_bootstrap_static()
+    if not bootstrap or not team_id:
+        return {}
+    try:
+        res = resolve_classic_squad(int(team_id), bootstrap, current_gw)
+    except Exception:
+        _logger.warning("Could not resolve own squad %s", team_id, exc_info=True)
+        return {}
+    return {int(team_id): _squad_entry(res)} if res.ok else {}
+
+
+def _resolve_league_squads(team_ids, current_gw, my_team_id) -> dict:
+    """Every analysed squad, own team included even when outside the subset.
+
+    The user's team can be configured but not a member of the selected league,
+    or truncated out by the team slider -- in which case "Yours" would be
+    uniformly empty, which reads as "you own nothing" rather than "we do not
+    know who you are".
+    """
+    mine = int(my_team_id) if my_team_id else None
+    rivals = tuple(int(t) for t in team_ids if mine is None or int(t) != mine)
+    squads = dict(_fetch_rival_squads(rivals, current_gw))
+    if mine is not None:
+        squads.update(_fetch_own_squad(mine, current_gw))
+    return squads
+
+
+def _ownership_display(df: pd.DataFrame, n_squads: int) -> pd.DataFrame:
+    """The ownership frame as the columns a human reads."""
+    out = pd.DataFrame({
+        "Player": df["Display_Name"],
+        "Pos": df["Position"],
+        "Club": df["Team"],
+        "Owned By": df["Owners"].astype(int).astype(str) + f"/{n_squads}",
+        "Own %": df["Own_Pct"],
+        "EO %": df["EO_Pct"],
+        "Capt": df["Captains"].astype(int),
+        "Yours": df["Mine"].map({True: "✓", False: ""}),
+        "Proj": df["Proj"],
+        "Next 3": df["Proj_Next3"],
+    })
+    return out.reset_index(drop=True)
+
+
+def _render_rival_tracker(ownership: pd.DataFrame,
+                          totals: pd.DataFrame,
+                          n_squads: int,
+                          my_team_id,
+                          squad_meta: dict,
+                          proj_range: tuple = None):
+    """Render the Rival Tracker tab.
+
+    A separate function from the page body so it can be driven directly by a
+    test with a populated fixture -- the page's own smoke test early-returns
+    long before reaching any tab body, which is the convention the Draft Power
+    Rankings tests follow.
+    """
+    st.subheader("Rival Tracker")
+    st.caption(
+        f"Ownership across the {n_squads} squad(s) analysed — not global "
+        "ownership. A haul from a player most of your league also owns moves "
+        "you nowhere."
+    )
+
+    if ownership is None or ownership.empty:
+        st.info("Could not resolve any squads for this league.")
+        return
+
+    # Rival squads are last-deadline by construction: FPL publishes no picks for
+    # a gameweek whose deadline has not passed, and my-team is the user's own
+    # credential. Saying so is the point -- every value in a stale squad is
+    # individually plausible, it is simply the wrong fifteen.
+    stale = [tid for tid, meta in (squad_meta or {}).items() if meta.get("is_stale")]
+    if stale:
+        source_gws = sorted({meta.get("source_gw") for meta in squad_meta.values()
+                             if meta.get("is_stale") and meta.get("source_gw")})
+        gw_note = f" (as of GW{source_gws[0]})" if len(source_gws) == 1 else ""
+        st.warning(
+            f"⚠️ {len(stale)} of {n_squads} squads are last-deadline{gw_note}. "
+            "FPL does not publish a rival's transfers or captain until the "
+            "deadline passes, so their moves this week are not reflected."
+        )
+
+    have_mine = bool(ownership["Mine"].any())
+
+    # --- Summary cards ---
+    tmpl = template_score(ownership)
+    diffs = differentials(ownership)
+    gaps = template_gaps(ownership)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(_stat_card(
+            "Your Squad EO",
+            f"{tmpl:.0f}%" if tmpl is not None else "—",
+            "mean effective ownership" if tmpl is not None else "your team not in this league",
+            accent="#60a5fa",
+        ), unsafe_allow_html=True)
+    with c2:
+        st.markdown(_stat_card(
+            "Differentials",
+            f"{len(diffs)}" if have_mine else "—",
+            f"owned by ≤{DEFAULT_DIFFERENTIAL_MAX_OWN:.0f}% of the league",
+            accent="#00ff87",
+        ), unsafe_allow_html=True)
+    with c3:
+        top_gap = gaps.iloc[0] if not gaps.empty else None
+        st.markdown(_stat_card(
+            "Biggest Exposure",
+            top_gap["Display_Name"] if top_gap is not None else "—",
+            f"{top_gap['EO_Pct']:.0f}% EO, you don't own him" if top_gap is not None
+            else "no high-ownership gaps",
+            accent="#ff6b6b",
+        ), unsafe_allow_html=True)
+    with c4:
+        best_diff = diffs.iloc[0] if not diffs.empty else None
+        st.markdown(_stat_card(
+            "Best Differential",
+            best_diff["Display_Name"] if best_diff is not None else "—",
+            f"{best_diff['Proj']:.1f} proj, {best_diff['Own_Pct']:.0f}% owned"
+            if best_diff is not None and pd.notna(best_diff["Proj"]) else "—",
+            accent="#00ff87",
+        ), unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # Colour every projection against the whole player pool, not against the
+    # handful of rows shown: the weakest of five hand-picked differentials is
+    # not a bad projection, and scaled against only its peers it renders red.
+    overrides = {"Proj": proj_range} if proj_range else {}
+    fmts = {"Own %": "{:.0f}%", "EO %": "{:.0f}%", "Proj": "{:.1f}", "Next 3": "{:.1f}"}
+    aligns = {"Pos": "center", "Club": "center", "Owned By": "center",
+              "Own %": "center", "EO %": "center", "Capt": "center",
+              "Yours": "center", "Proj": "center", "Next 3": "center"}
+
+    if have_mine:
+        left, right = st.columns(2)
+        with left:
+            st.markdown("##### Your differentials")
+            st.caption("Yours, and most of the league's is not. This is where you gain.")
+            render_styled_table(
+                _ownership_display(diffs.head(15), n_squads).drop(columns=["Yours"]),
+                col_formats=fmts, text_align=aligns,
+                positive_color_cols=["Proj"], color_range_overrides=overrides,
+            )
+        with right:
+            st.markdown("##### Template you're missing")
+            st.caption("The league owns them heavily, you don't. This is where you lose.")
+            render_styled_table(
+                _ownership_display(gaps.head(15), n_squads).drop(columns=["Yours"]),
+                col_formats=fmts, text_align=aligns,
+                positive_color_cols=["Proj"], color_range_overrides=overrides,
+            )
+        st.markdown("")
+    else:
+        st.info(
+            "Set your Classic team on the 🆔 League Setup page (or raise the "
+            "team limit above so it is included) to see your differentials and "
+            "the template you are missing."
+        )
+
+    # --- Full league ownership ---
+    st.markdown("##### League ownership")
+    st.caption(
+        "Effective ownership weights by multiplier, so a captained player "
+        "counts double — which is why it can exceed 100%. Your own players are "
+        "accented."
+    )
+    display = _ownership_display(ownership, n_squads)
+    render_styled_table(
+        display,
+        col_formats=fmts, text_align=aligns,
+        positive_color_cols=["EO %", "Proj"],
+        color_range_overrides=overrides,
+        highlight_row=lambda row: row["Yours"] == "✓",
+        max_height=600,
+    )
+
+    # --- The league's week ahead ---
+    if totals is not None and not totals.empty:
+        st.divider()
+        st.markdown("##### The league's week ahead")
+        st.caption(
+            "Each squad's projected total, applying its own lineup and captain "
+            "(bench counts 0, captain double). Rival lineups are the ones above "
+            "— last-deadline where flagged."
+        )
+
+        tdisp = pd.DataFrame({
+            "#": range(1, len(totals) + 1),
+            "Manager": totals["Manager"],
+            "Projected": totals["Proj_Total"],
+            "vs You": totals["Gap_To_You"],
+        })
+        render_styled_table(
+            tdisp,
+            col_formats={"Projected": "{:.1f}", "vs You": "{:+.1f}"},
+            text_align={"#": "center", "Projected": "center", "vs You": "center"},
+            positive_color_cols=["Projected"],
+            highlight_row=lambda row: bool(
+                totals.loc[totals["Manager"] == row["Manager"], "Mine"].any()),
+        )
+
+        fig = go.Figure(go.Bar(
+            x=totals["Manager"],
+            y=totals["Proj_Total"],
+            marker_color=["#00ff87" if m else "#60a5fa" for m in totals["Mine"]],
+            hovertemplate="%{x}: %{y:.1f} projected<extra></extra>",
+        ))
+        fig.update_layout(
+            **_DARK_CHART_LAYOUT,
+            title="Projected gameweek total",
+            height=400,
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
 def show_classic_league_analysis_page():
     """Display the Classic League Analysis page."""
 
@@ -564,14 +869,15 @@ def show_classic_league_analysis_page():
     st.divider()
 
     # Create tabs
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "Chip Usage",
         "Rank Movement",
         "Points Analysis",
         "Team Values",
         "Performance Stats",
         "Points by Position",
-        "Bench Analysis"
+        "Bench Analysis",
+        "🎯 Rival Tracker"
     ])
 
     # ---------------------------
@@ -955,3 +1261,54 @@ def show_classic_league_analysis_page():
             render_league_bench_analysis(league_bench, is_classic=True)
         else:
             st.info("Not enough data for bench analysis.")
+
+    # ---------------------------
+    # TAB 8: RIVAL TRACKER
+    # ---------------------------
+    with tab8:
+        # Behind a button because `st.tabs` renders every body on every rerun,
+        # and resolving a 20-team league is ~11s of network. Without the gate,
+        # someone opening this page to look at Chip Usage pays for a tab they
+        # never opened -- the same cost the Projections Hub removed by making
+        # its sections lazy. The Draft Helper's "Scan" button is the precedent.
+        loaded_key = f"rival_tracker_loaded_{league_id}"
+        show = bool(st.session_state.get(loaded_key))
+
+        if st.button("Load rival squads", key=f"load_rivals_{league_id}",
+                     type="primary" if not show else "secondary"):
+            st.session_state[loaded_key] = True
+            show = True
+
+        if not show:
+            st.subheader("Rival Tracker")
+            st.caption(
+                "Who in your league owns what — differentials, effective "
+                "ownership, and each rival's projected total."
+            )
+            st.info(
+                f"Resolving all {len(team_ids)} squads takes a few seconds, so "
+                "it is loaded on request rather than on every page view."
+            )
+        else:
+            my_team_id = config.FPL_CLASSIC_TEAM_ID
+            with st.spinner("Resolving squads across the league..."):
+                squad_meta = _resolve_league_squads(team_ids, current_gw, my_team_id)
+                squads = {tid: meta["picks"] for tid, meta in squad_meta.items()}
+                pool = blended_pool(current_gw, config.ROTOWIRE_URL)
+                ownership = compute_league_ownership(squads, pool, my_team_id)
+                totals = projected_team_totals(squads, pool, team_names, my_team_id)
+
+            issues = check_mini_league_ownership(ownership, squads, len(team_ids))
+            if issues:
+                # Logged rather than raised: a degraded answer on this tab must
+                # not take down a page whose other seven tabs are fine.
+                _logger.warning("Rival Tracker plausibility: %s", format_issues(issues))
+
+            proj_range = None
+            if pool is not None and not pool.empty and "Proj" in pool.columns:
+                proj_max = pd.to_numeric(pool["Proj"], errors="coerce").max()
+                if pd.notna(proj_max) and proj_max > 0:
+                    proj_range = (0.0, float(proj_max))
+
+            _render_rival_tracker(ownership, totals, len(squads), my_team_id,
+                                  squad_meta, proj_range)

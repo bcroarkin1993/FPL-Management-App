@@ -36,6 +36,7 @@ from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import to_display_name
 from scripts.common.text_helpers import compact_html
 from scripts.common.analytics import blend_projections_onto, merge_season_projections
+from scripts.common.player_pool import blended_pool as _blended_pool
 from scripts.common.fpl_classic_api import get_classic_bootstrap_static
 from scripts.common import projection_accuracy, projection_archive
 from scripts.common.data_validation import check_ffp_horizon
@@ -1122,73 +1123,10 @@ def render_match_odds():
 # Blended projections — the number the rest of the app actually uses
 # =============================================================================
 
-def _build_pool(bootstrap) -> pd.DataFrame:
-    """The canonical player universe for the blend, from the FPL bootstrap.
-
-    Carries both name forms on purpose: ``Player`` is the full legal name that
-    projection sources are matched against, ``Display_Name`` is what a human
-    calls him. Match on Player, display Display_Name -- swapping them silently
-    degrades match rates.
-    """
-    teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
-    pos_map = {1: "G", 2: "D", 3: "M", 4: "F"}
-    rows = []
-    for e in bootstrap.get("elements", []):
-        first, second = e.get("first_name", ""), e.get("second_name", "")
-        rows.append({
-            "Player_ID": e.get("id"),
-            "Player": f"{first} {second}".strip(),
-            "Display_Name": to_display_name(first, second, e.get("web_name", "")),
-            "Web_Name": e.get("web_name", ""),
-            "Team": teams.get(e.get("team"), ""),
-            "Position": pos_map.get(e.get("element_type"), "M"),
-            "ep_next": pd.to_numeric(e.get("ep_next"), errors="coerce"),
-            "status": e.get("status"),
-            "chance_of_playing_next_round": e.get("chance_of_playing_next_round"),
-            # Carries the return date the horizon model reads -- "Expected back
-            # 11 Oct" is three gameweeks at GW6.
-            "news": e.get("news"),
-        })
-    return pd.DataFrame(rows)
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _blended_pool(current_gw: int, rotowire_url: str):
-    """The blended projection for ``current_gw``, built once per page load.
-
-    Two tabs need this frame -- GW Projections renders it directly and Horizon
-    takes its first column from it -- and ``st.tabs`` runs every tab body on
-    every rerun, so without a cache the same blend is assembled twice on each
-    interaction. Measured warm, that was 4.4s for the first and a further ~0.9s
-    for the second; the name-matched ``merge_season_projections`` is most of it.
-
-    Cached on ``(gameweek, rotowire_url)`` rather than on the frames it reads:
-    both are small and hashable, and the fetches inside are themselves cached,
-    so a miss here is cheap. The TTL matches ``get_ffp_feed``'s so the blend and
-    the feed it was built from roll over together rather than the blend pinning
-    a feed that has since been refreshed.
-
-    ``st.cache_data`` returns a fresh object per call, so a caller mutating the
-    result cannot corrupt the other's copy -- which ``cache_resource`` would.
-    """
-    bootstrap = get_classic_bootstrap_static()
-    if not bootstrap:
-        return pd.DataFrame()
-    pool = _build_pool(bootstrap)
-    if pool.empty:
-        return pd.DataFrame()
-
-    rotowire_df = pd.DataFrame()
-    if rotowire_url:
-        rotowire_df = get_rotowire_player_projections(rotowire_url)
-    feed = get_ffp_feed()
-
-    # Rotowire values land on the pool by name (merge_season_projections is the
-    # app's tiered name-matched merge); FFP joins on the element id inside
-    # blend_projections_onto.
-    pool = merge_season_projections(pool, rotowire_df, output_col="Points")
-    return blend_projections_onto(pool, feed.df, expected_gw=current_gw)
-
+# _build_pool() and blended_pool() moved to scripts/common/player_pool.py when
+# the Classic Rival Tracker needed the same frame. blended_pool is imported
+# above under its old private name, so the cache key -- and the tests that
+# patch pp._blended_pool -- are unchanged.
 
 def _blended_source_status(rotowire_df, feed, blended, current_gw) -> None:
     """One row per source: is it up, how many players, how fresh, what weight.
