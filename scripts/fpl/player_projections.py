@@ -1522,7 +1522,137 @@ def render_accuracy():
             col_formats={"MAE": "{:.2f}", "Bias": "{:+.2f}", "Rank corr": "{:.2f}"},
         )
 
+    _render_horizon_length(scored)
     _render_weight_fit(scored)
+
+
+def _render_horizon_length(scored):
+    """How far ahead is worth projecting -- the question behind ROS's 40%.
+
+    A waiver claim or a transfer is a lasting decision, so a longer forecast
+    window sounds like it should be worth more. FFP publishes six gameweeks and
+    the scoring model percentiles three of them, and nothing had ever measured
+    whether the extra weeks help. They do not, and both reasons are on the page
+    rather than only the conclusion -- the answer is counter-intuitive enough
+    that it needs its evidence next to it.
+    """
+    st.markdown("#### How far ahead is worth projecting?")
+
+    lengths = projection_accuracy.score_horizon_lengths()
+    if lengths.empty:
+        st.info(
+            "No archived FFP gameweek has a complete run of actual points after "
+            "it yet, so horizon length cannot be scored. This needs an FFP table "
+            "carrying player ids — the GW3 archive is the spreadsheet recovery, "
+            "which publishes names only."
+        )
+        return
+
+    verdict = projection_accuracy.horizon_verdict()
+    best = verdict.get("best_weeks", projection_accuracy.ROS_HORIZON_WEEKS)
+    st.markdown(
+        compact_html(
+            """
+            <div style="background:#16213e;border:1px solid #2a2f52;
+                        border-radius:10px;padding:14px 16px;color:#e0e0e0;">
+              <div style="font-size:0.78rem;letter-spacing:.06em;
+                          text-transform:uppercase;color:#8fa3c8;">Best window</div>
+              <div style="font-size:1.25rem;font-weight:700;margin:.25rem 0;
+                          color:#7ee787;">%d gameweek%s</div>
+              <div style="font-size:0.85rem;color:#c8d2e4;">%s</div>
+            </div>
+            """ % (best, "" if best == 1 else "s", verdict.get("note", ""))
+        ),
+        unsafe_allow_html=True,
+    )
+
+    st.caption(
+        "**ROS weights a 3-gameweek total at 40%**, so this asks whether that "
+        "window is the right length. Each anchor is one FFP publication, scored "
+        "against the longest complete run of actual points available after it — "
+        "so a longer window is judged over a longer outcome rather than being "
+        "marked against a single week. Rank correlation, because the scoring "
+        "model percentiles this term: the ordering is what matters."
+    )
+
+    pivot = lengths.pivot_table(index="horizon_weeks", columns="anchor_gw",
+                               values="rho")
+    table = pd.DataFrame({
+        "Window": ["%d GW%s" % (w, " ← ROS" if w == projection_accuracy.ROS_HORIZON_WEEKS
+                                else "")
+                   for w in pivot.index],
+    })
+    for anchor in pivot.columns:
+        weeks_scored = int(lengths.loc[lengths["anchor_gw"] == anchor,
+                                       "weeks_scored"].iloc[0])
+        table["GW%d (%dw)" % (anchor, weeks_scored)] = pivot[anchor].values
+    table["Mean"] = pivot.mean(axis=1).values
+    render_styled_table(
+        table,
+        col_formats={c: "{:.3f}" for c in table.columns if c != "Window"},
+        positive_color_cols=[c for c in table.columns if c != "Window"],
+    )
+    st.caption(
+        "Column headings are the anchor gameweek and how many weeks of actual "
+        "points it was scored over. n=%d players per cell."
+        % int(lengths["n"].max())
+    )
+
+    decay = projection_accuracy.score_horizon_decay()
+    if not decay.empty and decay["lead_weeks"].nunique() > 1:
+        st.markdown("##### Why: a forecast decays fast")
+        d = decay.rename(columns={
+            "target_gw": "Gameweek", "lead_weeks": "Weeks early",
+            "rho": "Rank corr", "n": "N"})[
+            ["Gameweek", "Weeks early", "Rank corr", "N"]]
+        render_styled_table(
+            d.reset_index(drop=True),
+            col_formats={"Rank corr": "{:.3f}"},
+            positive_color_cols=["Rank corr"],
+            negative_color_cols=["Weeks early"],
+        )
+        st.caption(
+            "One FFP publication against itself, so the model and its vintage "
+            "are held constant and only the distance to the target week varies. "
+            "Each further week of a six-week window is worth less than the one "
+            "before it, which is why lengthening the total does not pay."
+        )
+
+    overlap = projection_accuracy.score_horizon_overlap()
+    if not overlap.empty:
+        st.markdown("##### Why: a long window is mostly player quality")
+        agg = (overlap.groupby("horizon_weeks")[["rho_vs_season", "rho_vs_ros"]]
+               .mean().reset_index())
+        agg.columns = ["Window (GW)", "vs season points", "vs the 3GW window"]
+        render_styled_table(
+            agg,
+            col_formats={"vs season points": "{:.3f}",
+                         "vs the 3GW window": "{:.3f}"},
+            positive_color_cols=["vs season points", "vs the 3GW window"],
+        )
+        st.caption(
+            "FFP publishes **one** start probability per player for all six "
+            "forecast weeks, so the only thing varying across a horizon is the "
+            "fixture — and over six weeks fixtures average out. The longer the "
+            "window, the more it just restates who is a good player, which ROS "
+            "already weights at 30–45% as season quality and measures from "
+            "*actual* points rather than a forecast. The right-hand column is "
+            "the other half of it: a window that correlates ~0.99 with the one "
+            "in use would barely change a single ranking."
+        )
+
+    anchors = int(verdict.get("anchors", 0))
+    if anchors < 2 or lengths["weeks_scored"].max() < 4:
+        st.warning(
+            "Thin evidence: %d anchor%s, and the longest outcome window is %d "
+            "gameweek%s. A six-week horizon cannot really be judged against "
+            "fewer than six weeks of results, so read this as *no reason to "
+            "look further ahead* rather than as proof that %d is optimal."
+            % (anchors, "" if anchors == 1 else "s",
+               int(lengths["weeks_scored"].max()),
+               "" if lengths["weeks_scored"].max() == 1 else "s",
+               projection_accuracy.ROS_HORIZON_WEEKS)
+        )
 
 
 def _render_verdict():

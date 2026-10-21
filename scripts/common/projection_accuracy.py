@@ -1153,3 +1153,319 @@ def confidence_note(scored: pd.DataFrame) -> str:
                 "means anything."
                 % (gws, "" if gws == 1 else "s", MIN_GAMEWEEKS_FOR_CONFIDENCE))
     return "%d gameweeks of history." % gws
+
+
+# =============================================================================
+# How far ahead is worth projecting?
+# =============================================================================
+
+#: FFP's cumulative horizon columns, shortest first. Each **includes** the
+#: anchor gameweek -- ``Next2GWs == Predicted + the following week`` -- so the
+#: window length is the number in the name, not a count of weeks beyond it.
+#: See CLAUDE.md's "Fantasy Football Pundit feed".
+HORIZON_COLUMNS = {
+    1: "Predicted",
+    2: "Next2GWs",
+    3: "Next3GWs",
+    4: "Next4GWs",
+    5: "Next5GWs",
+    6: "Next6GWs",
+}
+
+#: The column ROS actually percentiles, as `Proj_Next3`. Named here so the
+#: report can mark it rather than the page hard-coding a 3.
+ROS_HORIZON_WEEKS = 3
+
+#: Rows a single anchor needs before its ordering means anything. Lower than
+#: `MIN_HEAD_TO_HEAD_ROWS` because this is one population scored against itself
+#: rather than two sources' overlap.
+MIN_HORIZON_ROWS = 50
+
+
+def _ffp_archive_frame(gameweek: int):
+    """One archived FFP table, keyed on ``Player_ID``, plus its meta.
+
+    ``(None, {})`` when the gameweek is absent *or* carries no ids. The GW3
+    archive is the spreadsheet recovery, which has no ``Player_ID`` at all --
+    the sheet publishes names only -- and this report joins on the integer id
+    rather than name-matching, so that gameweek is simply not scoreable here.
+    """
+    from scripts.common import ffp_archive
+
+    df, meta = ffp_archive.load_gameweek(gameweek)
+    if df is None or df.empty or "Player_ID" not in df.columns:
+        return None, {}
+    df = df[df["Player_ID"].notna()].copy()
+    if df.empty:
+        return None, {}
+    df["Player_ID"] = pd.to_numeric(df["Player_ID"], errors="coerce")
+    df = df.dropna(subset=["Player_ID"])
+    df["Player_ID"] = df["Player_ID"].astype("int64")
+    return df.drop_duplicates("Player_ID").set_index("Player_ID"), meta
+
+
+def _actual_points(gameweek: int):
+    """Actual points for one gameweek, keyed on player id, or None."""
+    df, _ = projection_archive.load_actuals(gameweek)
+    if df is None or df.empty:
+        return None
+    for id_col in ("player_id", "Player_ID"):
+        if id_col in df.columns:
+            break
+    else:
+        return None
+    if "points" not in df.columns:
+        return None
+    out = df[[id_col, "points"]].dropna(subset=[id_col]).copy()
+    out[id_col] = pd.to_numeric(out[id_col], errors="coerce")
+    out = out.dropna(subset=[id_col])
+    out[id_col] = out[id_col].astype("int64")
+    return (out.drop_duplicates(id_col).set_index(id_col)["points"]
+            .pipe(pd.to_numeric, errors="coerce"))
+
+
+def _actual_window(start_gw: int, weeks: int):
+    """Total actual points over ``weeks`` gameweeks from ``start_gw``, or None.
+
+    All or nothing: a partial window would score a 6-week forecast against 3
+    weeks of outcome and flatter the shorter horizons, which is the comparison
+    this whole report is making.
+    """
+    total = None
+    for gw in range(start_gw, start_gw + weeks):
+        points = _actual_points(gw)
+        if points is None:
+            return None
+        total = points if total is None else total.add(points, fill_value=0)
+    return total
+
+
+def score_horizon_lengths() -> pd.DataFrame:
+    """How well each horizon length orders what actually happened.
+
+    The question behind the 40% multi-gameweek weight in ROS: a waiver claim or
+    a transfer is a lasting decision, so is a longer forecast window worth more?
+    FFP publishes six, the app scores three, and nothing had ever measured
+    whether the extra weeks help.
+
+    One row per (anchor, horizon length). Each anchor is scored over **the
+    longest complete run of actuals available from it**, so a longer-lasting
+    decision is judged over a longer outcome -- otherwise the test is rigged
+    towards the short horizons. ``rho`` is Spearman against that total, because
+    ROS percentiles this term: the ordering is what matters, not the scale.
+
+    Measured GW4-GW6 the answer was a clean no -- rho fell monotonically past
+    two gameweeks, on both available anchors, and `Next3GWs` and `Next6GWs`
+    correlate 0.988 with each other so the choice barely moves a ranking at
+    all. Two structural reasons, both visible in the other two reports below.
+    """
+    from scripts.common import ffp_archive
+
+    actual_gws = set(projection_archive.list_actuals())
+    rows = []
+    for anchor in ffp_archive.list_archived():
+        frame, meta = _ffp_archive_frame(anchor)
+        if frame is None:
+            continue
+        # The longest complete run of actuals starting at this anchor.
+        weeks_scored = 0
+        while anchor + weeks_scored in actual_gws:
+            weeks_scored += 1
+        if weeks_scored < 1:
+            continue
+        outcome = _actual_window(anchor, weeks_scored)
+        if outcome is None:
+            continue
+        common = frame.index.intersection(outcome.index)
+        if len(common) < MIN_HORIZON_ROWS:
+            continue
+        y = outcome.reindex(common)
+        for weeks, col in sorted(HORIZON_COLUMNS.items()):
+            if col not in frame.columns:
+                continue
+            x = pd.to_numeric(frame[col].reindex(common), errors="coerce")
+            mask = x.notna() & y.notna()
+            if mask.sum() < MIN_HORIZON_ROWS:
+                continue
+            rows.append({
+                "anchor_gw": anchor,
+                "horizon_weeks": weeks,
+                "column": col,
+                "weeks_scored": weeks_scored,
+                "rho": spearman(x[mask], y[mask]),
+                "n": int(mask.sum()),
+                "window_gw": meta.get("window_gw"),
+                "is_ros_term": weeks == ROS_HORIZON_WEEKS,
+            })
+    return pd.DataFrame(rows)
+
+
+def score_horizon_decay() -> pd.DataFrame:
+    """How much worse a forecast gets the further ahead it is made.
+
+    The *reason* behind :func:`score_horizon_lengths`, and the more durable
+    measurement of the two: it compares one FFP publication against itself at
+    different lead times, so the model and its vintage are held constant and
+    only the distance to the target week varies.
+
+    ``lead_weeks`` comes from the archive's own ``window_gw`` -- the gameweek
+    FFP's publication window opened on -- so a table archived for GW6 from a
+    GW4 window is a two-week-early forecast. Measured on the 11 September
+    publication: rho +0.508 same-week, +0.466 one week out, +0.352 two weeks
+    out, so roughly a third of the ordering is gone by the third week of a
+    window. Each later week of a six-week horizon is worth less than the last,
+    which is why lengthening the window does not pay.
+
+    Scored on ``Predicted`` -- the week's own number -- not a cumulative total,
+    since the point is to isolate one target week.
+    """
+    from scripts.common import ffp_archive
+
+    rows = []
+    for target in ffp_archive.list_archived():
+        frame, meta = _ffp_archive_frame(target)
+        if frame is None or "Predicted" not in frame.columns:
+            continue
+        window_gw = meta.get("window_gw")
+        if window_gw is None:
+            continue
+        outcome = _actual_points(target)
+        if outcome is None:
+            continue
+        common = frame.index.intersection(outcome.index)
+        x = pd.to_numeric(frame["Predicted"].reindex(common), errors="coerce")
+        y = outcome.reindex(common)
+        mask = x.notna() & y.notna()
+        if mask.sum() < MIN_HORIZON_ROWS:
+            continue
+        rows.append({
+            "target_gw": target,
+            "window_gw": int(window_gw),
+            "lead_weeks": int(target) - int(window_gw),
+            "rho": spearman(x[mask], y[mask]),
+            "n": int(mask.sum()),
+        })
+    return pd.DataFrame(rows).sort_values("lead_weeks") if rows else pd.DataFrame()
+
+
+def score_horizon_overlap() -> pd.DataFrame:
+    """What each horizon length is *made of*: fixtures, or just player quality.
+
+    The second structural reason a longer window does not pay, and the one that
+    argues against giving the far weeks their own separate term.
+
+    FFP publishes **one** start probability per player across all six forecast
+    weeks (verified in the live payload: 404 of 404 players carry exactly one
+    distinct value, and the five forward weeks are identical). So the only thing
+    varying across a horizon is fixture difficulty -- and over six weeks
+    fixtures average out. The longer the window, the more it collapses into "is
+    he a good player", which ROS already weights at 30-45% as ``season_quality``
+    and measures from *actual* points rather than a forecast.
+
+    ``rho_vs_season`` is each horizon's rank correlation with points scored
+    **before** the anchor, so it is a statement about what the forecast
+    duplicates, not about accuracy. Measured at GW4 it climbs +0.721 (1 week)
+    -> +0.770 (3) -> +0.775 (6). ``rho_vs_ros`` is the correlation with the
+    window ROS actually uses: at 0.988 for six weeks against three, the two
+    orderings are nearly the same variable.
+    """
+    from scripts.common import ffp_archive
+
+    actual_gws = set(projection_archive.list_actuals())
+    rows = []
+    for anchor in ffp_archive.list_archived():
+        frame, _ = _ffp_archive_frame(anchor)
+        if frame is None:
+            continue
+        prior = [gw for gw in sorted(actual_gws) if gw < anchor]
+        if not prior:
+            continue
+        season = None
+        for gw in prior:
+            points = _actual_points(gw)
+            if points is None:
+                continue
+            season = points if season is None else season.add(points, fill_value=0)
+        if season is None:
+            continue
+        ros_col = HORIZON_COLUMNS[ROS_HORIZON_WEEKS]
+        if ros_col not in frame.columns:
+            continue
+        ros = pd.to_numeric(frame[ros_col], errors="coerce")
+        for weeks, col in sorted(HORIZON_COLUMNS.items()):
+            if col not in frame.columns:
+                continue
+            x = pd.to_numeric(frame[col], errors="coerce")
+            common = frame.index.intersection(season.index)
+            xs, ys = x.reindex(common), season.reindex(common)
+            mask = xs.notna() & ys.notna()
+            if mask.sum() < MIN_HORIZON_ROWS:
+                continue
+            both = x.notna() & ros.notna()
+            rows.append({
+                "anchor_gw": anchor,
+                "horizon_weeks": weeks,
+                "column": col,
+                "rho_vs_season": spearman(xs[mask], ys[mask]),
+                "rho_vs_ros": (spearman(x[both], ros[both])
+                               if both.sum() >= MIN_HORIZON_ROWS else float("nan")),
+                "prior_gws": len(prior),
+                "n": int(mask.sum()),
+            })
+    return pd.DataFrame(rows)
+
+
+def horizon_verdict() -> dict:
+    """Should the multi-gameweek term look further ahead than it does?
+
+    Returns ``{"best_weeks", "ros_weeks", "margin", "anchors", "agreed",
+    "note"}``, or ``{"note": ...}`` alone when nothing is scoreable.
+
+    ``agreed`` is how many anchors put ``best_weeks`` top, and it carries the
+    weight here: each anchor is one FFP publication scored over a handful of
+    weeks, so a horizon that wins on one anchor and loses on another has told
+    us nothing. The note refuses to recommend a change on a single anchor, the
+    same way ``verdict()`` reports "led in N of M gameweeks" rather than a bare
+    margin.
+    """
+    scored = score_horizon_lengths()
+    if scored.empty:
+        return {"note": "No archived FFP gameweek has a complete run of actual "
+                        "points after it yet, so horizon length cannot be scored."}
+
+    per_anchor = scored.pivot_table(index="anchor_gw", columns="horizon_weeks",
+                                   values="rho")
+    winners = per_anchor.idxmax(axis=1).dropna()
+    mean_rho = scored.groupby("horizon_weeks")["rho"].mean()
+    best_weeks = int(mean_rho.idxmax())
+    ros_rho = float(mean_rho.get(ROS_HORIZON_WEEKS, float("nan")))
+    margin = float(mean_rho.max() - ros_rho) if ros_rho == ros_rho else float("nan")
+    agreed = int((winners == best_weeks).sum())
+    anchors = int(len(per_anchor))
+
+    if best_weeks == ROS_HORIZON_WEEKS:
+        note = ("%d-gameweek is the best-ordering window of the six on %d of %d "
+                "anchors, which is what ROS already uses."
+                % (best_weeks, agreed, anchors))
+    elif anchors < 2 or agreed < anchors:
+        note = ("%d-gameweek orders best on average (+%.3f rho over the "
+                "%d-gameweek window ROS uses) but leads on only %d of %d "
+                "anchors. One anchor is one FFP publication -- not grounds to "
+                "move the term."
+                % (best_weeks, margin, ROS_HORIZON_WEEKS, agreed, anchors))
+    else:
+        note = ("%d-gameweek orders best on every one of %d anchors, +%.3f rho "
+                "over the %d-gameweek window ROS uses. Worth considering once "
+                "there are %d scored gameweeks."
+                % (best_weeks, anchors, margin, ROS_HORIZON_WEEKS,
+                   MIN_GAMEWEEKS_FOR_CONFIDENCE))
+
+    longer = mean_rho[mean_rho.index > ROS_HORIZON_WEEKS]
+    if not longer.empty and longer.max() < ros_rho:
+        note += (" Every window longer than %d gameweeks orders *worse*, so "
+                 "looking further ahead is not the improvement it sounds like."
+                 % ROS_HORIZON_WEEKS)
+
+    return {"best_weeks": best_weeks, "ros_weeks": ROS_HORIZON_WEEKS,
+            "margin": margin, "anchors": anchors, "agreed": agreed,
+            "mean_rho": mean_rho.to_dict(), "note": note}

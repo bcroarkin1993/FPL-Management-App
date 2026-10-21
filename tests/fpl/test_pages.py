@@ -917,3 +917,53 @@ class TestHubSections:
             "%s rendered %s; it must render exactly %s"
             % (section, sorted(called), sorted(expected))
         )
+
+
+class TestAccuracyHorizonSection:
+    """"How far ahead is worth projecting?" on the Accuracy tab.
+
+    The answer is counter-intuitive -- a longer window orders *worse* -- so the
+    section renders both reasons alongside the verdict rather than the
+    conclusion alone.
+    """
+
+    def _render(self):
+        from scripts.fpl import player_projections as pp
+        tables, texts = [], []
+        with patch.object(pp, "render_styled_table",
+                          side_effect=lambda df, **k: tables.append(df)), \
+             patch("streamlit.markdown", side_effect=lambda t, **k: texts.append(str(t))), \
+             patch("streamlit.caption", side_effect=lambda t, **k: texts.append(str(t))), \
+             patch("streamlit.warning", side_effect=lambda t, **k: texts.append(str(t))), \
+             patch("streamlit.info", side_effect=lambda t, **k: texts.append(str(t))):
+            pp._render_horizon_length(pd.DataFrame())
+        return tables, " ".join(texts)
+
+    def test_it_renders_the_verdict_and_both_reasons(self, mock_streamlit):
+        from scripts.common import projection_accuracy
+        if projection_accuracy.score_horizon_lengths().empty:
+            pytest.skip("no archived gameweek has a complete run of actuals yet")
+        tables, text = self._render()
+        assert len(tables) >= 1
+        assert "How far ahead is worth projecting?" in text
+        # The two mechanisms, not just the conclusion.
+        assert "decays fast" in text
+        assert "player quality" in text
+
+    def test_the_window_in_use_is_marked(self, mock_streamlit):
+        from scripts.common import projection_accuracy
+        if projection_accuracy.score_horizon_lengths().empty:
+            pytest.skip("no archived gameweek has a complete run of actuals yet")
+        tables, _ = self._render()
+        windows = tables[0]["Window"].tolist()
+        assert any("ROS" in w for w in windows), (
+            "the reader cannot interpret the table without knowing which row is "
+            "the window the app actually uses")
+
+    def test_an_empty_archive_explains_itself(self, mock_streamlit):
+        from scripts.fpl import player_projections as pp
+        with patch.object(pp.projection_accuracy, "score_horizon_lengths",
+                          return_value=pd.DataFrame()):
+            tables, text = self._render()
+        assert tables == []
+        assert "cannot be scored" in text

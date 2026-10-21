@@ -1643,6 +1643,76 @@ distinguishable from FFP alone, while Rotowire, which carries 60% of the weight,
 is clearly worse than FFP. That is a hypothesis for the weight fit, not a
 mandate: it is two gameweeks, and `fit_blend_weights()` stays unapplied.
 
+### How far ahead is worth projecting — the question behind ROS's 40%
+
+`score_horizon_lengths()`, `score_horizon_decay()`, `score_horizon_overlap()`
+and `horizon_verdict()` (`projection_accuracy.py`), rendered as the Accuracy
+tab's **"How far ahead is worth projecting?"** section.
+
+**A waiver claim lasts, so a longer forecast window sounds like it should be
+worth more.** FFP publishes six gameweeks, `Proj_Next3` percentiles three of
+them, and that term is **40% of ROS in both formats** — and nothing had ever
+measured whether the extra weeks help. Asked directly from the app: should the
+Waiver Wire weight a six-gameweek view over a three?
+
+**It should not. Lengthening the window orders *worse*, monotonically.**
+Spearman against actual points, FFP archive joined to actuals on `Player_ID`:
+
+| Window | anchor GW4 (3w of actuals) | anchor GW5 (2w) | mean |
+|---|---|---|---|
+| 1 GW | +0.553 | +0.470 | 0.458 |
+| 2 GW | **+0.555** | **+0.477** | **0.461** |
+| 3 GW ← ROS | +0.546 | +0.476 | 0.459 |
+| 4 GW | +0.545 | +0.475 | 0.456 |
+| 5 GW | +0.537 | +0.471 | 0.452 |
+| 6 GW | +0.529 | +0.471 | 0.450 |
+
+n=374 per cell. Each anchor is scored against the **longest complete run of
+actuals available after it**, so a longer window is judged over a longer
+outcome — marking a six-week forecast against one week would rig the test
+towards the short horizons. A partial window is not scored at all, for the same
+reason.
+
+**Two structural reasons, both rendered beside the verdict**, because the
+conclusion is counter-intuitive enough that it needs its evidence next to it:
+
+- **A forecast decays fast.** One FFP publication against itself, so the model
+  and its vintage are held constant and only the lead time varies (read from
+  the archive's own `window_gw`): rho **+0.508** same-week, **+0.466** one week
+  out, **+0.352** two weeks out. A third of the ordering is gone by the third
+  week of a window, and each later week is worth less than the last.
+- **A long window is mostly player quality.** FFP publishes **one**
+  `start_pct` per player for all six weeks — re-verified in the live payload,
+  404 of 404 players carry exactly one distinct value and the five forward
+  weeks are identical — so the only thing varying across a horizon is the
+  fixture, and over six weeks fixtures average out. Correlation with points
+  already scored climbs with the window (+0.706 at 1 week to +0.727 at 6), and
+  ROS already weights that at 30–45% as `season_quality`, measured from
+  *actual* points rather than a forecast.
+
+**And the choice barely matters anyway**: `Next3GWs` and `Next6GWs` correlate
+**0.99**, so swapping them would not reorder a board. That is what
+`rho_vs_ros` in the overlap report is for — a proposed change that cannot move
+a ranking is not worth making whatever its rho.
+
+**The verdict refuses to recommend on one anchor.** Each anchor is a single FFP
+publication, so a window that wins on one and loses on another has said
+nothing — the same rule as `verdict()`'s "led in N of M gameweeks". It also
+states outright when every longer window is worse, since that is the half a
+reader's instinct gets backwards.
+
+Nothing here changes a weight. The measurement exists so the question
+re-answers itself as the archive grows, rather than being settled once in a
+scratch script: on this evidence 2GW edges 3GW by +0.002 and leads on 2 of 3
+anchors, which is noise, and the honest reading is **"no reason to look further
+ahead"** rather than "3 is optimal". The section says so in as many words.
+
+Two notes on what is scoreable. `archive/ffp/GW03.json` is the spreadsheet
+recovery and publishes **names only**, so it is skipped: this report joins on
+the integer `Player_ID` and never name-matches. And a six-week horizon cannot
+really be judged against fewer than six weeks of results — the warning on the
+section says that too.
+
 ### FFP's update stamp — their component changed and nothing noticed
 
 `ffp_feed.parse_updated()` reads FFP's "Updated for GW N" stamp. Observed
@@ -3888,8 +3958,8 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Projection accuracy harness | Phases 1-3 done, Phase 4a done, 4b blocked on data | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". **Phase 4a** done: the start model is now scored (Brier/AUC/bias, calibration and cohort tables, a "Will he start?" section on the Accuracy tab) and `ROTOWIRE_START_FLOORS` / `ROTOWIRE_OMITTED_START` are fitted from it by replaying the engine over the archive — three of eight cells moved, blend Brier 0.0678 → 0.0650. See "Scoring the start model". **Phase 4b** — fit `PROJECTION_SOURCE_WEIGHTS`, give `fpl_ep` a real weight, add an odds-derived source — is blocked until ~GW8: only 2 pre-deadline gameweeks exist against the harness's own 5-gameweek threshold. The replay harness built for 4a is what will fit the points weights too. |
-| Multi-GW Transfer Planner | Completed | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. The sanity-check gate is shared with Classic — see "Suggestion sanity veto". Classic now has a real multi-transfer planner: an ILP over the whole squad in expected points, solved for every K, with the −4 priced inside the objective — see "Multi-Transfer Planner". The horizon's basis is now the engine's throughout: `Proj_Next3` is converted once, `compute_player_scores()` percentiles it (on both sides of the percentile) instead of the raw mixed `MultiGW_Proj`, and the page-side workaround is gone — see "The ROS score reads `Proj_Next3`". The per-gameweek detail FFP publishes is no longer discarded: `to_long_schema()` exposes all six gameweeks and the Projections Hub's **Horizon** tab renders them (see "Horizon"). Remaining: the *scoring* model still uses only `Next3GWs` -- giving the wider horizon a weight is Phase 4b, and needs the accuracy harness to have an opinion first. |
+| Projection accuracy harness | Phases 1-3 done, Phase 4a done, 4b blocked on data | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". **Phase 4a** done: the start model is now scored (Brier/AUC/bias, calibration and cohort tables, a "Will he start?" section on the Accuracy tab) and `ROTOWIRE_START_FLOORS` / `ROTOWIRE_OMITTED_START` are fitted from it by replaying the engine over the archive — three of eight cells moved, blend Brier 0.0678 → 0.0650. See "Scoring the start model". **Phase 4b** — fit `PROJECTION_SOURCE_WEIGHTS`, give `fpl_ep` a real weight, add an odds-derived source — is blocked until ~GW8: only 2 pre-deadline gameweeks exist against the harness's own 5-gameweek threshold. The replay harness built for 4a is what will fit the points weights too. **The start constants are additionally blocked by `START_MODEL_REVISION` 3**: "Rotowire expects him to start" now comes from its projected-lineups page, and no snapshot records which players were in those XIs, so no archived gameweek is replayable against the current engine. Refitting waits on snapshots written under revision 3. |
+| Multi-GW Transfer Planner | Completed | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. The sanity-check gate is shared with Classic — see "Suggestion sanity veto". Classic now has a real multi-transfer planner: an ILP over the whole squad in expected points, solved for every K, with the −4 priced inside the objective — see "Multi-Transfer Planner". The horizon's basis is now the engine's throughout: `Proj_Next3` is converted once, `compute_player_scores()` percentiles it (on both sides of the percentile) instead of the raw mixed `MultiGW_Proj`, and the page-side workaround is gone — see "The ROS score reads `Proj_Next3`". The per-gameweek detail FFP publishes is no longer discarded: `to_long_schema()` exposes all six gameweeks and the Projections Hub's **Horizon** tab renders them (see "Horizon"). **The harness now has an opinion on the window length, and it is "leave it at three"**: scored against actuals, every window longer than 3GW orders *worse*, a forecast loses a third of its ordering by the third week out, and `Next3GWs`/`Next6GWs` correlate 0.99 so the choice cannot move a board — see "How far ahead is worth projecting". Giving the *wider* horizon a weight is therefore off the table rather than pending. What is still open is the term's 40% share itself, which on two anchors is indistinguishable from the 1GW projection sitting beside it; that is Phase 4b. |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
 | Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |
 

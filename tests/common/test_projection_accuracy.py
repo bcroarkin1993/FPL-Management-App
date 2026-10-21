@@ -638,3 +638,154 @@ class TestWhichSourceIsBest:
         """Brier for one, MAE for the other -- the metrics the tables report."""
         assert acc.verdict(acc.SCOPE_START)["metric"] == "brier"
         assert acc.verdict(acc.SCOPE_STARTERS)["metric"] == "mae"
+
+
+class TestHorizonLength:
+    """How far ahead is worth projecting -- the question behind ROS's 40%.
+
+    A waiver claim lasts, so a longer forecast window sounds like it should be
+    worth more. FFP publishes six gameweeks and the scoring model percentiles
+    three. These tests pin the *mechanics* of the measurement rather than its
+    current answer, which should change as the archive grows.
+    """
+
+    @staticmethod
+    def _ffp(gameweek, window_gw, n=120, quality_is_truth=True):
+        """An FFP table where every horizon is a clean multiple of quality."""
+        import pandas as pd
+        quality = pd.Series(range(n), dtype="float64")
+        rows = {"Player_ID": list(range(1, n + 1)), "Predicted": quality}
+        for weeks, col in sorted(acc.HORIZON_COLUMNS.items()):
+            if col == "Predicted":
+                continue
+            rows[col] = quality * weeks
+        return pd.DataFrame(rows), {"window_gw": window_gw, "gameweek": gameweek}
+
+    @staticmethod
+    def _actual(n=120, reverse=False):
+        import pandas as pd
+        pts = list(range(n))
+        return pd.DataFrame({"player_id": list(range(1, n + 1)),
+                             "points": pts[::-1] if reverse else pts})
+
+    def _patched(self, ffp_gws, actual_gws, monkeypatch, reverse_from=None):
+        """Stand in for both archives."""
+        from scripts.common import ffp_archive, projection_archive
+
+        monkeypatch.setattr(ffp_archive, "list_archived", lambda: sorted(ffp_gws))
+        monkeypatch.setattr(
+            ffp_archive, "load_gameweek",
+            lambda gw: self._ffp(gw, ffp_gws[gw]) if gw in ffp_gws else (None, {}))
+        monkeypatch.setattr(projection_archive, "list_actuals",
+                            lambda: sorted(actual_gws))
+        monkeypatch.setattr(
+            projection_archive, "load_actuals",
+            lambda gw: ((self._actual(reverse=(reverse_from is not None
+                                               and gw >= reverse_from)), {})
+                        if gw in actual_gws else (None, {})))
+
+    def test_it_scores_every_horizon_length(self, monkeypatch):
+        self._patched({4: 4}, {4, 5, 6}, monkeypatch)
+        out = acc.score_horizon_lengths()
+        assert sorted(out["horizon_weeks"]) == sorted(acc.HORIZON_COLUMNS)
+        assert out["weeks_scored"].eq(3).all(), "three weeks of actuals follow GW4"
+        assert out["is_ros_term"].sum() == 1
+        assert out.loc[out["is_ros_term"], "horizon_weeks"].iloc[0] == \
+            acc.ROS_HORIZON_WEEKS
+
+    def test_a_longer_window_is_judged_over_a_longer_outcome(self, monkeypatch):
+        """Otherwise the test is rigged towards the short horizons: marking a
+        six-week forecast against one week of results measures the wrong thing.
+        """
+        self._patched({4: 4, 6: 4}, {4, 5, 6}, monkeypatch)
+        out = acc.score_horizon_lengths()
+        assert out.loc[out["anchor_gw"] == 4, "weeks_scored"].eq(3).all()
+        assert out.loc[out["anchor_gw"] == 6, "weeks_scored"].eq(1).all()
+
+    def test_a_partial_window_is_not_scored_at_all(self, monkeypatch):
+        """All or nothing -- a window running past the last actual gameweek
+        would otherwise be scored against a shorter outcome than it covers."""
+        self._patched({4: 4}, {4, 5}, monkeypatch)
+        assert acc._actual_window(4, 2) is not None
+        assert acc._actual_window(4, 3) is None
+
+    def test_a_gameweek_without_player_ids_is_skipped(self, monkeypatch):
+        """The GW3 archive is the spreadsheet recovery, which publishes names
+        only. This report joins on the integer id and never name-matches."""
+        import pandas as pd
+        from scripts.common import ffp_archive, projection_archive
+
+        no_ids = pd.DataFrame({"Name": ["A", "B"], "Predicted": [1.0, 2.0]})
+        monkeypatch.setattr(ffp_archive, "list_archived", lambda: [3])
+        monkeypatch.setattr(ffp_archive, "load_gameweek",
+                            lambda gw: (no_ids, {"window_gw": 3}))
+        monkeypatch.setattr(projection_archive, "list_actuals", lambda: [3, 4])
+        monkeypatch.setattr(projection_archive, "load_actuals",
+                            lambda gw: (self._actual(), {}))
+        assert acc.score_horizon_lengths().empty
+        assert acc.score_horizon_decay().empty
+
+    def test_decay_reads_its_lead_time_from_the_archive(self, monkeypatch):
+        """`window_gw` is the gameweek FFP's publication window opened on, so a
+        table archived for GW6 from a GW4 window is a two-week-early forecast."""
+        self._patched({4: 4, 5: 4, 6: 4}, {4, 5, 6}, monkeypatch)
+        out = acc.score_horizon_decay()
+        assert list(out["lead_weeks"]) == [0, 1, 2]
+        assert list(out["target_gw"]) == [4, 5, 6]
+
+    def test_a_single_anchor_is_never_a_recommendation(self, monkeypatch):
+        """One anchor is one FFP publication. The verdict has to say so rather
+        than naming a winner off it -- the same rule as `verdict()`'s
+        "led in N of M gameweeks"."""
+        self._patched({4: 4}, {4, 5, 6}, monkeypatch)
+        v = acc.horizon_verdict()
+        assert v["anchors"] == 1
+        assert "not grounds to move" in v["note"]
+
+    def test_nothing_scoreable_says_so(self, monkeypatch):
+        from scripts.common import ffp_archive, projection_archive
+        monkeypatch.setattr(ffp_archive, "list_archived", lambda: [])
+        monkeypatch.setattr(projection_archive, "list_actuals", lambda: [])
+        v = acc.horizon_verdict()
+        assert "best_weeks" not in v
+        assert "cannot be scored" in v["note"]
+
+    def test_the_verdict_calls_out_longer_windows_being_worse(self, monkeypatch):
+        """The counter-intuitive half, and the reason the section exists: the
+        reader's instinct is that further ahead is more valuable."""
+        self._patched({4: 4, 5: 4}, {4, 5, 6}, monkeypatch, reverse_from=5)
+        v = acc.horizon_verdict()
+        mean = v["mean_rho"]
+        longer = [w for w in mean if w > acc.ROS_HORIZON_WEEKS]
+        if longer and max(mean[w] for w in longer) < mean[acc.ROS_HORIZON_WEEKS]:
+            assert "not the improvement it sounds like" in v["note"]
+
+    def test_the_overlap_report_compares_against_the_window_in_use(self, monkeypatch):
+        """`rho_vs_ros` is what says the choice barely matters: a window that
+        correlates ~0.99 with the one in use cannot reorder anything."""
+        self._patched({5: 5}, {4, 5, 6}, monkeypatch)
+        out = acc.score_horizon_overlap()
+        assert not out.empty
+        ros = out[out["horizon_weeks"] == acc.ROS_HORIZON_WEEKS]
+        assert ros["rho_vs_ros"].iloc[0] == pytest.approx(1.0)
+
+
+class TestHorizonLengthOnTheRealArchive:
+    """Against the committed archive, which is the point of committing it."""
+
+    def test_it_produces_a_report(self):
+        out = acc.score_horizon_lengths()
+        if out.empty:
+            pytest.skip("no archived gameweek has a complete run of actuals yet")
+        assert {"anchor_gw", "horizon_weeks", "rho", "n"} <= set(out.columns)
+        assert out["rho"].between(-1, 1).all()
+        assert (out["n"] >= acc.MIN_HORIZON_ROWS).all()
+
+    def test_the_verdict_is_honest_about_how_thin_it_is(self):
+        v = acc.horizon_verdict()
+        if "best_weeks" not in v:
+            pytest.skip("nothing scoreable yet")
+        # Either it recommends no change, or it says why it is not acting.
+        assert (v["best_weeks"] == acc.ROS_HORIZON_WEEKS
+                or "not grounds to move" in v["note"]
+                or "Worth considering once" in v["note"])
