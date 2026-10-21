@@ -221,6 +221,7 @@ def build_projections(
     pool: pd.DataFrame,
     weights: Optional[Dict[str, float]] = None,
     deadlines: Optional[Sequence] = None,
+    lineup_xi: Optional[Dict[str, object]] = None,
 ) -> pd.DataFrame:
     """Blend every usable source into one canonical projection frame.
 
@@ -236,6 +237,9 @@ def build_projections(
             ``chance_of_playing_next_round`` when present.
         weights: per-source blend weights. Defaults to
             ``config.PROJECTION_SOURCE_WEIGHTS``.
+        lineup_xi: ``{source name: LineupXI}`` -- a fresher lineup opinion for a
+            ``starters_only`` source, which then decides who it expects to start
+            in place of who it priced. See ``_listed_mask``.
 
     Returns:
         A frame indexed by ``Player_ID`` carrying ``CANONICAL_COLUMNS`` plus one
@@ -331,6 +335,16 @@ def build_projections(
         status=_pool_col(pool, "status", out.index),
         weights=weights,
         gameweek=gameweek,
+        starter_overrides={
+            name: ov for name, ov in (
+                (name, starter_override(
+                    xi,
+                    player_ids=pd.Series(out.index, index=out.index),
+                    teams=_pool_col(pool, "Team", out.index),
+                    index=out.index))
+                for name, xi in (lineup_xi or {}).items()
+            ) if ov is not None
+        },
         extra=out,
     )
 
@@ -363,7 +377,18 @@ def _pool_col(pool, col, index, default=None):
 #:    penalty blends against -- and a Rotowire-listed player no start model
 #:    priced takes the positional floor as his *value* rather than as a lower
 #:    bound on a fabricated 1.0.
-START_MODEL_REVISION = 2
+#: 3. "Rotowire expects him to start" is read from Rotowire's projected-lineups
+#:    page rather than from its weekly rankings article, per club and only where
+#:    the whole XI resolves. The article keeps the points; it is no longer the
+#:    lineup call. See `_listed_mask` and `rotowire_lineups.lineup_starters`.
+#:
+#:    **This one cannot be replayed from the archive at all**, which the two
+#:    before it could: the snapshots record `Start_Pct__rotowire`, so a constant
+#:    retune is recoverable from them, but they do not record *which* players the
+#:    lineups page had in the XI. So revision 2 snapshots are refused as such
+#:    rather than silently replayed against a different signal, and the start
+#:    constants cannot be refitted until snapshots accrue under this revision.
+START_MODEL_REVISION = 3
 
 #: Sources that may resolve a player's start probability, in precedence order.
 START_MODEL_SOURCES = ("ffp", "fpl_ep", "odds")
@@ -398,6 +423,85 @@ def _priced_mask(raw: pd.Series, index) -> pd.Series:
     return raw.reindex(index).gt(0).fillna(False)
 
 
+def starter_override(xi, *, player_ids: pd.Series, teams: Optional[pd.Series],
+                     index) -> Optional[pd.Series]:
+    """A tri-state "does this source expect him to start" Series from an XI.
+
+    ``True`` in the XI, ``False`` at a club whose XI resolved completely but
+    without him, and ``NaN`` -- no opinion -- everywhere else, which
+    ``_listed_mask`` falls back from. The three states are the whole point: a
+    club absent from the lineups page must not read as eleven benchings, so "no
+    opinion" has to be representable and has to be the default.
+
+    **The True case needs no club coverage and the False case does**, which is
+    why the two are assigned separately rather than masked from one comparison.
+    Promoting a resolved starter is safe wherever he was found; benching the
+    players an XI leaves out is only safe once the whole XI resolved, because an
+    unmatched starter is indistinguishable from a benched one. See
+    ``rotowire_lineups.lineup_starters``.
+
+    ``xi`` is duck-typed on ``.player_ids`` and ``.clubs`` so the engine does
+    not import the scraper; ``rotowire_lineups.LineupXI`` is what the app
+    passes. ``player_ids`` is aligned to ``index`` rather than read off it,
+    because only ``build_projections`` indexes by element id -- the page-facing
+    entry point blends frames with an index of their own.
+    """
+    if xi is None or not getattr(xi, "player_ids", None):
+        return None
+    ids = pd.to_numeric(pd.Series(player_ids).reindex(index), errors="coerce")
+    in_xi = ids.isin(set(xi.player_ids))
+
+    benched = pd.Series(False, index=index)
+    if teams is not None and getattr(xi, "clubs", None):
+        club = teams.reindex(index)
+        if not club.isna().all():
+            benched = club.astype(str).isin(set(xi.clubs)) & ~in_xi
+
+    override = pd.Series(np.nan, index=index, dtype="float64")
+    override[benched] = 0.0
+    override[in_xi] = 1.0
+    if override.isna().all():
+        return None
+    return override
+
+
+def _listed_mask(name: str, raw: pd.Series, index,
+                 overrides: Dict[str, pd.Series]) -> pd.Series:
+    """Who a starters-only source **expects to start**, which is not always who
+    it priced.
+
+    For a year these were the same question, because Rotowire's weekly rankings
+    *article* was the only lineup opinion the engine had: a priced player was a
+    projected starter, and the floor and the omission penalty both read
+    ``_priced_mask``.
+
+    Rotowire publishes a second table, though -- the projected-lineups page,
+    whose own description says it is "updated as team news breaks" -- and where
+    the two disagree the article is always the stale one. Measured 2026-10-21
+    for GW8, with the article stamped the previous morning: 3 of 220 differed,
+    and one was Phil Foden, benched on the lineups page, still in the article's
+    XI, rated **20%** to start by FFP, and rendered by this engine at **86%**
+    because presence in the article clips *up* to the positional floor. The
+    app's own Projected Lineups page had him on the bench at the same moment.
+
+    So an override states, per player, what the fresher table says: True he
+    starts, False he does not, and **NaN no opinion** -- which falls back to
+    ``_priced_mask`` and the behaviour that shipped for a year. The caller
+    supplies it as a Series because only it can resolve lineup names to element
+    ids; see ``rotowire_lineups.lineup_starters`` for the club-by-club gate that
+    decides where an opinion exists at all.
+    """
+    priced = _priced_mask(raw, index)
+    override = overrides.get(name)
+    if override is None:
+        return priced
+    stated = pd.to_numeric(override.reindex(index), errors="coerce")
+    known = stated.notna()
+    if not known.any():
+        return priced
+    return (priced & ~known) | (known & stated.fillna(0).gt(0))
+
+
 def blend_aligned(
     *,
     index,
@@ -419,6 +523,7 @@ def blend_aligned(
     fallback_names: Optional[Sequence[str]] = None,
     gameweek: Optional[int] = None,
     source_club_coverage: Optional[Dict[str, Dict[str, int]]] = None,
+    starter_overrides: Optional[Dict[str, pd.Series]] = None,
     extra: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """The blend itself, over Series that are already aligned to one index.
@@ -441,6 +546,7 @@ def blend_aligned(
     # engine itself is how two implementations of one blend come to disagree.
     floors = dict(start_floors) if start_floors is not None else _start_floors()
     source_club_coverage = dict(source_club_coverage or {})
+    starter_overrides = dict(starter_overrides or {})
     per_source_startpct = dict(per_source_startpct or {})
     per_source_next3 = dict(per_source_next3 or {})
     per_source_next3_basis = dict(per_source_next3_basis or {})
@@ -529,7 +635,8 @@ def blend_aligned(
         for name in starters_only:
             if name not in per_source_raw:
                 continue
-            listed = _priced_mask(per_source_raw[name], index)
+            listed = _listed_mask(name, per_source_raw[name], index,
+                                  starter_overrides)
             listed_floor = listed_floor.fillna(
                 positions.map(floors).astype("float64").where(listed))
         start_pct = start_pct.fillna(listed_floor)
@@ -574,12 +681,13 @@ def blend_aligned(
     for name in starters_only:
         if name not in per_source_raw:
             continue
-        priced = _priced_mask(per_source_raw[name], index)
+        listed = _listed_mask(name, per_source_raw[name], index,
+                              starter_overrides)
         for pos_code, floor_val in floors.items():
-            mask = priced & (positions == pos_code)
+            mask = listed & (positions == pos_code)
             start_pct[mask] = start_pct[mask].clip(lower=floor_val)
 
-        # Club coverage, not the fixture list: a club this source priced nobody
+        # Club coverage, not the fixture list: a club this source listed nobody
         # at is blank, unpublished, or a wholesale matching failure, and none of
         # those is a lineup call. Without team labels there is no way to tell,
         # so the penalty is simply not applied -- fail open, like the Projected
@@ -607,10 +715,10 @@ def blend_aligned(
         if published:
             club_count = club.astype(str).map(published).fillna(0)
         else:
-            club_count = priced.groupby(club.astype(str)).transform("sum")
+            club_count = listed.groupby(club.astype(str)).transform("sum")
         covered = club_count.ge(min_coverage) & known_club
         implied = positions.map(omitted_starts).astype("float64")
-        target = covered & ~priced & implied.notna()
+        target = covered & ~listed & implied.notna()
         if not target.any():
             continue
 
@@ -647,7 +755,7 @@ def blend_aligned(
         # Record what this source implied, so the accuracy harness can score the
         # decision rather than only its effect.
         out[f"Start_Pct__{name}"] = implied.where(target).fillna(
-            positions.map(floors).astype("float64").where(priced))
+            positions.map(floors).astype("float64").where(listed))
 
     # --- FPL's availability is a ceiling, never a source ---------------------
     #

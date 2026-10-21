@@ -323,6 +323,78 @@ class TestHorizonTab:
         assert {"Player_ID", "Proj", "Proj_Next3"} <= set(pool.columns)
         assert pool["Proj"].notna().any()
 
+    def _render_grid(self, search=""):
+        """Render the Horizon tab and hand back the frame it tabled."""
+        captured = []
+        with contextlib.ExitStack() as stack:
+            for target, value in (
+                ("scripts.fpl.player_projections.get_ffp_horizon", _ffp_horizon()),
+                ("scripts.fpl.player_projections.get_ffp_feed", _empty_ffp_feed()),
+                ("scripts.fpl.player_projections.get_rotowire_player_projections",
+                 pd.DataFrame()),
+                ("scripts.fpl.player_projections.get_classic_bootstrap_static",
+                 self._bootstrap()),
+                ("scripts.common.player_pool.get_ffp_feed", _empty_ffp_feed()),
+                ("scripts.common.player_pool.get_rotowire_player_projections",
+                 pd.DataFrame()),
+                ("scripts.common.player_pool.get_classic_bootstrap_static",
+                 self._bootstrap()),
+            ):
+                stack.enter_context(patch(target, return_value=value))
+            stack.enter_context(patch(
+                "scripts.fpl.player_projections.render_styled_table",
+                side_effect=lambda df, **k: captured.append(df)))
+            stack.enter_context(patch("streamlit.text_input", return_value=search))
+            from scripts.fpl.player_projections import render_horizon
+            render_horizon()
+        assert captured, "the Horizon tab rendered no table"
+        return captured[-1]
+
+    def test_filtering_does_not_re_number_the_board(self, mock_all_utils):
+        """The reported symptom, on the other grid: searching one player
+        reported him as #1 rather than where he sits on the whole board."""
+        full = self._render_grid()
+        assert full["#"].tolist() == sorted(full["#"].tolist())
+        target = full["Player"].iloc[-1]
+        expected = full["#"].iloc[-1]
+        assert expected > 1, "the fixture needs a player who is not already #1"
+
+        filtered = self._render_grid(search=target)
+        assert filtered["Player"].tolist() == [target]
+        assert filtered["#"].iloc[0] == expected, (
+            "# was stamped on after filtering, so the worst player on the "
+            "board read as #1 because he was the only row left"
+        )
+
+    def test_a_surname_matches_even_when_the_display_name_hides_it(self, mock_all_utils):
+        """Reported: searching "Nunes" returned nothing while the grid showed
+        "Matheus N." -- FPL abbreviates that surname in `web_name`. The display
+        name is fixed, but the search must not depend on having fixed it, so it
+        matches the full legal name too.
+
+        The fixture's display names are "Player N" and its legal names
+        "FirstN LastN", so a search for a legal-name fragment can only succeed
+        through that second haystack.
+        """
+        grid = self._render_grid(search="Last7")
+        assert not grid.empty, "the legal name was not searched"
+        assert len(grid) == 1
+        # The fixture's rendered name is the terse web_name, which is exactly
+        # the situation: what is on screen is not what you would type.
+        assert grid["Player"].iloc[0] == "P7"
+
+    def test_the_search_ignores_accents(self, mock_all_utils):
+        """Nobody types the ã in "Guimarães"."""
+        from scripts.fpl.player_projections import _name_filter
+        frame = pd.DataFrame({"Player": ["Bruno Guimarães", "Erling Haaland"]})
+        assert list(_name_filter(frame, "Guimaraes")) == [True, False]
+        assert list(_name_filter(frame, "guimarães")) == [True, False]
+
+    def test_the_search_column_never_reaches_the_table(self, mock_all_utils):
+        """`_search_name` is searched, not rendered."""
+        grid = self._render_grid()
+        assert "_search_name" not in grid.columns
+
     def test_an_unavailable_horizon_does_not_raise(self, mock_all_utils):
         with patch("scripts.fpl.player_projections.get_ffp_horizon",
                    return_value=_empty_ffp_horizon()):

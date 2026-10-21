@@ -2920,3 +2920,97 @@ def check_transfer_plan(plan: Optional[dict],
                     "had already had it applied."))
 
     return issues
+
+
+#: A Premier League club fields eleven players, and the lineups page publishes
+#: twenty clubs' worth. Below this many complete XIs the signal is thin enough
+#: that the engine is mostly falling back to the rankings article anyway, and a
+#: shape change at Rotowire is the likeliest reason.
+MIN_LINEUP_CLUBS = 14
+
+#: A club fields eleven. Mirrors ``rotowire_lineups.XI_SIZE``, restated here
+#: because this module is deliberately dependency-free.
+XI_SIZE = 11
+
+
+def check_rotowire_lineup_xi(xi, gameweek: Optional[int] = None,
+                             expected_clubs: int = 20) -> List[Issue]:
+    """Assert Rotowire's projected XIs are a lineup call and not a shape change.
+
+    This signal decides, for every player in the game, whether the projection
+    engine reads him as a projected starter -- so it sets the positional floor
+    on one side and the omission prior on the other. The gap between those is
+    the difference between 0.86 and 0.09 for a midfielder, which is the whole
+    projection.
+
+    **Every failure here is silent by construction**, because the engine is
+    deliberately fail-open: an unreadable page, a changed selector or an
+    unresolvable club yields "no opinion", the engine falls back to the weekly
+    rankings article, and the app renders exactly what it rendered before this
+    source existed. That is the right behaviour and it is also undetectable
+    from the page, which is why it needs a check.
+
+    What is asserted:
+
+    * **Something resolved at all.** An empty XI is the degraded state.
+    * **Enough complete clubs** (``MIN_LINEUP_CLUBS``). Partly-resolved clubs
+      still promote their starters but can bench nobody, so a collapse here is
+      a loss of the signal's downward half -- the half that catches a player
+      whose rankings entry has gone stale.
+    * **Roughly eleven starters per complete club.** More is two gameweeks of
+      lineups stacked under one label (the failure the gameweek filter exists
+      for); fewer means the XI parse is dropping players.
+    """
+    check = "rotowire_lineup_xi"
+    issues: List[Issue] = []
+
+    if xi is None:
+        return [Issue(check, "error", "no Rotowire lineup XI was resolved at all",
+                      "fetch_lineup_xi() returned None. The engine falls back to "
+                      "the weekly rankings article, so start probabilities will be "
+                      "as stale as that article is.")]
+
+    starters = set(getattr(xi, "player_ids", ()) or ())
+    clubs = set(getattr(xi, "clubs", ()) or ())
+    note = getattr(xi, "note", "") or ""
+
+    if not starters:
+        return [Issue(check, "error",
+                      f"Rotowire's lineups page resolved no starters ({note or 'no reason given'})",
+                      "Either the page is unreachable, its `lineup__main` / "
+                      "`lineup__player` selectors changed, or the gameweek filter "
+                      "dropped every matchup. Check scrape_lineups() against the "
+                      "live page.")]
+
+    if len(clubs) < MIN_LINEUP_CLUBS:
+        issues.append(Issue(
+            check, "error",
+            f"only {len(clubs)} of {expected_clubs} clubs' XIs resolved completely "
+            f"({note})",
+            "A club is complete only when all eleven of its starters match the FPL "
+            "pool, and only a complete club can bench anybody. Check the unresolved "
+            "names in the log: this is normally a club label missing from "
+            "TEAM_FULL_TO_SHORT, or a transliteration the matcher cannot bridge."))
+
+    # Judged against the whole league rather than per club, because
+    # `player_ids` deliberately includes the starters of clubs that did not
+    # resolve completely -- those are promotable even though they can bench
+    # nobody -- so there is no honest per-club denominator here.
+    ceiling = XI_SIZE * expected_clubs
+    if len(starters) > ceiling:
+        issues.append(Issue(
+            check, "error",
+            f"{len(starters)} starters resolved, more than {expected_clubs} clubs "
+            f"x {XI_SIZE} = {ceiling}",
+            "Two gameweeks of lineups are probably stacked under one label. That "
+            "is what the ordered (home, away) fixture filter in scrape_lineups() "
+            "exists to prevent; check that it resolved a gameweek at all."))
+    elif len(starters) < XI_SIZE * MIN_LINEUP_CLUBS:
+        issues.append(Issue(
+            check, "warning",
+            f"only {len(starters)} starters resolved, against {expected_clubs} "
+            f"clubs x {XI_SIZE} = {ceiling} ({note})",
+            "Either the page has not published every XI yet -- normal early in a "
+            "gameweek -- or the player parse is dropping rows."))
+
+    return issues

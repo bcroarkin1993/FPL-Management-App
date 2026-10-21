@@ -279,11 +279,25 @@ def to_display_name(first_name, second_name=None, web_name=None) -> str:
     Rules, in order:
       1. Abbreviated web_name ("B.Fernandes") -> expand the initial from
          first_name: "Bruno Fernandes".
+      1b. The initial is *trailing* instead ("Matheus N.", "Bruno G.",
+         "Toth.A") -> expand it from the full name: "Matheus Nunes", "Bruno
+         Guimaraes", "Alex Toth".
       2. web_name is already the whole name people use (it equals first_name,
          or first_name already contains it) -> use the longer of the two, so
          "Gabriel" stays "Gabriel" and "Thiago" becomes "Igor Thiago".
       3. web_name is a surname drawn from second_name -> "first_name web_name".
-      4. Anything unexpected -> web_name, else the full name.
+      4. Anything unexpected -> the full name when web_name is still
+         abbreviated, else web_name.
+
+    **An abbreviation must never be the thing we render.** Rule 1 took the last
+    dot-segment as a surname without checking it was a word, and rule 4 then
+    preferred web_name over the complete name it already had, so five live
+    players came out abbreviated or simply wrong: Matheus Nunes as "Matheus
+    N.", Bruno Guimaraes as "Bruno G.", and -- worse -- Alex Toth as **"Alex
+    A"** and Junior Kroupi as **"Junior Jr"**, both printing an initial where a
+    surname belongs. Reported as a search for "Nunes" returning nothing on the
+    Projections Hub, which is the mildest reading of it: a name nobody can
+    search is also a name nobody can recognise.
 
     Args:
         first_name: FPL `first_name`, or a full name if the others are omitted.
@@ -297,16 +311,29 @@ def to_display_name(first_name, second_name=None, web_name=None) -> str:
     second = clean_text(second_name)
     web = clean_text(web_name)
 
+    full_name = " ".join(p for p in (first, second) if p).strip()
     if not web:
-        return " ".join(p for p in (first, second) if p).strip()
+        return full_name
     if not first:
         return web
 
     # 1. "B.Fernandes" / "A. Becker" -> take the surname, keep the real first name.
+    #
+    #    The segment has to be a word the player actually has. Taking it on
+    #    faith turned "Toth.A" into "Alex A" and "Kroupi.Jr" into "Junior Jr",
+    #    printing an initial and a generational suffix as though either were a
+    #    surname.
     if "." in web:
         surname = web.split(".")[-1].strip()
-        if surname:
+        if len(surname) > 1 and _name_contains(full_name, surname):
             return ("%s %s" % (first, surname)).strip()
+
+        # 1b. The abbreviation is at the *end* -- FPL shortens the surname for
+        #     some players rather than the first name ("Matheus N.", "Bruno
+        #     G."), and for a couple it reverses the order too ("Toth.A").
+        expanded = _expand_trailing_initial(first, second, web)
+        if expanded:
+            return expanded
 
     first_norm = _strip_accents(first).lower()
     web_norm = _strip_accents(web).lower()
@@ -320,8 +347,67 @@ def to_display_name(first_name, second_name=None, web_name=None) -> str:
     if not second or web_norm in _strip_accents(second).lower():
         return ("%s %s" % (first, web)).strip()
 
-    # 4. Unrecognised shape -- web_name is still the safer of the two to show.
-    return web
+    # 4. Unrecognised shape. web_name is the safer of the two to show *unless*
+    #    it is still an abbreviation, in which case the complete name is -- it
+    #    is always readable, and always searchable.
+    return full_name if _looks_abbreviated(web) else web
+
+
+def _name_contains(full_name: str, word: str) -> bool:
+    """Is ``word`` one of ``full_name``'s words, accents aside?"""
+    target = _strip_accents(word).lower()
+    return target in [_strip_accents(w).lower() for w in full_name.split()]
+
+
+def _looks_abbreviated(web: str) -> bool:
+    """Does this web_name still contain a shortened name part?
+
+    A dot, or a bare single letter standing where a name should be. Both mean
+    the complete name is the better thing to render.
+    """
+    if "." in web:
+        return True
+    return any(len(tok) == 1 and tok.isalpha() for tok in web.split())
+
+
+def _expand_trailing_initial(first: str, second: str, web: str):
+    """``("Matheus", "Nunes", "Matheus N.")`` -> ``"Matheus Nunes"``, or None.
+
+    The initial is matched against the player's own name parts, preferring
+    ``second_name`` -- a trailing initial is usually the surname -- and falling
+    back to ``first_name``, which is where "Toth.A" finds its "Alex".
+
+    The result is ordered by **legal-name position**, not by the order
+    web_name happens to use, because some of these reverse it: "Toth.A" is
+    surname-first and must still render "Alex Toth".
+    """
+    tokens = [t for t in re.split(r"[.\s]+", web) if t]
+    if len(tokens) < 2:
+        return None
+    initial = tokens[-1]
+    if len(initial) != 1 or not initial.isalpha():
+        return None
+
+    prefix = [t for t in tokens[:-1] if len(t) > 1]
+    if not prefix:
+        return None
+
+    legal = (first or "").split() + (second or "").split()
+    target = _strip_accents(initial).lower()
+    taken = {_strip_accents(t).lower() for t in prefix}
+    expansion = next(
+        (w for w in ((second or "").split() + (first or "").split())
+         if _strip_accents(w).lower().startswith(target)
+         and _strip_accents(w).lower() not in taken),
+        None,
+    )
+    if expansion is None:
+        return None
+
+    chosen = prefix + [expansion]
+    order = {_strip_accents(w).lower(): i for i, w in enumerate(legal)}
+    chosen.sort(key=lambda w: order.get(_strip_accents(w).lower(), -1))
+    return " ".join(chosen)
 
 
 def format_deadline_stamp(when) -> str:

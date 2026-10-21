@@ -216,6 +216,7 @@ class TestNobodyReimplementsTheBlend:
             "import scripts.common.projection_engine;"
             "import scripts.common.projection_sources;"
             "import scripts.common.name_matching;"
+            "import scripts.common.rotowire_lineups;"
             "assert 'streamlit' not in sys.modules, 'pulled in Streamlit';"
             "print('ok')"
         )

@@ -48,6 +48,39 @@ os.environ["FPL_CLASSIC_LEAGUE_IDS"] = "99999:Test League"
 
 
 # =====================================================================
+# 2b. The projection engine's Rotowire lineup lookup is network I/O
+# =====================================================================
+# `analytics._blend_frame` asks Rotowire's lineups page who it expects to start,
+# which is two HTTP requests, and the offline suite must make none. Stubbed to
+# an empty XI -- "no opinion" -- which is the fail-open state the engine already
+# handles by falling back to the rankings article, so every existing
+# expectation is unchanged. Left live it cost the suite ~35 seconds and made it
+# depend on Rotowire being up. Tests that exercise the override patch this
+# themselves.
+#
+# Patched at the source rather than on `scraping.get_rotowire_lineup_xi`,
+# because the snapshot collector calls the pure function directly.
+#: The real function, kept so ``tests/live/conftest.py`` can put it back --
+#: the live suite exists to hit the real page.
+REAL_FETCH_LINEUP_XI = None
+
+
+def _stub_lineup_xi():
+    global REAL_FETCH_LINEUP_XI
+    from scripts.common import rotowire_lineups
+
+    REAL_FETCH_LINEUP_XI = rotowire_lineups.fetch_lineup_xi
+
+    def _empty(url=None, gameweek=None):
+        return rotowire_lineups.LineupXI(set(), set(), gameweek, "stubbed in tests")
+
+    rotowire_lineups.fetch_lineup_xi = _empty
+
+
+_stub_lineup_xi()
+
+
+# =====================================================================
 # 3. Mock data fixtures
 # =====================================================================
 

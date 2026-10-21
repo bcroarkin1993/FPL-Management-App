@@ -35,7 +35,7 @@ from typing import List, Optional
 import pandas as pd
 import requests
 
-from scripts.common import projection_archive, projection_engine
+from scripts.common import projection_archive, projection_engine, rotowire_lineups
 from scripts.common.projection_engine import build_projections
 from scripts.common.projection_sources import (
     fetch_ffp_table,
@@ -157,7 +157,16 @@ def collect_pre(gameweek: int, bootstrap, deadline=None,
     ep = fpl_ep_source(bootstrap=bootstrap, gameweek=gameweek)
 
     sources = [rw, ffp, ep]
+    # Rotowire's lineups page, which is what decides who it expects to start --
+    # the rankings article above only decides what he is worth if he does. A
+    # backfill resolves whatever the page currently shows, which for a past
+    # gameweek is a *later* one; the gameweek filter inside `scrape_lineups`
+    # drops those, so the XI comes back empty and the engine falls back to the
+    # article rather than importing next week's lineups into last week's file.
+    xi = rotowire_lineups.fetch_lineup_xi(gameweek=gameweek)
+    _logger.info("GW%s: Rotowire lineups resolved %s", gameweek, xi.note or "nothing")
     projections = build_projections(sources, gameweek=gameweek, pool=pool,
+                                    lineup_xi={"rotowire": xi},
                                     deadlines=_future_deadlines(bootstrap))
     if projections.empty:
         _logger.error("GW%s: engine produced no rows", gameweek)

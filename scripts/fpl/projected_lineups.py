@@ -19,231 +19,34 @@ from scripts.common.text_helpers import (
 from scripts.common.fixture_helpers import _bootstrap_teams_df
 from scripts.common.name_matching import ReferenceMatcher
 from scripts.common.scraping import get_pl_predicted_lineups
+# The scraper itself lives in a Streamlit-free module, because the projection
+# engine reads these XIs too -- see scripts/common/rotowire_lineups.py. These
+# are re-exported, not reimplemented: a second copy of a lineup parser is the
+# twin-drift failure this codebase has paid for repeatedly. Note that patching
+# `extract_players` or `_gameweek_fixture_pairs` on *this* module no longer
+# affects `scrape_lineups`, which resolves them in its own namespace.
+from scripts.common.rotowire_lineups import (
+    LINEUP_COLUMNS,
+    LineupScrape,
+    ROTOWIRE_TACTICAL_TO_POSITION,
+    _expand_abbreviated_initial,
+    _gameweek_fixture_pairs,
+    _matchup_is_in_gameweek,
+    _POS_LETTERS,
+    extract_players,
+    resolve_lineup_name,
+    scrape_lineups,
+    scrape_matchups,
+    scrape_rotowire_lineups,
+)
 
 _logger = get_logger("fpl_app.projected_lineups")
-
-def extract_players(section, team_type, team_name, matchup_index):
-    """
-    Extracts valid players from the given section, excluding those listed in the Injuries section.
-
-    Parameters:
-    - section (BeautifulSoup): The section containing the team's lineup.
-    - team_type (str): 'home' or 'visit' to determine the team type.
-    - team_name (str): The name of the team.
-    - matchup_index (int): Index of the matchup to track which game this lineup belongs to.
-
-    Returns:
-    - list: A list of tuples containing (Team, Position, Player, MatchupIndex) for valid players.
-    """
-    player_list = []
-    injuries_section_reached = False  # Track if the Injuries section has been reached
-
-    # Find the correct lineup section for the team
-    players_section = section.find('ul', class_=f'lineup__list is-{team_type}')
-
-    if players_section:
-        for item in players_section.find_all('li', class_='lineup__player'):
-            # Check if we reached the Injuries section
-            if item.find_previous_sibling('li', class_='lineup__title is-middle'):
-                injuries_section_reached = True
-
-            # Skip players if we are in the Injuries section
-            if not injuries_section_reached:
-                try:
-                    position = item.find('div', class_='lineup__pos').text.strip()
-                    player_name = item.find('a').text.strip()
-                    player_list.append((team_name, position, player_name, matchup_index))
-                except AttributeError:
-                    continue  # Skip if position or player name is missing
-
-    return player_list
-
-def _gameweek_fixture_pairs(gameweek):
-    """``{(home_short, away_short)}`` for one gameweek, from the FPL fixture list.
-
-    Returns an empty set when the list cannot be read, which callers treat as
-    "do not filter" -- see :func:`_matchup_is_in_gameweek`.
-    """
-    try:
-        teams = _bootstrap_teams_df()
-        short = dict(zip(teams["id"], teams["short_name"]))
-        resp = requests.get(
-            config.FPL_FIXTURES_BY_EVENT.format(gw=int(gameweek)), timeout=15
-        )
-        resp.raise_for_status()
-        return {
-            (short.get(f.get("team_h")), short.get(f.get("team_a")))
-            for f in resp.json()
-            if short.get(f.get("team_h")) and short.get(f.get("team_a"))
-        }
-    except Exception as e:
-        _logger.warning("Could not read the GW%s fixture list: %s", gameweek, e)
-        return set()
-
-
-def _matchup_is_in_gameweek(home_team, away_team, fixture_pairs) -> bool:
-    """Does this Rotowire matchup belong to the gameweek being displayed?
-
-    Rotowire's lineups page lists whatever matches it has lineups for, which
-    runs past the current gameweek -- observed 2026-09-10 with 11 matchups, ten
-    from GW4 and one ("Brentford vs Chelsea", 18 September) from GW5. Rendered
-    under a GW4 heading that is simply the wrong fixture.
-
-    **Fails open.** An unresolvable club label, or an unreadable fixture list,
-    keeps the matchup. Showing one extra match is a mild annoyance; silently
-    dropping a real one is a functional loss, and club labels are exactly the
-    thing that goes stale when a source changes its spelling.
-    """
-    if not fixture_pairs:
-        return True
-    home = TEAM_FULL_TO_SHORT.get(str(home_team).strip())
-    away = TEAM_FULL_TO_SHORT.get(str(away_team).strip())
-    if not home or not away:
-        _logger.info(
-            "Projected Lineups: unmapped club label in %r vs %r -- keeping the "
-            "matchup rather than dropping it", home_team, away_team
-        )
-        return True
-    return (home, away) in fixture_pairs
-
-
-LINEUP_COLUMNS = ['Team', 'Position', 'Player', 'MatchupIndex']
-
-
-class LineupScrape(NamedTuple):
-    """One pass over Rotowire's lineups page.
-
-    ``players`` and ``matchups`` share a single ``MatchupIndex`` space by
-    construction, which is the whole point of returning them together.
-    """
-
-    players: pd.DataFrame
-    matchups: list
-
-
-def scrape_lineups(url, gameweek=None) -> LineupScrape:
-    """Scrape Rotowire's lineups page once: the players and the matchup list.
-
-    **These must come from the same filtered pass.** Rotowire's page carries
-    whatever matches it has lineups for, which runs past the gameweek the app is
-    showing -- so both are filtered against the real fixture list, and
-    ``MatchupIndex`` is assigned only to matchups that survive, keeping it
-    contiguous. The renderer pairs home and away by that index, so a gap would
-    leave a matchup showing one side.
-
-    They used to be two functions doing two separate fetches, and only one of
-    them filtered. That put a next-gameweek fixture in the dropdown (observed:
-    "Brentford v Chelsea" under a GW4 heading) and, worse, gave the two sides
-    different index spaces: the players were numbered 0..9 after filtering while
-    the dropdown was numbered 0..10 before it. The stray fixture happened to
-    sort last both times, so the indices coincided and nothing looked wrong --
-    but Rotowire orders by kickoff, and a next-week fixture appearing anywhere
-    earlier would have rendered every subsequent matchup's players under the
-    wrong clubs. Every value on screen would still have been individually
-    plausible.
-
-    Parameters:
-    - url (str): The URL of the Rotowire lineups page.
-    - gameweek (int, optional): restrict to matchups belonging to this gameweek.
-      Defaults to ``config.CURRENT_GAMEWEEK``; pass ``0`` to disable.
-    """
-    try:
-        page = requests.get(url, timeout=30)
-    except Exception as e:
-        _logger.warning("Failed to fetch Rotowire lineups from %s: %s", url, e)
-        return LineupScrape(pd.DataFrame(columns=LINEUP_COLUMNS), [])
-    soup = BeautifulSoup(page.content, 'html.parser')
-
-    if gameweek is None:
-        gameweek = config.CURRENT_GAMEWEEK
-    fixture_pairs = _gameweek_fixture_pairs(gameweek) if gameweek else set()
-
-    # Matchups are read off the same `lineup__main` sections the players come
-    # from, via find_previous, rather than from the parallel `lineup__matchup`
-    # divs. They are 1:1 today, but deriving both from one iteration means they
-    # cannot drift apart -- and a matchup with no lineup section could otherwise
-    # reach the dropdown and render an empty card.
-    lineup_sections = soup.find_all('div', class_='lineup__main')
-
-    all_players = []
-    matchups = []
-    matchup_index = 0
-    skipped_other_gw = 0
-    for section in lineup_sections:
-        try:
-            home_team = section.find_previous('div', class_='lineup__mteam is-home').text.strip()
-            away_team = section.find_previous('div', class_='lineup__mteam is-visit').text.strip()
-
-            if not _matchup_is_in_gameweek(home_team, away_team, fixture_pairs):
-                skipped_other_gw += 1
-                continue
-
-            # Extract players while excluding those listed in the Injuries section
-            home_players = extract_players(section, 'home', home_team, matchup_index)
-            away_players = extract_players(section, 'visit', away_team, matchup_index)
-
-            all_players.extend(home_players + away_players)
-            matchups.append((home_team, away_team, matchup_index))
-            matchup_index += 1
-
-        except AttributeError as e:
-            _logger.warning("Error parsing lineup section (HTML structure may have changed): %s", e)
-
-    if skipped_other_gw:
-        _logger.info("Projected Lineups: skipped %d matchup(s) outside GW%s",
-                     skipped_other_gw, gameweek)
-    if not matchups and lineup_sections:
-        _logger.warning("Rotowire: found %d lineup sections but parsed no matchups",
-                        len(lineup_sections))
-
-    return LineupScrape(pd.DataFrame(all_players, columns=LINEUP_COLUMNS), matchups)
-
-
-def scrape_rotowire_lineups(url, gameweek=None):
-    """The players half of :func:`scrape_lineups`. See it for the filtering rules."""
-    return scrape_lineups(url, gameweek).players
-
-
-def scrape_matchups(url, gameweek=None):
-    """The matchup half of :func:`scrape_lineups`: ``(home, away, index)`` tuples.
-
-    Note the ``gameweek`` parameter, which this deliberately did not have: an
-    unfiltered matchup list is what put a next-gameweek fixture in the dropdown.
-    """
-    return scrape_lineups(url, gameweek).matchups
-
-
-#: Rotowire publishes a tactical *role* on the lineups page; FPL registers a
-#: position. They legitimately disagree -- a wing-back is "DMC" to Rotowire and
-#: a DEF to FPL -- which is why position is a hint here and never a filter.
-ROTOWIRE_TACTICAL_TO_POSITION = {
-    'GK': 'G',
-    'DL': 'D', 'DC': 'D', 'DR': 'D',
-    'DML': 'M', 'DMC': 'M', 'DMR': 'M',
-    'ML': 'M', 'MC': 'M', 'MR': 'M',
-    'AML': 'M', 'AMC': 'M', 'AMR': 'M',
-    'FL': 'F', 'FWL': 'F', 'FC': 'F', 'FW': 'F', 'FWR': 'F', 'FR': 'F',
-}
-
-_POS_LETTERS = ('G', 'D', 'M', 'F')
 
 #: Coarse fallback start probabilities, used only when the projection
 #: engine has no view of a player.
 _STATUS_BUCKET_START_PCT = {'Out': 0, 'Doubtful': 25,
                             'Questionable': 50, 'Likely': 75}
 _ELEMENT_TYPE_TO_POSITION = {1: 'G', 2: 'D', 3: 'M', 4: 'F'}
-
-#: "J.Palhinha" -> "J. Palhinha". Rotowire abbreviates a first name with no
-#: space after the dot, and canonical_normalize *deletes* the dot rather than
-#: splitting on it, so the whole thing collapses to the single token
-#: "jpalhinha" and every token-based tier misses. With the space restored the
-#: last-word tier sees "palhinha" and resolves it inside the club.
-_ABBREV_INITIAL_RE = re.compile(r'^([A-Za-z])\.(?=\S)')
-
-
-def _expand_abbreviated_initial(name):
-    return _ABBREV_INITIAL_RE.sub(r'\1. ', str(name or ''))
-
 
 class PlayerIndex(NamedTuple):
     """FPL player stats, resolvable from a Rotowire lineup name.
@@ -262,16 +65,11 @@ class PlayerIndex(NamedTuple):
         ``team`` is Rotowire's long club label and ``position`` its tactical
         code; both are resolved here so no caller has to.
 
-        **Every lookup is scoped to the club.** The hand-rolled matcher this
-        replaces was a six-stage ladder that was team- *and* position-agnostic
-        at every stage, over a dict that additionally keyed players by bare
-        surname and by ``web_name``. Both are ambiguous league-wide -- measured
-        live, 24 surnames and 17 web_names collided, 51 and 36 players -- and a
-        plain dict silently keeps whichever the bootstrap listed last. "Palmer"
-        was one of them: Cole Palmer (CHE, elite MID) and Alex Palmer (IPS, GK),
-        the exact pairing that already caused this bug once elsewhere in the
-        app. The card would show one player's form, injury and news under the
-        other's name, and every value on it would look perfectly ordinary.
+        The matching itself is ``rotowire_lineups.resolve_lineup_name`` -- the
+        same resolver the projection engine uses on the same page's XIs, so a
+        card and the engine's start signal cannot disagree about which player a
+        lineup entry is. See it for why every lookup is club-scoped and why
+        position is a hint rather than a filter.
         """
         if self.matcher is None or not len(self.stats):
             return {}
@@ -283,30 +81,10 @@ class PlayerIndex(NamedTuple):
             _logger.info("Projected Lineups: unmapped club label %r", team)
             return {}
 
-        name = _expand_abbreviated_initial(player_name)
         tactical = ROTOWIRE_TACTICAL_TO_POSITION.get(str(position or '').strip().upper())
-
-        hit = self.matcher.match(name, team_code, tactical)
+        hit = resolve_lineup_name(self.matcher, player_name, team_code, tactical)
         if hit is None:
-            # Rotowire's role and FPL's registered position disagree often
-            # enough to matter -- measured on one gameweek, 5 of 66 starters
-            # (Cunha listed as a forward and registered as a midfielder,
-            # wing-backs listed in midfield). Retrying across all four keeps
-            # them, and stays safe because a name that resolves to two
-            # different players still resolves to none.
-            hits = {self.matcher.match(name, team_code, p) for p in _POS_LETTERS}
-            hits.discard(None)
-            if len(hits) != 1:
-                return {}
-            hit = hits.pop()
-
-        # Residual risk, stated rather than papered over: two players at one
-        # club sharing a surname that FPL registers in different positions are
-        # separated by the position scoping, so a Rotowire role that disagrees
-        # with FPL's registration could pick the other one. That needs all four
-        # of those things at once, and the alternative -- ignoring position --
-        # makes every such pair unresolvable and loses the wing-backs too.
-
+            return {}
         return self.stats.get(hit, {})
 
 

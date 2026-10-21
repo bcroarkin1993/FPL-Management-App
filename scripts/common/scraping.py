@@ -88,6 +88,22 @@ def get_rotowire_player_projections(url, limit=None):
     return projection_sources.fetch_rotowire_projections(url, limit=limit, html=html)
 
 
+@st.cache_data(ttl=300)
+def get_rotowire_lineup_xi(url=None, gameweek=None):
+    """Rotowire's projected XIs as FPL element ids (cached).
+
+    Thin wrapper over ``rotowire_lineups.fetch_lineup_xi``. The TTL matches
+    ``get_ffp_feed``'s, because this is a *start* signal that moves with team
+    news -- pinning it for an hour like the rankings article would defeat the
+    point of preferring it.
+
+    Only hashable arguments, so the pool is resolved inside rather than passed:
+    Streamlit hashes every argument into the cache key.
+    """
+    from scripts.common import rotowire_lineups
+    return rotowire_lineups.fetch_lineup_xi(url, gameweek)
+
+
 # Rotowire stamps every article with "Updated on August 20, 2026 10:54AM EST" in
 # a div.article__date. Worth surfacing: a weekly rankings table published before
 # the last team-news cycle is materially less useful than one published after it,

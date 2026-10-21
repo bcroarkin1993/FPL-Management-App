@@ -40,7 +40,12 @@ def show_team_projections(team_id, fpl_player_projections, gameweek, ffp_df=None
     team_composition_df = get_team_composition_for_gameweek(config.FPL_DRAFT_LEAGUE_ID, team_id, gameweek)
 
     # Merge the FPL team df with the fpl_player_projections
-    team_player_projections = merge_fpl_players_and_projections(team_composition_df, fpl_player_projections)
+    # carry_cols: without the element id the projection engine cannot apply
+    # anything keyed on it -- Rotowire's projected-XI start signal included --
+    # and this page, like the pre-deadline branch of Draft Fixture Projections,
+    # is read before a deadline.
+    team_player_projections = merge_fpl_players_and_projections(
+        team_composition_df, fpl_player_projections, carry_cols=['Player_ID'])
 
     # Rotowire lists only expected starters, so everyone else comes out of that
     # merge with the literal string "N/A" in Matchup. The fixture is a property

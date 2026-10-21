@@ -189,6 +189,19 @@ class TestBlendedPosRankIsLeagueWide:
             "only row left"
         )
 
+    def test_the_overall_rank_is_league_wide_too(self, mock_streamlit):
+        """The reported symptom: searching one player reported him as #1."""
+        df, kwargs = self._render("")
+        assert df["#"].tolist() == [1.0, 2.0, 3.0, 4.0]
+        assert kwargs["col_formats"].get("#") == "{:.0f}"
+
+        df, _ = self._render("Small Mid")
+        assert df["Player"].tolist() == ["Small Mid"]
+        assert df["#"].iloc[0] == 4.0, (
+            "# was stamped on after filtering -- the worst player on the board "
+            "must not read as #1 because he is the only row left"
+        )
+
 
 class _FeedStub:
     """The minimum of scraping.FFPFeed that render_blended_projections reads."""

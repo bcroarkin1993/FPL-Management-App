@@ -31,7 +31,6 @@ import config
 # need the real values, so they are cleared for this directory only.
 _PINNED_FOR_OFFLINE_TESTS = ("FPL_CURRENT_GAMEWEEK", "ROTOWIRE_URL")
 
-
 def pytest_collection_modifyitems(items):
     """Tag everything in *this directory* with the `live` marker.
 
@@ -55,9 +54,24 @@ def _unpin_offline_env():
     saved = {k: os.environ.pop(k, None) for k in _PINNED_FOR_OFFLINE_TESTS}
     config._GW_CACHE = None
     config._RW_URL_CACHE = None
+
+    # The root conftest stubs Rotowire's lineup fetch to an empty XI so the
+    # offline suite makes no HTTP requests; the live suite exists to hit the
+    # real page. Restored in the *fixture* and not at module scope, because
+    # pytest imports this conftest during collection even for a `-m "not live"`
+    # run -- doing it at import put the whole offline suite back on the network
+    # and cost it 40 seconds.
+    from scripts.common import rotowire_lineups
+    from tests import conftest as root_conftest
+
+    stub = rotowire_lineups.fetch_lineup_xi
+    real = getattr(root_conftest, "REAL_FETCH_LINEUP_XI", None)
+    if real is not None:
+        rotowire_lineups.fetch_lineup_xi = real
     try:
         yield
     finally:
+        rotowire_lineups.fetch_lineup_xi = stub
         for key, value in saved.items():
             if value is not None:
                 os.environ[key] = value

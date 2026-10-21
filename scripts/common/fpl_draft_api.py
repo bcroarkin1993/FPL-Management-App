@@ -827,7 +827,9 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
     - gameweek (int | None): The gameweek for which to determine the team's composition.
 
     Returns:
-    - DataFrame with columns ['Player', 'Team', 'Position'] for the specified gameweek.
+    - DataFrame with columns ['Player', 'Team', 'Position', 'Player_ID'] for the
+      specified gameweek. ``Player_ID`` is the FPL element id, and is None only
+      for a roster name that could not be mapped back to the player map.
     """
     # Coerce IDs and settle the gameweek
     try:
@@ -879,7 +881,16 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
             team_composition.discard(name_out)   # discard avoids KeyError if not present
             team_composition.add(name_in)
 
-    # Build the output rows using the map; if a name can't be mapped back, fill Unknowns
+    # Build the output rows using the map; if a name can't be mapped back, fill Unknowns.
+    #
+    # `Player_ID` is emitted because this function is the *pre-deadline* roster
+    # for both Draft Fixture Projections and Draft Team Analysis, and it had the
+    # element id in hand and threw it away -- so both pages reached the
+    # projection engine with a name-keyed frame and no id. Anything keyed on the
+    # element id is then silently skipped: the Rotowire projected-XI start
+    # signal was, which left Phil Foden rendering at the stale 4.2 on exactly
+    # the pages anyone reads before a deadline. Note this is the same pair of
+    # callsites the Matchup backfill missed, for the same reason.
     rows = []
     for name in sorted(team_composition):
         pid = name_to_id.get(name)
@@ -888,15 +899,17 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
                 'Player': player_map[pid]['Player'],
                 'Team':   player_map[pid]['Team'],
                 'Position': player_map[pid]['Position'],
+                'Player_ID': pid,
             })
         else:
             rows.append({
                 'Player': name,
                 'Team':   'Unknown',
                 'Position': 'Unknown',
+                'Player_ID': None,
             })
 
-    return pd.DataFrame(rows, columns=['Player', 'Team', 'Position'])
+    return pd.DataFrame(rows, columns=['Player', 'Team', 'Position', 'Player_ID'])
 
 
 def get_team_id_by_name(league_id, team_name):

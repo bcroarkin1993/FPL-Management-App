@@ -591,7 +591,9 @@ claimed purity for as long as it had been untrue.
 lists 20 clubs × 11, so a player it does not price is not un-priced, he is not
 expected to start. The engine encodes that as a positional floor on `Start_Pct`
 (`config.ROTOWIRE_START_FLOORS`, DEF highest because a defender who starts plays
-90 minutes) rather than dropping the source.
+90 minutes) rather than dropping the source. (*Which* Rotowire table answers
+"does he start" is a separate question, and the answer is no longer the one
+carrying the points — see "Rotowire publishes its weekly numbers twice" below.)
 
 That signal runs **both ways**, and for a year only one direction was used. A
 player Rotowire *omitted* simply failed the `present` mask, the weights
@@ -641,6 +643,159 @@ load-bearing:
 floor if listed — so the snapshots record the *decision* and the accuracy harness
 can score it rather than only its effect. One gameweek is what this is fitted on;
 Phase 4 is where it should be settled.
+
+**Rotowire publishes its weekly numbers twice, and the two disagree.** The
+rankings *article* carries projected points; the **projected-lineups page**
+(`rotowire.com/soccer/lineups.php`, whose own description says it is "updated as
+team news breaks") carries the XIs and no points. For a year the engine took
+*both* answers from the article, because that is where the points are — so
+"Rotowire expects him to start" was as old as a weekly article.
+
+Reported from the app: **Phil Foden at 86% to start and 4.24 expected points on
+the Projections Hub, while the app's own Projected Lineups page had him on
+Manchester City's bench.** Measured 2026-10-21 at GW8 with the article stamped
+the previous morning: FFP rated him **20%**, the lineups page left him out, and
+presence in the article clips start probability *up* to the MID floor of 0.86.
+Both numbers came from Rotowire; they came from different vintages of it.
+
+League-wide the two agreed on 217 of 220, which is why nothing caught it — and
+why the direction matters more than the size. The article can only ever go
+stale, and staleness here only ever clips a demoted player *up*.
+
+**So the article keeps the points and the lineups page becomes the start
+signal.** `rotowire_lineups.py` is the scraper, lifted out of
+`scripts/fpl/projected_lineups.py` (which re-exports it) so the engine can read
+it without importing Streamlit; `fetch_lineup_xi()` resolves the XIs to element
+ids; `projection_engine.starter_override()` turns one into the tri-state Series
+`_listed_mask()` consumes. One parser, one resolver, one blend — a second copy
+of a lineup parser is the twin-drift failure this codebase keeps paying for.
+
+**The two directions of the signal are gated differently, and that asymmetry is
+the whole safety design.** Promoting a player — "Rotowire expects him to start"
+— needs only his own name to have resolved, and can only raise him towards the
+positional floor. Benching one is a claim about *everyone the XI leaves out*,
+and it lowers him to the omitted prior — so an unresolved starter is
+indistinguishable from a benched one, and a matching failure there would not
+degrade his projection but **invert** it. Hence:
+
+- A club may bench nobody until **all eleven** of its starters resolve.
+- A club that falls short still promotes the starters it did resolve.
+- An unmapped club label **fails closed** (no opinion), where the matchup
+  filter on the same page fails *open* — rendering an extra card costs a card,
+  benching eleven players costs them their projections.
+- No lineup page, no gameweek, no team labels: no override, and the engine
+  reads the article exactly as it did before this existed.
+
+Live at GW8 that is 19 of 20 clubs complete. Brighton falls short on two names
+the two sources genuinely spell differently — `Ferdi Kadıoğlu` against
+"F. Kadioglu" (the dotless Turkish ı does not fold to "i" under NFKD) and
+"Chema" for José María Andrés Baixauli, a nickname absent from the FPL name —
+so nine Brighton starters are promoted and none is benched.
+
+**The cross-position retry now prefers the stronger tier instead of
+abstaining.** `resolve_lineup_name()` retries across all four positions because
+Rotowire publishes a tactical role and FPL a registered position, and two
+positions can both produce a hit. Counting answers read that as ambiguity:
+"B. Thomas-Asante" matched Brandon Thomas-Asante (COV, FWD) on a complete
+surname at tier 3 *and* his team-mate **Bobby Thomas** on a looser tier 4, so
+the retry threw away a match an exact token had earned and left Coventry one
+short of the eleven the benching gate requires. Preferring the strongest tier
+is what `match_with_tier` exists for and what `_claim_reference_rows` already
+does; a genuine tie *within* one tier still resolves to nothing, which is the
+Alex/Cole Palmer rule unchanged. The Projected Lineups cards share the resolver,
+so this fixes them too.
+
+**The element id is spelled differently on every page, and keying the override
+on one name disabled it on the others.** `_frame_starter_overrides` read
+`Player_ID`, which the Draft merges carry (via `carry_cols`) and the optimizer
+pools build — but the Classic squad builders emit **`element_id`**. So Classic
+Fixture Projections went on rendering Foden at 4.24 after the engine had him at
+0.45 everywhere else, reported from the app *after* the fix had supposedly
+landed. `analytics._player_id_col()` reads all four spellings
+(`Player_ID`, `element_id`, `element`, `player_id`) the way
+`_chance_of_playing_col` already reads FPL's availability under either of its
+names, and a frame carrying none now logs a warning — the symptom is otherwise
+a stale projection that looks entirely ordinary.
+
+A bare `id` is deliberately **not** in that list: on these pages it is as
+likely to be a league or fixture id, and resolving a start signal against the
+wrong id space is worse than not resolving it.
+
+**And on the Draft pages there was no id to read at all.**
+`get_team_composition_for_gameweek()` — the *pre-deadline* roster for both Draft
+Fixture Projections and Draft Team Analysis — resolved each roster name to an
+element id, used it to look the player up, and then returned three columns
+without it. Both pages then merged through
+`merge_fpl_players_and_projections` with no `carry_cols`, which takes a matched
+row's fields from the projection source, so nothing survived either. It now
+publishes `Player_ID` and both callsites carry it.
+
+Note which two callsites those are: **the same pair, for the same reason, as
+the ones the `attach_matchups` backfill missed** — the branch that runs when
+there are no picks to read, which is exactly when a projection is read. Four of
+six callsites is the recurring shape of this mistake.
+
+Verified live on the real frames: Draft pre-deadline (`Player_ID`, 15 of 15
+players with a stated opinion) now gives Foden 0.45 and Nico O'Reilly 1.18
+where both read 4.2 and 3.1; the 668-row pool (`Player_ID`, 640 stated); the
+15-row Classic squad (`element_id`, 15 of 15). Matheus Nunes is unmoved at 2.76,
+being in both publications' XI — which is what the other 217 of 220 look like.
+
+This is the fourth time a gate keyed on a column some frames do not carry has
+silently switched a signal off — the omission penalty's club-coverage test,
+`_pool_col`'s all-None `Team` Series, and the Matchup backfill being the
+others. `tests/common/test_element_id_wiring.py` is the AST guard, modelled on
+`test_matchup_wiring.py`: it walks both Draft pages and fails on a merge that
+does not carry the element id, and asserts the roster frame publishes it.
+
+**Live effect, same data both sides: six players move, three each way, and
+`Proj_Start` is byte-identical.** Benched by the lineups page: Foden
+0.86 → 0.09 (Proj 4.24 → 0.45), Nico O'Reilly 0.75 → 0.28, Victor Muñoz
+0.75 → 0.33. In the XI but absent from the article: Cody Gakpo 0.09 → 0.86
+(Proj 0.56 → 5.19), Elliot Anderson 0.37 → 0.90, Joško Gvardiol 0.36 → 0.80.
+Only the start model moves — he would still score 4.93 if he played, and
+`team_strength` percentiles that number.
+
+Note what a benched player resolves to: the omitted prior blended with FFP's
+own figure, so Foden lands at 0.09 rather than keeping FFP's 0.20. Those
+constants were fitted on a cohort of players Rotowire **never listed**, which
+is mostly genuine squad players; a player it listed and then dropped is a
+different cohort and plausibly starts more often. There is no data to fit that
+with, and `Start_Pct__rotowire` records the decision per player, so the
+accuracy harness can score it once snapshots accrue.
+
+**`START_MODEL_REVISION` is 3, and this bump is not like the last two.** A
+constant retune is recoverable from a snapshot, because `Start_Pct__rotowire`
+holds the value that built it. *Which players the lineups page had in the XI* is
+not recorded anywhere, so a revision-2 snapshot cannot be replayed against this
+signal at all — it is refused as such rather than replayed against a different
+model, and the start constants cannot be refitted until snapshots accrue under
+revision 3.
+
+**Risk accepted**: this adds a dependency on a second Rotowire page, and it is
+a *start* signal, so a shape change there is worth more than a cosmetic one.
+Every failure degrades to the article — the behaviour that shipped for a year —
+`check_rotowire_lineup_xi()` is the tripwire, and `tests/live/` fails on a page
+that stops parsing, loses clubs, or carries a matchup from another gameweek.
+The Hub's Data Sources panel lists "Rotowire projected XIs" as its own row at
+**no weight**, captioned "start signal only", because the two publications
+being one row is what let them disagree invisibly.
+
+It costs **1.0s on a cold load** and nothing warm — three requests (the lineups
+page, the gameweek's fixtures, the bootstrap) plus a `ReferenceMatcher` build
+and 220 lookups, behind a 60s in-process memo under the 300s `st.cache_data`
+wrapper, the same two-layer arrangement as `ffp_feed._memoised` and for the same
+reason. The TTL matches `get_ffp_feed`'s because this is a signal that moves with
+team news; pinning it for an hour like the rankings article would defeat the
+point of preferring it. The bootstrap fetch duplicates
+`get_classic_bootstrap_static` across the Streamlit-free boundary, which is the
+same accepted duplicate recorded under "Three duplicate fetches".
+
+Note the offline suite stubs `fetch_lineup_xi` to an empty XI in
+`tests/conftest.py` (restored inside `tests/live/conftest.py`'s
+session fixture, **not** at its module scope — pytest imports that conftest
+during collection even for `-m "not live"`, which put the whole offline suite
+back on the network and cost it 40 seconds).
 
 **FPL's `ep_next` is a declared source, not a substitute.** It was already in
 the app: `classic/transfers.py` wrote it straight into `Projected_Points` — the
@@ -1584,6 +1739,15 @@ load-bearing — underestimate one and the last card is silently clipped.
 
 ### Projected Lineups — Rotowire lists more than one gameweek
 
+**The scraper lives in `scripts/common/rotowire_lineups.py`**, not on this page:
+the projection engine reads these XIs as its start signal (see "Rotowire
+publishes its weekly numbers twice"), and that module is Streamlit-free so the
+Actions snapshot collector can import it. `projected_lineups.py` re-exports
+every name, so the page is unchanged — but patching `extract_players` or
+`_gameweek_fixture_pairs` on *that* module no longer affects `scrape_lineups`,
+which resolves them in its own namespace. The tests patch
+`scripts.common.rotowire_lineups` for that reason.
+
 `scrape_rotowire_lineups()` takes every `lineup__main` section on Rotowire's
 lineups page, and that page carries whatever matches Rotowire has lineups for --
 which runs past the gameweek the app is showing. Observed 2026-09-10: eleven
@@ -1628,7 +1792,9 @@ when anyone looks at a projection. `tests/common/test_matchup_wiring.py` walks
 the AST of the pages that render a matchup and fails on a merged frame that
 never reaches `attach_matchups()`.
 
-**Start likelihood on the pitch is the engine's `Start_Pct`.** The page used to
+**Start likelihood on the pitch is the engine's `Start_Pct`** — and since the
+engine now reads this very page for its Rotowire start signal, the card and the
+projection cannot disagree about whether Rotowire expects him to start. The page used to
 compute its own from a few status buckets plus `starts / 22` -- a hard-coded
 season length -- which pinned every healthy player to the `max(80, ...)` floor
 early in the season and let the figure drift upward as the constant was
@@ -1798,6 +1964,50 @@ Keep the full legal name in a `Player` column for matching, and put the rendered
 value in `Display_Name`. **Match on `Player`, display `Display_Name`** — swapping
 them silently degrades match rates, since projection sources are matched against
 the full name.
+
+**An abbreviation must never be the thing we render.** FPL shortens the
+*surname* in `web_name` for a handful of players, which is the mirror image of
+the "B.Fernandes" case rule 1 was written for — and rule 1 took the last
+dot-segment as a surname without checking it was a word. Five live bootstrap
+rows came out wrong:
+
+| first | second | web_name | was | now |
+|---|---|---|---|---|
+| Matheus | Nunes | `Matheus N.` | Matheus N. | **Matheus Nunes** |
+| Bruno | Guimarães Rodriguez Moura | `Bruno G.` | Bruno G. | **Bruno Guimarães** |
+| Alex | Tóth | `Tóth.A` | **Alex A** | **Alex Tóth** |
+| Junior | Kroupi | `Kroupi.Jr` | **Junior Jr** | **Junior Kroupi** |
+| Djiamgone Jocelin Ta | Bi | `Jocelin.T` | Djiamgone Jocelin Ta T | **Jocelin Ta** |
+
+Three of those printed an initial or a generational suffix where a surname
+belongs. Reported as *"no results when I search Nunes on the Horizon page"*,
+which is the mildest reading of it: a name nobody can search is also a name
+nobody can recognise.
+
+Three rules, and the ordering one is the subtle part:
+
+- A dot-segment is only a surname if it is **one of the player's own name
+  words**. "A" and "Jr" are not, so they no longer become one.
+- A **trailing** initial is expanded from the full name, preferring
+  `second_name` and falling back to `first_name` — which is where `Tóth.A`
+  finds its "Alex".
+- The result is ordered by **legal-name position, not web_name's order**,
+  because some of these reverse it: `Tóth.A` is surname-first and must still
+  render "Alex Tóth".
+
+Where an abbreviation cannot be expanded, rule 4 now returns the **complete
+name** rather than web_name. A full name is always readable and always
+searchable; an abbreviation is neither. Verified against the whole live
+bootstrap: exactly **5 of 668** display names change and the other 663 are
+byte-identical.
+
+**And the search should not depend on the display name being right.**
+`player_projections._name_filter()` matches the full legal name alongside the
+rendered one and strips accents from both sides — so a surname works even when
+FPL has abbreviated it out of the display name, and "Guimaraes" typed on an
+ASCII keyboard finds "Guimarães". It backs the search box on all four Hub
+tables (Blended, Rotowire, FFP Data, Horizon); the Horizon grid carries the
+legal name in a `_search_name` column that is dropped before rendering.
 
 ### Pre-deadline Classic squad — one resolver, explicit provenance
 
@@ -2130,6 +2340,7 @@ to import from GitHub Actions.
 | `check_draft_game_settings()` | FPL changing a Draft rule this codebase hardcodes — the squad quota, the 50%/24h veto, the locked-player window, captains becoming a thing. Every one of these is a constant written down from the documentation, so a real change is otherwise invisible. An unreachable bootstrap is a **warning** (unknown), never an error (wrong) |
 | `check_blended_projections()` (start certainty) | A start probability of exactly **1.00** — the "no news means he plays" fallback outranking a source that had an opinion. Caught as a *self-contradiction*: the engine's own `Start_Pct__rotowire` decision sitting below the 1.00 it rendered. Abstains where no start model spoke at all, since the preseason pool legitimately resolves everyone to 1.00 |
 | `check_ffp_horizon()` | A multi-gameweek grid whose **columns are mislabelled** — a gap in the gameweek run shifts every later column one week left of its heading, and no individual cell can reveal it. Also an all-null or all-zero week, a basis inversion in one gameweek of six, and two tables stacked under one label (detected as a duplicate player, never as a row count — the real `archive/ffp/GW03.json` carries 561 rows and is fine) |
+| `check_rotowire_lineup_xi()` | Rotowire's projected XIs ceasing to be a lineup call — an unreadable page, a changed selector, a club label the matcher cannot resolve, or two gameweeks of lineups stacked under one label. **Every one of these is silent**, because the engine fails open to the weekly rankings article, which is the stale number the signal exists to replace |
 | `check_mini_league_ownership()` | A league ownership table computed over the wrong denominator. Ownership is a *share*, so resolving two of twelve rival squads still renders a full table of plausible percentages. Anchored on an exact invariant — `sum(Owners) == 15 x n_squads` — plus the un-normalised `my-team` signature (every multiplier 1, caught as a flat column since the *total* varies legitimately across chips and autosubs). Note EO's ceiling is **300**, not 100 |
 | `check_league_trade_config()` | The league's trade rules changing shape — `league.trades` vanishing or coming back null, `trades_time_for_approval` ceasing to be a bool. Both make the Trade Analyzer fall back to "assume approval is required", which is safe but is no longer a statement about *this* league and looks identical on screen. An **unrecognised** trades code is only a warning: three of the four codes are genuinely unknown, and a check that fires on expected ignorance gets muted |
 
@@ -2165,7 +2376,7 @@ afford it. It took down Draft Power Rankings, and the live suite filed it as
 |-------|----------|------|---------|
 | Unit tests for the checks | `tests/common/test_data_validation.py` | Always, offline | A check silently ceasing to fire. Every "bad data" fixture is a real number the app actually displayed. |
 | Live plausibility | `tests/live/` | Default run; skips offline | Upstream sources changing shape. Contract: **unreachable → SKIP, reachable but implausible → FAIL.** |
-| Page wiring | `tests/draft/test_fixture_page_wiring.py` | Always, offline | Two callsites of the same function being fed different inputs (the Fixtures Overview omitting `ffp_df`). Plausibility can't catch this — both numbers are individually plausible. |
+| Page wiring | `tests/draft/test_fixture_page_wiring.py`, `tests/common/test_matchup_wiring.py`, `tests/common/test_element_id_wiring.py` | Always, offline | Two callsites of the same function being fed different inputs (the Fixtures Overview omitting `ffp_df`); a merged frame that never reaches `attach_matchups`; a merged frame that drops the element id, so everything keyed on it is silently skipped. Plausibility can't catch any of these — both numbers are individually plausible. |
 
 `tests/live/conftest.py` clears the `FPL_CURRENT_GAMEWEEK` / `ROTOWIRE_URL` pins that
 the root conftest sets, so live tests resolve real config. Everything there is
@@ -2291,10 +2502,14 @@ Score = α × 1GW + (1-α) × ROS
 | `blend_projections_onto()` | `scripts/common/analytics.py` | The app-facing entry point to the projection engine. Attaches `Proj`, `Proj_Start`, `Start_Pct`, `Proj_Src`, `Proj_Spread`. |
 | `blend_fixture_projections()` | `scripts/common/analytics.py` | Thin wrapper that additionally writes the legacy `Proj_Blended` / `_proj_source`. Prefer `blend_projections_onto()`. `Proj_Blended` stays distinct from `Blended_Points`, the *live* in-gameweek blend. |
 | `blend_aligned()` | `scripts/common/projection_engine.py` | The blend itself — the only implementation. |
+| `fetch_lineup_xi()` / `get_rotowire_lineup_xi()` | `rotowire_lineups.py` / `scraping.py` | Rotowire's projected XIs as FPL element ids, with the per-club gate that decides who may be benched |
+| `starter_override()` | `scripts/common/projection_engine.py` | An XI as the tri-state "does this source expect him to start" Series — True promotes, False benches, NaN falls back to who the source priced |
+| `resolve_lineup_name()` | `scripts/common/rotowire_lineups.py` | One Rotowire lineup entry → a pool row, club-scoped, position as a hint, strongest tier wins. Shared by the engine and the Projected Lineups cards |
 | `_frame_projection_sources()` | `scripts/common/analytics.py` | The per-source series, bases and horizons read off one frame's columns — the only assembly. |
 | `_blend_frame()` | `scripts/common/analytics.py` | The single `blend_aligned()` call for page frames, so scoring and display cannot pass it different arguments. |
 | `_reference_horizon()` | `scripts/common/analytics.py` | The percentile reference pool, carrying a `Proj_Next3` on the same basis as the frame being scored. |
 | `compute_league_ownership()` | `scripts/common/mini_league.py` | Ownership and captaincy-weighted effective ownership within a mini-league |
+| `score_horizon_lengths()` / `horizon_verdict()` | `scripts/common/projection_accuracy.py` | Whether the multi-gameweek term should look further ahead than three gameweeks, scored against actuals |
 | `blended_pool()` | `scripts/common/player_pool.py` | The blended projection over the whole FPL pool, cached on `(gameweek, rotowire_url)`. Shared by the Projections Hub and the Classic Rival Tracker |
 | `positional_percentile()` | `scripts/common/analytics.py` | Within-position percentile against full FPL pool |
 | `season_progress_weight()` | `scripts/common/analytics.py` | Concave GW→weight curve for season quality blend |

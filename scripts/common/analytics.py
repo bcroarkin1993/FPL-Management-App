@@ -1383,6 +1383,81 @@ def _rotowire_club_coverage() -> dict:
     return {"rotowire": counts} if counts else {}
 
 
+#: The FPL element id, under every name a frame in this app stores it as.
+#: Deliberately **not** a bare ``id``: on these pages that is as likely to be a
+#: league or fixture id, and resolving a start signal against the wrong id space
+#: is worse than not resolving it.
+_PLAYER_ID_COLS = ("Player_ID", "element_id", "element", "player_id")
+
+
+def _player_id_col(df: pd.DataFrame):
+    """The frame's element ids, or None.
+
+    Every page spells this differently -- the Classic squad builders emit
+    ``element_id``, the Draft merges carry ``Player_ID`` through
+    ``carry_cols``, the optimizer pools build their own ``Player_ID`` -- and a
+    lookup keyed on one name silently does nothing on the pages that use
+    another. That is precisely how the Rotowire omission penalty came to be a
+    no-op on every per-squad page, and it repeated here: keyed on ``Player_ID``
+    alone, the lineup override was off on Classic Fixture Projections, so Phil
+    Foden kept rendering at 4.24 there after the engine had him at 0.45
+    everywhere else.
+
+    Same reasoning as :func:`_chance_of_playing_col`, which reads FPL's
+    availability under either of its two names for the same reason.
+    """
+    for col in _PLAYER_ID_COLS:
+        if col in df.columns:
+            ids = pd.to_numeric(df[col], errors="coerce")
+            if ids.notna().any():
+                return ids
+    return None
+
+
+def _frame_starter_overrides(df: pd.DataFrame) -> dict:
+    """``{"rotowire": tri-state Series}`` for one frame, or ``{}``.
+
+    The id mapping has to happen per frame, because only ``build_projections``
+    indexes by element id; a page frame carries the id as a column and has an
+    index of its own.
+    """
+    if "Team" not in df.columns:
+        return {}
+    ids = _player_id_col(df)
+    if ids is None:
+        # Visible rather than silent: this is a frame the start signal cannot
+        # reach, and the symptom is a stale projection that looks ordinary.
+        _logger.warning(
+            "Projection blend: a frame of %d players carries no element id under "
+            "any of %s, so Rotowire's projected XIs cannot be applied to it and "
+            "start likelihood falls back to the weekly rankings article.",
+            len(df), ", ".join(_PLAYER_ID_COLS))
+        return {}
+    xi = _rotowire_lineup_xi()
+    override = projection_engine.starter_override(
+        xi, player_ids=ids, teams=df["Team"], index=df.index)
+    return {"rotowire": override} if override is not None else {}
+
+
+def _rotowire_lineup_xi():
+    """Rotowire's projected XIs, or None when there is no usable opinion.
+
+    The companion to :func:`_rotowire_club_coverage`, and global for the same
+    reason: an XI is a statement about the league, not about the frame being
+    blended, so resolving it per frame would disable it on every per-squad page.
+
+    Fails to None on anything -- an unreachable page, a shape change, a club
+    whose XI did not resolve -- and the engine then reads "Rotowire expects him
+    to start" off the rankings article exactly as it did before this existed.
+    """
+    try:
+        from scripts.common.scraping import get_rotowire_lineup_xi
+        xi = get_rotowire_lineup_xi()
+    except Exception:                       # pragma: no cover
+        return None
+    return xi if xi is not None and getattr(xi, "clubs", None) else None
+
+
 def _frame_projection_sources(df: pd.DataFrame, rotowire_col: str = "Points"):
     """The per-source series, bases and horizons, read off one frame's columns.
 
@@ -1570,6 +1645,13 @@ def _blend_frame(df: pd.DataFrame, rotowire_col: str = "Points",
         per_source_next3_basis=per_source_next3_basis,
         starters_only={"rotowire"},
         source_club_coverage=_rotowire_club_coverage(),
+        # Rotowire's *lineups* page decides who it expects to start, where the
+        # rankings column above only decides what he is worth if he does. The
+        # two disagree whenever the article has gone stale -- which is most of a
+        # gameweek, and is how Phil Foden came to render at 86% to start while
+        # this app's own Projected Lineups page had him benched. Keyed on
+        # Player_ID, so a frame without one simply gets no override.
+        starter_overrides=_frame_starter_overrides(df),
         fallback_names=fallback_names,
         # Normalized to G/D/M/F. Pages disagree about this: the Draft pages carry
         # GK/DEF/MID/FWD while analytics groups on single letters. Feeding the

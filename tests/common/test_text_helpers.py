@@ -38,9 +38,47 @@ class TestToDisplayName:
         ("Gabriel", "dos Santos Magalhães", "Gabriel", "Gabriel"),
         # Surname sits in first_name, so web_name alone would lose "Igor".
         ("Igor Thiago", "Nascimento Rodrigues", "Thiago", "Igor Thiago"),
+        # The abbreviation is at the END -- FPL shortens the *surname* for
+        # these. All five are live bootstrap rows, and all five used to render
+        # an abbreviation or an outright wrong name.
+        ("Matheus", "Nunes", "Matheus N.", "Matheus Nunes"),
+        ("Bruno", "Guimarães Rodriguez Moura", "Bruno G.", "Bruno Guimarães"),
+        # Reversed: web_name is surname-first, so the initial expands from
+        # first_name and the result still has to read first-name-first.
+        ("Alex", "Tóth", "Tóth.A", "Alex Tóth"),
+        ("Djiamgone Jocelin Ta", "Bi", "Jocelin.T", "Jocelin Ta"),
+        # "Jr" is a suffix, not a surname: unexpandable, so the complete name
+        # wins over the abbreviation.
+        ("Junior", "Kroupi", "Kroupi.Jr", "Junior Kroupi"),
     ])
     def test_returns_the_common_name(self, first, second, web, expected):
         assert to_display_name(first, second, web) == expected
+
+    @pytest.mark.parametrize("first, second, web", [
+        ("Matheus", "Nunes", "Matheus N."),
+        ("Bruno", "Guimarães Rodriguez Moura", "Bruno G."),
+        ("Alex", "Tóth", "Tóth.A"),
+        ("Junior", "Kroupi", "Kroupi.Jr"),
+        ("Djiamgone Jocelin Ta", "Bi", "Jocelin.T"),
+    ])
+    def test_an_abbreviation_is_never_what_we_render(self, first, second, web):
+        """The property behind the five cases above.
+
+        A rendered name must not end in an initial, and must not print one
+        where a surname belongs -- "Alex A" and "Junior Jr" both did. A name
+        nobody can read is also a name nobody can search, which is how this
+        surfaced: "Nunes" returned nothing on the Projections Hub.
+        """
+        import re
+        out = to_display_name(first, second, web)
+        assert "." not in out, out
+        assert not re.search(r"(^|\s)[A-Za-z]$", out), out
+
+    def test_a_surname_the_player_does_not_have_is_not_invented(self):
+        """Rule 1 took the last dot-segment on faith. If it is not one of his
+        own name parts it is not his surname."""
+        assert to_display_name("Alex", "Tóth", "Tóth.A") == "Alex Tóth"
+        assert to_display_name("Junior", "Kroupi", "Kroupi.Jr") == "Junior Kroupi"
 
     def test_missing_web_name_falls_back_to_the_full_name(self):
         assert to_display_name("Erling", "Haaland", None) == "Erling Haaland"

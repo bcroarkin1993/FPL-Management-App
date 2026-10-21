@@ -12,6 +12,7 @@ Each data source is displayed in its own tab with clear attribution.
 """
 
 import math
+import re
 
 import config
 import pandas as pd
@@ -35,6 +36,8 @@ from scripts.common.utils import (
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import to_display_name
 from scripts.common.text_helpers import compact_html
+from scripts.common.text_helpers import _strip_accents
+from scripts.common import analytics
 from scripts.common.analytics import blend_projections_onto, merge_season_projections
 from scripts.common.player_pool import blended_pool as _blended_pool
 from scripts.common.fpl_classic_api import get_classic_bootstrap_static
@@ -71,6 +74,56 @@ def _positional_rank(df: pd.DataFrame, value_col: str,
     vals = pd.to_numeric(df[value_col], errors="coerce")
     return vals.groupby(df[position_col].astype("object"),
                         dropna=False).rank(method="min", ascending=False)
+
+
+def _name_filter(frame: pd.DataFrame, needle: str,
+                 cols=("Player", "_search_name")) -> pd.Series:
+    """Rows whose name matches ``needle``, accents and legal names included.
+
+    Two things a bare ``str.contains`` on the rendered name gets wrong, both
+    reported from the app:
+
+    * **The rendered name may not be the one you would type.** FPL abbreviates
+      some surnames in ``web_name``, so searching "Nunes" matched nothing while
+      the Horizon grid showed "Matheus N." -- the display bug
+      ``to_display_name`` now fixes, but the search should not depend on having
+      fixed it. Matching the full legal name as well means a surname always
+      works.
+    * **Accents.** "Guimaraes" typed on an ASCII keyboard does not contain-match
+      "Guimarães", and no user is going to type the ã.
+
+    Both sides are accent-stripped and lowercased, so the needle and the
+    haystack meet in the middle.
+    """
+    needle = _strip_accents(str(needle or "")).lower().strip()
+    if not needle:
+        return pd.Series(True, index=frame.index)
+    hay = pd.Series("", index=frame.index)
+    for col in cols:
+        if col in frame.columns:
+            hay = hay.str.cat(
+                frame[col].astype(str).map(lambda v: _strip_accents(v).lower()),
+                sep=" ", na_rep="")
+    return hay.str.contains(re.escape(needle), regex=True, na=False)
+
+
+def _overall_rank(df: pd.DataFrame, value_col: str,
+                  ascending: bool = False) -> pd.Series:
+    """1-based rank over *every* row of ``df``, best first.
+
+    The board's ``#`` column, and it obeys the same rule as
+    ``_positional_rank`` above: **compute it before filtering.** It used to be
+    ``range(1, len(display) + 1)`` stamped on after the search and position
+    filters had run, so searching one player reported him as **#1** whatever he
+    was worth -- the overall-rank twin of the trap that function documents.
+
+    Ties share a rank and a row with no value comes back NaN, for the same
+    reasons.
+    """
+    if value_col not in df.columns:
+        return pd.Series(float("nan"), index=df.index)
+    vals = pd.to_numeric(df[value_col], errors="coerce")
+    return vals.rank(method="min", ascending=ascending)
 
 
 # =============================================================================
@@ -274,7 +327,7 @@ def render_rotowire_projections():
     result = df.copy()
 
     if player_filter:
-        result = result[result['Player'].str.contains(player_filter, case=False, na=False)]
+        result = result[_name_filter(result, player_filter, cols=('Player',))]
 
     if position_filter and 'Position' in result.columns:
         result = result[result['Position'].isin(position_filter)]
@@ -422,7 +475,8 @@ def render_ffp_data():
     result = df.copy()
 
     if player_filter and 'Player' in result.columns:
-        result = result[result['Player'].str.contains(player_filter, case=False, na=False)]
+        result = result[_name_filter(result, player_filter,
+                                     cols=('Player', 'Name', 'Display_Name'))]
 
     if position_filter and 'Position' in result.columns:
         result = result[result['Position'].isin(position_filter)]
@@ -634,7 +688,12 @@ def render_horizon():
     ident = (horizon.df[horizon.df["FFP_GW"] == gws[0]]
              .dropna(subset=["Player_ID"]).copy())
     ident["Player_ID"] = pd.to_numeric(ident["Player_ID"], errors="coerce").astype("int64")
-    ident = ident.set_index("Player_ID")[["Display_Name", "Team", "Position"]]
+    _ident_cols = ["Display_Name", "Team", "Position"]
+    if "Name" in ident.columns:
+        ident = ident.rename(columns={"Name": "Player"})
+    if "Player" in ident.columns:
+        _ident_cols.append("Player")
+    ident = ident.set_index("Player_ID")[_ident_cols]
     if not blended.empty:
         b = blended[blended["Player_ID"].notna()].copy()
         b["Player_ID"] = pd.to_numeric(b["Player_ID"], errors="coerce").astype("int64")
@@ -646,6 +705,11 @@ def render_horizon():
                 ident["Team"].reindex(points.index)),
             "Position": b["Position"].reindex(points.index).combine_first(
                 ident["Position"].reindex(points.index)),
+            "Player": (b["Player"].reindex(points.index) if "Player" in b.columns
+                       else pd.Series(index=points.index, dtype="object")
+                       ).combine_first(
+                ident["Player"].reindex(points.index) if "Player" in ident.columns
+                else pd.Series(index=points.index, dtype="object")),
         })
     ident = ident.reindex(points.index)
 
@@ -671,6 +735,10 @@ def render_horizon():
         "Player": ident["Display_Name"].fillna(""),
         "Team": ident["Team"].fillna(""),
         "Pos": ident["Position"].fillna(""),
+        # Searched but never rendered: the full legal name, so a surname FPL
+        # abbreviates out of the display name is still findable. Dropped before
+        # the table is handed to the renderer.
+        "_search_name": ident.get("Player", pd.Series("", index=ident.index)).fillna(""),
     }, index=points.index)
     for g in shown:
         grid[gw_labels[g]] = pd.to_numeric(points[g], errors="coerce")
@@ -717,12 +785,19 @@ def render_horizon():
         descending = s2.selectbox("Order", ["Highest first", "Lowest first"],
                                   key="horizon_order") == "Highest first"
 
+    # Like Pos RK and the colour range above, the overall rank is fixed before
+    # the filters run -- it is a position on the whole board, so searching one
+    # player must not report him as "1". It does move with the sort control,
+    # which is the point of that control rather than a narrowing of the rows.
+    grid.insert(0, "#", _overall_rank(grid, sort_by, ascending=not descending))
+
     if search:
-        grid = grid[grid["Player"].str.contains(search, case=False, na=False)]
+        grid = grid[_name_filter(grid, search)]
     if positions:
         grid = grid[grid["Pos"].isin(positions)]
     if teams:
         grid = grid[grid["Team"].isin(teams)]
+    grid = grid.drop(columns=["_search_name"], errors="ignore")
 
     grid = grid.sort_values(sort_by, ascending=not descending)
     if grid.empty:
@@ -737,11 +812,10 @@ def render_horizon():
 
     if view == "Points":
         display = grid.reset_index(drop=True)
-        display.insert(0, "#", range(1, len(display) + 1))
         render_styled_table(
             display.head(300),
             col_formats={**{c: "{:.1f}" for c in label_cols},
-                         "Total": "{:.1f}", "Pos RK": "{:.0f}"},
+                         "Total": "{:.1f}", "#": "{:.0f}", "Pos RK": "{:.0f}"},
             positive_color_cols=label_cols + ["Total"],
             color_range_overrides=({c: span for c in label_cols} if span else None),
             max_height=640,
@@ -750,7 +824,8 @@ def render_horizon():
         rows = []
         colour = {c: [] for c in label_cols}
         for pid in ids:
-            row = {"Player": grid.at[pid, "Player"], "Team": grid.at[pid, "Team"],
+            row = {"#": grid.at[pid, "#"],
+                   "Player": grid.at[pid, "Player"], "Team": grid.at[pid, "Team"],
                    "Pos": grid.at[pid, "Pos"],
                    "Pos RK": grid.at[pid, "Pos RK"]}
             week_fdrs = []
@@ -772,13 +847,11 @@ def render_horizon():
                               if finite_fdrs else float("nan"))
             row["Total"] = grid.at[pid, "Total"]
             rows.append(row)
-        display = pd.DataFrame(rows)
-        display.insert(0, "#", range(1, len(display) + 1))
-        display = display.head(300)
+        display = pd.DataFrame(rows).head(300)
         render_styled_table(
             display,
             col_formats={"Total": "{:.1f}", "Avg FDR": "{:.2f}",
-                         "Pos RK": "{:.0f}"},
+                         "#": "{:.0f}", "Pos RK": "{:.0f}"},
             positive_color_cols=["Total"],
             # Colour comes from FFP's own published difficulty rather than the
             # text in the cell, and 1-5 is fixed so the scale means the same
@@ -810,9 +883,10 @@ def render_horizon():
         "so a row sums. **Total** therefore differs slightly from FFP's own "
         "\"Next %d GW\" on the FFP Data tab, which uses FFP for the first week too."
         % len(shown),
-        "**Pos RK** ranks **Total** against every player at the same position "
-        "over these same weeks, so it moves when you change the window but not "
-        "when you filter.",
+        "**#** ranks the sorted column and **Pos RK** ranks **Total** against "
+        "every player at the same position, both over these same weeks and "
+        "over the whole board — so they move when you change the window or the "
+        "sort, but not when you filter.",
     ]
     archived = horizon.archived_gameweeks()
     if archived:
@@ -1139,7 +1213,11 @@ def _blended_source_status(rotowire_df, feed, blended, current_gw) -> None:
     weights = getattr(config, "PROJECTION_SOURCE_WEIGHTS", {}) or {}
 
     def _row(name, ok, rows, note, updated, weight_key):
-        w = float(weights.get(weight_key, 0.0))
+        if weight_key == "__start_only__":
+            w, label = 0.0, "start signal only"
+        else:
+            w = float(weights.get(weight_key, 0.0))
+            label = f"{w:.0%}" if w > 0 else "fallback only"
         if not ok or not rows:
             status = "🔴 Unavailable"
         elif note:
@@ -1150,7 +1228,7 @@ def _blended_source_status(rotowire_df, feed, blended, current_gw) -> None:
             "Source": name,
             "Status": status,
             "Players": int(rows or 0),
-            "Weight": f"{w:.0%}" if w > 0 else "fallback only",
+            "Weight": label,
             "Updated": format_last_updated(updated) if updated else "—",
         }
 
@@ -1180,13 +1258,37 @@ def _blended_source_status(rotowire_df, feed, blended, current_gw) -> None:
         None, "fpl_ep",
     ))
 
+    # Rotowire's lineups page, listed separately from its rankings article
+    # because they are different publications of different vintages and the
+    # engine now reads one for points and the other for who starts. Listing
+    # only "Rotowire" is what let the two disagree invisibly: the Hub rendered
+    # Phil Foden at 86% to start off a day-old article while the app's own
+    # Projected Lineups page had him benched.
+    xi = analytics._rotowire_lineup_xi()
+    n_starters = len(getattr(xi, "player_ids", ()) or ()) if xi else 0
+    n_clubs = len(getattr(xi, "clubs", ()) or ()) if xi else 0
+    if not n_starters:
+        xi_note = "unavailable — start likelihood falls back to the rankings article"
+    elif n_clubs < 20:
+        # A club short of a complete XI can promote its starters but bench
+        # nobody, so say so rather than showing a green tick for a signal that
+        # is working in one direction only.
+        xi_note = f"{n_clubs}/20 clubs complete — no benchings at the rest"
+    else:
+        xi_note = ""
+    rows.append(_row("Rotowire projected XIs", bool(n_starters), n_starters,
+                     xi_note, None, "__start_only__"))
+
     st.markdown("##### Data Sources")
     render_styled_table(pd.DataFrame(rows))
     st.caption(
         "Weight is each source's share of the blend where it prices a player; "
         "weights are renormalised over whichever sources are actually available, "
         "so a missing source does not shrink the projection. FPL's own expected "
-        "points fills only players nobody else priced."
+        "points fills only players nobody else priced. **Rotowire's projected "
+        "XIs carry no points and no weight** — they decide *who starts*, which "
+        "the rankings article is too slow to track, so a player it benches is "
+        "priced as a substitute even where the article still ranks him."
     )
 
 
@@ -1231,6 +1333,8 @@ def render_blended_projections():
 
     display = pd.DataFrame({
         "Player": blended.get("Display_Name", blended["Player"]),
+        # Searched, never rendered -- see `_name_filter`.
+        "_search_name": blended["Player"],
         "Team": blended["Team"],
         "Pos": blended["Position"],
         "Proj": pd.to_numeric(blended["Proj"], errors="coerce"),
@@ -1249,9 +1353,10 @@ def render_blended_projections():
     })
     display = display[display["Proj"].notna()]
 
-    # Ranked here, over the whole board, so filtering to a club or a position
-    # narrows the rows without re-ranking them against each other.
+    # Both ranks are taken here, over the whole board, so filtering to a club
+    # or a position narrows the rows without re-ranking them against each other.
     display.insert(3, "Pos RK", _positional_rank(display, "Proj"))
+    display.insert(0, "#", _overall_rank(display, "Proj"))
 
     with st.expander("Filters", expanded=False):
         col1, col2 = st.columns(2)
@@ -1268,19 +1373,19 @@ def render_blended_projections():
         )
 
     if search:
-        display = display[display["Player"].str.contains(search, case=False, na=False)]
+        display = display[_name_filter(display, search)]
     if positions:
         display = display[display["Pos"].isin(positions)]
     if only_disagree:
         display = display[display["Spread"].fillna(0) >= 1.5]
+    display = display.drop(columns=["_search_name"], errors="ignore")
 
     display = display.sort_values("Proj", ascending=False).reset_index(drop=True)
-    display.insert(0, "#", range(1, len(display) + 1))
 
     render_styled_table(
         display.head(300),
         col_formats={
-            "Pos RK": "{:.0f}",
+            "#": "{:.0f}", "Pos RK": "{:.0f}",
             "Proj": "{:.2f}", "If Starts": "{:.2f}", "Start %": "{:.0f}%",
             "Rotowire": "{:.2f}", "FFP": "{:.2f}",
             "Spread": "{:.2f}",
@@ -1291,8 +1396,9 @@ def render_blended_projections():
     )
     st.caption(
         f"Showing {min(len(display), 300)} of {len(display)} projected players. "
-        "**Pos RK** is his rank on **Proj** among every player at his position, "
-        "league-wide — it does not change when you filter. "
+        "**#** is his rank on **Proj** across the whole board and **Pos RK** "
+        "his rank among every player at his position, both league-wide — "
+        "neither changes when you filter. "
         "The per-source columns are on the *if he starts* basis, so they are "
         "directly comparable with each other and with **If Starts**."
     )

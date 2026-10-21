@@ -687,11 +687,19 @@ def analyze_fixture_projections(fixture, league_id, projections_df, use_actual_l
         team2_composition = get_team_composition_for_gameweek(league_id, team2_id, gameweek)
 
         # Merge full squad with projections, then split into optimal XI + bench
+        # carry_cols as in the actual-lineup branch above: the merge takes
+        # matched rows' names from the projection source, so without this the
+        # element id does not survive -- and the projection engine then cannot
+        # apply anything keyed on it, including Rotowire's projected-XI start
+        # signal. This branch is the one that runs *pre-deadline*, which is when
+        # a projection is read.
         team1_full = merge_fpl_players_and_projections(
-            team1_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+            team1_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']],
+            carry_cols=['Player_ID'],
         )
         team2_full = merge_fpl_players_and_projections(
-            team2_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']]
+            team2_composition, projections_df[['Player', 'Team', 'Position', 'Matchup', 'Points', 'Pos Rank']],
+            carry_cols=['Player_ID'],
         )
         # As above: merge_fpl_players_and_projections writes the literal string
         # "N/A" into Matchup for anyone Rotowire did not list, and this branch --

@@ -14,7 +14,13 @@ import pandas as pd
 import pytest
 
 from scripts.common.text_helpers import TEAM_FULL_TO_SHORT
+from scripts.common import rotowire_lineups as rl
 from scripts.fpl import projected_lineups as pl
+
+# The scraper moved to `scripts.common.rotowire_lineups` so the projection
+# engine can read the same XIs without importing Streamlit. `pl` re-exports it,
+# so these tests still drive the page's own entry points -- but the seams have
+# to be patched where the implementation now resolves them.
 
 
 GW4_PAIRS = {("BOU", "BRE"), ("CHE", "HUL"), ("LIV", "FUL")}
@@ -81,9 +87,9 @@ class TestScrapeFiltersByGameweek:
         # One player per side, so matchup indices are observable.
         def _extract(section, side, team, idx):
             return [(team, "M", f"{team} player", idx)]
-        with patch.object(pl.requests, "get", return_value=resp), \
-             patch.object(pl, "_gameweek_fixture_pairs", return_value=GW4_PAIRS), \
-             patch.object(pl, "extract_players", side_effect=_extract):
+        with patch.object(rl.requests, "get", return_value=resp), \
+             patch.object(rl, "_gameweek_fixture_pairs", return_value=GW4_PAIRS), \
+             patch.object(rl, "extract_players", side_effect=_extract):
             return pl.scrape_rotowire_lineups("https://example.com/lineups", gameweek=4)
 
     def test_the_later_gameweeks_matchup_is_excluded(self):
@@ -102,8 +108,8 @@ class TestScrapeFiltersByGameweek:
         resp.content = _HTML.encode("utf-8")
         def _extract(section, side, team, idx):
             return [(team, "M", f"{team} player", idx)]
-        with patch.object(pl.requests, "get", return_value=resp), \
-             patch.object(pl, "extract_players", side_effect=_extract):
+        with patch.object(rl.requests, "get", return_value=resp), \
+             patch.object(rl, "extract_players", side_effect=_extract):
             df = pl.scrape_rotowire_lineups("https://example.com/lineups", gameweek=0)
         assert sorted(df["MatchupIndex"].unique()) == [0, 1, 2]
 
@@ -130,9 +136,9 @@ class TestMatchupsShareTheIndexSpace:
         def _extract(section, side, team, idx):
             return [(team, "M", f"{team} player", idx)]
 
-        with patch.object(pl.requests, "get", return_value=resp) as get, \
-             patch.object(pl, "_gameweek_fixture_pairs", return_value=GW4_PAIRS), \
-             patch.object(pl, "extract_players", side_effect=_extract):
+        with patch.object(rl.requests, "get", return_value=resp) as get, \
+             patch.object(rl, "_gameweek_fixture_pairs", return_value=GW4_PAIRS), \
+             patch.object(rl, "extract_players", side_effect=_extract):
             return pl.scrape_lineups("https://example.com/lineups", gameweek), get
 
     def test_matchups_exclude_the_later_gameweek(self):
@@ -167,9 +173,9 @@ class TestMatchupsShareTheIndexSpace:
         reached the dropdown."""
         resp = MagicMock()
         resp.content = _HTML.encode("utf-8")
-        with patch.object(pl.requests, "get", return_value=resp), \
-             patch.object(pl, "_gameweek_fixture_pairs", return_value=GW4_PAIRS), \
-             patch.object(pl, "extract_players", side_effect=lambda *a: []):
+        with patch.object(rl.requests, "get", return_value=resp), \
+             patch.object(rl, "_gameweek_fixture_pairs", return_value=GW4_PAIRS), \
+             patch.object(rl, "extract_players", side_effect=lambda *a: []):
             matchups = pl.scrape_matchups("https://example.com/lineups", gameweek=4)
         assert [(h, a) for h, a, _ in matchups] == [
             ("Chelsea", "Hull City"), ("Liverpool", "Fulham")]
@@ -182,16 +188,16 @@ class TestMatchupsShareTheIndexSpace:
         def _extract(section, side, team, idx):
             return [(team, "M", f"{team} player", idx)]
 
-        with patch.object(pl.requests, "get", return_value=resp), \
-             patch.object(pl, "_gameweek_fixture_pairs", return_value=GW4_PAIRS), \
-             patch.object(pl, "extract_players", side_effect=_extract):
+        with patch.object(rl.requests, "get", return_value=resp), \
+             patch.object(rl, "_gameweek_fixture_pairs", return_value=GW4_PAIRS), \
+             patch.object(rl, "extract_players", side_effect=_extract):
             df = pl.scrape_rotowire_lineups("https://example.com/lineups", gameweek=4)
             matchups = pl.scrape_matchups("https://example.com/lineups", gameweek=4)
         assert df.equals(scrape.players)
         assert matchups == scrape.matchups
 
     def test_a_failed_fetch_returns_both_halves_empty(self):
-        with patch.object(pl.requests, "get", side_effect=RuntimeError("down")):
+        with patch.object(rl.requests, "get", side_effect=RuntimeError("down")):
             scrape = pl.scrape_lineups("https://example.com/lineups", gameweek=4)
         assert scrape.players.empty
         assert list(scrape.players.columns) == pl.LINEUP_COLUMNS
