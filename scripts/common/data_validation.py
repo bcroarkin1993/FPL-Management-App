@@ -979,6 +979,88 @@ def check_draft_game_settings(settings: Optional[dict]) -> List[Issue]:
     return issues
 
 
+def check_position_claim_rates(
+    rates: Optional[dict],
+    events_observed: Optional[int] = None,
+) -> List[Issue]:
+    """Assert the per-position waiver claim rates could really have happened.
+
+    These rates are the only input to the Waiver Wire's reachability bands — the
+    `Likely yours` / `Contested` / `Long shot` pills — so a wrong one mislabels
+    every suggestion at that position while every pill still reads as a plausible
+    opinion. They replaced a model that inferred contention from Power Rankings
+    and over-called it badly: on league 11347 it flagged the top two goalkeepers
+    as unreachable every round in a league that had accepted four goalkeeper
+    claims all season.
+
+    Each rate is accepted claims per manager per round at one position, so the
+    bounds are arithmetic rather than tuned:
+
+    * **Negative is impossible**, and a rate above the position's squad quota
+      (2/5/5/3) means more players were claimed at that position in a round than
+      a manager can even hold — the signature of a denominator that lost its
+      round count or its manager count.
+    * **A single observed round is a warning, not an error.** One round is a real
+      measurement and the right thing to use, but it is one week of one league's
+      behaviour, and the band it produces should not be read as settled.
+
+    An empty mapping is *not* an error: it is the documented "unmeasurable"
+    answer, and the page correctly renders no badge at all for it.
+    """
+    check = "position_claim_rates"
+
+    if not rates:
+        # Unknown, not wrong. `position_claim_rates()` returns {} with no log, no
+        # position map or no manager count, and the bands then abstain.
+        return []
+
+    issues = []
+    quota = {"G": 2, "D": 5, "M": 5, "F": 3}
+
+    for pos, rate in sorted(rates.items()):
+        try:
+            value = float(rate)
+        except (TypeError, ValueError):
+            issues.append(Issue(
+                check, "error",
+                "claim rate for %r is not a number: %r" % (pos, rate),
+                "Every rate is accepted claims per manager per round. A "
+                "non-numeric one means the log was parsed into the wrong shape.",
+            ))
+            continue
+        if value != value or value < 0:
+            issues.append(Issue(
+                check, "error",
+                "claim rate for %r is %r" % (pos, rate),
+                "A count of claims divided by rounds x managers cannot be "
+                "negative or NaN. Check that accepted rows are being counted "
+                "and that the denominator is not zero.",
+            ))
+            continue
+        cap = quota.get(pos)
+        if cap is not None and value > cap:
+            issues.append(Issue(
+                check, "error",
+                "claim rate for %r is %.2f per manager per round, above the "
+                "squad quota of %d" % (pos, value, cap),
+                "A manager cannot hold more than %d at this position, so he "
+                "cannot average more accepted claims than that in a round. The "
+                "usual cause is a denominator missing its round or manager "
+                "count, which inflates every band at once." % cap,
+            ))
+
+    if events_observed is not None and events_observed < 2:
+        issues.append(Issue(
+            check, "warning",
+            "claim rates are measured over %d waiver round(s)" % events_observed,
+            "One round is a real measurement and the right thing to use, but it "
+            "is a single week of a single league. Expect the bands to move as "
+            "rounds accrue.",
+        ))
+
+    return issues
+
+
 def check_waiver_order(order: Optional[Sequence[dict]],
                        n_entries: Optional[int] = None,
                        my_entry_id: Optional[int] = None,

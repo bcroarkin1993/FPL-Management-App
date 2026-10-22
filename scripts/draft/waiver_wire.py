@@ -44,6 +44,7 @@ from scripts.common.waiver_priority import (
     BAND_LONG_SHOT,
     claim_outlook,
     expected_gone_before,
+    expected_taken_at_position,
     managers_ahead,
     my_waiver_pick,
     rank_claim_plan,
@@ -77,6 +78,7 @@ from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings, 
 # ---------------------------
 
 POSITION_LABEL_TO_CODE = {"GK": "G", "DEF": "D", "MID": "M", "FWD": "F"}
+POSITION_CODE_TO_LABEL = {c: l for l, c in POSITION_LABEL_TO_CODE.items()}
 
 
 def _filter_by_position(df, labels):
@@ -1316,14 +1318,17 @@ def _compute_transfer_suggestions(
             (2 x 5 window, one move per position) is the compact view; passing
             ``None`` for both candidate limits with this off enumerates every
             upgrade on the board — at most one per droppable roster player.
-        waiver_context: ``{n_ahead, rival_needs, expected_gone}`` — how many
-            managers claim before this one, which positions they are short at,
-            and how many players the league's own history says typically go
-            first. Used to stamp each suggestion with how reachable the add
-            actually is. Computed **here** rather than at the callsite, for the
-            same reason the locked-player filter below is: a caller that forgets
-            it produces a page that looks identical and quietly recommends
-            players six other managers see first.
+        waiver_context: ``{n_ahead, claim_rates, expected_gone, rival_needs}`` —
+            how many managers claim before this one, how many players this
+            league's log says go at each position and overall before its turn,
+            and (as prose only) which positions those managers are short at.
+            Used to stamp each suggestion with how reachable the add actually
+            is. Computed **here** rather than at the callsite, for the same
+            reason the locked-player filter below is: a caller that forgets it
+            produces a page that looks identical and quietly recommends players
+            six other managers see first. An empty context — free agency, an
+            unknown queue, or a league with no waiver history — leaves every
+            band blank, which renders no badge at all.
 
     Returns:
         (suggestions, debug_rows) — suggestions is the ranked list of transfers;
@@ -1441,6 +1446,13 @@ def _compute_transfer_suggestions(
         # list it annotates.
         _pos_rank = {idx: rank for rank, idx in enumerate(avail_sorted.index, start=1)}
 
+        # How many players this league's log says go at *this* position before
+        # your pick. One figure per position, so it is computed out here rather
+        # than per candidate. None where the league has no history to measure,
+        # which `claim_outlook` reads as "no opinion" rather than as zero.
+        _expected_at_pos = expected_taken_at_position(
+            pos, ctx.get('n_ahead'), ctx.get('claim_rates')) if ctx else None
+
         pos_debug_pairs = []
         roster_iter = (roster_sorted if roster_candidates is None
                        else roster_sorted.head(roster_candidates))
@@ -1550,8 +1562,9 @@ def _compute_transfer_suggestions(
                 outlook = claim_outlook(
                     position=pos,
                     pos_rank=_pos_rank.get(cand['add_idx']),
-                    rivals_needing=len((ctx.get('rival_needs') or {}).get(pos, [])),
                     n_ahead=ctx.get('n_ahead'),
+                    expected_at_position=_expected_at_pos,
+                    rivals_needing=len((ctx.get('rival_needs') or {}).get(pos, [])),
                     expected_gone=ctx.get('expected_gone'),
                     overall_rank=_overall_rank.get(cand['add_idx']),
                 )
@@ -1664,20 +1677,28 @@ def _outlook_pill(band: str) -> str:
             f'font-size:0.8em;font-weight:bold;margin-left:8px;">{label}</span>')
 
 
-def _render_waiver_queue(order: List[Dict], my_entry_id, stats: Optional[Dict] = None):
+def _render_waiver_queue(order: List[Dict], my_entry_id, stats: Optional[Dict] = None,
+                         free_agency: bool = False):
     """The league's waiver order, with this manager's slot marked.
 
     Rendered because the number on the banner card ("pick 7 of 10") is only half
     the story — which *teams* pick ahead of you is what makes a contested target
     predictable.
+
+    ``waiver_pick`` is always the order for the **next** round, so in free agency
+    it is a forward-looking fact rather than a live one. It stays on the page —
+    planning the next round is exactly what you do during free agency — but the
+    title and caption say which round it describes, since the same number read as
+    current would imply a queue that is not running.
     """
     if not order:
         return
 
     pick = my_waiver_pick(order, my_entry_id)
     n_ahead = len(managers_ahead(order, my_entry_id))
-    title = (f"Waiver order — you pick {pick} of {len(order)}"
-             if pick else f"Waiver order ({len(order)} teams)")
+    _when = "next waiver round" if free_agency else "waiver order"
+    title = (f"{_when.capitalize()} — you pick {pick} of {len(order)}"
+             if pick else f"{_when.capitalize()} ({len(order)} teams)")
 
     with st.expander(title, expanded=False):
         rows = []
@@ -1696,23 +1717,53 @@ def _render_waiver_queue(order: List[Dict], my_entry_id, stats: Optional[Dict] =
         ), unsafe_allow_html=True)
 
         st.caption(
-            "FPL re-derives this order from the standings each gameweek — the "
+            ("Free agency is open, so this applies to the **next** waiver round "
+             "rather than to anything you do today. " if free_agency else "")
+            + "FPL re-derives this order from the standings each gameweek — the "
             "bottom team claims first — and a **successful** claim sends that "
             "manager to the back of the queue for the rest of the round. A "
             "**failed** claim costs nothing, so rank your claims by what you "
             "actually want rather than by what you think you can get."
         )
 
-        if stats and stats.get("participation_rate") is not None and n_ahead:
-            gone = expected_gone_before(pick, stats["participation_rate"])
+        _rate = (stats or {}).get("participation_rate_recent")
+        if _rate is None:
+            _rate = (stats or {}).get("participation_rate")
+        if stats and _rate is not None and n_ahead:
+            gone = expected_gone_before(pick, _rate)
+            # The recent window, not the whole season. Measured live on this
+            # league the two were 63% and 71%: the rounds just after a draft are
+            # churn, and quoting them reports the league as more active than it is.
+            _recent = stats.get("recent_events") or []
+            _scope = (f"the last {len(_recent)} waiver round"
+                      f"{'s' if len(_recent) != 1 else ''}"
+                      if _recent else
+                      f"{stats['events_observed']} waiver round"
+                      f"{'s' if stats['events_observed'] != 1 else ''}")
             line = (
-                f"Across {stats['events_observed']} waiver round"
-                f"{'s' if stats['events_observed'] != 1 else ''} in this league, "
-                f"{stats['participation_rate'] * 100:.0f}% of managers claimed in a "
+                f"Across {_scope} in this league, "
+                f"{_rate * 100:.0f}% of managers claimed in a "
                 f"given round — so expect roughly **{gone:.0f}** of the {n_ahead} "
                 f"managers ahead of you to take a player before your first claim "
                 f"is looked at."
             )
+            _rates = stats.get("position_claim_rates") or {}
+            if _rates and n_ahead:
+                _per_pos = ", ".join(
+                    f"{POSITION_CODE_TO_LABEL.get(p, p)} {expected_taken_at_position(p, n_ahead, _rates):.1f}"
+                    for p in ("G", "D", "M", "F") if _rates.get(p) is not None
+                )
+                if _per_pos:
+                    line += (f" By position, the players they typically take are: "
+                             f"{_per_pos}.")
+                    # The badges are suppressed in free agency, so pointing at
+                    # them there would describe something not on the page.
+                    line += (" That is what the reachability badge on each "
+                             "suggestion is calibrated on, rather than how badly "
+                             "a rival is ranked somewhere."
+                             if not free_agency else
+                             " That is what the reachability badges will be "
+                             "calibrated on once the next waiver round opens.")
             if stats.get("contested_share") is not None:
                 line += (f" {stats['contested_share'] * 100:.0f}% of successful "
                          f"claims were for a player someone else also wanted")
@@ -1723,20 +1774,34 @@ def _render_waiver_queue(order: List[Dict], my_entry_id, stats: Optional[Dict] =
             st.caption(line)
 
 
-def _render_claim_plan(suggestions: List[Dict]):
+def _render_claim_plan(suggestions: List[Dict], free_agency: bool = False):
     """The priority-ordered list of claims to submit to FPL.
 
     FPL asks you to rank your waiver requests, and the instinct is to lead with
     something safe. That is backwards: processing walks down your list until one
     claim succeeds, and only a *success* costs your slot — so a long shot at the
     top is free. ``rank_claim_plan()`` carries that rule and its evidence.
+
+    **In free agency none of that applies**, so the framing changes rather than
+    the list. There is no queue to be processed in, no priority to spend and
+    nothing to be beaten to: each add simply happens. The ordering still earns
+    its place, because every add costs a drop and the pool shrinks as the rest of
+    the league acts, but presenting it as a ranked *request* list would describe
+    a mechanic that is not running.
     """
     plan = rank_claim_plan(suggestions)
     if len(plan) < 2:
         return
 
-    with st.expander(f"Suggested claim order ({len(plan)} requests)", expanded=False):
+    title = (f"Suggested pickup order ({len(plan)} moves)" if free_agency
+             else f"Suggested claim order ({len(plan)} requests)")
+    with st.expander(title, expanded=False):
         st.caption(
+            "Free agency is open, so each of these processes the moment you make "
+            "it — there is no waiver priority to spend and nobody to beat. Work "
+            "down the list: every add costs you a drop, and the best targets go "
+            "first as the rest of the league picks over the same pool."
+            if free_agency else
             "Submit these in this order. A failed claim does not cost your waiver "
             "priority, so the long shots belong at the top — only a claim that "
             "**succeeds** moves you to the back of the queue."
@@ -1758,23 +1823,43 @@ def _render_claim_plan(suggestions: List[Dict]):
         ), unsafe_allow_html=True)
 
 
-def _build_waiver_context(waiver_order: List[Dict], my_entry_id, current_gw: int) -> Dict:
+def _build_waiver_context(
+    waiver_order: List[Dict],
+    my_entry_id,
+    current_gw: int,
+    transaction_mode: Optional[str] = None,
+) -> Dict:
     """What the suggestion engine needs to judge whether a claim is reachable.
 
-    Three things: how many managers claim before you, which positions *those*
-    managers are short at, and how many players this league's history says go
-    before your turn.
+    Four things: how many managers claim before you, how many players this
+    league's log says go at **each position** before your turn, how many go
+    overall, and — as prose only — which positions those managers are short at.
+
+    **Nothing is reachable-or-not during free agency, so nothing is computed.**
+    The bands describe a queue, and in free agency an available player is simply
+    added: there is no priority to lose and no one to be beaten to him by. An
+    empty context disables the outlook end to end — `_build_suggestion()` stamps
+    an empty band, `_outlook_pill('')` renders nothing, and the claim plan drops
+    its parenthetical — so this one early return is the whole suppression.
+    It also means free agency no longer pays for `build_league_strength()`.
+
+    An **unreadable** mode keeps the bands rather than suppressing them: a
+    transient `/league/{id}/details` failure must not be indistinguishable from
+    free agency, and failing to the behaviour that already exists is the rule
+    everywhere else in this codebase.
 
     Rival need comes from the Power Rankings model rather than a second notion of
     squad strength — `aggregate_team_strength()` already scores every roster by
     position against the full FPL pool, and its `Team_ID` is the `entry_id` space
-    the waiver order is keyed on, so the join is exact rather than by name.
+    the waiver order is keyed on, so the join is exact rather than by name. It no
+    longer sets a band; see `claim_outlook()`.
 
-    Returns `{}` whenever the order is unknown or power rankings are unavailable.
-    An empty context disables the outlook entirely, which renders as no badge at
-    all — the right answer, since "we could not tell" is not a finding about a
-    player and a neutral badge on every card is noise.
+    Returns `{}` whenever free agency is open, the order is unknown, or the league
+    has no waiver history to calibrate on. A neutral badge on every card is noise,
+    and "we could not tell" is not a finding about a player.
     """
+    if transaction_mode == TRANSACTION_MODE_FREE_AGENCY:
+        return {}
     if not waiver_order or my_entry_id is None:
         return {}
     pick = my_waiver_pick(waiver_order, my_entry_id)
@@ -1784,7 +1869,8 @@ def _build_waiver_context(waiver_order: List[Dict], my_entry_id, current_gw: int
     n_ahead = len(managers_ahead(waiver_order, my_entry_id))
     if n_ahead == 0:
         # You claim first: nothing ahead of you can take anyone.
-        return {"n_ahead": 0, "rival_needs": {}, "expected_gone": 0.0}
+        return {"n_ahead": 0, "rival_needs": {}, "claim_rates": {},
+                "expected_gone": 0.0}
 
     needs = {}
     try:
@@ -1794,15 +1880,19 @@ def _build_waiver_context(waiver_order: List[Dict], my_entry_id, current_gw: int
         team_df, _ = build_league_strength(config.FPL_DRAFT_LEAGUE_ID, current_gw)
         needs = _rival_needs(team_df, waiver_order, my_entry_id)
     except Exception:
-        # Power Rankings failing must never take this page down; the outlook then
-        # rests on board position alone.
+        # Power Rankings failing must never take this page down; the reason string
+        # simply loses its trailing clause.
         _logger.warning("Unable to derive rival positional needs", exc_info=True)
 
-    stats = _waiver_claim_stats(config.FPL_DRAFT_LEAGUE_ID, len(waiver_order))
+    stats = _waiver_claim_stats(config.FPL_DRAFT_LEAGUE_ID, len(waiver_order)) or {}
     return {
         "n_ahead": n_ahead,
         "rival_needs": needs,
-        "expected_gone": expected_gone_before(pick, (stats or {}).get("participation_rate")),
+        "claim_rates": stats.get("position_claim_rates") or {},
+        # The recent window, not the season: the post-draft rounds are churn and
+        # report a league as more active than it now is.
+        "expected_gone": expected_gone_before(
+            pick, stats.get("participation_rate_recent")),
     }
 
 
@@ -1810,6 +1900,8 @@ def _render_transfer_suggestions(
     suggestions: List[Dict],
     current_gw: int = 0,
     total_found: Optional[int] = None,
+    free_agency: bool = False,
+    waiver_gw: Optional[int] = None,
 ):
     """Render suggestion cards using styled HTML.
 
@@ -1819,6 +1911,12 @@ def _render_transfer_suggestions(
     Args:
         total_found: how many moves the search turned up before the view limit
             was applied — surfaced so a truncated list says so.
+        free_agency: whether adds process immediately. These cards carry no
+            reachability badge in that window (see `_build_waiver_context`), so
+            the caption has to say why they are all simply available — and name
+            the one exception, which is that a player dropped this week is locked
+            until the next waiver round and cannot be picked up as a free agent.
+        waiver_gw: the gameweek whose waiver round a locked player enters.
     """
     if not suggestions:
         st.info("No beneficial transfers found. Your roster looks strong at all positions.")
@@ -1840,6 +1938,15 @@ def _render_transfer_suggestions(
                  "next drop takes the next-best target. They are ordered by the "
                  "**expected points** the swap adds per gameweek, which is the "
                  "only way a goalkeeper move and a forward move can be compared.")
+    if free_agency:
+        # No reachability badges in this window, so say why: there is no queue to
+        # lose a player in. The exception is worth naming, because it is the one
+        # way an "available" player still cannot be had today.
+        _wv = f"GW{waiver_gw} waiver round" if waiver_gw else "next waiver round"
+        note += (" Free agency is open, so these are direct swaps that process "
+                 "immediately — no waiver priority and nobody to beat. The one "
+                 f"exception: a player dropped this week is locked until the {_wv} "
+                 "and cannot be picked up as a free agent.")
     st.caption(note)
 
     pos_labels = {'G': 'GK', 'D': 'DEF', 'M': 'MID', 'F': 'FWD'}
@@ -2107,21 +2214,44 @@ def _fetch_all_transactions(league_id: int) -> pd.DataFrame:
 def _waiver_claim_stats(league_id: int, n_managers: int) -> Dict[str, Any]:
     """What this league's own past waiver rounds looked like.
 
-    The useful figure is how many managers actually claim in a given round: the
-    number of players gone before your turn is not your pick number, it is the
-    number of managers ahead of you who bother to submit anything. That is a
-    property of this league and is measurable from nothing but its own log.
+    Two figures, both measurable from nothing but this league's own log. How many
+    managers actually claim in a given round — the number of players gone before
+    your turn is not your pick number, it is the number of managers ahead of you
+    who bother to submit anything. And **where those claims land**, which is what
+    the reachability bands are calibrated on: a position the league rarely shops
+    at is not contested however badly a rival is ranked there.
+
+    The element to position map is built here from ``get_fpl_player_mapping()``,
+    which is itself cached, rather than taken as an argument — so this function's
+    cache key stays ``(league_id, n_managers)`` and no caller has to assemble a
+    667-entry dict for Streamlit to hash.
 
     Returns ``{}`` on any failure — the queue expander then states the rule
-    without the calibrated line, rather than quoting a fabricated rate.
+    without the calibrated line, and the bands abstain, rather than either
+    quoting a fabricated rate.
     """
-    from scripts.common.waiver_priority import claim_history_stats
+    from scripts.common.waiver_priority import claim_history_stats, position_claim_rates
 
     try:
         df = _fetch_all_transactions(league_id)
         if df.empty:
             return {}
-        return claim_history_stats(df.to_dict("records"), n_managers=n_managers or None)
+        rows = df.to_dict("records")
+        stats = claim_history_stats(rows, n_managers=n_managers or None)
+        try:
+            positions = {
+                pid: info.get("Position")
+                for pid, info in (get_fpl_player_mapping() or {}).items()
+            }
+            stats["position_claim_rates"] = position_claim_rates(
+                rows, positions, n_managers=n_managers or None)
+        except Exception:
+            # The rates are the band's only input, so losing them disables the
+            # outlook. That is the intended degradation, and far better than
+            # falling back to the rival-need model this replaced.
+            _logger.warning("Unable to measure per-position claim rates", exc_info=True)
+            stats["position_claim_rates"] = {}
+        return stats
     except Exception:
         _logger.warning("Unable to summarise waiver claim history", exc_info=True)
         return {}
@@ -2339,9 +2469,12 @@ def _render_transaction_window(window: Dict[str, Any], locked_count: int,
     mode = window.get("mode")
     next_gw = window.get("next_event") or window.get("current_event")
 
-    if mode == TRANSACTION_MODE_FREE_AGENCY:
+    free_agency = mode == TRANSACTION_MODE_FREE_AGENCY
+    if free_agency:
         window_icon, window_label = "🟢", "Free Agency open"
-        window_note = "Available players can be added immediately"
+        # The exception matters: an "available" player who was just dropped is
+        # locked, and that is the only way a free-agency add can still fail.
+        window_note = "Adds process immediately — except players just dropped"
     else:
         window_icon, window_label = "⏳", "Waivers pending"
         window_note = "Requests process at the waiver deadline"
@@ -2377,6 +2510,11 @@ def _render_transaction_window(window: Dict[str, Any], locked_count: int,
             "You claim first" if n_ahead == 0
             else f"{n_ahead} manager{'s' if n_ahead != 1 else ''} claim before you"
         )
+        # `waiver_pick` is always the *next* round's order, so during free agency
+        # it is a plan rather than a live constraint. Unlabelled it reads as a
+        # queue you are sitting in today, which is the thing that is not running.
+        if free_agency:
+            pick_note = f"Next round · {pick_note}"
     else:
         pick_value = "—"
         pick_note = "Waiver order unavailable"
@@ -2449,12 +2587,21 @@ def show_waiver_wire_page():
 
     my_entry_id = getattr(config, "FPL_DRAFT_TEAM_ID", None)
 
+    # Which window is open decides whether reachability is a question at all: in
+    # free agency an available player is simply added, so there is no queue to be
+    # beaten in. An unreadable mode is *not* treated as free agency — see
+    # `_build_waiver_context`.
+    _mode = transaction_window.get("mode")
+    _free_agency = _mode == TRANSACTION_MODE_FREE_AGENCY
+    _waiver_gw = (transaction_window.get("next_event")
+                  or transaction_window.get("current_event"))
+
     with window_container:
         _render_transaction_window(transaction_window, locked_count,
                                    waiver_order, my_entry_id)
         _render_waiver_queue(waiver_order, my_entry_id, _waiver_claim_stats(
             config.FPL_DRAFT_LEAGUE_ID, len(waiver_order)
-        ))
+        ), free_agency=_free_agency)
 
     # Suggestion view controls. They render inside the suggestion container at the
     # top of the page, but have to be *created* here — before the search runs —
@@ -2772,7 +2919,8 @@ def show_waiver_wire_page():
     suggestions = []
     debug_rows: List[Dict] = []
     total_found = 0
-    waiver_context = _build_waiver_context(waiver_order, my_entry_id, current_gw)
+    waiver_context = _build_waiver_context(waiver_order, my_entry_id, current_gw,
+                                           transaction_mode=_mode)
     if not my_roster.empty and not avail_all.empty and sugg_positions:
         try:
             avail_all = _compute_waiver_score(avail_all, fpl_stats, current_gw=current_gw)
@@ -2803,9 +2951,10 @@ def show_waiver_wire_page():
             st.info("Select at least one position above to see transfer suggestions.")
         else:
             _render_transfer_suggestions(
-                suggestions, current_gw=current_gw, total_found=total_found
+                suggestions, current_gw=current_gw, total_found=total_found,
+                free_agency=_free_agency, waiver_gw=_waiver_gw,
             )
-            _render_claim_plan(suggestions)
+            _render_claim_plan(suggestions, free_agency=_free_agency)
         _render_transfer_debug(debug_rows)
 
     st.markdown("---")
@@ -2880,7 +3029,6 @@ def show_waiver_wire_page():
     # Availability badge. Locked players stay in the table on purpose — they are
     # the next waiver round's targets — but they are never suggested as transfers.
     if "Draft_State" in _display_avail.columns:
-        _waiver_gw = transaction_window.get("next_event") or transaction_window.get("current_event")
         _locked_label = f"🔒 Locked (GW{_waiver_gw} waiver)" if _waiver_gw else "🔒 Locked"
         _display_avail["Status"] = np.where(
             _display_avail["Draft_State"] == ELEMENT_STATE_LOCKED,

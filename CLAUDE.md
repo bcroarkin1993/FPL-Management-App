@@ -2418,6 +2418,7 @@ to import from GitHub Actions.
 | `check_team_strength()` | Degenerate power rankings — every team scoring ~50 because position codes were `GKP/DEF/MID/FWD` instead of `G/D/M/F`, short squads, impossible injury costs |
 | `check_resolved_squad()` | A Classic squad that is illegal (size, duplicates, >3 per club, negative bank from double-applied transfer arithmetic) or **stale** — the last-deadline fifteen presented as current, whose every individual value is plausible |
 | `check_element_states()` | Draft player states changing shape — an unknown `status` code, `owner` disagreeing with the status, an owned count that isn't teams x 15. Every one makes locked players read as available, so the Waiver Wire suggests players who cannot be picked up |
+| `check_position_claim_rates()` | Per-position waiver claim rates that could not have happened — a negative one, or one above the position's squad quota (2/5/5/3), which is the signature of a denominator that lost its round or manager count and inflates every band at once. These rates are the **only** input to the reachability pills, so a wrong one mislabels every suggestion at that position while each pill still reads as a plausible opinion. An empty mapping is the documented "unmeasurable" answer and is not an error; a single observed round is a *warning* |
 | `check_waiver_order()` | A waiver queue that is not a queue — a gap or repeat in the 1..N picks, a manager missing from it, or **your own entry absent**, which is the two-id-space trap whose only other symptom is an empty join that reads on the page as "you have no waiver pick". Disagreement with the standings is a *warning*: a successful claim rotates its manager to the back mid-gameweek |
 | `check_draft_game_settings()` | FPL changing a Draft rule this codebase hardcodes — the squad quota, the 50%/24h veto, the locked-player window, captains becoming a thing. Every one of these is a constant written down from the documentation, so a real change is otherwise invisible. An unreachable bootstrap is a **warning** (unknown), never an error (wrong) |
 | `check_blended_projections()` (start certainty) | A start probability of exactly **1.00** — the "no news means he plays" fallback outranking a source that had an opinion. Caught as a *self-contradiction*: the engine's own `Start_Pct__rotowire` decision sitting below the 1.00 it rendered. Abstains where no start model spoke at all, since the preseason pool legitimately resolves everyone to 1.00 |
@@ -3678,16 +3679,87 @@ inflates every contested figure.
 **The forward estimate is calibrated on participation, not on your pick number.**
 The players gone before your turn is the number of managers ahead of you who
 *claim at all*, which is a property of the league and measurable from nothing but
-its own log. Measured across five rounds: 76% participation, so at pick 7 expect
-~4.6 gone — against 5 actually observed in GW4 and 4 in GW5. Without history the
-rate is None and no figure is quoted, rather than assuming everyone claims.
+its own log. Without history the rate is None and no figure is quoted, rather
+than assuming everyone claims.
 
-Rival *need* reuses `aggregate_team_strength()` rather than inventing a second
-notion of squad strength. Bands are `likely` / `contested` / `long_shot`, and an
-unresolvable input renders **no badge at all** — the order or the power rankings
-being unavailable is not a finding about a player, and a neutral pill on every
-card is noise. The outlook is computed inside `_compute_transfer_suggestions()`,
-not at the callsite, for the same reason the locked-player filter is.
+**And it is calibrated on the *recent* rounds, because the rounds after a draft
+are churn.** Measured on league 11347 (2026-10-22), claimants per round ran 4,
+10, 10 for GW1-3 — every manager still reshaping a squad — and then 8, 6, 6, 7,
+6 for GW4-8. Averaging all eight reports **71%** where the last `RECENT_ROUNDS`
+(4) say **63%**, and the difference runs one way: an all-season mean describes a
+league as more active than it now is. `claim_history_stats()` reports both and
+every caller reads `participation_rate_recent`.
+
+**The bands are measured per position, not inferred from rival weakness.** They
+used to be: `rivals_needing` counted managers ahead of you ranked in the bottom
+third at a position, and `pos_rank <= needing` was a `long_shot` outright. That
+reads a positional *rank* as an intention to claim, stacking three assumptions at
+full weight — that the rival claims at all, that he claims at *this* position,
+and that he takes the best player there. The middle one is the one the league's
+own log refutes.
+
+Of 87 accepted claims across eight rounds: MID 36, DEF 29, FWD 18, **GK 4**. An
+active manager claims at only **1.77 of the four positions** (mode 1). So at pick
+6 of 10 the old model called the top two goalkeepers unreachable every round in a
+league that had accepted four GK claims all season, and — worst of all — made the
+top **four** forwards long shots off `needing = 4`, at the position its log claims
+second-least. In the default "Best per position" view that is every card on the
+page reading `Long shot`, which is what it was reported for.
+
+`position_claim_rates()` measures accepted claims per manager per round at each
+position over the recent window, and `expected_taken_at_position()` scales it by
+the managers ahead. `E` live: MID 2.38, DEF 1.25, FWD 0.50, GK 0.13. Then:
+
+| Band | Rule |
+|---|---|
+| `long_shot` | `pos_rank <= floor(E)` — inside the sweep |
+| `contested` | `E >= CONTESTED_MIN_EXPECTED` (0.5) and `pos_rank <= floor(E) + 1` |
+| `contested` | or `overall_rank <= expected_gone` — a board-wide standout |
+| `likely` | otherwise |
+
+`floor(E)` is "the top N here are expected to be gone" and the contested band
+always extends exactly one rank past it, so a partial expectation reads as a
+borderline rather than being dropped. `CONTESTED_MIN_EXPECTED` is what keeps
+goalkeeper silent: below an even chance that a *single* player goes at a
+position, there is nothing to warn about. Live effect, same data both sides —
+GK #1-#2 `long_shot` → nothing flagged; DEF #1-#2 → #1 `long_shot`, #2
+`contested`; MID #1-#2 → #1-#2 `long_shot`, #3 `contested`; FWD #1-#4 → #1
+`contested` alone.
+
+**Accepted claims, never submitted ones**, since a declined claim took nobody off
+the board and `di` rows trail an acceptance several deep — the same double-count
+`contested_share` avoids. Rival *need* still reuses `aggregate_team_strength()`
+rather than inventing a second notion of squad strength, but it is now a trailing
+clause on the reason string and sets nothing, appended **only when non-zero** so
+a card cannot read "none of them is short here" beside a `contested` pill.
+
+**A league with no measured rates is not banded at all.** The old model would
+band a league it had never observed, straight off Power Rankings; now an
+unresolvable input renders **no badge** — the order, the log or the power
+rankings being unavailable is not a finding about a player, and a neutral pill on
+every card is noise. The outlook is computed inside
+`_compute_transfer_suggestions()`, not at the callsite, for the same reason the
+locked-player filter is.
+
+**The bands describe a queue, so free agency switches them off entirely.** Once
+waivers have processed an available player is simply *added*: there is no
+priority to spend, nobody to be beaten to him by, and nothing is a long shot.
+`transaction_mode` reached three places on the page (the banner card, the
+locked-status badge, the deadline) but never the outlook, so for a year the cards
+badged queue contention in a window with no queue.
+`_build_waiver_context()` now returns `{}` there, which is the whole suppression
+— the pill, the reason line and the claim-plan parenthetical all key off an empty
+context — and free agency stops paying for `build_league_strength()` as a bonus.
+An **unreadable** mode keeps the bands: a transient `/league/{id}/details`
+failure must not be indistinguishable from free agency.
+
+The rest of the page re-frames rather than disappearing, because planning the
+next round is exactly what free agency is for: "Suggested claim order" becomes
+"Suggested pickup order" (adds process immediately, no priority is spent), the
+queue expander and the waiver-pick card say they describe the **next** round, and
+the suggestion caption names the one exception that still bites — **a player
+dropped this week is locked and cannot be picked up as a free agent**, entering
+the next waiver round instead.
 
 ### Deadlines are published too — stop deriving them
 
@@ -3890,6 +3962,17 @@ transactions   : 160 rows -> 136 'w' / 24 'f'; 87 'a', 58 'di', 15 'do'
                  76% of managers claim per round; peak contention 8 on one player
 ```
 
+Re-measured 2026-10-22 at GW8, which is what the reachability bands are
+calibrated on (`position_claim_rates()`, `claim_history_stats()`):
+
+```
+transactions   : 200 rows -> 170 'w' / 30 'f'; 87 'a', 64 'di', 19 'do'
+                 8 waiver rounds; claimants 4, 10, 10, 8, 6, 6, 7, 6 of 10
+                 participation 71% all-season, 63% over the last 4 rounds
+                 accepted claims by position: MID 36, DEF 29, FWD 18, GK 4
+                 an active manager claims at 1.77 of the 4 positions (mode 1)
+```
+
 **The order is re-derived from rank each gameweek**, worst team first, and
 rotates within the round — which is why `waiver_pick` reads as the exact inverse
 of the standings between rounds and why `check_waiver_order()` only *warns* when
@@ -4007,7 +4090,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Season Highlights for Team Analysis | Best XI (optimal formation from top scorers), Team MVP (with starts/goals/assists/captain stats), Best Clubs (top 3 contributing EPL clubs); shared `team_analysis_helpers.py` module for Draft and Classic |
 | Advanced Player Statistics Table | 40+ columns with 8 presets (Essential, Attacking, Defensive, Per 90, ICT Focus, Fixture Focus, GK Stats, Regression); green-white-red color gradients; regression metrics (G-xG, A-xA, GI-xGI) to identify over/under performers; switched to Classic FPL API for price/ownership data |
 | Waiver Wire Transfer Suggestions | Top-3 position-locked swap suggestions with unified Player Value scoring, injury-aware hold logic, raised score-gap thresholds (elite/above-avg/weak tiers), multi-signal sanity check (vetoes ADD clearly worse on proj/season/3GW), 4-level FFP name fallback, and inline GW+3GW+season stats on each suggestion card |
-| Waiver claim reachability | Reads FPL's published `waiver_pick`, so the page knows where in the claim queue this manager sits and stops leading with targets six other managers see first. Banner card, queue expander, a `likely`/`contested`/`long_shot` band per suggestion driven by Power Rankings positional need, and a priority-ordered claim plan built on "a failed claim costs nothing". Calibrated on the league's own transaction history. See "The queue is published" |
+| Waiver claim reachability | Reads FPL's published `waiver_pick`, so the page knows where in the claim queue this manager sits and stops leading with targets six other managers see first. Banner card, queue expander, a `likely`/`contested`/`long_shot` band per suggestion, and a priority-ordered claim plan built on "a failed claim costs nothing". **The band is now measured per position from the league's own log rather than inferred from Power Rankings need**, over the recent rounds only — the inference over-called badly, flagging the top two goalkeepers every round in a league that accepts four GK claims a season and the top *four* forwards off a bottom-third rank. And it **switches off entirely in free agency**, where an available player is simply added and no claim is a long shot. See "The queue is published" |
 | Deadlines and rules read from FPL | `events[].waivers_time` / `trades_time` replace the hardcoded 25.5h/49.5h offsets (kept as fallback), and `check_draft_game_settings()` fires if FPL moves a rule the codebase compiles in. `draft_rank` joins onto the Draft Helper board as `FPL Rank` / `Δ` |
 | Error logging & better error messages | Added `error_helpers.py` module with structured logging and user-facing error display; added `timeout=30` to ~12 unprotected `requests.get()` calls; added `_logger.warning()` to ~15 silent `except` blocks; replaced ~13 generic error messages with actionable hints |
 | Luck-Adjusted Standings (All-Play Record) | Replaced simplistic average-based model with industry-standard All-Play Record (every team vs every other each GW); fixed 0-score filter bug; shared `luck_analysis.py` module for Draft and Classic H2H; color-styled standings tables with auto-sized height; added toggle to Classic H2H standings |

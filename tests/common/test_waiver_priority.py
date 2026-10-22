@@ -17,9 +17,11 @@ from scripts.common.waiver_priority import (
     claim_history_stats,
     claim_outlook,
     expected_gone_before,
+    expected_taken_at_position,
     managers_ahead,
     my_waiver_pick,
     parse_waiver_order,
+    position_claim_rates,
     rank_claim_plan,
     reconstruct_round_order,
     rival_needs,
@@ -71,6 +73,31 @@ def _gw5_transactions():
          "result": r, "kind": "w", "event": 5}
         for i, p, e, el, r in raw
     ]
+
+
+#: Element ids 1-4 are one player per position, so a fixture can say "a defender
+#: was claimed" without carrying the bootstrap.
+_POSITIONS = {1: "G", 2: "D", 3: "M", 4: "F"}
+
+
+def _rounds(spec, kind="w"):
+    """Waiver rows from ``{event: [(entry, element_in, result), ...]}``.
+
+    Shaped after league 11347's log: the early rounds are busy post-draft churn
+    and the later ones settle down, which is the difference the recency window
+    exists to see.
+    """
+    rows = []
+    idx = 0
+    for event in sorted(spec):
+        for entry, element_in, result in spec[event]:
+            idx += 1
+            rows.append({
+                "index": idx, "priority": 1, "entry": entry,
+                "element_in": element_in, "element_out": 99,
+                "result": result, "kind": kind, "event": event,
+            })
+    return rows
 
 
 class TestParsingThePublishedQueue:
@@ -149,6 +176,28 @@ class TestLeagueHistory:
         ]
         assert claim_history_stats(rows, n_managers=10)["claimants_per_event"] == {5: 6}
 
+    def test_the_recent_window_is_reported_beside_the_season(self):
+        """They disagree, and systematically — post-draft rounds are churn.
+
+        Live on league 11347: 71% across all eight rounds, 63% across the last
+        four. The bands and the expected-gone line read the recent one.
+        """
+        rows = _rounds({
+            1: [(e, 3, "a") for e in range(1, 11)],   # 10 of 10 claim
+            2: [(e, 3, "a") for e in range(1, 11)],
+            3: [(1, 3, "a"), (2, 3, "a")],            # 2 of 10
+            4: [(1, 3, "a"), (2, 3, "a")],
+        })
+        stats = claim_history_stats(rows, n_managers=10, recent_rounds=2)
+        assert stats["participation_rate"] == pytest.approx(0.6)
+        assert stats["participation_rate_recent"] == pytest.approx(0.2)
+        assert stats["recent_events"] == [3, 4]
+
+    def test_a_short_log_makes_the_two_figures_agree(self):
+        stats = claim_history_stats(_gw5_transactions(), n_managers=10)
+        assert stats["participation_rate"] == pytest.approx(0.6)
+        assert stats["participation_rate_recent"] == pytest.approx(0.6)
+
     def test_no_history_gives_no_rate_rather_than_a_made_up_one(self):
         stats = claim_history_stats([], n_managers=10)
         assert stats["participation_rate"] is None
@@ -182,35 +231,159 @@ class TestRivalNeeds:
         assert rival_needs(self._team_df(), order, 56094) == {}   # first pick
 
 
+class TestPositionClaimRates:
+    """Where a league's claims actually land, which is what the bands rest on."""
+
+    def test_rates_are_accepted_claims_per_manager_per_round(self):
+        rows = _rounds({
+            7: [(1, 3, "a"), (2, 3, "a"), (3, 2, "a")],
+            8: [(1, 3, "a"), (2, 2, "a")],
+        })
+        rates = position_claim_rates(rows, _POSITIONS, n_managers=10)
+        # 3 midfielders and 2 defenders over 2 rounds x 10 managers.
+        assert rates["M"] == pytest.approx(3 / 20)
+        assert rates["D"] == pytest.approx(2 / 20)
+        assert rates["G"] == 0.0 and rates["F"] == 0.0
+
+    def test_a_declined_claim_took_nobody_off_the_board(self):
+        """`di` rows trail an acceptance several deep — counting them double-counts."""
+        rows = _rounds({8: [(1, 3, "a"), (2, 3, "di"), (3, 3, "di"), (4, 3, "do")]})
+        rates = position_claim_rates(rows, _POSITIONS, n_managers=10)
+        assert rates["M"] == pytest.approx(1 / 10)
+
+    def test_only_the_recent_rounds_calibrate(self):
+        """Post-draft churn is not how a league behaves in October.
+
+        Live on league 11347 the first three rounds ran 40/100/100% participation
+        and the last four 60-70%, so an all-season mean reports a league as more
+        active than it now is.
+        """
+        rows = _rounds({
+            1: [(e, 3, "a") for e in range(1, 11)],   # everyone claims a MID
+            2: [(e, 3, "a") for e in range(1, 11)],
+            3: [(e, 3, "a") for e in range(1, 11)],
+            4: [(1, 3, "a")],
+            5: [(1, 3, "a")],
+            6: [(1, 3, "a")],
+            7: [(1, 3, "a")],
+        })
+        recent = position_claim_rates(rows, _POSITIONS, n_managers=10,
+                                      recent_rounds=4)
+        whole = position_claim_rates(rows, _POSITIONS, n_managers=10,
+                                     recent_rounds=99)
+        assert recent["M"] == pytest.approx(4 / 40)     # 4 claims, 4 rounds
+        assert whole["M"] == pytest.approx(34 / 70)
+        assert recent["M"] < whole["M"]
+
+    def test_free_agency_rows_are_not_waiver_history(self):
+        rows = _rounds({8: [(1, 3, "a")]}, kind="f")
+        assert position_claim_rates(rows, _POSITIONS, n_managers=10) == {}
+
+    def test_an_unresolved_player_is_skipped_not_bucketed(self):
+        """A missing element would otherwise deflate every position at once."""
+        rows = _rounds({8: [(1, 3, "a"), (2, 777, "a")]})
+        rates = position_claim_rates(rows, _POSITIONS, n_managers=10)
+        assert rates["M"] == pytest.approx(1 / 10)
+        assert sum(rates.values()) == pytest.approx(1 / 10)
+
+    def test_nothing_measurable_is_unknown_not_zero(self):
+        rows = _rounds({8: [(1, 3, "a")]})
+        assert position_claim_rates(rows, _POSITIONS, n_managers=None) == {}
+        assert position_claim_rates(rows, None, n_managers=10) == {}
+        assert position_claim_rates([], _POSITIONS, n_managers=10) == {}
+        assert position_claim_rates(None, _POSITIONS, n_managers=10) == {}
+
+    def test_expected_taken_scales_by_the_managers_ahead(self):
+        rates = {"G": 0.025, "D": 0.25, "M": 0.475, "F": 0.10}
+        assert expected_taken_at_position("M", 5, rates) == pytest.approx(2.375)
+        assert expected_taken_at_position("G", 5, rates) == pytest.approx(0.125)
+        assert expected_taken_at_position("M", 0, rates) == 0.0
+
+    def test_an_unmeasured_rate_is_none_rather_than_zero(self):
+        assert expected_taken_at_position("M", 5, {}) is None
+        assert expected_taken_at_position("M", 5, None) is None
+        assert expected_taken_at_position("M", None, {"M": 0.5}) is None
+        assert expected_taken_at_position(None, 5, {"M": 0.5}) is None
+
+
 class TestClaimOutlook:
-    def test_the_best_available_at_a_position_several_rivals_need_is_a_long_shot(self):
-        out = claim_outlook("M", pos_rank=1, rivals_needing=4, n_ahead=6)
+    #: Measured on league 11347 (2026-10-22), pick 6 of 10 so 5 managers ahead.
+    LIVE_E = {"G": 0.125, "D": 1.25, "M": 2.375, "F": 0.5}
+
+    def _bands(self, pos, needing=0, ranks=range(1, 6)):
+        return [
+            claim_outlook(pos, r, 5, expected_at_position=self.LIVE_E[pos],
+                          rivals_needing=needing)["band"]
+            for r in ranks
+        ]
+
+    def test_the_top_of_a_position_the_league_shops_at_is_a_long_shot(self):
+        out = claim_outlook("M", pos_rank=1, n_ahead=5, expected_at_position=2.375)
         assert out["band"] == BAND_LONG_SHOT
-        assert "4 of the 6" in out["reason"]
+        assert "2.4 midfielders" in out["reason"]
 
-    def test_just_past_the_rivals_is_contested(self):
-        assert claim_outlook("M", 5, rivals_needing=4, n_ahead=6)["band"] == BAND_CONTESTED
+    def test_the_rank_past_the_sweep_is_contested_and_the_next_is_likely(self):
+        assert self._bands("M") == [
+            BAND_LONG_SHOT, BAND_LONG_SHOT, BAND_CONTESTED, BAND_LIKELY, BAND_LIKELY]
+        assert self._bands("D") == [
+            BAND_LONG_SHOT, BAND_CONTESTED, BAND_LIKELY, BAND_LIKELY, BAND_LIKELY]
 
-    def test_deep_enough_to_survive_them_is_likely(self):
-        out = claim_outlook("M", 9, rivals_needing=4, n_ahead=6)
-        assert out["band"] == BAND_LIKELY
+    def test_a_position_the_league_barely_claims_is_never_flagged(self):
+        """The regression this model exists for.
+
+        League 11347 accepted **four** goalkeeper claims in eight rounds, and the
+        old model called the top two goalkeepers unreachable every single round,
+        on nothing but two rivals being ranked badly there.
+        """
+        assert self._bands("G", needing=2) == [BAND_LIKELY] * 5
+
+    def test_rival_weakness_cannot_widen_the_band(self):
+        """Forward was the worst over-call: `needing=4` made #1-#4 long shots.
+
+        The log says forwards are 18 of 87 accepted claims, so at a mid-queue
+        pick only the very best one is even borderline.
+        """
+        assert self._bands("F", needing=4) == [
+            BAND_CONTESTED, BAND_LIKELY, BAND_LIKELY, BAND_LIKELY, BAND_LIKELY]
+        # ...and it cannot narrow it either: the band is the measurement alone.
+        assert self._bands("M", needing=0) == self._bands("M", needing=4)
+
+    def test_rival_weakness_survives_as_prose_only(self):
+        with_need = claim_outlook("M", 1, 5, expected_at_position=2.375,
+                                  rivals_needing=2)
+        without = claim_outlook("M", 1, 5, expected_at_position=2.375,
+                                rivals_needing=0)
+        assert with_need["band"] == without["band"]
+        assert "weakest at MID" in with_need["reason"]
+        # Never asserted where it would contradict the pill beside it.
+        assert "weakest" not in without["reason"]
 
     def test_board_position_catches_competition_from_managers_with_no_need(self):
-        """A standout target goes even when nobody ahead is short at his position."""
-        out = claim_outlook("M", 9, rivals_needing=0, n_ahead=6,
-                            expected_gone=4.6, overall_rank=2)
+        """A standout target goes even where the league rarely shops his position."""
+        out = claim_outlook("G", 3, 5, expected_at_position=0.125,
+                            expected_gone=3.6, overall_rank=2)
         assert out["band"] == BAND_CONTESTED
-        out = claim_outlook("M", 9, rivals_needing=0, n_ahead=6,
-                            expected_gone=4.6, overall_rank=30)
+        out = claim_outlook("G", 3, 5, expected_at_position=0.125,
+                            expected_gone=3.6, overall_rank=30)
         assert out["band"] == BAND_LIKELY
 
     def test_the_first_pick_is_never_contested(self):
-        assert claim_outlook("M", 1, rivals_needing=0, n_ahead=0)["band"] == BAND_LIKELY
+        assert claim_outlook("M", 1, 0)["band"] == BAND_LIKELY
+
+    def test_an_unmeasured_league_is_not_banded_at_all(self):
+        """A league whose log we have never seen gets no opinion.
+
+        The old model banded it anyway, straight off Power Rankings — which is
+        how it came to assert contention it had no evidence for.
+        """
+        assert claim_outlook("M", 1, 5)["band"] == BAND_UNKNOWN
+        assert claim_outlook("M", 1, 5, rivals_needing=4)["band"] == BAND_UNKNOWN
+        assert claim_outlook("M", 1, 5, rivals_needing=4)["reason"] == ""
 
     def test_missing_inputs_render_nothing_rather_than_a_guess(self):
-        assert claim_outlook("M", None, 3, 6)["band"] == BAND_UNKNOWN
-        assert claim_outlook("M", 1, 3, None)["band"] == BAND_UNKNOWN
-        assert claim_outlook("M", None, 3, 6)["reason"] == ""
+        assert claim_outlook("M", None, 6, expected_at_position=2.0)["band"] == BAND_UNKNOWN
+        assert claim_outlook("M", 1, None, expected_at_position=2.0)["band"] == BAND_UNKNOWN
+        assert claim_outlook("M", None, 6, expected_at_position=2.0)["reason"] == ""
 
 
 class TestClaimPlan:

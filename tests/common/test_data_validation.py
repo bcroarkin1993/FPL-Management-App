@@ -1284,6 +1284,61 @@ class TestLeagueTradeConfig:
             raise_on_error(self._check({"mode": "waivers"}))
 
 
+class TestCheckPositionClaimRates:
+    """The bands rest entirely on these rates, and a wrong one is silent.
+
+    Each rate is accepted claims per manager per round at one position. Get the
+    denominator wrong and every pill at that position is mislabelled while each
+    still reads as a plausible opinion -- the same shape of failure as the model
+    these replaced, which called the top two goalkeepers unreachable every round
+    in a league that accepted four goalkeeper claims all season.
+    """
+
+    #: Measured on league 11347 over its last four rounds (2026-10-22).
+    LIVE = {"G": 0.025, "D": 0.25, "M": 0.475, "F": 0.1}
+
+    def test_the_live_rates_are_clean(self):
+        from scripts.common.data_validation import check_position_claim_rates
+        assert check_position_claim_rates(self.LIVE, events_observed=4) == []
+
+    def test_unmeasurable_is_not_an_error(self):
+        """`{}` is the documented "we could not tell", and the page renders no badge."""
+        from scripts.common.data_validation import check_position_claim_rates
+        assert check_position_claim_rates({}) == []
+        assert check_position_claim_rates(None) == []
+
+    def test_a_negative_rate_errors(self):
+        from scripts.common.data_validation import check_position_claim_rates
+        issues = check_position_claim_rates({"M": -0.5})
+        assert issues and issues[0].severity == "error"
+
+    def test_a_rate_above_the_squad_quota_errors(self):
+        """More claims per round than a manager can hold means a lost divisor.
+
+        A denominator missing its round count inflates every position at once,
+        so the whole board reads as contested.
+        """
+        from scripts.common.data_validation import check_position_claim_rates
+        issues = check_position_claim_rates({"G": 3.0, "M": 6.0})
+        assert len([i for i in issues if i.severity == "error"]) == 2
+        assert any("squad quota of 2" in i.message for i in issues)
+
+    def test_a_rate_inside_its_quota_is_fine_however_busy(self):
+        from scripts.common.data_validation import check_position_claim_rates
+        assert check_position_claim_rates({"M": 4.9}, events_observed=4) == []
+
+    def test_a_non_numeric_rate_errors(self):
+        from scripts.common.data_validation import check_position_claim_rates
+        issues = check_position_claim_rates({"M": "lots"})
+        assert issues and issues[0].severity == "error"
+
+    def test_a_single_round_warns_rather_than_erroring(self):
+        """One round is a real measurement, just not a settled one."""
+        from scripts.common.data_validation import check_position_claim_rates
+        issues = check_position_claim_rates(self.LIVE, events_observed=1)
+        assert issues and all(i.severity == "warning" for i in issues)
+
+
 class TestCheckWaiverOrder:
     """The published waiver queue decides who sees a player first.
 

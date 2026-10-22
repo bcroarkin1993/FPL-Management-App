@@ -4,7 +4,8 @@ Three things this app now reads rather than infers, each of which would fail
 silently if the payload moved:
 
 * `league_entries[].waiver_pick` — the claim queue the Waiver Wire's reachability
-  bands rest on entirely.
+  bands rest on entirely, and the per-position claim rates read out of the
+  transaction log that decide where those bands fall.
 * `events[].waivers_time` / `trades_time` — the real deadlines, replacing the
   hardcoded offsets.
 * `settings` — the rulebook this codebase compiles in as constants.
@@ -19,14 +20,17 @@ import requests
 import config
 from scripts.common.data_validation import (
     check_draft_game_settings,
+    check_position_claim_rates,
     check_waiver_order,
     format_issues,
 )
 from scripts.common.waiver_priority import (
     claim_history_stats,
+    expected_taken_at_position,
     managers_ahead,
     my_waiver_pick,
     parse_waiver_order,
+    position_claim_rates,
 )
 from tests.live.conftest import skip_if_unreachable
 
@@ -135,6 +139,90 @@ class TestTransactionLogStillDecodes:
             pytest.skip("No waiver rounds yet this season")
         assert 0.0 < stats["participation_rate"] <= 1.0
         assert stats["max_contention"] >= 1
+
+    def test_the_recent_window_is_measurable_and_differs_from_the_season(
+            self, transactions, league_details):
+        """The bands read the recent rate, so it has to exist.
+
+        They disagreed by 8 points live (63% against 71%) because the rounds
+        just after a draft are churn. Equality is legitimate for a short log, so
+        this asserts the figure is usable rather than that it is lower.
+        """
+        stats = claim_history_stats(
+            transactions, n_managers=len(league_details.get("league_entries", []))
+        )
+        if not stats["events_observed"]:
+            pytest.skip("No waiver rounds yet this season")
+        assert stats["recent_events"], "a log with rounds in it must name a window"
+        assert 0.0 < stats["participation_rate_recent"] <= 1.0
+
+    def test_per_position_claim_rates_are_plausible(
+            self, transactions, league_details, bootstrap):
+        """The only input to the reachability bands, so it is the thing to check.
+
+        A wrong rate mislabels every pill at that position while each still reads
+        as a plausible opinion — the silent failure `check_position_claim_rates()`
+        exists for. Measured 2026-10-22: MID 0.475, DEF 0.25, FWD 0.10, GK 0.025
+        accepted claims per manager per round.
+        """
+        pos_by_code = {1: "G", 2: "D", 3: "M", 4: "F"}
+        positions = {
+            e.get("id"): pos_by_code.get(e.get("element_type"))
+            for e in bootstrap.get("elements", [])
+        }
+        assert positions, "the Draft bootstrap published no elements"
+
+        n_managers = len(league_details.get("league_entries", []))
+        stats = claim_history_stats(transactions, n_managers=n_managers)
+        if not stats["events_observed"]:
+            pytest.skip("No waiver rounds yet this season")
+
+        rates = position_claim_rates(transactions, positions, n_managers=n_managers)
+        assert rates, (
+            "no per-position claim rates could be measured from a log that has "
+            "waiver rounds in it — the bands would silently abstain on every card"
+        )
+        issues = check_position_claim_rates(rates, stats["events_observed"])
+        assert not _errors(issues), format_issues(issues)
+
+        # Every position resolved, so a claim cannot have been dropped on the
+        # floor: an unresolved element deflates every rate at once.
+        accepted = [t for t in transactions
+                    if t.get("kind") == "w" and t.get("result") == "a"
+                    and t.get("event") in set(stats["recent_events"])]
+        resolved = sum(1 for t in accepted if positions.get(t.get("element_in")))
+        assert resolved == len(accepted), (
+            f"{len(accepted) - resolved} of {len(accepted)} accepted claims in "
+            f"the recent window name a player the bootstrap does not carry"
+        )
+
+    def test_the_expected_sweep_cannot_exceed_the_board(
+            self, transactions, league_details, bootstrap):
+        """`n_ahead x rate` is a count of players, and it has to be a small one.
+
+        The old model called the top four forwards unreachable at a mid-queue
+        pick; a figure that large again would mean the rates had broken, since no
+        league takes four of one position per round.
+        """
+        pos_by_code = {1: "G", 2: "D", 3: "M", 4: "F"}
+        positions = {
+            e.get("id"): pos_by_code.get(e.get("element_type"))
+            for e in bootstrap.get("elements", [])
+        }
+        entries = league_details.get("league_entries", [])
+        n_managers = len(entries)
+        rates = position_claim_rates(transactions, positions, n_managers=n_managers)
+        if not rates:
+            pytest.skip("No waiver rounds yet this season")
+
+        n_ahead = max(0, n_managers - 1)   # the worst case: you pick last
+        for pos in ("G", "D", "M", "F"):
+            expected = expected_taken_at_position(pos, n_ahead, rates)
+            assert expected is not None
+            assert 0.0 <= expected <= n_managers, (
+                f"{expected:.1f} {pos} expected gone before the last pick in a "
+                f"{n_managers}-team league — the rates have lost a divisor"
+            )
 
 
 class TestPublishedDeadlines:

@@ -432,19 +432,40 @@ class TestClaimReachabilityIsStampedInsideTheSearch:
              "Transfer Score": 0.72, "Draft_State": "a"},
         ])
 
-    def test_the_best_target_at_a_position_rivals_need_is_a_long_shot(self):
+    def test_the_top_of_a_position_the_league_shops_at_is_a_long_shot(self):
         from scripts.common.waiver_priority import BAND_LONG_SHOT
         from scripts.draft.waiver_wire import _compute_transfer_suggestions
 
         suggestions, _ = _compute_transfer_suggestions(
             self._avail_pair(), _roster(ROSTER), top_n=3,
             one_per_position=False, roster_candidates=None, avail_candidates=None,
-            waiver_context={"n_ahead": 6, "rival_needs": {"M": [1, 2, 3, 4]},
+            # 6 managers ahead x 0.40 midfielders each = 2.4 expected gone.
+            waiver_context={"n_ahead": 6, "claim_rates": {"M": 0.40},
+                            "rival_needs": {"M": [1, 2, 3, 4]},
                             "expected_gone": 4.6},
         )
         top = next(s for s in suggestions if s["add_player"] == "Top Mid")
         assert top["outlook_band"] == BAND_LONG_SHOT
-        assert "4 of the 6" in top["outlook_reason"]
+        assert "2.4 midfielders" in top["outlook_reason"]
+
+    def test_the_band_comes_from_the_rates_and_not_from_rival_weakness(self):
+        """Four rivals short at a position they never claim at is not contention.
+
+        This is the over-call the page was reported for: `rival_needs` alone made
+        the top four forwards long shots in a league whose log shows forwards are
+        18 of 87 accepted claims.
+        """
+        from scripts.common.waiver_priority import BAND_LIKELY
+        from scripts.draft.waiver_wire import _compute_transfer_suggestions
+
+        suggestions, _ = _compute_transfer_suggestions(
+            self._avail_pair(), _roster(ROSTER), top_n=3,
+            one_per_position=False, roster_candidates=None, avail_candidates=None,
+            waiver_context={"n_ahead": 6, "claim_rates": {"M": 0.01},
+                            "rival_needs": {"M": [1, 2, 3, 4]},
+                            "expected_gone": 0.0},
+        )
+        assert {s["outlook_band"] for s in suggestions} == {BAND_LIKELY}
 
     def test_a_deeper_target_at_the_same_position_survives_them(self):
         from scripts.common.waiver_priority import BAND_LIKELY
@@ -453,10 +474,24 @@ class TestClaimReachabilityIsStampedInsideTheSearch:
         suggestions, _ = _compute_transfer_suggestions(
             self._avail_pair(), _roster(ROSTER), top_n=3,
             one_per_position=False, roster_candidates=None, avail_candidates=None,
-            waiver_context={"n_ahead": 6, "rival_needs": {"M": []},
-                            "expected_gone": 0.0},
+            waiver_context={"n_ahead": 6, "claim_rates": {"M": 0.0},
+                            "rival_needs": {"M": []}, "expected_gone": 0.0},
         )
         assert {s["outlook_band"] for s in suggestions} == {BAND_LIKELY}
+
+    def test_a_league_with_no_measured_rates_is_not_banded(self):
+        """Power Rankings alone is not evidence about a rival's intentions."""
+        from scripts.draft.waiver_wire import _compute_transfer_suggestions
+
+        suggestions, _ = _compute_transfer_suggestions(
+            self._avail_pair(), _roster(ROSTER), top_n=3,
+            one_per_position=False, roster_candidates=None, avail_candidates=None,
+            waiver_context={"n_ahead": 6, "claim_rates": {},
+                            "rival_needs": {"M": [1, 2, 3, 4]},
+                            "expected_gone": None},
+        )
+        assert suggestions
+        assert all(s["outlook_band"] == "unknown" for s in suggestions)
 
     def test_no_waiver_context_leaves_the_band_blank_rather_than_neutral(self):
         """The order or the power rankings being unavailable is not a finding.
@@ -495,10 +530,158 @@ class TestClaimReachabilityIsStampedInsideTheSearch:
         suggestions, _ = _compute_transfer_suggestions(
             avail, _roster(ROSTER), top_n=3,
             one_per_position=False, roster_candidates=None, avail_candidates=None,
-            waiver_context={"n_ahead": 6, "rival_needs": {"M": [1]}, "expected_gone": 4.6},
+            waiver_context={"n_ahead": 6, "claim_rates": {"M": 0.40},
+                            "rival_needs": {"M": [1]}, "expected_gone": 4.6},
         )
         deep = next(s for s in suggestions if s["add_player"] == "Deep Mid")
         assert deep["outlook_band"] == BAND_LONG_SHOT, "he is now the #1 adjusted target"
+
+
+class TestFreeAgencyFraming:
+    """What the page says once the waiver round has processed.
+
+    Free agency is a different mechanic: an available player is simply added, so
+    there is no queue, no priority to spend and nothing to be beaten to. Every
+    line that describes a queue has to stop describing one -- and the single
+    exception has to be named, because a player dropped this week is locked and
+    is the one way an "available" player still cannot be had today.
+    """
+
+    STATS = {
+        "events_observed": 8,
+        "recent_events": [5, 6, 7, 8],
+        "participation_rate": 0.713,
+        "participation_rate_recent": 0.63,
+        "contested_share": 0.41,
+        "max_contention": 8,
+        "position_claim_rates": {"G": 0.025, "D": 0.25, "M": 0.475, "F": 0.1},
+    }
+
+    def _order(self, n=10):
+        return [{"pick": i, "entry_id": 56085 + i, "league_entry_id": 56181 + i,
+                 "team_name": "Team %d" % i} for i in range(1, n + 1)]
+
+    def _suggestions(self):
+        """Real suggestion payloads, from the real search.
+
+        Hand-built dicts drift out of step with `_build_suggestion()` and then
+        fail on a missing key rather than on the thing under test.
+        """
+        from scripts.draft.waiver_wire import _compute_transfer_suggestions
+
+        avail = _avail([
+            {"Player": "Top Mid", "Team": "NEW", "Position": "M", "Points": 6.5,
+             "Transfer Score": 0.90, "Draft_State": "a"},
+            {"Player": "Second Mid", "Team": "LIV", "Position": "M", "Points": 6.0,
+             "Transfer Score": 0.85, "Draft_State": "a"},
+        ])
+        # Two droppable players, so two moves assign and the claim plan renders
+        # (it returns early below two).
+        roster = _roster(ROSTER + [
+            {"Player": "Spare Mid", "Team": "BUR", "Position": "M", "Points": 1.2,
+             "Keep Score": 0.12, "Season_Points": 8},
+        ])
+        suggestions, _ = _compute_transfer_suggestions(
+            avail, roster, top_n=None, one_per_position=False,
+            roster_candidates=None, avail_candidates=None)
+        assert len(suggestions) >= 2, suggestions
+        return suggestions
+
+    def _captions(self, mock_streamlit):
+        return " ".join(
+            str(c.args[0]) if c.args else ""
+            for c in mock_streamlit["caption"].call_args_list
+        )
+
+    @staticmethod
+    def _expander_titles():
+        """`mock_streamlit["expander"]` is the patcher, not the started mock."""
+        from unittest.mock import MagicMock, patch
+
+        spy = MagicMock()
+        spy.return_value.__enter__ = MagicMock(return_value=None)
+        spy.return_value.__exit__ = MagicMock(return_value=None)
+        return patch("streamlit.expander", spy), spy
+
+    def test_the_cards_say_a_dropped_player_is_still_locked(self, mock_streamlit):
+        """The one exception to "adds process immediately"."""
+        import scripts.draft.waiver_wire as ww
+
+        ww._render_transfer_suggestions(self._suggestions(), current_gw=8,
+                                        total_found=2, free_agency=True,
+                                        waiver_gw=9)
+        text = self._captions(mock_streamlit)
+        assert "dropped this week is locked" in text
+        assert "GW9 waiver round" in text
+
+    def test_the_cards_say_nothing_about_free_agency_during_waivers(self, mock_streamlit):
+        import scripts.draft.waiver_wire as ww
+
+        ww._render_transfer_suggestions(self._suggestions(), current_gw=8,
+                                        total_found=2, free_agency=False)
+        assert "Free agency" not in self._captions(mock_streamlit)
+
+    def test_the_claim_plan_becomes_a_pickup_order(self, mock_streamlit):
+        """Presenting it as a ranked *request* list would describe a dead mechanic."""
+        import scripts.draft.waiver_wire as ww
+
+        sugg = self._suggestions()
+        pat, spy = self._expander_titles()
+        with pat:
+            ww._render_claim_plan(sugg, free_agency=True)
+        assert any("pickup order" in c.args[0] for c in spy.call_args_list)
+        text = self._captions(mock_streamlit)
+        assert "no waiver priority to spend" in text
+        assert "failed claim" not in text
+
+    def test_the_claim_plan_keeps_its_waiver_framing_during_waivers(self, mock_streamlit):
+        import scripts.draft.waiver_wire as ww
+
+        sugg = self._suggestions()
+        pat, spy = self._expander_titles()
+        with pat:
+            ww._render_claim_plan(sugg, free_agency=False)
+        assert any("claim order" in c.args[0] for c in spy.call_args_list)
+        assert "failed claim" in self._captions(mock_streamlit)
+
+    def test_the_queue_is_labelled_as_the_next_round(self, mock_streamlit):
+        """`waiver_pick` is always the next round's order, never today's."""
+        import scripts.draft.waiver_wire as ww
+
+        pat, spy = self._expander_titles()
+        with pat:
+            ww._render_waiver_queue(self._order(), 56091, self.STATS,
+                                    free_agency=True)
+        assert any("Next waiver round" in c.args[0] for c in spy.call_args_list)
+        assert "applies to the **next** waiver round" in self._captions(mock_streamlit)
+
+    def test_the_queue_quotes_the_recent_window_and_the_position_split(
+            self, mock_streamlit):
+        """The figures the bands are actually calibrated on.
+
+        63% over the last four rounds, not 71% over the season, and the
+        per-position expectation that replaced the rival-need inference.
+        """
+        import scripts.draft.waiver_wire as ww
+
+        ww._render_waiver_queue(self._order(), 56091, self.STATS)
+        text = self._captions(mock_streamlit)
+        assert "the last 4 waiver rounds" in text
+        assert "63% of managers claimed" in text
+        # 5 managers ahead of pick 6: MID 2.4, GK 0.1.
+        assert "MID 2.4" in text and "GK 0.1" in text
+
+    def test_the_window_card_names_the_locked_exception(self, mock_streamlit):
+        import scripts.draft.waiver_wire as ww
+
+        ww._render_transaction_window({"mode": "free-agency", "next_event": 9},
+                                      locked_count=3, waiver_order=self._order(),
+                                      my_entry_id=56091)
+        html = " ".join(str(c.args[0]) if c.args else ""
+                        for c in mock_streamlit["markdown"].call_args_list)
+        assert "except players just dropped" in html
+        # The waiver pick is next round's, and saying so is the point.
+        assert "Next round" in html
 
 
 class TestWaiverContextDegradesQuietly:
@@ -527,7 +710,46 @@ class TestWaiverContextDegradesQuietly:
                   "team_name": "Stoned Squirrels"}]
         with patch.object(ww, "_waiver_claim_stats", side_effect=AssertionError):
             ctx = ww._build_waiver_context(order, 56094, 5)
-        assert ctx == {"n_ahead": 0, "rival_needs": {}, "expected_gone": 0.0}
+        assert ctx == {"n_ahead": 0, "rival_needs": {}, "claim_rates": {},
+                       "expected_gone": 0.0}
+
+    def test_free_agency_disables_the_outlook_entirely(self):
+        """There is no queue to be beaten in, so no claim is a long shot.
+
+        An available player is simply added, so every band would be a statement
+        about a mechanic that is not running. An empty context is the whole
+        suppression: the pill, the reason line and the claim-plan parenthetical
+        all key off it.
+        """
+        from unittest.mock import patch
+        import scripts.draft.waiver_wire as ww
+
+        order = [{"pick": 1, "entry_id": 56094, "league_entry_id": 56190,
+                  "team_name": "Starboys"},
+                 {"pick": 2, "entry_id": 56086, "league_entry_id": 56182,
+                  "team_name": "Stoned Squirrels"}]
+        # Neither the claim history nor Power Rankings should be reached for --
+        # free agency is also the window that should cost the page the least.
+        with patch.object(ww, "_waiver_claim_stats", side_effect=AssertionError), \
+                patch("scripts.common.team_strength.build_league_strength",
+                      side_effect=AssertionError):
+            assert ww._build_waiver_context(
+                order, 56086, 5, transaction_mode="free-agency") == {}
+
+    def test_an_unreadable_window_keeps_the_outlook(self):
+        """An outage must not be indistinguishable from free agency.
+
+        `/league/{id}/details` failing leaves `mode` None, and suppressing on
+        that would silently delete the feature for the duration.
+        """
+        import scripts.draft.waiver_wire as ww
+
+        order = [{"pick": 1, "entry_id": 56094, "league_entry_id": 56190,
+                  "team_name": "Starboys"},
+                 {"pick": 2, "entry_id": 56086, "league_entry_id": 56182,
+                  "team_name": "Stoned Squirrels"}]
+        ctx = ww._build_waiver_context(order, 56094, 5, transaction_mode=None)
+        assert ctx.get("n_ahead") == 0
 
 
 class TestClaimsAreRankedInPoints:
