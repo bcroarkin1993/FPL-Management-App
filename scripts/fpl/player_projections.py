@@ -1442,7 +1442,11 @@ def render_accuracy():
         return
 
     gws = sorted(scored["gameweek"].unique())
-    if scored["gameweek"].nunique() < projection_accuracy.MIN_GAMEWEEKS_FOR_CONFIDENCE:
+    # The same count `confidence_note` reports, so the headline and the warning
+    # cannot disagree -- and pre-deadline only, because a backfill must not buy
+    # the page confidence it is refused for fitting weights.
+    if (projection_accuracy.confident_gameweeks(scored)
+            < projection_accuracy.MIN_GAMEWEEKS_FOR_CONFIDENCE):
         st.warning(note)
     else:
         st.caption(note)

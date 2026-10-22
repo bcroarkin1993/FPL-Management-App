@@ -640,6 +640,68 @@ class TestWhichSourceIsBest:
         assert acc.verdict(acc.SCOPE_STARTERS)["metric"] == "mae"
 
 
+class TestConfidenceCountsPreDeadlineOnly:
+    """A backfill must not buy the tab confidence it is refused for fitting.
+
+    `fit_blend_weights()` and `verdict(pre_only=True)` have always excluded
+    post-deadline captures -- a backfill can see team news no manager had, so
+    it flatters every source in it. The confidence gate counted them, and the
+    moment GW7 landed that broke: five gameweeks scoreable, one the GW3
+    backfill, so the headline read "5 gameweeks of history" with no warning
+    while the weight fit below it still said four and still warned.
+    """
+
+    @staticmethod
+    def _scored(captures):
+        """One row per gameweek, with the given capture kinds."""
+        return pd.DataFrame({
+            "gameweek": list(range(3, 3 + len(captures))),
+            "source": ["blend"] * len(captures),
+            "scope": ["starters"] * len(captures),
+            "capture": list(captures),
+            "mae": [2.0] * len(captures),
+        })
+
+    def test_a_backfill_does_not_count(self):
+        scored = self._scored(["backfill"] + ["pre-deadline"] * 4)
+        assert scored["gameweek"].nunique() == 5
+        assert acc.confident_gameweeks(scored) == 4
+
+    def test_the_note_still_warns_one_gameweek_short(self):
+        scored = self._scored(["backfill"] + ["pre-deadline"] * 4)
+        note = acc.confidence_note(scored)
+        assert "noise" in note
+        assert "4 pre-deadline gameweeks" in note
+
+    def test_the_note_names_the_gap_rather_than_hiding_it(self):
+        """Reporting a smaller number than the table shows rows for needs a
+        reason beside it."""
+        scored = self._scored(["backfill"] + ["pre-deadline"] * 4)
+        note = acc.confidence_note(scored)
+        assert "5 scored" in note and "after the deadline" in note
+
+    def test_enough_pre_deadline_gameweeks_stops_the_warning(self):
+        scored = self._scored(["backfill"] + ["pre-deadline"] * 5)
+        assert acc.confident_gameweeks(scored) == 5
+        note = acc.confidence_note(scored)
+        assert "noise" not in note
+
+    def test_no_backfills_reads_cleanly(self):
+        scored = self._scored(["pre-deadline"] * 5)
+        assert acc.confident_gameweeks(scored) == 5
+        assert "scored, but" not in acc.confidence_note(scored)
+
+    def test_a_frame_without_the_column_falls_back_to_the_row_count(self):
+        """The looser answer, which is the safe direction for a caller that
+        predates the capture column."""
+        scored = self._scored(["pre-deadline"] * 3).drop(columns=["capture"])
+        assert acc.confident_gameweeks(scored) == 3
+
+    def test_empty_is_zero_not_an_error(self):
+        assert acc.confident_gameweeks(pd.DataFrame()) == 0
+        assert acc.confident_gameweeks(None) == 0
+
+
 class TestHorizonLength:
     """How far ahead is worth projecting -- the question behind ROS's 40%.
 

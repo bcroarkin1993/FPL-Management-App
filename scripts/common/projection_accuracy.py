@@ -1139,20 +1139,58 @@ def _current_weights(sources: Sequence[str]) -> List[float]:
     return [w / total for w in raw]
 
 
+def confident_gameweeks(scored: pd.DataFrame) -> int:
+    """Gameweeks that may support a conclusion: **pre-deadline captures only**.
+
+    Not the row count. A backfill is a snapshot taken after the deadline, so it
+    can see team news -- in the limit, lineups -- that no manager had when they
+    picked, and it flatters every source in it. ``fit_blend_weights()`` and
+    ``verdict(pre_only=True)`` have always excluded them for that reason; the
+    confidence gate did not, and counted them.
+
+    That mattered the moment GW7 landed. Five gameweeks were scoreable, one of
+    them the GW3 backfill, so the tab's headline stopped disclaiming itself --
+    "5 gameweeks of history", no warning -- while the weight fit directly below
+    still said four and still warned. The page was presenting itself as
+    confident on the strength of a gameweek it refuses to fit on.
+
+    Falls back to the plain count where the frame carries no ``capture``
+    column, which is the looser answer and the safe direction for a caller that
+    predates it.
+    """
+    if scored is None or scored.empty:
+        return 0
+    if "capture" not in scored.columns:
+        return int(scored["gameweek"].nunique())
+    pre = scored[scored["capture"] != "backfill"]
+    return int(pre["gameweek"].nunique())
+
+
 def confidence_note(scored: pd.DataFrame) -> str:
     """A plain sentence about whether the sample supports any conclusion."""
     if scored is None or scored.empty:
         return ("No gameweek yet has both a projection snapshot and actual "
                 "points. Accuracy can be measured from the first completed "
                 "gameweek after snapshots began.")
-    gws = int(scored["gameweek"].nunique())
+    gws = confident_gameweeks(scored)
+    total = int(scored["gameweek"].nunique())
+    # "pre-deadline" is claimed only where the frame actually says so. Without
+    # a `capture` column the count is the plain one, and asserting a capture
+    # time we do not know would be worse than the looser wording.
+    kind = "pre-deadline gameweek" if "capture" in scored.columns else "gameweek"
+    # Name the gap rather than quietly reporting a smaller number than the
+    # table plainly shows rows for.
+    held = ("" if total == gws else
+            " (%d scored, but %d taken after the deadline and so not counted "
+            "towards this)" % (total, total - gws))
     if gws < MIN_GAMEWEEKS_FOR_CONFIDENCE:
-        return ("%d gameweek%s of history. Differences between sources this "
-                "small are noise -- treat the table as a sanity check, not a "
-                "verdict. At least %d gameweeks are needed before the ordering "
-                "means anything."
-                % (gws, "" if gws == 1 else "s", MIN_GAMEWEEKS_FOR_CONFIDENCE))
-    return "%d gameweeks of history." % gws
+        return ("%d %s%s of history%s. Differences between sources this small "
+                "are noise -- treat the table as a sanity check, not a "
+                "verdict. At least %d are needed before the ordering means "
+                "anything."
+                % (gws, kind, "" if gws == 1 else "s", held,
+                   MIN_GAMEWEEKS_FOR_CONFIDENCE))
+    return "%d %ss of history%s." % (gws, kind, held)
 
 
 # =============================================================================

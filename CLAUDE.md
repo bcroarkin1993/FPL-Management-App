@@ -1468,7 +1468,19 @@ manager had. Backfills are shown, clearly labelled, but `fit_blend_weights()`
 skips them: letting a flattered source move the weights the app runs on is
 exactly how a measurement harness makes things worse.
 
-**The UI refuses to overclaim.** Below `MIN_GAMEWEEKS_FOR_CONFIDENCE` (5) the
+**The UI refuses to overclaim**, and the gate counts **pre-deadline gameweeks,
+not scored ones** (`confident_gameweeks()`). A backfill is shown but never
+fitted on, because it can see team news no manager had — so counting it towards
+confidence contradicts the rule directly above. That is not hypothetical: the
+moment GW7 landed there were five scoreable gameweeks, one of them the GW3
+backfill, and the headline stopped disclaiming itself ("5 gameweeks of
+history", no warning) while `fit_blend_weights` directly below it still said
+four and still warned. The page read as confident on the strength of a gameweek
+it refuses to fit on. The note now names the gap rather than quietly reporting
+a smaller number than the table shows rows for, and says "pre-deadline" only
+where the frame carries a `capture` column to prove it.
+
+Below `MIN_GAMEWEEKS_FOR_CONFIDENCE` (5) the
 tab warns that differences this small are noise and that the configured weights
 are deliberately left alone. With nothing scoreable it says which half is
 missing for which gameweek, rather than rendering blank — that is the state

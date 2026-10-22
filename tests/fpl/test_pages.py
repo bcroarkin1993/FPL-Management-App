@@ -967,3 +967,55 @@ class TestAccuracyHorizonSection:
             tables, text = self._render()
         assert tables == []
         assert "cannot be scored" in text
+
+
+class TestAccuracyConfidenceGate:
+    """The tab's warning and its headline must use one count.
+
+    They diverged: the gate counted every scored gameweek while the note it
+    rendered counted pre-deadline ones, so the page could show a confident
+    caption above a weight fit that still disclaimed itself.
+    """
+
+    @staticmethod
+    def _scored(captures):
+        return pd.DataFrame({
+            "gameweek": list(range(3, 3 + len(captures))),
+            "source": ["blend"] * len(captures),
+            "scope": ["starters"] * len(captures),
+            "capture": list(captures),
+            "mae": [2.0] * len(captures),
+            "bias": [0.0] * len(captures),
+            "spearman": [0.5] * len(captures),
+            "n": [100] * len(captures),
+            "coverage": [1.0] * len(captures),
+        })
+
+    def _render(self, captures):
+        from scripts.fpl import player_projections as pp
+        warned, captioned = [], []
+        with patch.object(pp.projection_accuracy, "score_archive",
+                          return_value=self._scored(captures)), \
+             patch.object(pp, "_render_verdict"), \
+             patch.object(pp, "_render_horizon_length"), \
+             patch.object(pp, "_render_start_section", create=True), \
+             patch.object(pp, "_render_weight_fit"), \
+             patch.object(pp, "render_styled_table"), \
+             patch("streamlit.warning", side_effect=lambda t, **k: warned.append(str(t))), \
+             patch("streamlit.caption", side_effect=lambda t, **k: captioned.append(str(t))), \
+             patch("streamlit.markdown"), patch("streamlit.info"), \
+             patch("streamlit.expander"), patch("streamlit.columns",
+                                                return_value=[MagicMock(), MagicMock()]):
+            pp.render_accuracy()
+        return warned, captioned
+
+    def test_a_backfill_does_not_silence_the_warning(self, mock_streamlit):
+        """Five scored gameweeks, one a backfill -> still four, still warned."""
+        warned, _ = self._render(["backfill"] + ["pre-deadline"] * 4)
+        assert any("noise" in w for w in warned), (
+            "the page went confident on a gameweek it refuses to fit on")
+
+    def test_five_pre_deadline_gameweeks_stops_warning(self, mock_streamlit):
+        warned, captioned = self._render(["pre-deadline"] * 5)
+        assert not any("noise" in w for w in warned)
+        assert any("pre-deadline gameweeks of history" in c for c in captioned)
