@@ -1706,6 +1706,24 @@ Two known gaps are why this is a tolerance and not equality: `chance_of_playing`
 is not archived, so FPL's availability ceiling cannot be reapplied (9 rows in
 1,315), and `priced` reads a genuine zero projection as unpriced.
 
+**A cohort holds one constant but not only one value, and reading it as "exactly
+one" broke on the first revision-3 snapshot.** `_snapshot_constants()` split the
+floor/prior cohorts by `priced` — who Rotowire's weekly *article* priced — while
+from revision 3 `Start_Pct__rotowire` follows its *projected-lineups page*. The
+two disagree for a handful of players a week: 6 of 668 at GW8, three swaps across
+Crystal Palace, Leeds and Sunderland. That put the floor *and* the prior inside
+one cohort, recovery returned `(None, None)`, and the fitter refused **every**
+revision-3+ snapshot permanently — the "broken by its own last answer" failure
+the paragraph above exists to avoid, arriving by a different door. GW7 shows 0
+such players because the signal did not exist yet, which is why this stayed
+invisible until GW8 was collected.
+
+The constant is now the cohort's **modal** value, rejected only where no value
+dominates (`MIN_COHORT_DOMINANCE`, 0.75 — the observed worst case is 0.91, 21 of
+23 forwards, so the margin is for small-cohort noise rather than drift).
+Labelling by `priced` rather than by taking the larger of the two values keeps it
+correct if a retune ever ordered a floor below a prior.
+
 **The search is exact rather than greedy, because the constants are separable.**
 Both are applied as `positions.map(...)` and a player is in exactly one position
 and one cohort, so a goalkeeper's floor cannot touch a midfielder's row. One
@@ -3937,6 +3955,19 @@ is `settings.transactions.waivers_before_deadline_hours_event`, a per-gameweek
 override of the waiver window — the article's "less when gameweeks are close
 together" — that arithmetic over the fixture list cannot see. It is empty for
 this whole season, and `check_draft_game_settings()` warns if it stops being.
+
+**And FPL has now published one.** Observed 2026-10-28,
+`waivers_before_deadline_hours_event` is `{'14': 21}` and GW14's published window
+is indeed 21h/45h — so the override stopped being empty, `check_draft_game_settings()`
+warns about it as designed, and the published path carries the right deadline.
+
+`DRAFT_OFFSET_HOURS` / `TRADE_APPROVAL_LEAD_HOURS` are deliberately **not** taught
+to read it: they are the fallback for an unreachable bootstrap, and `settings` is
+unreachable in exactly that case, so a per-gameweek override is inexpressible
+there by construction. The live test derives its expectation from the override
+instead of a flat 24h/48h, which pins strictly more than before — that the
+published times *honour* the stated override, and that trades stay exactly 24h
+ahead of waivers.
 
 This also collapses the midweek look-ahead in `resolve_trade_deadline()` to a
 lookup: the reasoning in its docstring stays as the *why*, but walking `events`

@@ -231,15 +231,32 @@ class TestPublishedDeadlines:
         missing = [e["id"] for e in events if not e.get("waivers_time")]
         assert not missing, f"gameweeks with no published waivers_time: {missing}"
 
-    def test_the_offsets_the_app_falls_back_to_still_match(self, bootstrap):
-        """waivers = deadline - 24h, trades = deadline - 48h, for all 38.
+    def test_the_published_windows_match_24h_48h_or_a_stated_override(self, bootstrap):
+        """waivers = deadline - 24h and trades 24h before that, unless FPL says otherwise.
 
-        If FPL ever varies these, the *published* path stays correct and only the
-        fallback constants go stale — so this is the prompt to revisit them, not
-        evidence the app is currently wrong.
+        **FPL does now say otherwise.** Observed 2026-10-28,
+        `settings.transactions.waivers_before_deadline_hours_event` is
+        `{'14': 21}` and GW14's published window is indeed 21h/45h — the
+        per-gameweek override CLAUDE.md predicted would eventually appear, and
+        which arithmetic over the fixture list cannot see.
+
+        So the expectation is derived from the override rather than fixed at 24.
+        That is strictly more than the flat assertion checked: it now also pins
+        that the published times *honour* the stated override, and that trades
+        stay exactly 24h ahead of waivers.
+
+        `DRAFT_OFFSET_HOURS` / `TRADE_APPROVAL_LEAD_HOURS` in `waiver_alerts.py`
+        are deliberately **not** taught to read the override. They are the
+        fallback for an unreachable bootstrap, and `settings` is unreachable in
+        exactly that case — so a per-gameweek override is inexpressible there by
+        construction. That is the whole reason `published_deadlines()` is the
+        primary path, and `check_draft_game_settings()` warns when overrides
+        start being published so the gap is visible rather than silent.
         """
         from scripts.common.waiver_alerts import _iso_to_et
 
+        overrides = (((bootstrap.get("settings") or {}).get("transactions") or {})
+                     .get("waivers_before_deadline_hours_event")) or {}
         off = []
         for e in bootstrap["events"]["data"]:
             deadline = _iso_to_et(e.get("deadline_time"))
@@ -249,12 +266,16 @@ class TestPublishedDeadlines:
                 continue
             w_h = (deadline - waivers).total_seconds() / 3600
             t_h = (deadline - trades).total_seconds() / 3600
-            if abs(w_h - 24) > 0.01 or abs(t_h - 48) > 0.01:
-                off.append((e["id"], w_h, t_h))
+            want_w = float(overrides.get(str(e["id"]), 24))
+            want_t = want_w + 24
+            if abs(w_h - want_w) > 0.01 or abs(t_h - want_t) > 0.01:
+                off.append({"gw": e["id"], "waivers_h": w_h, "trades_h": t_h,
+                            "expected": (want_w, want_t)})
         assert not off, (
-            "gameweeks whose windows are not the standard 24h/48h: %r. The "
-            "published path handles this; DRAFT_OFFSET_HOURS / "
-            "TRADE_APPROVAL_LEAD_HOURS in waiver_alerts.py no longer do." % off
+            "published windows that match neither 24h/48h nor a stated "
+            "per-gameweek override: %r. If the override list explains it, read "
+            "it here; if not, FPL has varied the windows silently and only the "
+            "published path is still correct." % off
         )
 
     def test_the_resolver_reads_the_live_calendar(self, bootstrap):

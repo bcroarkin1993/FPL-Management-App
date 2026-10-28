@@ -850,6 +850,14 @@ def _start_replay_inputs(gameweeks: Optional[Sequence[int]] = None) -> List[dict
     return out
 
 
+#: Share of a cohort its modal value must hold for that value to be read as the
+#: constant which built the snapshot. From revision 3 a cohort legitimately
+#: carries a few of the other constant -- `Start_Pct__rotowire` follows the
+#: lineups page while `priced` follows the article -- and the observed worst case
+#: is 0.91. Below this the cohort is genuinely split and recovers nothing.
+MIN_COHORT_DOMINANCE = 0.75
+
+
 def _snapshot_constants(one: pd.DataFrame, priced: pd.Series):
     """The floors and implied values this snapshot was built with, recovered.
 
@@ -862,9 +870,24 @@ def _snapshot_constants(one: pd.DataFrame, priced: pd.Series):
     Nothing extra needs storing, because the engine already records the decision
     per player: ``Start_Pct__rotowire`` holds the positional floor where Rotowire
     listed a player and the implied value where it did not. Both are constant
-    within a position, so the unique value per cohort *is* the constant. Returns
-    ``(None, None)`` for a snapshot predating that column, which then has no way
-    to prove what built it.
+    within a position, so the dominant value per cohort *is* the constant.
+    Returns ``(None, None)`` for a snapshot predating that column, which then has
+    no way to prove what built it.
+
+    **The cohort holds one constant but not only one value, and reading it as
+    "exactly one" broke on the first revision-3 snapshot.** ``priced`` is who
+    Rotowire's weekly *article* priced; from revision 3, ``Start_Pct__rotowire``
+    follows its *projected-lineups page* instead, and the two disagree for a
+    handful of players a week -- 6 of 668 at GW8, three swaps across Crystal
+    Palace, Leeds and Sunderland. That put the floor *and* the prior inside one
+    cohort, so recovery returned nothing and the start-constant fitter refused
+    every revision-3+ snapshot permanently, which is exactly the "broken by its
+    own last answer" failure the paragraph above exists to avoid.
+
+    So the constant is the cohort's **modal** value, and the cohort is rejected
+    only when no value dominates it (``MIN_COHORT_DOMINANCE``). Labelling by
+    ``priced`` rather than by taking the larger value keeps this correct if a
+    future retune ever ordered a floor below a prior.
     """
     col = one.get("start_pct__rotowire")
     if col is None or not pd.to_numeric(col, errors="coerce").notna().any():
@@ -878,12 +901,17 @@ def _snapshot_constants(one: pd.DataFrame, priced: pd.Series):
     for cohort, mask in (("listed", priced), ("omitted", ~priced)):
         found = {}
         for pos, grp in values[mask].groupby(positions[mask]):
-            uniq = grp.dropna().unique()
-            # More than one value in a cohort means this is not the constant it
-            # is being read as, so recover nothing rather than a plausible guess.
-            if len(uniq) != 1:
+            vals = grp.dropna()
+            if vals.empty:
+                continue
+            counts = vals.value_counts()
+            # A cohort with no dominant value is not the constant it is being
+            # read as, so recover nothing rather than a plausible guess. Observed
+            # worst case is 0.91 (21 of 23 forwards at GW8), so the margin here
+            # is for small-cohort noise and not for drift.
+            if counts.iloc[0] < MIN_COHORT_DOMINANCE * len(vals):
                 return None, None
-            found[str(pos)] = float(uniq[0])
+            found[str(pos)] = float(counts.index[0])
         recovered[cohort] = found or None
     return recovered.get("listed"), recovered.get("omitted")
 
