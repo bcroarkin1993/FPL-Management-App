@@ -6,10 +6,13 @@ copies of "the blend" quietly disagreeing. Every test here is written against a
 real failure the app shipped, not an invented edge case.
 """
 
+from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from scripts.common import projection_engine
 from scripts.common.projection_engine import (
     blend_aligned,
     build_projections,
@@ -909,3 +912,160 @@ class TestMultiGameweekBasis:
                                 weights={"ffp": 1.0})
         assert out.loc[1, "Proj"] == pytest.approx(5.0)
         assert out.loc[1, "Proj_Next3"] == pytest.approx(15.0)
+
+
+class TestCombiningSeveralProjectedXIs:
+    """**Unanimous to bench**, which is the whole safety property.
+
+    Promoting a player is a claim about him alone and can only lift him toward a
+    positional floor. Benching him is a claim about everyone an XI leaves out,
+    and it *inverts* his projection -- reported from the app at GW8, where three
+    published XIs agreed on only eight of Manchester City's eleven and Phil
+    Foden, named by two of the three, read 0.21 because the third was silent.
+    """
+
+    IDX = pd.Index([1, 2, 3, 4, 5])
+
+    def _combine(self, a, b):
+        return projection_engine.combine_starter_overrides(
+            {"a": pd.Series(a, index=self.IDX, dtype="float64"),
+             "b": pd.Series(b, index=self.IDX, dtype="float64")}, self.IDX)
+
+    def test_the_truth_table(self):
+        nan = float("nan")
+        #              starts/benches, benches/starts, both bench, silent, lone start
+        got = self._combine([1.0, 0.0, 0.0, nan, 1.0],
+                            [0.0, 1.0, 0.0, nan, nan])
+        assert got.loc[1] == 1.0, "one source naming him promotes him"
+        assert got.loc[2] == 1.0, "and it does not matter which source"
+        assert got.loc[3] == 0.0, "benched only when every stating source agrees"
+        assert pd.isna(got.loc[4]), "no opinion anywhere stays no opinion"
+        assert got.loc[5] == 1.0, "a lone promotion still promotes"
+
+    def test_disagreement_can_never_lower_anybody(self):
+        nan = float("nan")
+        got = self._combine([1.0, 1.0, nan, nan, nan], [0.0, nan, 0.0, nan, nan])
+        # Row 3 is a lone benching, which legitimately stands; rows 1 and 2 are
+        # the disagreement cases and must both promote.
+        assert got.loc[1] == 1.0 and got.loc[2] == 1.0
+
+    def test_the_result_does_not_depend_on_source_order(self):
+        """The omission blend is sequential, so a per-source application would
+        compound in `set` iteration order. Combining first removes that."""
+        a = pd.Series([1.0, 0.0, 0.0], index=[1, 2, 3], dtype="float64")
+        b = pd.Series([0.0, 1.0, 0.0], index=[1, 2, 3], dtype="float64")
+        idx = pd.Index([1, 2, 3])
+        first = projection_engine.combine_starter_overrides({"a": a, "b": b}, idx)
+        second = projection_engine.combine_starter_overrides({"b": b, "a": a}, idx)
+        assert first.equals(second)
+
+    def test_a_lone_sources_benching_still_stands(self):
+        """A source with *no opinion* is not a veto.
+
+        This is the single-source behaviour the app shipped with, and it is why
+        adding a publication can bench players at a club the other has not
+        published yet -- new information, not a regression.
+        """
+        got = projection_engine.combine_starter_overrides(
+            {"only": pd.Series([0.0, 1.0], index=[1, 2], dtype="float64")},
+            pd.Index([1, 2]))
+        assert list(got) == [0.0, 1.0]
+
+    def test_nothing_stated_anywhere_is_none_not_a_frame_of_nans(self):
+        """None is "never asked"; the engine then reads who the points table
+        priced, exactly as it did before any XI source existed."""
+        idx = pd.Index([1, 2])
+        assert projection_engine.combine_starter_overrides(None, idx) is None
+        assert projection_engine.combine_starter_overrides({}, idx) is None
+        assert projection_engine.combine_starter_overrides(
+            {"a": pd.Series([float("nan")] * 2, index=idx)}, idx) is None
+
+
+class TestTheOmittedPriorRespectsStartHistory:
+    """The prior was fitted on players who started 0 of 16 times.
+
+    Measured over every pre-deadline snapshot in `archive/projections/` -- 1,114
+    rows on the prior -- it is well calibrated for that cohort (said 0.044,
+    observed 0.031) and under-predicts by +0.079 / +0.071 / +0.111 for the
+    25-50%, 50-75% and 75-100% start-history buckets. Reported from the app as
+    Rayan Cherki reading 21% off five starts in eight gameweeks.
+    """
+
+    IDX = pd.Index([1, 2, 3])
+
+    def _blend(self, **extra):
+        return projection_engine.blend_aligned(
+            index=self.IDX,
+            per_source_raw={"rotowire": pd.Series([5.0, 0.0, 0.0], index=self.IDX)},
+            per_source_basis={"rotowire": "conditional"},
+            per_source_startpct={"ffp": pd.Series([0.5, 0.5, 0.5], index=self.IDX)},
+            starters_only={"rotowire"},
+            positions=pd.Series(["M", "M", "M"], index=self.IDX),
+            teams=pd.Series(["MCI", "MCI", "MCI"], index=self.IDX),
+            source_club_coverage={"rotowire": {"MCI": 11}},
+            gameweek=8,
+            **extra)
+
+    def test_no_starts_supplied_is_byte_identical(self):
+        """What keeps every existing caller and frame unaffected."""
+        base = self._blend()
+        cols = ["Proj", "Proj_Start", "Start_Pct"]
+        assert base[cols].equals(self._blend(starts=None)[cols])
+
+    def test_a_player_who_has_been_starting_is_not_a_never_starter(self):
+        base = self._blend()
+        with_hist = self._blend(starts=pd.Series([0, 5, 0], index=self.IDX))
+        assert with_hist.loc[2, "Start_Pct"] > base.loc[2, "Start_Pct"]
+        # 5 starts in 7 played x 0.25 = 0.179 implied, against a 0.02 prior.
+        assert with_hist.loc[2, "Start_Pct"] == pytest.approx(0.307, abs=0.01)
+
+    def test_it_can_only_ever_raise(self):
+        base = self._blend()
+        for starts in ([0, 0, 0], [1, 4, 7], [7, 7, 7]):
+            got = self._blend(starts=pd.Series(starts, index=self.IDX))
+            assert (got["Start_Pct"] >= base["Start_Pct"] - 1e-9).all()
+
+    def test_a_player_the_source_listed_is_untouched(self):
+        """The floor applies to the *omission* prior, so a listed player -- who
+        is clipped up to the positional floor instead -- cannot be affected."""
+        base = self._blend()
+        got = self._blend(starts=pd.Series([7, 0, 0], index=self.IDX))
+        assert got.loc[1, "Start_Pct"] == base.loc[1, "Start_Pct"]
+
+    def test_only_the_start_model_moves(self):
+        """He would still score the same if he played, and `team_strength`
+        percentiles that number rather than the discounted one."""
+        base = self._blend()
+        got = self._blend(starts=pd.Series([0, 5, 0], index=self.IDX))
+        assert np.allclose(base["Proj_Start"], got["Proj_Start"], equal_nan=True)
+
+    def test_the_weight_is_read_from_config(self):
+        """Fittable by the same grid search as the floors and priors."""
+        with patch.object(projection_engine, "_history_weight", return_value=0.0):
+            zero = self._blend(starts=pd.Series([0, 5, 0], index=self.IDX))
+        base = self._blend()
+        assert zero.loc[2, "Start_Pct"] == pytest.approx(base.loc[2, "Start_Pct"])
+
+
+class TestEachXIsOpinionIsRecorded:
+    def test_every_source_gets_its_own_start_xi_column(self):
+        """What makes a two-source signal scoreable after the fact.
+
+        Revision 3 recorded the engine's *decision* but not which players each
+        page had in its XI, so no archived gameweek could be replayed against
+        the signal at all.
+        """
+        idx = pd.Index([1, 2])
+        out = projection_engine.blend_aligned(
+            index=idx,
+            per_source_raw={"rotowire": pd.Series([5.0, 4.0], index=idx)},
+            per_source_basis={"rotowire": "conditional"},
+            starters_only={"rotowire"},
+            positions=pd.Series(["M", "M"], index=idx),
+            teams=pd.Series(["MCI", "MCI"], index=idx),
+            starter_overrides={
+                "rotowire": pd.Series([1.0, 0.0], index=idx),
+                "sportsgambler": pd.Series([0.0, 1.0], index=idx),
+            })
+        assert list(out["Start_XI__rotowire"]) == [1.0, 0.0]
+        assert list(out["Start_XI__sportsgambler"]) == [0.0, 1.0]

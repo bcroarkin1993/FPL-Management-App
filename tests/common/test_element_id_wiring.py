@@ -91,8 +91,10 @@ class TestOverrideReachesBothFrameShapes:
         from unittest.mock import patch
         from scripts.common import analytics
         from scripts.common import rotowire_lineups as rlm
-        with patch.object(analytics, "_rotowire_lineup_xi",
-                          return_value=rlm.LineupXI({367}, {"MCI"}, 8)):
+        # `_lineup_xis` is the seam: `_frame_starter_overrides` builds one
+        # override per publication and the engine combines them.
+        with patch.object(analytics, "_lineup_xis",
+                          return_value={"rotowire": rlm.LineupXI({367}, {"MCI"}, 8)}):
             return analytics._frame_starter_overrides(df)
 
     def test_the_draft_shape(self):

@@ -35,7 +35,12 @@ from typing import List, Optional
 import pandas as pd
 import requests
 
-from scripts.common import projection_archive, projection_engine, rotowire_lineups
+from scripts.common import (
+    projection_archive,
+    projection_engine,
+    rotowire_lineups,
+    sportsgambler_lineups,
+)
 from scripts.common.projection_engine import build_projections
 from scripts.common.projection_sources import (
     fetch_ffp_table,
@@ -85,6 +90,11 @@ def build_pool(bootstrap) -> pd.DataFrame:
             "ep_next": pd.to_numeric(e.get("ep_next"), errors="coerce"),
             "status": e.get("status"),
             "chance_of_playing_next_round": e.get("chance_of_playing_next_round"),
+            # The player's own start count, which floors the omitted prior:
+            # a man every published XI leaves out who has nonetheless been
+            # starting is not the never-starter that prior was fitted on.
+            # See `config.OMITTED_START_HISTORY_WEIGHT`.
+            "starts": pd.to_numeric(e.get("starts"), errors="coerce"),
             # Carries the return date the horizon model reads -- "Expected back
             # 11 Oct" is three gameweeks at GW6.
             "news": e.get("news"),
@@ -163,10 +173,19 @@ def collect_pre(gameweek: int, bootstrap, deadline=None,
     # gameweek is a *later* one; the gameweek filter inside `scrape_lineups`
     # drops those, so the XI comes back empty and the engine falls back to the
     # article rather than importing next week's lineups into last week's file.
-    xi = rotowire_lineups.fetch_lineup_xi(gameweek=gameweek)
-    _logger.info("GW%s: Rotowire lineups resolved %s", gameweek, xi.note or "nothing")
+    # Every projected XI we can read. Each is recorded in the snapshot as its own
+    # `Start_XI__<source>` column, which is what makes a two-source start signal
+    # scoreable after the fact -- the gap revision 3 left, where which players a
+    # lineups page had in its XI was recorded nowhere at all.
+    xis = {
+        "rotowire": rotowire_lineups.fetch_lineup_xi(gameweek=gameweek),
+        "sportsgambler": sportsgambler_lineups.fetch_lineup_xi(gameweek=gameweek),
+    }
+    for _name, _xi in xis.items():
+        _logger.info("GW%s: %s lineups resolved %s", gameweek, _name,
+                     getattr(_xi, "note", None) or "nothing")
     projections = build_projections(sources, gameweek=gameweek, pool=pool,
-                                    lineup_xi={"rotowire": xi},
+                                    lineup_xi=xis,
                                     deadlines=_future_deadlines(bootstrap))
     if projections.empty:
         _logger.error("GW%s: engine produced no rows", gameweek)

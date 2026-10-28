@@ -454,8 +454,15 @@ class LineupXI(NamedTuple):
 
 
 def lineup_starters(players: pd.DataFrame, pool: pd.DataFrame,
-                    gameweek: Optional[int] = None) -> LineupXI:
+                    gameweek: Optional[int] = None,
+                    source: str = "Rotowire") -> LineupXI:
     """Resolve a scraped lineups frame against the FPL pool, club by club.
+
+    ``source`` names the publication in the log lines only. There is one gate
+    for every XI source by design: a second copy of this asymmetry is the
+    twin-drift failure this codebase keeps paying for, and a benching gate is
+    the worst place for it -- a drift there would not degrade a projection but
+    invert it.
 
     **The two directions of the signal are gated differently, and that
     asymmetry is the whole safety design.**
@@ -484,7 +491,7 @@ def lineup_starters(players: pd.DataFrame, pool: pd.DataFrame,
     """
     empty = LineupXI(set(), set(), gameweek)
     if players is None or players.empty or pool is None or pool.empty:
-        return empty._replace(note="No Rotowire lineups were available.")
+        return empty._replace(note="No %s lineups were available." % source)
     if "Player_ID" not in pool.columns:
         return empty._replace(note="The player pool carries no element ids.")
 
@@ -506,7 +513,7 @@ def lineup_starters(players: pd.DataFrame, pool: pd.DataFrame,
         if not code:
             # Fail closed, unlike the matchup filter: an unmapped club here
             # would silently bench every player at it.
-            _logger.info("Rotowire lineups: unmapped club label %r", club_label)
+            _logger.info("%s lineups: unmapped club label %r", source, club_label)
             continue
         found = set()
         for _, row in rows.iterrows():
@@ -527,8 +534,8 @@ def lineup_starters(players: pd.DataFrame, pool: pd.DataFrame,
 
     if partial:
         _logger.info(
-            "Rotowire lineups: %d club(s) not fully resolved, so nobody there "
-            "is benched on this signal: %s", len(partial), ", ".join(partial))
+            "%s lineups: %d club(s) not fully resolved, so nobody there "
+            "is benched on this signal: %s", source, len(partial), ", ".join(partial))
 
     note = "%d starter%s, %d club%s complete" % (
         len(resolved), "" if len(resolved) == 1 else "s",

@@ -72,6 +72,7 @@ The Odds API ────────────┘
 | `draft.premierleague.com/api/` | League data, rosters, transactions |
 | `fantasy.premierleague.com/api/` | Player stats, fixtures, FDR |
 | `rotowire.com/soccer/` | Player projections, EPL lineups, article publish times |
+| `sportsgambler.com/lineups/` | A second projected XI per fixture — the start signal's corroboration (see "A second projected XI") |
 | `fantasyfootballpundit.com` | Points predictions, goal/assist odds, clean sheet odds (site payload; see "Fantasy Football Pundit feed") |
 | `api.the-odds-api.com` | Match betting odds (h2h, BTTS, totals) |
 | `api.premierleague.com/content/` | Official predicted-XI graphics, per-club team news, injury table (see "Premier League content") |
@@ -764,13 +765,13 @@ different cohort and plausibly starts more often. There is no data to fit that
 with, and `Start_Pct__rotowire` records the decision per player, so the
 accuracy harness can score it once snapshots accrue.
 
-**`START_MODEL_REVISION` is 3, and this bump is not like the last two.** A
-constant retune is recoverable from a snapshot, because `Start_Pct__rotowire`
-holds the value that built it. *Which players the lineups page had in the XI* is
-not recorded anywhere, so a revision-2 snapshot cannot be replayed against this
-signal at all — it is refused as such rather than replayed against a different
-model, and the start constants cannot be refitted until snapshots accrue under
-revision 3.
+**This bumped `START_MODEL_REVISION` to 3, and that bump was not like the last
+two.** A constant retune is recoverable from a snapshot, because
+`Start_Pct__rotowire` holds the value that built it. *Which players the lineups
+page had in the XI* was recorded nowhere, so a revision-2 snapshot cannot be
+replayed against this signal at all — it is refused as such rather than replayed
+against a different model. (The revision is now **4**; see "A second projected
+XI" below, which also closes the recording gap via `Start_XI__<source>`.)
 
 **Risk accepted**: this adds a dependency on a second Rotowire page, and it is
 a *start* signal, so a shape change there is worth more than a cosmetic one.
@@ -796,6 +797,159 @@ Note the offline suite stubs `fetch_lineup_xi` to an empty XI in
 session fixture, **not** at its module scope — pytest imports that conftest
 during collection even for `-m "not live"`, which put the whole offline suite
 back on the network and cost it 40 seconds).
+
+### A second projected XI — because one source's silence benched real players
+
+`scripts/common/sportsgambler_lineups.py` (pure),
+`projection_engine.combine_starter_overrides()` (the consensus),
+`analytics._lineup_xis()` (the page path), `check_lineup_consensus()`.
+
+**One publication decided who starts, and a benching inverts a projection
+rather than degrading it.** Reported from the app at GW8: **Rayan Cherki read
+21% to start** against Aston Villa off a 5.71 conditional projection. Rotowire's
+rankings article did not price him, so he took the MID omitted prior of 0.02,
+and its lineups page left him out of a complete City XI, so he was benched on
+both paths. The blend was exactly `0.6 x 0.02 + 0.4 x 0.50 (FFP) = 0.212`.
+Rotowire's XI instead started **Ayyoub Bouaddi**, whom FFP rated 20% with one
+start all season, over Cherki at 50% with five starts in eight.
+
+Three XIs disagreed about City that week and agreed on only eight of eleven:
+
+| | Rotowire | Sportsgambler | A reader's source | FFP | Starts/8 |
+|---|---|---|---|---|---|
+| Bouaddi | yes | yes | no | 20% | 1 |
+| Doku | yes | yes | no | 90% | 1 |
+| Foden | **no** | yes | yes | 50% | 4 |
+| Cherki | no | no | yes | 50% | 5 |
+
+**The source.** Sportsgambler's index lists every fixture with an id, and
+`/lineups/lineups-load2.php?id=<id>` serves that fixture's XI as plain
+server-rendered HTML — `.lineups-home` / `.lineups-away`, eleven `.player-name`
+nodes each. Names resolve at **99.0%** (196 of 198 at GW8) through the
+*existing* `rotowire_lineups.resolve_lineup_name` + `ReferenceMatcher`, so this
+module is a scraper and nothing else: the resolver, the per-club benching gate
+(`lineup_starters`, which gained only a `source` label) and the `LineupXI` type
+are all imported. A second copy of a benching gate is the twin-drift failure
+this codebase keeps paying for, and a drift *there* would not degrade a
+projection but invert it.
+
+Two traps specific to this page:
+
+- **A `confirmed` CSS class sits on every fixture button while the heading says
+  "Predicted Lineup".** It is styling. A test asserts the module never branches
+  on it, because reading it would promote a prediction to a team sheet.
+- **It carries about five gameweeks**, each a complete set of ten — so a
+  `resolve_ffp_gameweek`-style vote over all fifty pairs scores GW8, GW9 and
+  GW10 at ten each and cannot choose. Each ordered `(home, away)` pair is looked
+  up in the real fixture list instead; a pair occurs at most once a season. And
+  unlike `rotowire_lineups._matchup_is_in_gameweek`, which fails *open* because
+  an extra matchup costs one rendered card, this filter **fails closed**: the
+  union of five gameweeks is not a lineup call, and it would promote half the
+  league. Filtering before fetching also drops 50 requests to 10.
+
+**The sources are combined in the engine, unanimous-to-bench.** Any source
+naming a player promotes him; he is benched only where every source *with an
+opinion* leaves him out. So disagreement can never lower anybody — the existing
+asymmetry of `starter_override` extended across publications, for the same
+reason. Verified live: of 168 players both sources had an opinion about, they
+disagreed on 13, and **all 13 resolved to start**.
+
+**Combining rather than applying each source in turn is load-bearing**, not
+tidiness. The omission blend is sequential — it lowers `start_pct` once per
+starters-only source and the next source's blend is computed against the
+already-lowered value — and it iterates a `set`, so *which* compounded first
+would vary by hash order. One combined opinion keeps exactly one omission pass,
+which also sidesteps two further traps: the omission share is drawn from the
+**points** weights (so a start-only source would have weight 0 and no influence
+at all), and `has_other` does not count other lineup sources.
+
+**A source with no opinion is not a veto.** A lone publication's benching still
+stands, which is the single-source behaviour the app shipped with — so adding a
+source can *bench* players at a club the other has not published yet. That is
+new information rather than a regression, and it is why coverage is reported per
+publication on the Hub's Data Sources panel.
+
+`Start_XI__<source>` records each publication's raw tri-state per player,
+separately from the combined decision, because *which players each page had in
+its XI* was recorded nowhere under revision 3 — the exact gap that makes an
+archived gameweek unreplayable against this kind of signal.
+
+### The omitted prior was fitted on players who never start
+
+`config.OMITTED_START_HISTORY_WEIGHT` (0.25, env-overridable).
+
+The second half of the Cherki report, and the half no new source fixes — he is
+absent from *both* scraped XIs. What pins him is that the omitted prior
+(`{G 0.02, D 0.07, M 0.02, F 0.05}`) was calibrated on a cohort that started
+**0 of 16 times**, and is then applied to anybody a source leaves out.
+
+Measured over every pre-deadline snapshot in `archive/projections/` — 1,114 rows
+sitting on the prior, bucketed by each player's own start rate *before* that
+gameweek:
+
+| Prior start rate | n | Engine said | They started | Gap |
+|---|---|---|---|---|
+| never started | 874 | 0.044 | 0.031 | −0.013 |
+| 1–25% | 71 | 0.144 | 0.141 | −0.003 |
+| 25–50% | 56 | 0.100 | 0.179 | **+0.079** |
+| 50–75% | 64 | 0.163 | 0.234 | **+0.071** |
+| 75–100% | 49 | 0.174 | 0.286 | **+0.111** |
+
+**The prior is right for the cohort it was fitted on** and under-predicts by
+7–11 points, monotonically, for everyone with a real start history. So the
+implied value becomes `max(positional_prior, 0.25 x starts / (gameweek - 1))`.
+After it, the two worst buckets go from +0.071 and +0.111 to **+0.006 each**,
+the never-started bucket is byte-identical, and Brier over the cohort improves
+0.05500 → 0.05404. The 25–50% bucket still under-predicts by +0.056.
+
+Four properties:
+
+- **It can only raise the implied value**, and the omission penalty's own
+  `np.minimum` still keeps it from raising `Start_Pct` — so a benched player can
+  only be pulled down, just not as far.
+- **No `starts` supplied leaves it a no-op**, which is what keeps every existing
+  caller and every per-squad frame byte-identical. The pools carry it from the
+  bootstrap; a frame without it degrades silently and correctly.
+- **A mid-season signing is understated** by the `gameweek - 1` denominator
+  (three starts in three games reads 0.43, not 1.0). That is the safe direction,
+  since the floor can only raise.
+- **0.25 is evidenced, not fitted.** It is the Brier minimum of a grid search
+  over those 1,114 rows, with a clean 0.20–0.30 plateau — but the search
+  *approximates* the engine, applying the implied floor at a fixed 0.6 share
+  rather than replaying `blend_aligned`, because a real replay is gated on
+  `START_MODEL_REVISION`. `fit_start_constants()` settles it once revision-4
+  captures accrue.
+
+**`START_MODEL_REVISION` is 4.** Unreplayable for the same reason revision 3
+was, and now doubly so — which is why both halves of this ship on the
+measurement above plus a live before/after rather than on a fit, the same
+methodology the lineups-page change used.
+
+**Live effect, measured in one process so both halves see identical XI data**
+(GW9, mid-week): **81 players move, every one upward, and `Proj_Start` is
+byte-identical.** Seven from the second XI source (mean +2.38 expected points)
+and 74 from the history floor (mean +0.17). Cherki 0.212 → 0.312 (`Proj` 1.48 →
+2.18); João Pedro, Wissa, Guéhi, Calafiori and Botman all gain ~0.1 of start
+probability off their own start rates. Note 0.312 is *calibration* rather than
+vindication: the archive says players in exactly his situation — left out by
+every XI, ≥50% start history — go on to start 23.4% of the time.
+
+**Risk accepted**: a second scraped page, and a *start* signal, so a shape
+change matters more than a cosmetic one. Each source fails to "no opinion"
+independently and the others carry on; all of them failing leaves the engine
+reading the rankings article exactly as it did before any of this existed.
+`check_lineup_xi()` (the old `check_rotowire_lineup_xi`, now source-named and
+aliased) is the per-source tripwire, and **`check_lineup_consensus()` is the
+cross-source one** — two XIs that have drifted onto different gameweeks are each
+perfectly well-formed, and only comparing them can see it. `tests/live/` fails
+on a page that stops parsing, loses a club label, keeps every fixture, or
+disagrees wholesale with the other source.
+
+It costs one index fetch plus one pooled request per fixture (ten), ~1.7s cold
+and nothing warm, behind the same 60s success-only memo under a 300s
+`st.cache_data` wrapper. **Both** XI fetchers are stubbed in `tests/conftest.py`
+— a second source left live puts the whole offline suite back on the network,
+which is the 40-second regression recorded directly above.
 
 **FPL's `ep_next` is a declared source, not a substitute.** It was already in
 the app: `classic/transfers.py` wrote it straight into `Projected_Points` — the
@@ -2423,6 +2577,7 @@ to import from GitHub Actions.
 | `check_draft_game_settings()` | FPL changing a Draft rule this codebase hardcodes — the squad quota, the 50%/24h veto, the locked-player window, captains becoming a thing. Every one of these is a constant written down from the documentation, so a real change is otherwise invisible. An unreachable bootstrap is a **warning** (unknown), never an error (wrong) |
 | `check_blended_projections()` (start certainty) | A start probability of exactly **1.00** — the "no news means he plays" fallback outranking a source that had an opinion. Caught as a *self-contradiction*: the engine's own `Start_Pct__rotowire` decision sitting below the 1.00 it rendered. Abstains where no start model spoke at all, since the preseason pool legitimately resolves everyone to 1.00 |
 | `check_ffp_horizon()` | A multi-gameweek grid whose **columns are mislabelled** — a gap in the gameweek run shifts every later column one week left of its heading, and no individual cell can reveal it. Also an all-null or all-zero week, a basis inversion in one gameweek of six, and two tables stacked under one label (detected as a duplicate player, never as a row count — the real `archive/ffp/GW03.json` carries 561 rows and is fine) |
+| `check_lineup_consensus()` | Two projected XIs that have drifted onto **different gameweeks**. Each one passes its own shape check while this happens — eleven names a club, every label resolved — because being well-formed says nothing about *which* week it describes, and only comparing the two can see it. A source describing another week does not add noise: the engine benches players who were never in this week's squad and promotes players who are not playing. A single source is **not** a finding, being the state the app shipped in for a year |
 | `check_rotowire_lineup_xi()` | Rotowire's projected XIs ceasing to be a lineup call — an unreadable page, a changed selector, a club label the matcher cannot resolve, or two gameweeks of lineups stacked under one label. **Every one of these is silent**, because the engine fails open to the weekly rankings article, which is the stale number the signal exists to replace |
 | `check_mini_league_ownership()` | A league ownership table computed over the wrong denominator. Ownership is a *share*, so resolving two of twelve rival squads still renders a full table of plausible percentages. Anchored on an exact invariant — `sum(Owners) == 15 x n_squads` — plus the un-normalised `my-team` signature (every multiplier 1, caught as a flat column since the *total* varies legitimately across chips and autosubs). Note EO's ceiling is **300**, not 100 |
 | `check_league_trade_config()` | The league's trade rules changing shape — `league.trades` vanishing or coming back null, `trades_time_for_approval` ceasing to be a bool. Both make the Trade Analyzer fall back to "assume approval is required", which is safe but is no longer a statement about *this* league and looks identical on screen. An **unrecognised** trades code is only a warning: three of the four codes are genuinely unknown, and a check that fires on expected ignorance gets muted |
@@ -2587,6 +2742,8 @@ Score = α × 1GW + (1-α) × ROS
 | `blend_aligned()` | `scripts/common/projection_engine.py` | The blend itself — the only implementation. |
 | `fetch_lineup_xi()` / `get_rotowire_lineup_xi()` | `rotowire_lineups.py` / `scraping.py` | Rotowire's projected XIs as FPL element ids, with the per-club gate that decides who may be benched |
 | `starter_override()` | `scripts/common/projection_engine.py` | An XI as the tri-state "does this source expect him to start" Series — True promotes, False benches, NaN falls back to who the source priced |
+| `combine_starter_overrides()` | `scripts/common/projection_engine.py` | Several publications' XIs as one tri-state opinion, **unanimous to bench** — so disagreement can never lower anybody |
+| `sportsgambler_lineups.fetch_lineup_xi()` | `sportsgambler_lineups.py` / `scraping.py` | The second projected XI, resolved to FPL element ids through the shared resolver and benching gate |
 | `resolve_lineup_name()` | `scripts/common/rotowire_lineups.py` | One Rotowire lineup entry → a pool row, club-scoped, position as a hint, strongest tier wins. Shared by the engine and the Projected Lineups cards |
 | `_frame_projection_sources()` | `scripts/common/analytics.py` | The per-source series, bases and horizons read off one frame's columns — the only assembly. |
 | `_blend_frame()` | `scripts/common/analytics.py` | The single `blend_aligned()` call for page frames, so scoring and display cannot pass it different arguments. |
@@ -4053,7 +4210,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Projection accuracy harness | Phases 1-3 done, Phase 4a done, 4b blocked on data | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". **Phase 4a** done: the start model is now scored (Brier/AUC/bias, calibration and cohort tables, a "Will he start?" section on the Accuracy tab) and `ROTOWIRE_START_FLOORS` / `ROTOWIRE_OMITTED_START` are fitted from it by replaying the engine over the archive — three of eight cells moved, blend Brier 0.0678 → 0.0650. See "Scoring the start model". **Phase 4b** — fit `PROJECTION_SOURCE_WEIGHTS`, give `fpl_ep` a real weight, add an odds-derived source — is blocked until ~GW8: only 2 pre-deadline gameweeks exist against the harness's own 5-gameweek threshold. The replay harness built for 4a is what will fit the points weights too. **The start constants are additionally blocked by `START_MODEL_REVISION` 3**: "Rotowire expects him to start" now comes from its projected-lineups page, and no snapshot records which players were in those XIs, so no archived gameweek is replayable against the current engine. Refitting waits on snapshots written under revision 3. |
+| Projection accuracy harness | Phases 1-3 done, Phase 4a done, 4b blocked on data | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". **Phase 4a** done: the start model is now scored (Brier/AUC/bias, calibration and cohort tables, a "Will he start?" section on the Accuracy tab) and `ROTOWIRE_START_FLOORS` / `ROTOWIRE_OMITTED_START` are fitted from it by replaying the engine over the archive — three of eight cells moved, blend Brier 0.0678 → 0.0650. See "Scoring the start model". **Phase 4b** — fit `PROJECTION_SOURCE_WEIGHTS`, give `fpl_ep` a real weight, add an odds-derived source — is blocked until ~GW8: only 2 pre-deadline gameweeks exist against the harness's own 5-gameweek threshold. The replay harness built for 4a is what will fit the points weights too. **The start constants are additionally blocked by `START_MODEL_REVISION` 4**: "expects him to start" now comes from *two* projected-lineups pages combined unanimous-to-bench, and the omitted prior is floored on a player's own start rate — neither replayable from a snapshot written before revision 4, which is the first to record each publication's XI as `Start_XI__<source>`. Refitting waits on those. Both changes therefore shipped on an archive calibration plus a live before/after rather than a fit; `config.OMITTED_START_HISTORY_WEIGHT` (0.25) is the one constant that came out of a grid search, over 1,114 archived rows. See "A second projected XI" and "The omitted prior was fitted on players who never start". |
 | Multi-GW Transfer Planner | Completed | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. The sanity-check gate is shared with Classic — see "Suggestion sanity veto". Classic now has a real multi-transfer planner: an ILP over the whole squad in expected points, solved for every K, with the −4 priced inside the objective — see "Multi-Transfer Planner". The horizon's basis is now the engine's throughout: `Proj_Next3` is converted once, `compute_player_scores()` percentiles it (on both sides of the percentile) instead of the raw mixed `MultiGW_Proj`, and the page-side workaround is gone — see "The ROS score reads `Proj_Next3`". The per-gameweek detail FFP publishes is no longer discarded: `to_long_schema()` exposes all six gameweeks and the Projections Hub's **Horizon** tab renders them (see "Horizon"). **The harness now has an opinion on the window length, and it is "leave it at three"**: scored against actuals, every window longer than 3GW orders *worse*, a forecast loses a third of its ordering by the third week out, and `Next3GWs`/`Next6GWs` correlate 0.99 so the choice cannot move a board — see "How far ahead is worth projecting". Giving the *wider* horizon a weight is therefore off the table rather than pending. What is still open is the term's 40% share itself, which on two anchors is indistinguishable from the 1GW projection sitting beside it; that is Phase 4b. |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
 | Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |

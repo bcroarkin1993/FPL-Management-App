@@ -61,17 +61,20 @@ def _unpin_offline_env():
     # pytest imports this conftest during collection even for a `-m "not live"`
     # run -- doing it at import put the whole offline suite back on the network
     # and cost it 40 seconds.
-    from scripts.common import rotowire_lineups
+    from scripts.common import rotowire_lineups, sportsgambler_lineups
     from tests import conftest as root_conftest
 
-    stub = rotowire_lineups.fetch_lineup_xi
-    real = getattr(root_conftest, "REAL_FETCH_LINEUP_XI", None)
-    if real is not None:
-        rotowire_lineups.fetch_lineup_xi = real
+    _modules = (rotowire_lineups, sportsgambler_lineups)
+    stubs = {m.__name__: m.fetch_lineup_xi for m in _modules}
+    reals = getattr(root_conftest, "REAL_LINEUP_FETCHERS", None) or {}
+    for m in _modules:
+        if reals.get(m.__name__) is not None:
+            m.fetch_lineup_xi = reals[m.__name__]
     try:
         yield
     finally:
-        rotowire_lineups.fetch_lineup_xi = stub
+        for m in _modules:
+            m.fetch_lineup_xi = stubs[m.__name__]
         for key, value in saved.items():
             if value is not None:
                 os.environ[key] = value

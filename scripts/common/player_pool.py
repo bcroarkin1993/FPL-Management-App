@@ -47,6 +47,11 @@ def build_pool(bootstrap) -> pd.DataFrame:
             "ep_next": pd.to_numeric(e.get("ep_next"), errors="coerce"),
             "status": e.get("status"),
             "chance_of_playing_next_round": e.get("chance_of_playing_next_round"),
+            # The player's own start count, which floors the omitted prior:
+            # a man every published XI leaves out who has nonetheless been
+            # starting is not the never-starter that prior was fitted on.
+            # See `config.OMITTED_START_HISTORY_WEIGHT`.
+            "starts": pd.to_numeric(e.get("starts"), errors="coerce"),
             # Carries the return date the horizon model reads -- "Expected back
             # 11 Oct" is three gameweeks at GW6.
             "news": e.get("news"),

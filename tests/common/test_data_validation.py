@@ -1284,6 +1284,61 @@ class TestLeagueTradeConfig:
             raise_on_error(self._check({"mode": "waivers"}))
 
 
+class TestCheckLineupConsensus:
+    """Two XIs that have drifted onto different gameweeks.
+
+    The engine combines every XI it can read, so a source describing another
+    week does not add noise -- its benchings bench players who were never in
+    this week's squad and its promotions lift players who are not playing. Each
+    source passes its own shape check while this happens, because being
+    well-formed says nothing about *which* week it describes.
+    """
+
+    def _xi(self, ids, clubs=("MCI",), gw=9):
+        from scripts.common.rotowire_lineups import LineupXI
+        return LineupXI(set(ids), set(clubs), gw, "")
+
+    def test_two_sources_that_mostly_agree_are_clean(self):
+        from scripts.common.data_validation import check_lineup_consensus
+        a = self._xi(range(1, 12))
+        b = self._xi(list(range(1, 10)) + [99, 100])   # 9 of 11 shared
+        assert check_lineup_consensus({"a": a, "b": b}) == []
+
+    def test_wholesale_disagreement_errors(self):
+        from scripts.common.data_validation import check_lineup_consensus
+        issues = check_lineup_consensus({"a": self._xi(range(1, 12)),
+                                         "b": self._xi(range(50, 61))})
+        assert issues and issues[0].severity == "error"
+        assert "agree on only" in issues[0].message
+
+    def test_different_gameweeks_error_outright(self):
+        from scripts.common.data_validation import check_lineup_consensus
+        issues = check_lineup_consensus({"a": self._xi(range(1, 12), gw=9),
+                                         "b": self._xi(range(1, 12), gw=10)})
+        assert any("different gameweeks" in i.message for i in issues)
+
+    def test_one_source_is_not_a_finding(self):
+        """The state this app shipped in for a year, and the state every source
+        but one failing degrades to."""
+        from scripts.common.data_validation import check_lineup_consensus
+        assert check_lineup_consensus({"a": self._xi(range(1, 12))}) == []
+        assert check_lineup_consensus({}) == []
+        assert check_lineup_consensus(None) == []
+
+    def test_disjoint_coverage_is_not_disagreement(self):
+        """Early in a gameweek the two can have published different halves of
+        the fixture list, which says nothing about whether they agree."""
+        from scripts.common.data_validation import check_lineup_consensus
+        a = self._xi(range(1, 12), clubs=("MCI",))
+        b = self._xi(range(50, 61), clubs=("ARS",))
+        assert check_lineup_consensus({"a": a, "b": b}) == []
+
+    def test_an_empty_source_is_ignored_rather_than_scored_as_disagreement(self):
+        from scripts.common.data_validation import check_lineup_consensus
+        a = self._xi(range(1, 12))
+        assert check_lineup_consensus({"a": a, "dead": self._xi([])}) == []
+
+
 class TestCheckPositionClaimRates:
     """The bands rest entirely on these rates, and a wrong one is silent.
 

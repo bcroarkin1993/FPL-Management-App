@@ -140,6 +140,24 @@ def _omitted_starts() -> Dict[str, float]:
     return dict(DEFAULT_OMITTED_STARTS)
 
 
+#: Fallback for ``config.OMITTED_START_HISTORY_WEIGHT`` -- see there for the
+#: calibration table behind it. Must track config, for the reason the floors and
+#: priors above must: the app and its own fallback disagreeing is worse than
+#: either value.
+DEFAULT_OMITTED_START_HISTORY_WEIGHT = 0.25
+
+
+def _history_weight() -> float:
+    try:
+        import config
+        w = getattr(config, "OMITTED_START_HISTORY_WEIGHT", None)
+        if w is not None:
+            return float(w)
+    except Exception:                       # pragma: no cover
+        pass
+    return DEFAULT_OMITTED_START_HISTORY_WEIGHT
+
+
 def _min_club_coverage() -> int:
     try:
         import config
@@ -333,6 +351,10 @@ def build_projections(
         news=_pool_col(pool, "news", out.index),
         deadlines=deadlines,
         status=_pool_col(pool, "status", out.index),
+        # Floors the omitted prior on the player's own start rate -- see
+        # `config.OMITTED_START_HISTORY_WEIGHT`. A pool without the column
+        # leaves that a no-op.
+        starts=_pool_col(pool, "starts", out.index),
         weights=weights,
         gameweek=gameweek,
         starter_overrides={
@@ -388,7 +410,20 @@ def _pool_col(pool, col, index, default=None):
 #:    lineups page had in the XI. So revision 2 snapshots are refused as such
 #:    rather than silently replayed against a different signal, and the start
 #:    constants cannot be refitted until snapshots accrue under this revision.
-START_MODEL_REVISION = 3
+#: 4. Two things, both about *benching*, which is the direction that inverts a
+#:    projection rather than degrading it:
+#:
+#:    * More than one publication's XI is read, and they are combined by
+#:      `combine_starter_overrides`: any source naming a player promotes him,
+#:      and he is benched only where every source with an opinion leaves him
+#:      out. Disagreement can no longer lower anybody.
+#:    * The omission prior can no longer ignore a player's own start rate --
+#:      see `config.OMITTED_START_HISTORY_WEIGHT`.
+#:
+#:    Unreplayable for the same reason as revision 3, and now doubly so: which
+#:    players *each* page had in its XI is recorded only from this revision on,
+#:    as the `Start_XI__<source>` columns.
+START_MODEL_REVISION = 4
 
 #: Sources that may resolve a player's start probability, in precedence order.
 START_MODEL_SOURCES = ("ffp", "fpl_ep", "odds")
@@ -465,8 +500,64 @@ def starter_override(xi, *, player_ids: pd.Series, teams: Optional[pd.Series],
     return override
 
 
+def combine_starter_overrides(
+    overrides: Optional[Dict[str, pd.Series]],
+    index=None,
+) -> Optional[pd.Series]:
+    """Several publications' XIs as one tri-state opinion. **Unanimous to bench.**
+
+    Any source naming a player promotes him; he is benched only where every
+    source that has an opinion about him leaves him out, and at least one does.
+    Everything else is NaN -- no opinion -- which falls back to who the points
+    table priced.
+
+    **So disagreement can never lower anybody.** That is the existing asymmetry
+    of ``starter_override`` extended across sources, for the same reason:
+    promoting a player is a claim about him alone and can only lift him towards
+    a positional floor, while benching him is a claim about everyone an XI
+    leaves out and *inverts* his projection. Reported from the app at GW8 --
+    three published XIs agreed on only eight of Manchester City's eleven, and
+    Phil Foden, named by two of the three, read 0.21 because the third was
+    silent.
+
+    **Combining here rather than applying each source in turn is deliberate.**
+    The omission blend below is sequential: it lowers ``start_pct`` once per
+    starters-only source, and a second source's blend is then computed against
+    the already-lowered value, so two benchings would compound. Worse, it
+    iterates a ``set``, so *which* compounded first would vary by hash order.
+    Resolving one combined opinion keeps exactly one omission pass, which also
+    sidesteps the omission share being drawn from the **points** weights (a
+    start-only source would have weight 0 and so no influence at all) and
+    ``has_other`` not counting other lineup sources.
+
+    Returns None when nothing is stated anywhere, so a caller that resolved no
+    XI at all is indistinguishable from one that never asked.
+    """
+    series = [s for s in (overrides or {}).values() if s is not None]
+    if not series:
+        return None
+    if index is None:
+        index = series[0].index
+
+    stated = [pd.to_numeric(s.reindex(index), errors="coerce") for s in series]
+    starts = pd.Series(False, index=index)
+    benches = pd.Series(False, index=index)
+    for s in stated:
+        starts |= s.gt(0).fillna(False)
+        benches |= s.le(0).fillna(False)
+
+    combined = pd.Series(np.nan, index=index, dtype="float64")
+    # Benched first, then promoted, so "any source starts him" wins outright --
+    # which makes the result independent of the order the sources arrived in.
+    combined[benches] = 0.0
+    combined[starts] = 1.0
+    if combined.isna().all():
+        return None
+    return combined
+
+
 def _listed_mask(name: str, raw: pd.Series, index,
-                 overrides: Dict[str, pd.Series]) -> pd.Series:
+                 override: Optional[pd.Series]) -> pd.Series:
     """Who a starters-only source **expects to start**, which is not always who
     it priced.
 
@@ -490,9 +581,15 @@ def _listed_mask(name: str, raw: pd.Series, index,
     supplies it as a Series because only it can resolve lineup names to element
     ids; see ``rotowire_lineups.lineup_starters`` for the club-by-club gate that
     decides where an opinion exists at all.
+
+    ``override`` is **one** Series, already combined across every publication by
+    ``combine_starter_overrides``, and is applied to every starters-only source
+    rather than looked up per source. It is a statement about selection, not
+    about who this particular points table priced, so there is nothing for it to
+    be keyed on -- and keying it per source made the omission penalty compound
+    in set-iteration order once there was more than one XI.
     """
     priced = _priced_mask(raw, index)
-    override = overrides.get(name)
     if override is None:
         return priced
     stated = pd.to_numeric(override.reindex(index), errors="coerce")
@@ -516,6 +613,7 @@ def blend_aligned(
     chance_of_playing: Optional[pd.Series] = None,
     status: Optional[pd.Series] = None,
     news: Optional[pd.Series] = None,
+    starts: Optional[pd.Series] = None,
     deadlines: Optional[Sequence] = None,
     weights: Optional[Dict[str, float]] = None,
     start_floors: Optional[Dict[str, float]] = None,
@@ -547,6 +645,9 @@ def blend_aligned(
     floors = dict(start_floors) if start_floors is not None else _start_floors()
     source_club_coverage = dict(source_club_coverage or {})
     starter_overrides = dict(starter_overrides or {})
+    # One combined opinion, resolved once -- see `combine_starter_overrides`
+    # for why this is not applied per source.
+    combined_override = combine_starter_overrides(starter_overrides, index)
     per_source_startpct = dict(per_source_startpct or {})
     per_source_next3 = dict(per_source_next3 or {})
     per_source_next3_basis = dict(per_source_next3_basis or {})
@@ -636,7 +737,7 @@ def blend_aligned(
             if name not in per_source_raw:
                 continue
             listed = _listed_mask(name, per_source_raw[name], index,
-                                  starter_overrides)
+                                  combined_override)
             listed_floor = listed_floor.fillna(
                 positions.map(floors).astype("float64").where(listed))
         start_pct = start_pct.fillna(listed_floor)
@@ -682,7 +783,7 @@ def blend_aligned(
         if name not in per_source_raw:
             continue
         listed = _listed_mask(name, per_source_raw[name], index,
-                              starter_overrides)
+                              combined_override)
         for pos_code, floor_val in floors.items():
             mask = listed & (positions == pos_code)
             start_pct[mask] = start_pct[mask].clip(lower=floor_val)
@@ -718,6 +819,32 @@ def blend_aligned(
             club_count = listed.groupby(club.astype(str)).transform("sum")
         covered = club_count.ge(min_coverage) & known_club
         implied = positions.map(omitted_starts).astype("float64")
+
+        # **The prior is right for the cohort it was fitted on and wrong for
+        # everybody else.** It was calibrated on players who started 0 of 16
+        # times. Measured over every pre-deadline snapshot in the archive --
+        # 1,114 rows sitting on it, bucketed by each player's own start rate
+        # before that gameweek -- the engine said 0.044 against an observed
+        # 0.031 for the never-started, and then under-predicted by +0.079,
+        # +0.071 and +0.111 for the 25-50%, 50-75% and 75-100% buckets.
+        # Monotone. Reported from the app as Rayan Cherki reading 21% to start
+        # off five starts in eight gameweeks.
+        #
+        # A player every XI leaves out who has nonetheless been starting is not
+        # a never-starter, so his own rate floors the prior. It can only ever
+        # *raise* `implied`, and the `np.minimum` below still keeps the penalty
+        # from raising `start_pct` -- so a benched player can only be pulled
+        # down, just not as far. No `starts` supplied leaves this a no-op, which
+        # is what keeps every existing caller byte-identical.
+        if starts is not None and gameweek:
+            played = max(1, int(gameweek) - 1)
+            rate = (pd.to_numeric(starts.reindex(index), errors="coerce")
+                    / float(played)).clip(0.0, 1.0)
+            # A mid-season signing is understated by this denominator (three
+            # starts in three games reads 0.43, not 1.0). That is the safe
+            # direction, since the floor can only raise.
+            implied = np.maximum(implied, _history_weight() * rate.fillna(0.0))
+
         target = covered & ~listed & implied.notna()
         if not target.any():
             continue
@@ -756,6 +883,17 @@ def blend_aligned(
         # decision rather than only its effect.
         out[f"Start_Pct__{name}"] = implied.where(target).fillna(
             positions.map(floors).astype("float64").where(listed))
+
+    # Record each publication's *raw* XI opinion, separately from the combined
+    # one that was applied. `Start_Pct__<points source>` above records the
+    # engine's decision; these record who said what, which is the only thing
+    # that makes a two-source signal scoreable after the fact -- and the gap
+    # revision 3 left, where which players a lineups page had in its XI was
+    # recorded nowhere and so no snapshot could be replayed against it.
+    for _src, _ov in starter_overrides.items():
+        if _ov is not None:
+            out[f"Start_XI__{_src}"] = pd.to_numeric(
+                _ov.reindex(index), errors="coerce")
 
     # --- FPL's availability is a ceiling, never a source ---------------------
     #

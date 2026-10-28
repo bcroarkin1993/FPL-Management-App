@@ -62,19 +62,26 @@ os.environ["FPL_CLASSIC_LEAGUE_IDS"] = "99999:Test League"
 # because the snapshot collector calls the pure function directly.
 #: The real function, kept so ``tests/live/conftest.py`` can put it back --
 #: the live suite exists to hit the real page.
+#: ``{module name: real function}``. **Every** XI source has to be stubbed, not
+#: just the first one: a second source left live puts the offline suite back on
+#: the network, which is the 40-second regression this block exists to prevent.
 REAL_FETCH_LINEUP_XI = None
+REAL_LINEUP_FETCHERS = {}
 
 
 def _stub_lineup_xi():
     global REAL_FETCH_LINEUP_XI
-    from scripts.common import rotowire_lineups
-
-    REAL_FETCH_LINEUP_XI = rotowire_lineups.fetch_lineup_xi
+    from scripts.common import rotowire_lineups, sportsgambler_lineups
 
     def _empty(url=None, gameweek=None):
         return rotowire_lineups.LineupXI(set(), set(), gameweek, "stubbed in tests")
 
-    rotowire_lineups.fetch_lineup_xi = _empty
+    for module in (rotowire_lineups, sportsgambler_lineups):
+        REAL_LINEUP_FETCHERS[module.__name__] = module.fetch_lineup_xi
+        module.fetch_lineup_xi = _empty
+
+    # Kept under its original name too: tests/live/conftest.py restores from it.
+    REAL_FETCH_LINEUP_XI = REAL_LINEUP_FETCHERS[rotowire_lineups.__name__]
 
 
 _stub_lineup_xi()

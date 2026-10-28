@@ -329,8 +329,8 @@ class TestEveryFrameShapeCanReachTheOverride:
 
         df = pd.DataFrame({"element_id": [398, 367], "Team": ["MCI", "MCI"],
                            "Position": ["M", "M"]})
-        with patch.object(analytics, "_rotowire_lineup_xi",
-                          return_value=rlm.LineupXI({367}, {"MCI"}, 8)):
+        with patch.object(analytics, "_lineup_xis",
+                          return_value={"rotowire": rlm.LineupXI({367}, {"MCI"}, 8)}):
             overrides = analytics._frame_starter_overrides(df)
         assert "rotowire" in overrides
         ov = overrides["rotowire"]

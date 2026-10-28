@@ -120,6 +120,17 @@ ROTOWIRE_LINEUPS_URL = os.getenv(
     "ROTOWIRE_LINEUPS_URL",
     "https://www.rotowire.com/soccer/lineups.php",
 )
+# ----- Sportsgambler -----
+# The second projected-XI source. Its index lists every fixture with an id and
+# `/lineups/lineups-load2.php?id=<id>` serves that fixture's XI as plain HTML.
+# Added because the engine had one XI opinion and a *benching* inverts a
+# projection rather than degrading it: at GW8 three published XIs agreed on only
+# eight of Manchester City's eleven, and Phil Foden -- named by two of the three
+# -- was crushed to 0.21 by the silence of the one.
+SPORTSGAMBLER_LINEUPS_URL = os.getenv(
+    "SPORTSGAMBLER_LINEUPS_URL",
+    "https://www.sportsgambler.com/lineups/football/england-premier-league/",
+)
 ROTOWIRE_SEASON_RANKINGS_URL = os.getenv(
     "ROTOWIRE_SEASON_RANKINGS_URL",
     "https://www.rotowire.com/soccer/article/fantasy-premier-league-fpl-rankings-top-400-for-2026-27-season-124261",
@@ -233,6 +244,41 @@ ROTOWIRE_OMITTED_START = {"G": 0.02, "D": 0.07, "M": 0.02, "F": 0.05}
 # below this is blank, unpublished, or a wholesale matching failure -- and
 # "unknown" is then the honest answer, not "benched".
 ROTOWIRE_MIN_CLUB_COVERAGE = 5
+
+# How much of a player's own start rate survives being left out of every
+# published XI. The implied value above becomes
+# `max(positional_prior, OMITTED_START_HISTORY_WEIGHT * starts / gameweeks)`.
+#
+# **The prior above is right for the cohort it was fitted on and wrong for
+# everybody else.** It was calibrated on players who started 0 of 16 times.
+# Measured over every pre-deadline snapshot in `archive/projections/` -- 1,114
+# rows sitting on the prior -- bucketed by each player's own start rate before
+# that gameweek:
+#
+#   prior rate      n    engine said   they started    gap
+#   never started   874      0.044         0.031      -0.013
+#   1-25%            71      0.144         0.141      -0.003
+#   25-50%           56      0.100         0.179      +0.079
+#   50-75%           64      0.163         0.234      +0.071
+#   75-100%          49      0.174         0.286      +0.111
+#
+# Monotone, and under-predicting by 7-11 points for anyone with a real start
+# history. Reported from the app as Rayan Cherki reading 21% to start off five
+# starts in eight gameweeks.
+#
+# 0.25 is the Brier minimum of a grid search over those rows (0.05500 ->
+# 0.05389, a clean single minimum with a 0.20-0.30 plateau). It is an evidenced
+# starting value and **not a fit**: the search approximates the engine, applying
+# the implied floor at a fixed 0.6 share rather than replaying `blend_aligned`,
+# because a real replay is gated on START_MODEL_REVISION and no archived
+# snapshot predates revision 4. `fit_start_constants()` settles it once
+# revision-4 captures accrue.
+#
+# It can only ever *raise* the implied value, and the omission penalty's own
+# `np.minimum` still keeps it from raising `Start_Pct` -- so a benched player
+# can still only be pulled down, just not as far.
+OMITTED_START_HISTORY_WEIGHT = float(
+    os.getenv("FPL_OMITTED_START_HISTORY_WEIGHT", "0.25"))
 
 # ----- Fantasy Football Pundit -----
 # Env overrides for FFP's addresses. Rotowire has had four of these for a while

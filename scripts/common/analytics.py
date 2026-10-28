@@ -1415,7 +1415,12 @@ def _player_id_col(df: pd.DataFrame):
 
 
 def _frame_starter_overrides(df: pd.DataFrame) -> dict:
-    """``{"rotowire": tri-state Series}`` for one frame, or ``{}``.
+    """``{source: tri-state Series}`` for one frame, or ``{}``.
+
+    One entry per publication that resolved an XI. The engine combines them --
+    see ``projection_engine.combine_starter_overrides``, which is "unanimous to
+    bench" -- rather than this returning a single opinion, because the raw
+    per-source calls are what make the signal scoreable after the fact.
 
     The id mapping has to happen per frame, because only ``build_projections``
     indexes by element id; a page frame carries the id as a column and has an
@@ -1429,33 +1434,53 @@ def _frame_starter_overrides(df: pd.DataFrame) -> dict:
         # reach, and the symptom is a stale projection that looks ordinary.
         _logger.warning(
             "Projection blend: a frame of %d players carries no element id under "
-            "any of %s, so Rotowire's projected XIs cannot be applied to it and "
-            "start likelihood falls back to the weekly rankings article.",
+            "any of %s, so the projected XIs cannot be applied to it and start "
+            "likelihood falls back to the weekly rankings article.",
             len(df), ", ".join(_PLAYER_ID_COLS))
         return {}
-    xi = _rotowire_lineup_xi()
-    override = projection_engine.starter_override(
-        xi, player_ids=ids, teams=df["Team"], index=df.index)
-    return {"rotowire": override} if override is not None else {}
+    out = {}
+    for name, xi in _lineup_xis().items():
+        override = projection_engine.starter_override(
+            xi, player_ids=ids, teams=df["Team"], index=df.index)
+        if override is not None:
+            out[name] = override
+    return out
+
+
+def _lineup_xis() -> dict:
+    """Every projected XI the app can read, keyed by publication.
+
+    Global rather than per frame, for the reason :func:`_rotowire_club_coverage`
+    is: an XI is a statement about the league, not about the frame being
+    blended, so resolving it per frame would disable it on every per-squad page.
+
+    **Each source fails to nothing independently.** An unreachable page, a shape
+    change, or a club whose XI did not resolve drops that publication and leaves
+    the others in charge; all of them failing leaves the engine reading "expects
+    him to start" off the rankings article exactly as it did before any of this
+    existed. A source is only included once it has completed at least one club,
+    since ``clubs`` is what licenses a benching.
+    """
+    out = {}
+    for name, getter in (
+        ("rotowire", "get_rotowire_lineup_xi"),
+        ("sportsgambler", "get_sportsgambler_lineup_xi"),
+    ):
+        try:
+            import scripts.common.scraping as _scraping
+            xi = getattr(_scraping, getter)()
+        except Exception:                   # pragma: no cover
+            continue
+        if xi is not None and getattr(xi, "clubs", None):
+            out[name] = xi
+    return out
 
 
 def _rotowire_lineup_xi():
-    """Rotowire's projected XIs, or None when there is no usable opinion.
-
-    The companion to :func:`_rotowire_club_coverage`, and global for the same
-    reason: an XI is a statement about the league, not about the frame being
-    blended, so resolving it per frame would disable it on every per-squad page.
-
-    Fails to None on anything -- an unreachable page, a shape change, a club
-    whose XI did not resolve -- and the engine then reads "Rotowire expects him
-    to start" off the rankings article exactly as it did before this existed.
-    """
-    try:
-        from scripts.common.scraping import get_rotowire_lineup_xi
-        xi = get_rotowire_lineup_xi()
-    except Exception:                       # pragma: no cover
-        return None
-    return xi if xi is not None and getattr(xi, "clubs", None) else None
+    """Rotowire's projected XIs alone, or None. Retained for callers that ask
+    specifically about Rotowire -- the Hub's Data Sources panel does, since it
+    reports each publication's club completion separately."""
+    return _lineup_xis().get("rotowire")
 
 
 def _frame_projection_sources(df: pd.DataFrame, rotowire_col: str = "Points"):
@@ -1645,11 +1670,13 @@ def _blend_frame(df: pd.DataFrame, rotowire_col: str = "Points",
         per_source_next3_basis=per_source_next3_basis,
         starters_only={"rotowire"},
         source_club_coverage=_rotowire_club_coverage(),
-        # Rotowire's *lineups* page decides who it expects to start, where the
-        # rankings column above only decides what he is worth if he does. The
-        # two disagree whenever the article has gone stale -- which is most of a
-        # gameweek, and is how Phil Foden came to render at 86% to start while
-        # this app's own Projected Lineups page had him benched. Keyed on
+        # The projected-*lineups* pages decide who is expected to start, where
+        # the rankings column above only decides what he is worth if he does.
+        # The two disagree whenever an article has gone stale -- which is most
+        # of a gameweek, and is how Phil Foden came to render at 86% to start
+        # while this app's own Projected Lineups page had him benched. More than
+        # one publication is read and the engine combines them unanimously-to-
+        # bench, so disagreement can no longer lower anybody. Keyed on
         # Player_ID, so a frame without one simply gets no override.
         starter_overrides=_frame_starter_overrides(df),
         fallback_names=fallback_names,
@@ -1664,6 +1691,11 @@ def _blend_frame(df: pd.DataFrame, rotowire_col: str = "Points",
         # omission penalty cannot be applied safely, so it is not applied.
         teams=(df["Team"] if "Team" in df.columns else None),
         chance_of_playing=_chance_of_playing_col(df),
+        # A player every XI leaves out who has nonetheless been starting is not
+        # a never-starter, which is what the omitted prior assumes -- see
+        # `config.OMITTED_START_HISTORY_WEIGHT`. A frame without `starts` leaves
+        # that floor a no-op rather than guessing a rate.
+        starts=numeric_col(df, "starts", float("nan")) if "starts" in df.columns else None,
         status=df.get("status"),
         # An explicit return date bounds the multi-gameweek horizon; see
         # `projection_engine.blend_aligned`. Absent on frames that never merged

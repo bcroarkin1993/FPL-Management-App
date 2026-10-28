@@ -1264,20 +1264,27 @@ def _blended_source_status(rotowire_df, feed, blended, current_gw) -> None:
     # only "Rotowire" is what let the two disagree invisibly: the Hub rendered
     # Phil Foden at 86% to start off a day-old article while the app's own
     # Projected Lineups page had him benched.
-    xi = analytics._rotowire_lineup_xi()
-    n_starters = len(getattr(xi, "player_ids", ()) or ()) if xi else 0
-    n_clubs = len(getattr(xi, "clubs", ()) or ()) if xi else 0
-    if not n_starters:
-        xi_note = "unavailable — start likelihood falls back to the rankings article"
-    elif n_clubs < 20:
-        # A club short of a complete XI can promote its starters but bench
-        # nobody, so say so rather than showing a green tick for a signal that
-        # is working in one direction only.
-        xi_note = f"{n_clubs}/20 clubs complete — no benchings at the rest"
-    else:
-        xi_note = ""
-    rows.append(_row("Rotowire projected XIs", bool(n_starters), n_starters,
-                     xi_note, None, "__start_only__"))
+    # One row per publication. Listing them separately is the point: a single
+    # "projected XIs" row would hide which of them is stale, and the engine
+    # combines them unanimously-to-bench, so *how many* have an opinion about a
+    # club decides whether anyone there can be benched at all.
+    _xis = analytics._lineup_xis()
+    for _src, _label in (("rotowire", "Rotowire projected XIs"),
+                         ("sportsgambler", "Sportsgambler projected XIs")):
+        xi = _xis.get(_src)
+        n_starters = len(getattr(xi, "player_ids", ()) or ()) if xi else 0
+        n_clubs = len(getattr(xi, "clubs", ()) or ()) if xi else 0
+        if not n_starters:
+            xi_note = "unavailable — the other XI source stands alone"
+        elif n_clubs < 20:
+            # A club short of a complete XI can promote its starters but bench
+            # nobody, so say so rather than showing a green tick for a signal
+            # that is working in one direction only.
+            xi_note = f"{n_clubs}/20 clubs complete — no benchings at the rest"
+        else:
+            xi_note = ""
+        rows.append(_row(_label, bool(n_starters), n_starters,
+                         xi_note, None, "__start_only__"))
 
     st.markdown("##### Data Sources")
     render_styled_table(pd.DataFrame(rows))
@@ -1285,10 +1292,13 @@ def _blended_source_status(rotowire_df, feed, blended, current_gw) -> None:
         "Weight is each source's share of the blend where it prices a player; "
         "weights are renormalised over whichever sources are actually available, "
         "so a missing source does not shrink the projection. FPL's own expected "
-        "points fills only players nobody else priced. **Rotowire's projected "
-        "XIs carry no points and no weight** — they decide *who starts*, which "
-        "the rankings article is too slow to track, so a player it benches is "
-        "priced as a substitute even where the article still ranks him."
+        "points fills only players nobody else priced. **The projected XIs carry "
+        "no points and no weight** — they decide *who starts*, which a weekly "
+        "rankings article is too slow to track, so a benched player is priced as "
+        "a substitute even where the article still ranks him. They are combined "
+        "**unanimous-to-bench**: one source naming a player starts him, and he is "
+        "benched only where every source with an opinion leaves him out, so two "
+        "XIs disagreeing can never lower anybody."
     )
 
 

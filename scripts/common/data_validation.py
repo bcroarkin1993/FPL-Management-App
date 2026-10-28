@@ -3015,8 +3015,8 @@ MIN_LINEUP_CLUBS = 14
 XI_SIZE = 11
 
 
-def check_rotowire_lineup_xi(xi, gameweek: Optional[int] = None,
-                             expected_clubs: int = 20) -> List[Issue]:
+def check_rotowire_lineup_xi(xi, gameweek=None, expected_clubs=20,
+                             source: str = "Rotowire") -> List[Issue]:
     """Assert Rotowire's projected XIs are a lineup call and not a shape change.
 
     This signal decides, for every player in the game, whether the projection
@@ -3047,7 +3047,8 @@ def check_rotowire_lineup_xi(xi, gameweek: Optional[int] = None,
     issues: List[Issue] = []
 
     if xi is None:
-        return [Issue(check, "error", "no Rotowire lineup XI was resolved at all",
+        return [Issue(check, "error",
+                      "no %s lineup XI was resolved at all" % source,
                       "fetch_lineup_xi() returned None. The engine falls back to "
                       "the weekly rankings article, so start probabilities will be "
                       "as stale as that article is.")]
@@ -3058,7 +3059,8 @@ def check_rotowire_lineup_xi(xi, gameweek: Optional[int] = None,
 
     if not starters:
         return [Issue(check, "error",
-                      f"Rotowire's lineups page resolved no starters ({note or 'no reason given'})",
+                      "%s's lineups page resolved no starters (%s)"
+                      % (source, note or "no reason given"),
                       "Either the page is unreachable, its `lineup__main` / "
                       "`lineup__player` selectors changed, or the gameweek filter "
                       "dropped every matchup. Check scrape_lineups() against the "
@@ -3094,5 +3096,90 @@ def check_rotowire_lineup_xi(xi, gameweek: Optional[int] = None,
             f"clubs x {XI_SIZE} = {ceiling} ({note})",
             "Either the page has not published every XI yet -- normal early in a "
             "gameweek -- or the player parse is dropping rows."))
+
+    return issues
+
+
+#: Named for what it does rather than for the first source that needed it. The
+#: body was already duck-typed on ``.player_ids`` / ``.clubs``, so a second
+#: publication reuses it as it stands.
+check_lineup_xi = check_rotowire_lineup_xi
+
+
+#: Two publications predicting the same eleven-a-side fixtures should mostly
+#: agree. Below this they are not describing the same gameweek.
+MIN_LINEUP_AGREEMENT = 0.60
+
+
+def check_lineup_consensus(xis: Optional[dict],
+                           expected_clubs: int = 20) -> List[Issue]:
+    """Assert two projected XIs are describing the same thing.
+
+    The engine combines every XI it can read, unanimous-to-bench, so a source
+    that has silently drifted onto **another gameweek** does not merely add
+    noise: its benchings are real benchings of players who were never in that
+    week's squad, and its promotions lift players who are not playing. Both read
+    as ordinary numbers.
+
+    Nothing else can catch it. Each source passes ``check_lineup_xi`` on its own
+    -- eleven names a club, twenty clubs, every label resolved -- because being
+    well-formed says nothing about *which* week it describes. Only comparing the
+    two does.
+
+    Agreement is measured over the clubs both sources completed, since those are
+    the only players both have an opinion about. Two XIs for one fixture
+    legitimately differ on two or three of eleven; they do not differ on nine.
+
+    A single source is **not** a finding: it is the state this app shipped in for
+    a year and the state every source but one failing degrades to.
+    """
+    check = "lineup_consensus"
+    issues: List[Issue] = []
+
+    usable = {name: xi for name, xi in (xis or {}).items()
+              if xi is not None and set(getattr(xi, "player_ids", ()) or ())}
+    if len(usable) < 2:
+        return issues
+
+    names = sorted(usable)
+    for i, left_name in enumerate(names):
+        for right_name in names[i + 1:]:
+            left, right = usable[left_name], usable[right_name]
+            shared = (set(getattr(left, "clubs", ()) or ())
+                      & set(getattr(right, "clubs", ()) or ()))
+            if not shared:
+                # Early in a gameweek the two can legitimately have published
+                # disjoint halves of the fixture list.
+                continue
+            l_ids = set(left.player_ids)
+            r_ids = set(right.player_ids)
+            # Scoped to the shared clubs via the ids each source resolved there;
+            # a club is only "shared" when both resolved all eleven, so the two
+            # sets are comparable eleven-for-eleven.
+            union = l_ids | r_ids
+            if not union:
+                continue
+            overlap = len(l_ids & r_ids) / float(len(union))
+            if overlap < MIN_LINEUP_AGREEMENT:
+                issues.append(Issue(
+                    check, "error",
+                    "%s and %s agree on only %.0f%% of their starters across the "
+                    "%d club(s) both completed"
+                    % (left_name, right_name, overlap * 100, len(shared)),
+                    "Two XIs for the same fixtures differ on two or three of "
+                    "eleven, not on most of them. The usual cause is one source "
+                    "having drifted onto a different gameweek, which its own "
+                    "shape checks cannot see -- compare the gameweek each one "
+                    "resolved and the fixtures it kept."))
+
+    gws = {int(xi.gameweek) for xi in usable.values()
+           if getattr(xi, "gameweek", None) is not None}
+    if len(gws) > 1:
+        issues.append(Issue(
+            check, "error",
+            "the XI sources report different gameweeks: %s" % sorted(gws),
+            "Every source must be asked for the same gameweek. A mismatch means "
+            "one of them resolved its own, which is how a benching lands on a "
+            "player who is not in this week's fixture list at all."))
 
     return issues

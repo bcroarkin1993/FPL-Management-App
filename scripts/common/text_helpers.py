@@ -71,6 +71,14 @@ TEAM_FULL_TO_SHORT = {
     # premierleague.com's XI graphics are titled "Nottm Forest Matchweek 4 line
     # up" -- no apostrophe. An unmapped label there drops that club's graphic.
     "Nottm Forest": "NFO",
+    # Sportsgambler's lineups page. "Nott'm Forest" here uses a *curly*
+    # apostrophe (U+2019), not the straight one above, and Forest is the only
+    # club in the league carrying one -- so an explicit key is cheaper and more
+    # obvious than normalising punctuation inside every caller of this map.
+    # An unmapped label on that page fails closed: the club gets no XI opinion
+    # at all, so these two keys are worth 2 of 20 clubs' start signal.
+    "Nott’m Forest": "NFO",
+    "Man United": "MUN",
 }
 
 # Position mappings (various formats -> G/D/M/F)

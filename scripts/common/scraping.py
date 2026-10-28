@@ -104,6 +104,22 @@ def get_rotowire_lineup_xi(url=None, gameweek=None):
     return rotowire_lineups.fetch_lineup_xi(url, gameweek)
 
 
+@st.cache_data(ttl=300)
+def get_sportsgambler_lineup_xi(url=None, gameweek=None):
+    """Sportsgambler's projected XIs as FPL element ids (cached).
+
+    The second XI opinion. Same TTL and same rules as
+    ``get_rotowire_lineup_xi`` above -- a start signal moves with team news, and
+    only hashable arguments reach a cached function.
+
+    It costs one index fetch plus one request per fixture in the gameweek (ten,
+    pooled), which is why the gameweek filter runs on the index *before*
+    fetching rather than after.
+    """
+    from scripts.common import sportsgambler_lineups
+    return sportsgambler_lineups.fetch_lineup_xi(url, gameweek)
+
+
 # Rotowire stamps every article with "Updated on August 20, 2026 10:54AM EST" in
 # a div.article__date. Worth surfacing: a weekly rankings table published before
 # the last team-news cycle is materially less useful than one published after it,
