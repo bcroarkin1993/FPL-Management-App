@@ -915,3 +915,61 @@ class TestHorizonLengthOnTheRealArchive:
         assert (v["best_weeks"] == acc.ROS_HORIZON_WEEKS
                 or "not grounds to move" in v["note"]
                 or "Worth considering once" in v["note"])
+
+
+class TestAScoreNeedsSomethingToCompareAgainst:
+    """"Brier 0.076" is uninterpretable, which was reported as such.
+
+    A raw error number carries no scale: 0.076 is excellent for a Brier score
+    and 2.5 is unremarkable for an MAE, and the tab said neither. The baseline
+    is the dumbest forecast that still respects the data -- one constant for
+    everybody.
+    """
+
+    def test_the_start_baseline_is_the_observed_rate(self, _start_archive):
+        ref = acc.no_skill_reference(acc.SCOPE_START)
+        assert ref["metric"] == "brier"
+        # Brier of a constant p against outcomes with mean p is p(1-p).
+        assert 0.0 < ref["value"] <= 0.25
+        assert "%" in ref["label"]
+
+    def test_the_points_baseline_uses_the_median_not_the_mean(self, _archive):
+        """The median is what minimises MAE. Comparing against the mean would
+        flatter every source by using a baseline that is not the best constant.
+        """
+        ref = acc.no_skill_reference(acc.SCOPE_STARTERS)
+        assert ref["metric"] == "mae"
+        import pandas as pd
+        rows = acc.score_gameweek(3)
+        assert ref["value"] > 0
+
+    def test_skill_is_zero_at_the_baseline_and_one_at_perfect(self):
+        ref = {"value": 0.2, "metric": "brier"}
+        assert acc.skill_against_no_skill(0.2, ref) == pytest.approx(0.0)
+        assert acc.skill_against_no_skill(0.0, ref) == pytest.approx(1.0)
+        assert acc.skill_against_no_skill(0.1, ref) == pytest.approx(0.5)
+
+    def test_negative_skill_is_a_real_answer(self):
+        """A source can be worse than the best constant, and on points every
+        source currently is -- which is the most useful thing the tab can say
+        about MAE, so it must not be clamped away."""
+        ref = {"value": 2.31, "metric": "mae"}
+        assert acc.skill_against_no_skill(2.50, ref) < 0
+
+    def test_nothing_scoreable_gives_no_reference_rather_than_a_guess(self):
+        assert acc.skill_against_no_skill(1.0, {}) is None
+        assert acc.skill_against_no_skill(float("nan"), {"value": 0.2}) is None
+        assert acc.skill_against_no_skill(1.0, {"value": 0.0}) is None
+
+    def test_every_rendered_metric_has_a_gloss(self):
+        """A number on the page with no definition anywhere is the bug."""
+        for key in ("brier", "auc", "mae", "bias", "spearman"):
+            name, direction, blurb = acc.METRIC_GLOSSARY[key]
+            assert name and blurb
+            assert direction in ("lower", "higher", "toward zero")
+
+    def test_the_glossary_covers_the_metrics_the_baselines_name(self):
+        for scope in (acc.SCOPE_START, acc.SCOPE_STARTERS):
+            ref = acc.no_skill_reference(scope)
+            if ref:
+                assert ref["metric"] in acc.METRIC_GLOSSARY

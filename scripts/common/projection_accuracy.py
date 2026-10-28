@@ -715,6 +715,128 @@ def _loss(frame: pd.DataFrame, source: str, scope: str) -> pd.Series:
     return err ** 2 if scope == SCOPE_START else err.abs()
 
 
+#: Plain-language gloss per metric: what it measures, which way is good, and
+#: what a reader should compare the number against. The page renders these
+#: rather than assuming the reader knows what a Brier score is -- reported as
+#: "not sure what Brier 0.076 means", which is a fair thing not to know.
+METRIC_GLOSSARY = {
+    "brier": (
+        "Brier score",
+        "lower",
+        "The average squared miss on a probability. Predict 100% for a player "
+        "who starts and you score 0; predict 100% for one who does not and you "
+        "score 1. It rewards being right *and* being appropriately unsure.",
+    ),
+    "auc": (
+        "AUC",
+        "higher",
+        "Ordering alone, ignoring whether the probabilities are the right size: "
+        "the chance a player who started was rated above one who did not. 0.5 is "
+        "a coin flip, 1.0 is perfect. A source that says 100% for everybody "
+        "scores 0.5.",
+    ),
+    "mae": (
+        "MAE",
+        "lower",
+        "The average miss, in points. 2.5 means the typical projection is two "
+        "and a half points out.",
+    ),
+    "bias": (
+        "Bias",
+        "toward zero",
+        "The average miss *with its sign*, so consistently-too-high and merely "
+        "noisy are told apart. MAE cannot distinguish them.",
+    ),
+    "spearman": (
+        "Rank correlation",
+        "higher",
+        "Whether the order is right, ignoring the sizes entirely. 0 is random, "
+        "1 is a perfect ordering. This is the half that matters for picking "
+        "between players, and the half MAE is blind to.",
+    ),
+}
+
+
+def no_skill_reference(scope: str = SCOPE_STARTERS,
+                       pre_only: bool = True) -> dict:
+    """What a model carrying **no information** scores, so a metric has a scale.
+
+    A raw error number is uninterpretable on its own: 0.076 is excellent for a
+    Brier score and 2.5 is unremarkable for an MAE, and nothing on the page said
+    so. Both become readable against the dumbest forecast that still respects
+    the data -- one constant for everybody.
+
+    * **start** -- everyone gets the observed start rate. That is the
+      "climatological" forecast, and the honest baseline for a probability:
+      Brier ``p(1-p)``.
+    * **starters** / **all** -- everyone gets the same points. Reported against
+      the **median**, because the median is what minimises MAE; using the mean
+      would flatter every source by comparing it to a baseline that is not even
+      the best constant.
+
+    Returns ``{}`` when nothing is scoreable. ``skill`` on the result is the
+    fraction of the way from that baseline to perfect, so 0 means "no better
+    than one number for everybody" and 1 means exact.
+    """
+    frames = []
+    for gw in projection_archive.scoreable_gameweeks():
+        joined, meta = _pair(gw)
+        if joined is None or joined.empty:
+            continue
+        if pre_only and not meta.get("captured_before_deadline"):
+            continue
+        frames.append(joined)
+    if not frames:
+        return {}
+
+    data = pd.concat(frames, ignore_index=True)
+    started = pd.to_numeric(data.get("started"), errors="coerce").fillna(0) > 0
+
+    if scope == SCOPE_START:
+        outcome = started.astype(float)
+        if outcome.empty:
+            return {}
+        rate = float(outcome.mean())
+        return {
+            "scope": scope,
+            "metric": "brier",
+            "value": float(((rate - outcome) ** 2).mean()),
+            "n": int(len(outcome)),
+            "label": "everyone rated %.0f%%" % (rate * 100),
+            "detail": "the observed start rate",
+        }
+
+    rows = data[started] if scope == SCOPE_STARTERS else data
+    actual = pd.to_numeric(rows.get("points"), errors="coerce").dropna()
+    if actual.empty:
+        return {}
+    middle = float(actual.median())
+    return {
+        "scope": scope,
+        "metric": "mae",
+        "value": float((actual - middle).abs().mean()),
+        "n": int(len(actual)),
+        "label": "everyone projected %.1f" % middle,
+        "detail": "the median actual score, which is what minimises MAE",
+    }
+
+
+def skill_against_no_skill(value: float, reference: dict) -> Optional[float]:
+    """How far from "no information" to perfect a score sits, as a fraction.
+
+    0.0 is no better than one constant for everybody and 1.0 is exact.
+    **Negative is a real answer**, not an error: a source can be worse than the
+    best constant, and on points every source currently is -- which is the most
+    useful thing the Accuracy tab can tell a reader about MAE.
+    """
+    if not reference or value is None or value != value:
+        return None
+    base = reference.get("value")
+    if not base:
+        return None
+    return float(1.0 - (value / base))
+
+
 def head_to_head(scope: str = SCOPE_STARTERS, pre_only: bool = True) -> pd.DataFrame:
     """Every pair of sources, compared on the players both of them priced.
 

@@ -1471,6 +1471,7 @@ def render_accuracy():
         )
 
     _render_verdict()
+    _render_glossary()
 
     st.markdown("#### Error by source")
     st.caption(
@@ -1669,6 +1670,81 @@ def _render_horizon_length(scored):
         )
 
 
+def _render_glossary():
+    """What every number on this tab means, in one collapsed place.
+
+    The tab reported Brier scores, AUC, MAE, bias and rank correlation to three
+    decimal places and defined none of them where a reader would look. Each
+    definition here comes with the direction that is good and -- the part that
+    actually makes a number readable -- what it should be compared against,
+    computed from the archive rather than asserted.
+    """
+    refs = {
+        "Who starts": projection_accuracy.no_skill_reference(
+            projection_accuracy.SCOPE_START),
+        "Points if he starts": projection_accuracy.no_skill_reference(
+            projection_accuracy.SCOPE_STARTERS),
+    }
+    with st.expander("What do these numbers mean?"):
+        rows = []
+        for key, (name, direction, blurb) in projection_accuracy.METRIC_GLOSSARY.items():
+            rows.append({
+                "Metric": name,
+                "Good is": {"lower": "lower", "higher": "higher",
+                            "toward zero": "near 0"}.get(direction, direction),
+                "What it measures": blurb,
+            })
+        render_styled_table(pd.DataFrame(rows))
+        st.caption(
+            "**A score needs something to be compared against**, which is what "
+            "makes the headline cards above readable. The baseline is the "
+            "dumbest forecast that still respects the data — one number for "
+            "everybody:"
+        )
+        for label, ref in refs.items():
+            if not ref:
+                continue
+            st.caption(
+                "· **%s** — %s (%s) scores %s **%.3f** over %s player-gameweeks."
+                % (label, ref["label"], ref["detail"],
+                   projection_accuracy.METRIC_GLOSSARY[ref["metric"]][0],
+                   ref["value"], f"{ref['n']:,}")
+            )
+        st.caption(
+            "So on **who starts** the app is well clear of guessing. On "
+            "**points if he starts** no source beats that constant on average "
+            "miss — FPL returns among starters have a standard deviation of "
+            "about 3.2 points and most of that is irreducible, so MAE is a weak "
+            "way to choose between sources. **Rank correlation** is the one "
+            "that separates them, and it is why the fitted blend weights are "
+            "not simply whatever minimises MAE."
+        )
+
+
+def _plain_skill(value, reference) -> str:
+    """A raw error score as a sentence, anchored on a no-information baseline.
+
+    "Brier 0.076" is uninterpretable without knowing what good looks like, and
+    nothing on this page said. Against the dumbest forecast that still respects
+    the data -- one constant for everybody -- it becomes readable, and on points
+    it becomes *informative*: no source currently beats that constant on average
+    miss, which is the single most useful thing this tab can tell a reader.
+    """
+    if not reference:
+        return ""
+    skill = projection_accuracy.skill_against_no_skill(value, reference)
+    if skill is None:
+        return ""
+    baseline = reference.get("label", "no information")
+    if skill >= 0.02:
+        return ("<b>%.0f%%</b> of the way from <i>%s</i> to perfect"
+                % (skill * 100, baseline))
+    if skill <= -0.02:
+        return ("<b>%.0f%% worse</b> than simply <i>%s</i> — the ordering is "
+                "what separates the sources" % (abs(skill) * 100, baseline))
+    return "<b>level with</b> simply <i>%s</i>" % baseline
+
+
 def _render_verdict():
     """Which source is actually best -- the answer, before the evidence.
 
@@ -1684,14 +1760,15 @@ def _render_verdict():
         (projection_accuracy.SCOPE_START, "Who starts", "Brier", "{:.3f}"),
         (projection_accuracy.SCOPE_STARTERS, "Points if he starts", "MAE", "{:.2f}"),
     ]
-    verdicts = [(label, metric, fmt, projection_accuracy.verdict(scope))
+    verdicts = [(label, metric, fmt, projection_accuracy.verdict(scope),
+                 projection_accuracy.no_skill_reference(scope))
                 for scope, label, metric, fmt in questions]
-    if not any(v.get("best") for _, _, _, v in verdicts):
+    if not any(v.get("best") for *_, v, _ref in verdicts):
         return
 
     st.markdown("#### The short version")
     cols = st.columns(len(verdicts))
-    for col, (label, metric, fmt, v) in zip(cols, verdicts):
+    for col, (label, metric, fmt, v, ref) in zip(cols, verdicts):
         with col:
             if not v.get("best"):
                 st.info(v.get("note") or "Not scoreable yet.")
@@ -1711,7 +1788,10 @@ def _render_verdict():
                                   text-transform:uppercase;color:#8fa3c8;">{label}</div>
                       <div style="font-size:1.25rem;font-weight:700;margin:.25rem 0;
                                   color:#7ee787;">{name}</div>
-                      <div style="font-size:0.85rem;color:#c8d2e4;">
+                      <div style="font-size:0.9rem;color:#e0e0e0;">
+                        {_plain_skill(v['value'], ref)}
+                      </div>
+                      <div style="font-size:0.8rem;color:#8fa3c8;margin-top:.2rem;">
                         {metric} {fmt.format(v['value'])} · {tail}
                       </div>
                       <div style="font-size:0.78rem;color:#8fa3c8;margin-top:.3rem;">
@@ -1788,12 +1868,14 @@ def _render_start_model(scored):
     st.markdown("#### Will he start?")
     st.caption(
         "The minutes model on its own, scored against whether each player "
-        "actually started. **Brier** is the mean squared error of a probability — "
-        "lower is better, and 0.25 is what you get by answering 50% to "
-        "everything. **AUC** is ordering alone: whether the players it rated "
-        "higher did start more often. The two fail differently — a source can "
-        "order players perfectly and still state every probability far too high — "
-        "which is why **bias** is here as well."
+        "actually started. **Brier** is the average squared miss on a "
+        "probability: say 100% for a player who starts and you score 0, say it "
+        "for one who does not and you score 1 — so it rewards being right *and* "
+        "being appropriately unsure, and a source that says 100% for everybody "
+        "scores badly rather than looking good. **AUC** is ordering alone: the "
+        "chance a player who started was rated above one who did not, where 0.5 "
+        "is a coin flip. A source can order perfectly and still state every "
+        "probability far too high, which is why **bias** is here as well."
     )
 
     summary = projection_accuracy.summarise(scored)

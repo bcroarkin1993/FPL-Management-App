@@ -1853,6 +1853,56 @@ Still open in 4b: an odds-derived source, and giving `fpl_ep` a real weight —
 the latter now has a measurement against it rather than merely no measurement
 for it.
 
+### A score needs something to compare against
+
+`no_skill_reference()`, `skill_against_no_skill()`, `METRIC_GLOSSARY`
+(`projection_accuracy.py`), `_plain_skill()` and `_render_glossary()` on the
+Accuracy tab.
+
+**Reported from the app: "not sure what Brier 0.076 means".** A fair thing not
+to know, and the tab's fault rather than the reader's — it printed Brier, AUC,
+MAE, bias and rank correlation to three decimal places and defined none of them
+where anybody would look. A raw error number carries no scale: 0.076 is
+excellent for a Brier score and 2.5 is unremarkable for an MAE.
+
+The anchor is the dumbest forecast that still respects the data — one constant
+for everybody — and both are computed from the archive rather than asserted:
+
+| Question | Baseline | Baseline score | App |
+|---|---|---|---|
+| Who starts | everyone rated 33% (the observed start rate) | Brier **0.2215** | 0.0759 — **66% of the way to perfect** |
+| Points if he starts | everyone projected 3.0 | MAE **2.3094** | 2.4999 — **8% worse** |
+
+**The points row is the finding.** Measured on identical rows, *no source beats
+a constant* on average miss: FFP 2.500 is level with predicting the mean and
+worse than predicting the median, Rotowire is 2.587, the blend 2.545, `fpl_ep`
+3.040. FPL returns among starters have a standard deviation of 3.2 points and
+most of that is irreducible, so **MAE is a weak way to choose between sources**
+and the tab now says so instead of presenting it as the verdict.
+
+The median is the baseline, not the mean, because the median is what minimises
+MAE — comparing against the mean would flatter every source against a baseline
+that is not even the best constant.
+
+**Negative skill is a real answer and is not clamped away.** It is the most
+useful thing this tab can tell a reader about MAE.
+
+**This is also the sanity check Phase 4b needed.** MAE rewards predicting the
+conditional median, so a metric-driven weight fit could in principle reward
+whichever source is merely most *compressed*. It did not: FFP's predictions are
+**more** spread than Rotowire's (sd 1.079 against 0.867), and the two objectives
+agree that Rotowire's weight belongs well below 0.6 —
+
+| Rotowire weight | 0.0 | **0.2** | 0.4 | 0.6 |
+|---|---|---|---|---|
+| MAE (lower better) | 2.488 | 2.497 | 2.513 | 2.534 |
+| Rank corr (higher better) | 0.1708 | **0.1735** | 0.1713 | 0.1626 |
+
+**MAE is optimised at 0.0 and rank correlation at 0.20** — independently the
+value `_nearest_in_band()` derived from the tie band. So the shipped weights are
+the rank-optimal ones as well, which is a stronger result than the MAE fit alone
+and is why they are not simply whatever minimises MAE.
+
 ### Which source is best — the tab has to answer, not just report
 
 `verdict()` and `head_to_head()` (`projection_accuracy.py`), rendered as "The
