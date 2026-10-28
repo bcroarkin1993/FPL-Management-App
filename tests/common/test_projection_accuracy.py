@@ -164,6 +164,70 @@ class TestBackfillsNeverMoveTheWeights:
         assert out["mae"] <= out["current_mae"] + 1e-9
 
 
+class TestTheWeightFitDoesNotOverclaim:
+    """An argmin always names something, so the fit needs the same two guards
+    `fit_start_constants` carries.
+
+    On the live GW4-8 surface the MAE is monotone in Rotowire's weight with no
+    interior optimum, the minimum sits on the grid *edge* at 0.00, and every
+    weight from 0.00 to 0.20 is within 0.5% of it. "The best fit is 0.00" was
+    true and almost meaningless.
+    """
+
+    def test_the_tie_band_is_reported(self, _archive):
+        out = acc.fit_blend_weights(step=0.25)
+        assert out["tie_band"], "a fit with no band cannot say what it cannot distinguish"
+        assert all(abs(sum(c.values()) - 1.0) < 1e-9 for c in out["tie_band"])
+
+    def test_a_grid_edge_winner_is_flagged_as_one(self):
+        """Not refused -- a zero weight is interpretable for a source, unlike a
+        positional floor -- but never silently adopted."""
+        import numpy as np
+        import pandas as pd
+        band = [(0.0, 1.0, 0.0), (0.2, 0.8, 0.0)]
+        assert acc._nearest_in_band(band, (0.6, 0.4, 0.0)) == (0.2, 0.8, 0.0)
+
+    def test_the_recommendation_is_the_smallest_change_into_the_band(self):
+        band = [(0.0, 1.0, 0.0), (0.1, 0.9, 0.0), (0.2, 0.8, 0.0)]
+        assert acc._nearest_in_band(band, (0.6, 0.4, 0.0)) == (0.2, 0.8, 0.0)
+        # ...and from the other side, the nearest is the other end.
+        assert acc._nearest_in_band(band, (0.0, 1.0, 0.0)) == (0.0, 1.0, 0.0)
+
+    def test_a_tie_on_distance_prefers_not_introducing_a_new_source(self):
+        """Giving weight to a source held at zero is a bigger claim than
+        reweighting two that already carry some. Live, the two nearest band
+        members differed by exactly that -- `fpl_ep` 0.00 against 0.05, which
+        buys 0.08% of MAE and is itself inside the band."""
+        band = [(0.2, 0.75, 0.05), (0.2, 0.8, 0.0)]
+        assert acc._nearest_in_band(band, (0.6, 0.4, 0.0)) == (0.2, 0.8, 0.0)
+
+    def test_weights_already_in_the_band_are_left_alone(self, _archive):
+        """The `FIT_TIE_BAND` rule for the start constants, applied here: where
+        the configured value is indistinguishable from the best, do nothing."""
+        out = acc.fit_blend_weights(step=0.25)
+        if out["configured_in_band"]:
+            assert out["recommended"] == out["current"]
+
+    def test_the_shipped_weights_are_inside_the_band(self):
+        """What makes this fit *applied* rather than merely reported.
+
+        Phase 4b moved the configured split to the nearest point of the band,
+        so a fit run today should recommend no further change. If this fails,
+        either the archive has grown enough to move the band or the constants
+        and the fit have parted company.
+        """
+        if not acc.projection_archive.scoreable_gameweeks():
+            pytest.skip("no scoreable gameweek in the archive")
+        out = acc.fit_blend_weights()
+        if out["fitted"] is None:
+            pytest.skip(out["note"])
+        assert out["configured_in_band"], (
+            "the configured weights %r are outside the %.1f%% band around the "
+            "best fit %r -- the smallest supported change is %r"
+            % (out["current"], acc.WEIGHT_FIT_TIE_BAND * 100, out["fitted"],
+               out["recommended"]))
+
+
 class TestSimplex:
     def test_every_weight_vector_sums_to_one(self):
         for w in acc._simplex(3, 0.25):

@@ -77,6 +77,12 @@ SCOPE_START = "start"
 #: Reported anyway, but never presented as a conclusion.
 MIN_GAMEWEEKS_FOR_CONFIDENCE = 5
 
+#: Fractional MAE band inside which two weightings are not distinguishable on
+#: this sample. Mirrors `FIT_TIE_BAND` for the start constants and exists for
+#: the same reason -- the live GW4-8 surface is monotone with its minimum on the
+#: grid edge, and 0.00 through 0.25 of Rotowire all sit within 0.5% of the best.
+WEIGHT_FIT_TIE_BAND = 0.005
+
 #: Below this many rows, one *cohort* of the start model is not worth retuning --
 #: which is a different question from how many gameweeks exist. The cohorts differ
 #: in size by an order of magnitude within a single gameweek (measured over GW4 and
@@ -572,26 +578,69 @@ def fit_blend_weights(gameweeks: Optional[Sequence[int]] = None,
     actual = data["points"]
     preds = {s: data[_column_for(s, SCOPE_STARTERS)] for s in sources}
 
-    best, best_mae = None, np.inf
+    scored = []
     for weights in _simplex(len(sources), step):
         blended = sum(w * preds[s] for w, s in zip(weights, sources))
-        mae = float((blended - actual).abs().mean())
-        if mae < best_mae:
-            best, best_mae = weights, mae
+        scored.append((float((blended - actual).abs().mean()), tuple(weights)))
+    scored.sort(key=lambda row: row[0])
+    best_mae, best = scored[0]
 
     current = _current_weights(sources)
     cur_blend = sum(w * preds[s] for w, s in zip(current, sources))
     current_mae = float((cur_blend - actual).abs().mean())
+
+    # --- The two guards, because an argmin always names something ------------
+    #
+    # Exactly the pair `fit_start_constants` carries, and for the same reason:
+    # this search had neither, so it reported a single winner off a surface it
+    # could not actually distinguish. On the live GW4-8 fit the MAE is monotone
+    # in Rotowire's weight with no interior optimum, the minimum sits on the
+    # grid *edge* at 0.00, and every weight from 0.00 to 0.25 is inside the
+    # band -- so "the best fit is 0.00" was true and almost meaningless.
+    cutoff = best_mae * (1.0 + WEIGHT_FIT_TIE_BAND)
+    band = [w for mae, w in scored if mae <= cutoff]
+    configured_in_band = tuple(round(w, 10) for w in current) in {
+        tuple(round(x, 10) for x in w) for w in band
+    }
+    at_grid_edge = any(w <= 0.0 or w >= 1.0 for w in best)
+
+    recommended = current if configured_in_band else _nearest_in_band(band, current)
 
     return {
         "fitted": {s: round(w, 3) for s, w in zip(sources, best)},
         "mae": best_mae,
         "current": {s: round(w, 3) for s, w in zip(sources, current)},
         "current_mae": current_mae,
+        "recommended": {s: round(w, 3) for s, w in zip(sources, recommended)},
+        "tie_band": [{s: round(w, 3) for s, w in zip(sources, cand)} for cand in band],
+        "configured_in_band": bool(configured_in_band),
+        "at_grid_edge": bool(at_grid_edge),
         "n": int(len(data)),
         "gameweeks": int(data["gameweek"].nunique()),
         "note": "",
     }
+
+
+def _nearest_in_band(band, current):
+    """The tie-band member that changes the configured weights least.
+
+    **Which value to adopt is not the argmin.** Everything in the band is
+    indistinguishable on this sample, so the honest move is the smallest one
+    that leaves the band -- which also avoids adopting a grid-edge value, the
+    thing `fit_start_constants` refuses outright for the positional floors.
+
+    Ties on distance prefer the candidate that introduces no new source: giving
+    weight to a source the config holds at zero is a bigger claim than
+    reweighting two that already carry some, and on the live fit the two nearest
+    members differ by exactly that (`fpl_ep` 0.00 against 0.05, which buys
+    0.08% of MAE and is itself inside the band).
+    """
+    def _key(cand):
+        l1 = sum(abs(c - w) for c, w in zip(cand, current))
+        new_sources = sum(1 for c, w in zip(cand, current) if w <= 0.0 and c > 0.0)
+        return (round(l1, 10), new_sources, tuple(-c for c in cand))
+
+    return min(band, key=_key)
 
 
 # --- Which source is actually best -------------------------------------------

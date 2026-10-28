@@ -1598,14 +1598,23 @@ class TestFixtureBlendBasis:
             "FFP_GW": [3],
         })
         out = blend_fixture_projections(players, ffp, expected_gw=3)
-        # 0.6*5.0 + 0.4*6.0 = 5.4, then x the MID floor (start 50% is below it).
-        # Against the constant, not a literal: the floors are fitted from the
-        # archive and move.
-        from scripts.common.projection_engine import DEFAULT_START_FLOORS
+        # Against the constants, never literals: both the floors and the blend
+        # weights are fitted from the archive and move. (The weights were
+        # 60/40 Rotowire/FFP until GW8 made them fittable, which is exactly the
+        # kind of change that leaves a hard-coded `5.4` here asserting the old
+        # engine rather than the current one.)
+        from scripts.common.projection_engine import (
+            DEFAULT_START_FLOORS, DEFAULT_WEIGHTS)
         floor = DEFAULT_START_FLOORS["M"]
-        assert out.loc[0, "Proj_Blended"] == pytest.approx(5.4 * floor, abs=0.01)
-        # The old behaviour blended Predicted (3.0) instead: 0.6*5 + 0.4*3 = 4.2.
-        assert out.loc[0, "Proj_Blended"] > 4.2 * floor
+        w_rw, w_ffp = DEFAULT_WEIGHTS["rotowire"], DEFAULT_WEIGHTS["ffp"]
+        # Rotowire's 5.0 blended with FFP's *conditional* 6.0, then x the MID
+        # floor, since a stated 50% start is below it.
+        conditional = w_rw * 5.0 + w_ffp * 6.0
+        assert out.loc[0, "Proj_Blended"] == pytest.approx(conditional * floor, abs=0.01)
+        # The old behaviour blended FFP's already-discounted `Predicted` (3.0),
+        # which charges the start probability twice and is strictly lower.
+        double_discounted = w_rw * 5.0 + w_ffp * 3.0
+        assert out.loc[0, "Proj_Blended"] > double_discounted * floor
 
 
 # =============================================================================

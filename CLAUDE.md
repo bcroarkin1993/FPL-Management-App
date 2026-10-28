@@ -1784,6 +1784,75 @@ would mean the app and its own fallback disagree. Tests assert against the
 constants rather than literals, so the next retune does not break a dozen of
 them — four had hard-coded `0.68` and needed rewriting for this one.
 
+### Phase 4b — the 60/40 split was never measured, and it was wrong
+
+`fit_blend_weights()` with `WEIGHT_FIT_TIE_BAND` and `_nearest_in_band()`,
+`config.PROJECTION_SOURCE_WEIGHTS`, `config.ROTOWIRE_OMISSION_SHARE`.
+
+**60/40 Rotowire/FFP was the number the app shipped with, not a fitted one.**
+With five pre-deadline gameweeks in the archive (n=923 started
+player-gameweeks, GW4–8) it became fittable, and the surface is monotone:
+
+| Rotowire weight | 0.00 | 0.20 | 0.40 | 0.60 *(as shipped)* |
+|---|---|---|---|---|
+| MAE | 2.498 | **2.506** | 2.522 | 2.543 |
+
+No interior optimum. Paired per player, FFP beats Rotowire by **+0.103** (CI
+0.054–0.152) and beats the 60/40 **blend itself** by +0.040 (CI 0.015–0.066),
+leading in 4 of the 5 gameweeks. So part of Rotowire's weight was costing
+points rather than earning them — the hypothesis "Which source is best"
+recorded after two gameweeks, now with enough data to act on.
+
+**The weights are now 0.20 / 0.80, and the argmin of 0.00 is deliberately not
+adopted.** `fit_blend_weights()` had neither of the guards
+`fit_start_constants` carries, so it reported one winner off a surface it could
+not distinguish. Both are now in place:
+
+- **`WEIGHT_FIT_TIE_BAND` (0.5%)** — twenty weightings sit inside it, every
+  Rotowire weight from 0.00 to 0.20 among them.
+- **A grid-edge winner is flagged, not adopted.** The minimum is at 0.00,
+  which is the search running out of room; it is the same objection that makes
+  an edge-of-grid positional floor refused outright.
+
+`_nearest_in_band()` then picks **the smallest change that reaches the band**,
+which is what makes 0.20 a derived answer rather than a chosen one. Ties on
+distance prefer not introducing a new source: giving weight to a source held at
+zero is a bigger claim than reweighting two that already carry some, and the two
+nearest members differed by exactly that (`fpl_ep` 0.00 against 0.05, worth
+0.08% of MAE and itself inside the band — so `fpl_ep` stays at 0). Live effect:
+MAE **2.5427 → 2.5062**, capturing 78% of the available gain while staying off
+the edge. Re-running the fit now reports `configured_in_band`, i.e. no further
+change this history supports. The Accuracy tab renders *Recommended* beside
+*Best fit* and says outright that they differ and why.
+
+**`ROTOWIRE_OMISSION_SHARE` had to be split off first, or this would have
+silently undone Phase 4a.** The omitted prior blended at
+`w_self / (w_self + w_rest)` over the *points* weights — so how strongly a
+*start* inference is trusted was a function of how much the points blend trusts
+the same source. Measured on a player every published XI left out, with FFP
+rating him 50%, moving Rotowire's points weight moved his `Start_Pct`:
+
+| points weight | 0.60 | 0.25 | 0.00 |
+|---|---|---|---|
+| resolved `Start_Pct` | 0.212 | 0.380 | **0.500** |
+
+At zero the omission signal vanishes entirely and a benched player reads as
+though nothing had been said about him — against a prior that was *fitted*
+against this very term. It is now its own constant, pinned at the 0.6 the prior
+was fitted under, and a test asserts the start model is invariant under the
+points weights. Re-fitting the prior should re-fit the share with it; re-fitting
+the points weights must not touch it.
+
+**Live effect of the weight change, same data both sides** (GW9): 215 players'
+`Proj_Start` move, 92 up and 123 down, mean −0.103 — all of them `RW+FFP`
+players, since only a player both sources priced can be reweighted.
+**`Start_Pct` and `Proj_Next3` are byte-identical**, which is the decoupling
+working. Haaland stays top; Foden rises 9th to 5th.
+
+Still open in 4b: an odds-derived source, and giving `fpl_ep` a real weight —
+the latter now has a measurement against it rather than merely no measurement
+for it.
+
 ### Which source is best — the tab has to answer, not just report
 
 `verdict()` and `head_to_head()` (`projection_accuracy.py`), rendered as "The
@@ -4241,7 +4310,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Projection accuracy harness | Phases 1-3 done, Phase 4a done, 4b blocked on data | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". **Phase 4a** done: the start model is now scored (Brier/AUC/bias, calibration and cohort tables, a "Will he start?" section on the Accuracy tab) and `ROTOWIRE_START_FLOORS` / `ROTOWIRE_OMITTED_START` are fitted from it by replaying the engine over the archive — three of eight cells moved, blend Brier 0.0678 → 0.0650. See "Scoring the start model". **Phase 4b** — fit `PROJECTION_SOURCE_WEIGHTS`, give `fpl_ep` a real weight, add an odds-derived source — is blocked until ~GW8: only 2 pre-deadline gameweeks exist against the harness's own 5-gameweek threshold. The replay harness built for 4a is what will fit the points weights too. **The start constants are additionally blocked by `START_MODEL_REVISION` 4**: "expects him to start" now comes from *two* projected-lineups pages combined unanimous-to-bench, and the omitted prior is floored on a player's own start rate — neither replayable from a snapshot written before revision 4, which is the first to record each publication's XI as `Start_XI__<source>`. Refitting waits on those. Both changes therefore shipped on an archive calibration plus a live before/after rather than a fit; `config.OMITTED_START_HISTORY_WEIGHT` (0.25) is the one constant that came out of a grid search, over 1,114 archived rows. See "A second projected XI" and "The omitted prior was fitted on players who never start". |
+| Projection accuracy harness | Phases 1-3 done, 4a done, 4b points weights done | Phase 1 (engine + app-wide migration + Projections Hub "Blended" tab) done — see "Projection Engine". Phase 2 (per-gameweek snapshots of projections and actuals, collected by a scheduled workflow and committed) done — see "Projection snapshots". Phase 3 (per-source MAE/RMSE/bias/rank-correlation, scored twice and on a common subset, surfaced as the Hub's Accuracy tab) done — see "Projection accuracy". **Phase 4a** done: the start model is now scored (Brier/AUC/bias, calibration and cohort tables, a "Will he start?" section on the Accuracy tab) and `ROTOWIRE_START_FLOORS` / `ROTOWIRE_OMITTED_START` are fitted from it by replaying the engine over the archive — three of eight cells moved, blend Brier 0.0678 → 0.0650. See "Scoring the start model". **Phase 4b**: `PROJECTION_SOURCE_WEIGHTS` is now **fitted** — GW8 brought the archive to the 5 pre-deadline gameweeks the harness requires, and the split moved from the never-measured 60/40 to **20/80** Rotowire/FFP (MAE 2.5427 → 2.5062). The fitter gained the two guards it lacked, a tie band and a grid-edge flag, so it recommends the smallest change that reaches the band rather than an argmin it cannot distinguish; `ROTOWIRE_OMISSION_SHARE` was split off first so a points retune cannot silently retune the start model. See "Phase 4b — the 60/40 split was never measured". Still open: an odds-derived source, and `fpl_ep`'s weight, which now has a measurement *against* it rather than none for it. **The start constants are additionally blocked by `START_MODEL_REVISION` 4**: "expects him to start" now comes from *two* projected-lineups pages combined unanimous-to-bench, and the omitted prior is floored on a player's own start rate — neither replayable from a snapshot written before revision 4, which is the first to record each publication's XI as `Start_XI__<source>`. Refitting waits on those. Both changes therefore shipped on an archive calibration plus a live before/after rather than a fit; `config.OMITTED_START_HISTORY_WEIGHT` (0.25) is the one constant that came out of a grid search, over 1,114 archived rows. See "A second projected XI" and "The omitted prior was fitted on players who never start". |
 | Multi-GW Transfer Planner | Completed | FFP Next3GWs blended into ROS scoring (40% weight) and displayed on waiver/transfer suggestion cards. The sanity-check gate is shared with Classic — see "Suggestion sanity veto". Classic now has a real multi-transfer planner: an ILP over the whole squad in expected points, solved for every K, with the −4 priced inside the objective — see "Multi-Transfer Planner". The horizon's basis is now the engine's throughout: `Proj_Next3` is converted once, `compute_player_scores()` percentiles it (on both sides of the percentile) instead of the raw mixed `MultiGW_Proj`, and the page-side workaround is gone — see "The ROS score reads `Proj_Next3`". The per-gameweek detail FFP publishes is no longer discarded: `to_long_schema()` exposes all six gameweeks and the Projections Hub's **Horizon** tab renders them (see "Horizon"). **The harness now has an opinion on the window length, and it is "leave it at three"**: scored against actuals, every window longer than 3GW orders *worse*, a forecast loses a third of its ordering by the third week out, and `Next3GWs`/`Next6GWs` correlate 0.99 so the choice cannot move a board — see "How far ahead is worth projecting". Giving the *wider* horizon a weight is therefore off the table rather than pending. What is still open is the term's 40% share itself, which on two anchors is indistinguishable from the 1GW projection sitting beside it; that is Phase 4b. |
 | Set Piece Takers Dashboard | Completed | New tab on Player Statistics page. Surface FPL bootstrap set piece data (penalties_order, direct_freekicks_order, corners_and_indirect_freekicks_order) grouped by team with penalty stats context. |
 | Gameweek Review/Recap | Completed | New tab on Home page covering both Draft and Classic. Post-GW summary: top/bottom performers, bench points missed, captain vs best-captain analysis, rank movement, optimal lineup what-if. Leverage existing bench_analysis.py and live stats. |

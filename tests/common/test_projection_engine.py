@@ -1069,3 +1069,59 @@ class TestEachXIsOpinionIsRecorded:
             })
         assert list(out["Start_XI__rotowire"]) == [1.0, 0.0]
         assert list(out["Start_XI__sportsgambler"]) == [0.0, 1.0]
+
+
+class TestTheOmissionShareIsNotThePointsWeight:
+    """A points retune must not silently retune the start model.
+
+    The share was `w_self / (w_self + w_rest)` over `PROJECTION_SOURCE_WEIGHTS`,
+    which made the strength of a *start* inference a function of how much the
+    *points* blend trusts the same source. At a Rotowire weight of 0 the
+    omission signal vanished altogether and a player every published XI left out
+    read as though nothing had been said about him -- so the Phase 4b points fit
+    would have undone the Phase 4a prior that was fitted against this term.
+    """
+
+    IDX = pd.Index([1, 2])
+
+    def _benched_start_pct(self, weights):
+        out = projection_engine.blend_aligned(
+            index=self.IDX,
+            per_source_raw={"rotowire": pd.Series([5.0, 0.0], index=self.IDX)},
+            per_source_basis={"rotowire": "conditional"},
+            per_source_startpct={"ffp": pd.Series([0.5, 0.5], index=self.IDX)},
+            starters_only={"rotowire"},
+            positions=pd.Series(["M", "M"], index=self.IDX),
+            teams=pd.Series(["MCI", "MCI"], index=self.IDX),
+            source_club_coverage={"rotowire": {"MCI": 11}},
+            weights=weights,
+            gameweek=9)
+        return float(out.loc[2, "Start_Pct"])
+
+    def test_the_points_weights_cannot_move_it(self):
+        got = [self._benched_start_pct({"rotowire": w, "ffp": 1.0 - w})
+               for w in (0.6, 0.4, 0.2, 0.0)]
+        assert len(set(round(v, 9) for v in got)) == 1, (
+            "the omitted prior's strength followed the points weights: %s" % got)
+
+    def test_zero_points_weight_still_benches_him(self):
+        """The specific failure: at rw=0 he used to resolve to FFP's 0.50."""
+        assert self._benched_start_pct({"rotowire": 0.0, "ffp": 1.0}) < 0.3
+
+    def test_the_share_is_read_from_config(self):
+        """So re-fitting the prior can re-fit the share with it."""
+        with patch.object(projection_engine, "_omission_share", return_value=1.0):
+            full = self._benched_start_pct({"rotowire": 0.2, "ffp": 0.8})
+        with patch.object(projection_engine, "_omission_share", return_value=0.0):
+            none = self._benched_start_pct({"rotowire": 0.2, "ffp": 0.8})
+        assert full < none, "a larger share must pull the benched player lower"
+
+    def test_the_fallback_tracks_config(self):
+        import config
+        assert (projection_engine.DEFAULT_OMISSION_SHARE
+                == pytest.approx(config.ROTOWIRE_OMISSION_SHARE))
+
+    def test_the_default_weights_track_config(self):
+        """The app and its own fallback disagreeing is worse than either value."""
+        import config
+        assert projection_engine.DEFAULT_WEIGHTS == config.PROJECTION_SOURCE_WEIGHTS

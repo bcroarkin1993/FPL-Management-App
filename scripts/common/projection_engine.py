@@ -63,12 +63,14 @@ HORIZON_GWS = 3
 #: Short labels for ``Proj_Src``. Kept terse because this renders in a table cell.
 SOURCE_LABELS = {"rotowire": "RW", "ffp": "FFP", "fpl_ep": "xP", "odds": "ODDS"}
 
-#: Default blend weights, matching the app's long-standing 60/40 Rotowire/FFP
-#: split so this refactor is behaviour-preserving where both sources are present.
+#: Default blend weights -- the fallback when ``config`` is unreadable, so it
+#: must track ``config.PROJECTION_SOURCE_WEIGHTS``, where the measurement behind
+#: these numbers lives. (They were 60/40 Rotowire/FFP from the app's beginning
+#: until GW8, when five pre-deadline gameweeks made the split fittable.)
 #: ``fpl_ep`` is wired but weighted 0 until the accuracy harness has an opinion:
 #: it is carried through for display and for the snapshot either way.
 #: Overridden by ``config.PROJECTION_SOURCE_WEIGHTS``.
-DEFAULT_WEIGHTS = {"rotowire": 0.6, "ffp": 0.4, "fpl_ep": 0.0, "odds": 0.0}
+DEFAULT_WEIGHTS = {"rotowire": 0.2, "ffp": 0.8, "fpl_ep": 0.0, "odds": 0.0}
 
 #: A start-probability floor applied when *Rotowire* prices a player. Rotowire
 #: only lists expected starters, so its presence is itself a confidence signal
@@ -156,6 +158,22 @@ def _history_weight() -> float:
     except Exception:                       # pragma: no cover
         pass
     return DEFAULT_OMITTED_START_HISTORY_WEIGHT
+
+
+#: Fallback for ``config.ROTOWIRE_OMISSION_SHARE`` -- see there. Must track
+#: config, like every other constant in this block.
+DEFAULT_OMISSION_SHARE = 0.6
+
+
+def _omission_share() -> float:
+    try:
+        import config
+        v = getattr(config, "ROTOWIRE_OMISSION_SHARE", None)
+        if v is not None:
+            return float(v)
+    except Exception:                       # pragma: no cover
+        pass
+    return DEFAULT_OMISSION_SHARE
 
 
 def _min_club_coverage() -> int:
@@ -849,14 +867,22 @@ def blend_aligned(
         if not target.any():
             continue
 
-        # Weight share, renormalised the way the points blend is: this source
-        # against the other weighted ones. Where no other source expressed a
-        # start probability at all, there is nothing to blend with and the
-        # implied value stands alone -- start_pct would be the bare 1.0 default,
-        # which is an absence of opinion rather than one.
-        w_self = float(weights.get(name, 0.0))
-        w_rest = sum(float(w) for n, w in weights.items() if n != name and float(w) > 0)
-        share = w_self / (w_self + w_rest) if (w_self + w_rest) > 0 else 1.0
+        # How much of the implied value survives the blend. **Its own constant,
+        # not this source's points weight.**
+        #
+        # It was `w_self / (w_self + w_rest)`, which made the strength of a
+        # *start* inference a function of how much the *points* blend trusts the
+        # same source -- so retuning the points weights silently retuned the
+        # start model. Measured on a player every published XI left out, with
+        # FFP rating him 50%: moving Rotowire's points weight 0.60 -> 0.25 ->
+        # 0.00 moved his resolved Start_Pct 0.212 -> 0.380 -> 0.500. At zero the
+        # omission signal disappears and a benched player reads as though
+        # nothing had been said about him -- which is how a points fit would
+        # have undone the prior that was fitted against this very term.
+        #
+        # One constant rather than a per-source mapping because there is one
+        # starters-only source. A second would need one.
+        share = _omission_share()
 
         # "Another opinion" is judged by the same rule as the resolution above:
         # a bare `chance_of_playing = 100` is not one. Counting it left the

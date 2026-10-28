@@ -174,7 +174,35 @@ def _parse_projection_weights(raw, default):
     return out or dict(default)
 
 
-_DEFAULT_PROJECTION_WEIGHTS = {"rotowire": 0.6, "ffp": 0.4, "fpl_ep": 0.0, "odds": 0.0}
+# **Measured, as of GW8.** The 60/40 split was never fitted -- it was the number
+# the app shipped with -- and with five pre-deadline gameweeks in the archive
+# (n=923 started player-gameweeks) `fit_blend_weights()` has an opinion:
+#
+#   rotowire weight   0.00    0.20    0.40    0.60 (as shipped)
+#   MAE               2.498   2.506   2.522   2.543
+#
+# Monotone, with no interior optimum. Paired per player, FFP beats Rotowire by
+# +0.103 (CI 0.054-0.152) and beats the 60/40 *blend itself* by +0.040 (CI
+# 0.015-0.066), leading in 4 of the 5 gameweeks -- so some of Rotowire's weight
+# was costing points rather than earning them.
+#
+# **0.20 rather than the argmin of 0.00**, for the two reasons
+# `fit_start_constants` already refuses an argmin: the minimum sits on the grid
+# *edge*, and everything from 0.00 to 0.20 is inside `WEIGHT_FIT_TIE_BAND` and
+# therefore indistinguishable on this sample. So this is the smallest change
+# that reaches the band -- `_nearest_in_band()` derives it rather than anyone
+# choosing it. Zero would also drop the 0-4 players a week Rotowire alone
+# prices, and would state that an expert lineup-led projection is worth nothing,
+# which 923 rows is too thin to assert.
+#
+# `fpl_ep` stays at 0: its fitted 0.05 buys 0.08% of MAE, itself well inside the
+# band, and it is the weakest of the sources on points (MAE 2.760 alone).
+#
+# None of this touches the *start* model. Rotowire's projected XIs and its
+# positional floor are weight-independent, and the omission prior's strength is
+# `ROTOWIRE_OMISSION_SHARE`, deliberately its own constant for exactly this
+# reason -- see there.
+_DEFAULT_PROJECTION_WEIGHTS = {"rotowire": 0.2, "ffp": 0.8, "fpl_ep": 0.0, "odds": 0.0}
 PROJECTION_SOURCE_WEIGHTS = _parse_projection_weights(
     os.getenv("FPL_PROJECTION_WEIGHTS"), _DEFAULT_PROJECTION_WEIGHTS
 )
@@ -238,6 +266,26 @@ ROTOWIRE_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.86, "F": 0.65}
 # implied value as his whole start probability, so a zero puts his `Proj` at
 # exactly 0. Live, that would have been 78 further midfielders.
 ROTOWIRE_OMITTED_START = {"G": 0.02, "D": 0.07, "M": 0.02, "F": 0.05}
+
+# How much of the omitted prior survives being blended against the other
+# sources' start opinions. **Deliberately its own constant, and not Rotowire's
+# points weight.**
+#
+# It used to be derived as `w_self / (w_self + w_rest)` from
+# PROJECTION_SOURCE_WEIGHTS, which made the strength of a *start* inference a
+# function of how much the points blend trusts the same source. Those are
+# different questions, and conflating them meant a points retune silently
+# re-tuned the start model: measured on a player every published XI left out,
+# with FFP rating him 50%, moving Rotowire's points weight 0.60 -> 0.25 -> 0.00
+# moved his Start_Pct 0.212 -> 0.380 -> 0.500. At zero the omission signal
+# vanishes entirely and a benched player reads as though nothing had been said
+# about him.
+#
+# 0.60 is the value ROTOWIRE_OMITTED_START above was fitted under, so pinning it
+# here is what keeps that fit meaningful. Re-fitting the prior should re-fit this
+# with it; changing the points weights should not touch it.
+ROTOWIRE_OMISSION_SHARE = float(
+    os.getenv("FPL_ROTOWIRE_OMISSION_SHARE", "0.6"))
 
 # How many players Rotowire must price at a club before its silence about one
 # of them means anything. Observed: exactly 11 per club, all 20 clubs. A club

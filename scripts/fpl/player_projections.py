@@ -1907,19 +1907,50 @@ def _render_weight_fit(scored):
         "Fitted on %d gameweek%s (%d player-gameweeks), pre-deadline captures "
         "only." % (fit["gameweeks"], "" if fit["gameweeks"] == 1 else "s", fit["n"])
     )
+    recommended = fit.get("recommended") or current
     rows = [{
         "Source": _SOURCE_LABELS.get(k, k),
         "Current": current.get(k, 0.0) * 100,
         "Best fit": fitted.get(k, 0.0) * 100,
+        "Recommended": recommended.get(k, 0.0) * 100,
     } for k in fitted]
     render_styled_table(
         pd.DataFrame(rows),
-        col_formats={"Current": "{:.0f}%", "Best fit": "{:.0f}%"},
+        col_formats={"Current": "{:.0f}%", "Best fit": "{:.0f}%",
+                     "Recommended": "{:.0f}%"},
     )
     st.caption(
         "Current weights give MAE **%.3f**; the best fit gives **%.3f** "
         "(%.3f better)." % (fit["current_mae"], fit["mae"], gain)
     )
+
+    # **The best fit is not the recommendation, and saying so is the point.**
+    # An argmin always names something: this surface is monotone with its
+    # minimum on the grid edge, and a whole range of weights sits inside the
+    # tie band, so reporting one winner overstates what the sample can tell.
+    band = fit.get("tie_band") or []
+    if len(band) > 1:
+        st.caption(
+            "**%d weightings are within %.1f%% of that best fit**, so this "
+            "sample cannot choose between them. *Recommended* is the smallest "
+            "change that reaches the band — which also avoids adopting a "
+            "weight of 0%% or 100%%, where the grid simply ran out of room "
+            "rather than finding an optimum."
+            % (len(band), projection_accuracy.WEIGHT_FIT_TIE_BAND * 100)
+        )
+    if fit.get("configured_in_band"):
+        st.success(
+            "The configured weights are already inside the band — there is no "
+            "change this history supports making."
+        )
+    elif recommended != current:
+        st.info(
+            "Configured weights sit outside the band. The smallest supported "
+            "change is "
+            + " · ".join("%s %.0f%%" % (_SOURCE_LABELS.get(k, k), v * 100)
+                         for k, v in recommended.items() if v > 0)
+            + "."
+        )
 
     if fit["gameweeks"] < projection_accuracy.MIN_GAMEWEEKS_FOR_CONFIDENCE:
         st.warning(
