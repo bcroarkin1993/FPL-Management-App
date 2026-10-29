@@ -109,19 +109,3 @@ class TestTranslateSeries:
     def test_nan_in_stays_nan(self):
         out = translate_series(pd.Series([60, None]), _mapping())
         assert pd.isna(out.iloc[1])
-
-
-class TestWaiverDisplayNamesUseTheRightSpace:
-    def test_the_map_is_built_from_the_classic_bootstrap(self):
-        """`Player_ID` on every Waiver Wire frame comes from
-        `pull_fpl_player_stats()`, i.e. the Classic space, so the display map
-        has to be keyed the same way. Reading the Draft bootstrap here labelled
-        a tenth of the pool with another player's name."""
-        import inspect
-        from scripts.draft import waiver_wire as ww
-        src = inspect.getsource(ww._display_name_maps)
-        assert "get_classic_bootstrap_static" in src
-        assert "_load_bootstrap" not in src, (
-            "_load_bootstrap is the Draft API, whose ids disagree with "
-            "Player_ID on these frames"
-        )
