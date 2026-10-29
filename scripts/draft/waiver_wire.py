@@ -2007,7 +2007,14 @@ def _render_transfer_suggestions(
                  "target goes to the player you most want to replace, and the "
                  "next drop takes the next-best target. They are ordered by the "
                  "**expected points** the swap adds per gameweek, which is the "
-                 "only way a goalkeeper move and a forward move can be compared.")
+                 "only way a goalkeeper move and a forward move can be compared "
+                 "— so a big upgrade over a weak player outranks a smaller one "
+                 "over a player who is already decent, even where the incoming "
+                 "player is the better footballer. **Every swap is "
+                 "position-locked**, which is FPL's rule rather than ours: a "
+                 "claim replaces a squad player with an unselected one at the "
+                 "*same* position, so a defender can never be swapped for a "
+                 "midfielder however much that would improve the squad.")
     if free_agency:
         # No reachability badges in this window, so say why: there is no queue to
         # lose a player in. The exception is worth naming, because it is the one

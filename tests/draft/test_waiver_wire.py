@@ -1089,3 +1089,76 @@ class TestWaiverDisplayNamesUseTheRightSpace:
             "_load_bootstrap is the Draft API, whose ids disagree with "
             "Player_ID on these frames"
         )
+
+
+class TestEverySuggestionIsPositionLocked:
+    """FPL's rule, not ours: a claim replaces a squad player with an unselected
+    one at the *same* position.
+
+    Asked from the app why the page did not suggest dropping Bobby Thomas (a
+    Coventry defender) for Mathys Tel (a Spurs midfielder). It cannot: that
+    swap is not submittable.
+
+    Note each fixture carries **two** players per position on the roster and at
+    least one available player at the position under test. A position with one
+    rostered player, or none available, is skipped wholesale -- so a naive
+    fixture returns an empty list and the test passes without ever exercising
+    the rule it claims to pin.
+    """
+
+    @staticmethod
+    def _roster_both_positions():
+        return _roster([
+            {"Player": "Weak Def", "Team": "COV", "Position": "D",
+             "Points": 1.2, "Keep Score": 0.15, "Season_Points": 6},
+            {"Player": "Spare Def", "Team": "COV", "Position": "D",
+             "Points": 3.0, "Keep Score": 0.55, "Season_Points": 30},
+            {"Player": "Weak Mid", "Team": "ARS", "Position": "M",
+             "Points": 1.0, "Keep Score": 0.10, "Season_Points": 5},
+            {"Player": "Spare Mid", "Team": "ARS", "Position": "M",
+             "Points": 3.2, "Keep Score": 0.58, "Season_Points": 32},
+        ])
+
+    def test_an_elite_midfielder_is_never_offered_for_a_defender(self):
+        """The reported shape: a weak defender on the roster, the best
+        available player in the game, and no legal way to connect them."""
+        avail = _avail([
+            {"Player": "Elite Mid", "Team": "TOT", "Position": "M",
+             "Points": 9.0, "Transfer Score": 0.99, "Draft_State": "a"},
+        ])
+        sugg, _ = _compute_transfer_suggestions(
+            avail, self._roster_both_positions(), top_n=None,
+            roster_candidates=None, avail_candidates=None,
+            one_per_position=False)
+        assert len(sugg) == 1, sugg
+        assert sugg[0]["add_player"] == "Elite Mid"
+        assert sugg[0]["drop_position"] == "M" == sugg[0]["add_position"]
+        assert all(s["drop_position"] != "D" for s in sugg), (
+            "the weak defender must not be upgraded with a midfielder, "
+            "however much it would improve the squad"
+        )
+
+    def test_every_suggestion_matches_positions_on_both_sides(self):
+        avail = _avail([
+            {"Player": "Good Def", "Team": "AVL", "Position": "D",
+             "Points": 5.0, "Transfer Score": 0.80, "Draft_State": "a"},
+            {"Player": "Good Mid", "Team": "TOT", "Position": "M",
+             "Points": 6.0, "Transfer Score": 0.90, "Draft_State": "a"},
+        ])
+        sugg, _ = _compute_transfer_suggestions(
+            avail, self._roster_both_positions(), top_n=None,
+            roster_candidates=None, avail_candidates=None,
+            one_per_position=False)
+        assert len(sugg) == 2, sugg
+        for s in sugg:
+            assert s["drop_position"] == s["add_position"]
+        assert {(s["drop_player"], s["add_player"]) for s in sugg} == {
+            ("Weak Def", "Good Def"), ("Weak Mid", "Good Mid")}
+
+    def test_the_caption_says_so(self):
+        """The reported confusion was a reasonable inference from a page that
+        never stated the rule."""
+        import inspect
+        from scripts.draft import waiver_wire as ww
+        src = inspect.getsource(ww._render_transfer_suggestions)
+        assert "position-locked" in src
