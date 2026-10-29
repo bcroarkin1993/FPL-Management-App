@@ -102,14 +102,29 @@ def _filter_by_position(df, labels):
     pos = pos.map(lambda p: POSITION_LABEL_TO_CODE.get(p, p))
     return df[pos.isin(wanted)]
 
-# "Best per position" is the compact default: the single strongest move at each
-# position, which is the shape the page shipped with. The rest scan the whole
-# roster against the whole available pool.
+# "Best per position" is the compact view the page shipped with: the single
+# strongest move at each position. The rest scan the whole roster against the
+# whole available pool.
+#
+# **It is no longer the default, because it hides moves worth making.** It tries
+# only the 2 weakest roster players against the 5 best available at each
+# position and then emits *one* move per position, so a second good move at a
+# position someone has already claimed simply disappears -- and disappears
+# silently, since a player who was never evaluated produces no debug row and so
+# reads exactly like one that was evaluated and rejected. Measured on the live
+# GW9 pool it showed 2 moves where the full scan found 5, dropping ones worth
+# +0.92, +0.79 and +0.17 points per gameweek.
+#
+# The default is "Top 10": the full roster against the full pool, ordered by
+# expected points gained, capped so the list stays readable. The cap is a
+# display limit, not a search limit -- `total_found` reports what the scan
+# actually found, so a truncated list says so.
 SUGGESTION_VIEW_BEST_PER_POS = "Best per position"
+SUGGESTION_VIEW_DEFAULT = "Top 10"
 SUGGESTION_VIEW_OPTIONS = [
     SUGGESTION_VIEW_BEST_PER_POS,
     "Top 5",
-    "Top 10",
+    SUGGESTION_VIEW_DEFAULT,
     "All improvements",
 ]
 SUGGESTION_VIEW_LIMITS = {"Top 5": 5, "Top 10": 10}
@@ -2153,12 +2168,10 @@ def _render_transfer_debug(debug_rows: List[Dict]):
 
         st.caption(
             "A player missing from the lists below was **never evaluated**, "
-            "which is not the same as rejected. In the default *Best per "
-            "position* view only the 2 weakest roster players are tried "
-            "against the 5 best available at each position, and only the "
-            "single best move per position is shown — switch **Show** to "
-            "*All improvements* to search the whole roster against the whole "
-            "pool."
+            "which is not the same as rejected. The *Best per position* view "
+            "tries only your 2 weakest players at each position against the 5 "
+            "best available and shows one move per position; every other view "
+            "searches the whole roster against the whole pool."
         )
 
         for row in debug_rows:
@@ -2682,11 +2695,14 @@ def show_waiver_wire_page():
             sugg_view = st.selectbox(
                 "Show",
                 options=SUGGESTION_VIEW_OPTIONS,
-                index=0,
-                help="'Best per position' shows the single strongest move at each "
-                     "position. The other views search your whole roster against "
-                     "the entire available pool. No player is added or dropped "
-                     "twice, so the list is a set of moves you can all make.",
+                index=SUGGESTION_VIEW_OPTIONS.index(SUGGESTION_VIEW_DEFAULT),
+                help="These views search your whole roster against the entire "
+                     "available pool, ordered by expected points gained. No "
+                     "player is added or dropped twice, so the list is a set of "
+                     "moves you can all make. 'Best per position' is the "
+                     "narrow view: it tries only your 2 weakest players at each "
+                     "position against the 5 best available and shows one move "
+                     "per position, so it does hide moves worth making.",
             )
         with _ctl_pos:
             sugg_pos_labels = st.multiselect(

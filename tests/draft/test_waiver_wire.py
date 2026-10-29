@@ -986,3 +986,90 @@ class TestTheHoldFactorCannotInventValue:
         assert _roster_injury_factor(
             0, "i", "ACL - Expected back 20 May", 0.0,
             deadlines=self._deadlines()) < 0.5
+
+
+class TestTheDefaultViewDoesNotHideMoves:
+    """Reported from the app: "default should not be Best per Position, since
+    that misses a lot of valuable transfers to make".
+
+    It is right, and measurably so. The compact view tries only the 2 weakest
+    roster players at each position against the 5 best available, then emits a
+    single move per position -- so a second good move at a position someone has
+    already claimed vanishes, and vanishes *silently*, because a player who was
+    never evaluated produces no debug row and so reads exactly like one that
+    was evaluated and rejected. Measured on the live GW9 pool it showed 2 moves
+    where the full scan found 5.
+    """
+
+    @staticmethod
+    def _three_weak_mids():
+        return _roster([
+            {"Player": "Weak Mid A", "Team": "ARS", "Position": "M",
+             "Points": 1.0, "Keep Score": 0.10, "Season_Points": 5},
+            {"Player": "Weak Mid B", "Team": "ARS", "Position": "M",
+             "Points": 1.2, "Keep Score": 0.15, "Season_Points": 6},
+            {"Player": "Weak Mid C", "Team": "ARS", "Position": "M",
+             "Points": 1.4, "Keep Score": 0.20, "Season_Points": 7},
+        ])
+
+    @staticmethod
+    def _three_good_mids():
+        return _avail([
+            {"Player": "Good Mid A", "Team": "NEW", "Position": "M",
+             "Points": 6.0, "Transfer Score": 0.90, "Draft_State": "a"},
+            {"Player": "Good Mid B", "Team": "LIV", "Position": "M",
+             "Points": 5.8, "Transfer Score": 0.85, "Draft_State": "a"},
+            {"Player": "Good Mid C", "Team": "MCI", "Position": "M",
+             "Points": 5.6, "Transfer Score": 0.80, "Draft_State": "a"},
+        ])
+
+    def test_the_compact_view_shows_one_move_and_hides_two(self):
+        sugg, _ = _compute_transfer_suggestions(
+            self._three_good_mids(), self._three_weak_mids(), top_n=None,
+            roster_candidates=2, avail_candidates=5, one_per_position=True)
+        assert len(sugg) == 1, (
+            "this is the narrow view working as designed -- and why it is no "
+            "longer the default"
+        )
+
+    def test_the_full_scan_finds_all_three(self):
+        sugg, _ = _compute_transfer_suggestions(
+            self._three_good_mids(), self._three_weak_mids(), top_n=None,
+            roster_candidates=None, avail_candidates=None,
+            one_per_position=False)
+        assert len(sugg) == 3, (
+            "every weak midfielder has a distinct upgrade available, and all "
+            "three are moves the manager could actually make"
+        )
+        adds = {s["add_player"] for s in sugg}
+        drops = {s["drop_player"] for s in sugg}
+        assert len(adds) == 3 and len(drops) == 3, (
+            "no player may be added or dropped twice -- the list has to be a "
+            "set of moves that can all be made together"
+        )
+
+
+class TestTheDefaultView:
+    def test_the_default_is_not_the_compact_view(self):
+        from scripts.draft import waiver_wire as ww
+        assert ww.SUGGESTION_VIEW_DEFAULT != ww.SUGGESTION_VIEW_BEST_PER_POS
+
+    def test_the_default_is_a_real_option(self):
+        from scripts.draft import waiver_wire as ww
+        assert ww.SUGGESTION_VIEW_DEFAULT in ww.SUGGESTION_VIEW_OPTIONS
+
+    def test_the_default_is_capped_so_the_list_stays_readable(self):
+        """A full scan can return one move per droppable roster player."""
+        from scripts.draft import waiver_wire as ww
+        assert ww.SUGGESTION_VIEW_LIMITS.get(ww.SUGGESTION_VIEW_DEFAULT) == 10
+
+    def test_the_selectbox_defaults_to_it_rather_than_to_index_zero(self):
+        """A mocked selectbox hands back its first option whatever the index,
+        so no page test can catch a regression to `index=0` here."""
+        import inspect
+        from scripts.draft import waiver_wire as ww
+        src = inspect.getsource(ww.show_waiver_wire_page)
+        assert "SUGGESTION_VIEW_OPTIONS.index(SUGGESTION_VIEW_DEFAULT)" in src, (
+            "the Show selectbox must resolve its index from the default "
+            "constant, not hard-code one"
+        )
