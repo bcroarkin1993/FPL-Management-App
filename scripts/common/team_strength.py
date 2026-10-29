@@ -389,10 +389,27 @@ def build_league_strength(league_id, current_gw: int) -> Tuple[pd.DataFrame, pd.
         return pd.DataFrame(), pd.DataFrame()
 
     # Exact join on integer element ID — no name matching anywhere in this path.
+    #
+    # **But the ids have to be translated first.** The rosters come from the
+    # Draft API and this pool from `pull_fpl_player_stats()` / the Classic
+    # bootstrap, and the two number 64 of 669 players differently -- so a
+    # direct join silently hands those players another player's stats rather
+    # than failing to match them. Measured on one live 10-team league, 7 of its
+    # 150 rostered players were affected. See `scripts/common/element_ids.py`.
+    from scripts.common.element_ids import draft_to_classic_ids
+    _id_map = draft_to_classic_ids()
+    if not _id_map:
+        _logger.warning(
+            "Element id translation unavailable; roster ids are being joined "
+            "to the Classic-keyed pool directly, which mislabels any player "
+            "the two APIs number differently.")
+
     by_id = pool.set_index("Player_ID", drop=False)
     frames = []
     for team_id, blob in rosters.items():
-        ids = [pid for pid in blob["player_ids"] if pid in by_id.index]
+        _wanted = [(_id_map.get(int(pid), pid) if _id_map else pid)
+                   for pid in blob["player_ids"] if pid is not None]
+        ids = [pid for pid in _wanted if pid in by_id.index]
         missing = len(blob["player_ids"]) - len(ids)
         if missing:
             _logger.warning("Team %s: %d rostered element(s) absent from bootstrap", team_id, missing)

@@ -165,7 +165,17 @@ def _display_name_maps() -> Tuple[Dict[int, str], Dict[str, str]]:
     by_id: Dict[int, str] = {}
     seen: Dict[str, set] = {}
     try:
-        elements = _load_bootstrap().get("elements", [])
+        # The **Classic** bootstrap, deliberately, because `Player_ID` on every
+        # frame this page builds comes from `pull_fpl_player_stats()` and is
+        # therefore a Classic element id. This read the *Draft* bootstrap, and
+        # the two APIs disagree about 64 of 669 ids -- so a tenth of the pool
+        # was being labelled with another player's name. The symptom was a
+        # suggestion to "drop Nordi Mukiele for Lukas Hornicek", a defender for
+        # a goalkeeper: António Silva (Classic 566) had been given the name of
+        # whoever Draft calls 566, which is Horníček. See
+        # `scripts/common/element_ids.py`.
+        from scripts.common.fpl_classic_api import get_classic_bootstrap_static
+        elements = get_classic_bootstrap_static().get("elements", [])
     except Exception:
         _logger.warning("Could not load bootstrap for display names", exc_info=True)
         return {}, {}
