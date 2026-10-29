@@ -70,6 +70,7 @@ from scripts.common.analytics import (
     merge_ffp_single_gw_data,
     enrich_reference_with_projections,
     numeric_col,
+    attach_reference_ids,
 )
 from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings, render_ffp_status
 
@@ -955,6 +956,50 @@ def _add_fdr_and_form(
     # Ensure Player_ID exists (for downstream)
     if "Player_ID" not in base.columns:
         base["Player_ID"] = np.nan
+
+    # --- Tier 3: the tiered matcher, for what exact equality cannot reach ----
+    #
+    # Both merges above are **exact** on the normalised name. Projection sources
+    # publish the common name and the FPL bootstrap publishes the full legal
+    # one, so every player whose legal name is longer than his common one falls
+    # straight through -- and the miss is silent, because the caller just sees
+    # NaN.
+    #
+    # Reported from the app as "James Hill recommended over António João
+    # Silva". Measured on the live 101-row available pool, 12 players lost
+    # their id here, including the 4th-best available defender:
+    #
+    #     James Hill      BOU  D  5.03 pts   Player_ID  60.0
+    #     Antonio Silva   BOU  D  5.01 pts   Player_ID   NaN
+    #
+    # Same club, same position, projections two hundredths apart. Everything
+    # downstream is keyed on this id -- `Season_Points` and `starts` merge on
+    # it and then `fillna(0)`, injury status never lands, the projected-XI
+    # override is skipped -- so `season_quality` and `start_consistency` read
+    # zero, ROS collapses, Transfer Score collapses, and he drops out of the
+    # candidate window entirely. He generates no debug row either, so it reads
+    # exactly like "evaluated and rejected". Hill matched exactly, kept his
+    # full ROS, and won.
+    #
+    # Tier 4 of `ReferenceMatcher` is a token subset in either direction scoped
+    # to team *and* position, which is precisely this shape. Note the roster
+    # path uses `_backfill_player_ids`, which scores with `fuzz.WRatio` -- the
+    # scorer this codebase has banned, whose failure mode is documented
+    # directly beneath it -- so it is deliberately not reused here.
+    if not base.empty and stats is not None and not stats.empty:
+        _before = int(base["Player_ID"].isna().sum())
+        if _before:
+            base = attach_reference_ids(
+                base, stats,
+                fill_cols=("Player_ID", "form", "points_per_game"),
+                ref_web_col="web_name",
+                source_name="waiver available pool",
+            )
+            _after = int(base["Player_ID"].isna().sum())
+            if _before != _after:
+                _logger.info(
+                    "Available pool: resolved %d of %d element ids the exact "
+                    "name joins missed.", _before - _after, _before)
 
     # Compute Avg FDR next N GWs
     base["AvgFDRNextN"] = base["Team"].apply(lambda t: _avg_fdr_for_team(str(t), current_gw, weeks))
@@ -2091,6 +2136,30 @@ def _render_transfer_debug(debug_rows: List[Dict]):
                 "they were recently dropped or added and only become claimable at the "
                 "next waiver deadline."
             )
+
+        # Collected since this gate was written and never shown, which is half
+        # of why "why isn't X suggested?" was unanswerable from this panel: a
+        # player removed here produces no pair row at all, so he reads exactly
+        # like one that was evaluated and rejected.
+        _unavailable = max(
+            (int(r.get('unavailable_excluded', 0) or 0) for r in debug_rows), default=0
+        )
+        if _unavailable:
+            st.caption(
+                f"🚑 {_unavailable} player(s) were excluded as unable to play — "
+                "injured, suspended or unavailable, so they cannot be scored "
+                "against anyone this gameweek."
+            )
+
+        st.caption(
+            "A player missing from the lists below was **never evaluated**, "
+            "which is not the same as rejected. In the default *Best per "
+            "position* view only the 2 weakest roster players are tried "
+            "against the 5 best available at each position, and only the "
+            "single best move per position is shown — switch **Show** to "
+            "*All improvements* to search the whole roster against the whole "
+            "pool."
+        )
 
         for row in debug_rows:
             pos = row['pos']

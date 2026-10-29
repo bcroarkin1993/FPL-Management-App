@@ -818,6 +818,73 @@ def _position_letters(df: pd.DataFrame) -> Optional[pd.Series]:
     return None
 
 
+def attach_reference_ids(
+    player_df: pd.DataFrame,
+    ref_df: pd.DataFrame,
+    *,
+    fill_cols: Sequence[str] = ("Player_ID",),
+    name_col: str = "Player",
+    ref_name_col: str = "Player",
+    ref_web_col: Optional[str] = None,
+    source_name: str = "",
+) -> pd.DataFrame:
+    """Fill missing ``fill_cols`` from the FPL pool via :class:`ReferenceMatcher`.
+
+    The tiered matcher that every cross-source *projection* merge already goes
+    through, made available for the other direction: resolving a projection
+    source's short name back to an FPL **element id**.
+
+    This exists because an exact-equality join cannot do it. Projection sources
+    publish the common name ("Antonio Silva") and the FPL bootstrap publishes
+    the full legal one ("António João Pereira de Albuquerque Tavares da Silva"),
+    so `(normalised name, team, position)` misses ~12% of a Rotowire table --
+    and the miss is silent, because the caller sees NaN and carries on. Tier 4
+    is a token subset in either direction, scoped to team and position, which
+    is exactly this shape.
+
+    Only ``NaN`` values are filled, so a row an exact merge already resolved is
+    never overwritten; and because the whole frame is offered to the matcher,
+    those resolved rows *defend* their reference row against a looser claim
+    from someone else.
+
+    Deliberately not ``_backfill_player_ids``, which scores with
+    ``fuzz.WRatio`` -- the scorer whose failure mode is documented directly
+    beneath it, and which falls through to a team- and position-agnostic scope
+    when a narrow one comes up empty.
+    """
+    out = player_df.copy()
+    if out.empty or ref_df is None or ref_df.empty:
+        return out
+
+    claims = _claim_reference_rows(
+        out, ref_df,
+        name_col=name_col, ref_name_col=ref_name_col,
+        ref_web_col=ref_web_col if ref_web_col and ref_web_col in ref_df.columns else None,
+        source_name=source_name or "attach_reference_ids",
+    )
+    if not claims:
+        return out
+
+    filled = 0
+    for col in fill_cols:
+        if col not in ref_df.columns:
+            continue
+        if col not in out.columns:
+            out[col] = np.nan
+        for player_idx, ref_idx in claims.items():
+            try:
+                if pd.isna(out.at[player_idx, col]):
+                    out.at[player_idx, col] = ref_df.at[ref_idx, col]
+                    filled += 1
+            except (KeyError, ValueError):
+                continue
+    if filled:
+        _logger.info("%s: tiered matcher filled %d reference value(s) that the "
+                     "exact joins missed.", source_name or "attach_reference_ids",
+                     filled)
+    return out
+
+
 def _claim_reference_rows(
     player_df: pd.DataFrame,
     ref_df: pd.DataFrame,
