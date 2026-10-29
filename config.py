@@ -224,6 +224,62 @@ PROJECTION_SOURCE_WEIGHTS = _parse_projection_weights(
     os.getenv("FPL_PROJECTION_WEIGHTS"), _DEFAULT_PROJECTION_WEIGHTS
 )
 
+# =============================================================================
+# Transfer / Keep scoring -- the 1GW vs rest-of-season balance
+# =============================================================================
+#
+# Lifted out of `analytics.compute_player_scores` and
+# `analytics.compute_dynamic_alpha`, where they were bare literals inside two
+# functions and restated in several comments. Named here so the balance can be
+# tuned without editing the scoring code, and so the accuracy harness can
+# eventually fit it the way it fits the start constants.
+#
+# **These are judgement, not measurement.** Unlike `ROTOWIRE_START_FLOORS`
+# nothing has been fitted here: there is no archived Transfer Score to score
+# against an outcome, because the thing it predicts ("was this a good claim")
+# is not a quantity the snapshots record. Treat the numbers as a stated policy.
+
+#: Weights inside the ROS score, as `base + slope * season_progress`. They sum
+#: to 1.0 at every gameweek. `mgw` is the 3-gameweek horizon (forward-looking),
+#: `sq` is season quality -- actual points blended with Rotowire's *preseason*
+#: projection, so it is the backward-looking term.
+#:
+#: `mgw` was raised and `sq` lowered by 0.05 after a reported case: at GW9 a
+#: mid-price midfielder (Mathys Tel) led a rival (Jack Rudoni) on *both*
+#: forward signals -- 1GW percentile 0.937 against 0.730, and the 3GW horizon
+#: 0.860 against 0.821 -- and still scored lower, because `sq` (0.373) slightly
+#: outweighed `mgw` (0.364) and both of its inputs favoured the rival's longer
+#: track record. At GW9 `sq` is still 63.5% *preseason* opinion, so a nine-week-
+#: old guess was outvoting what both live projections said.
+ROS_WEIGHTS = {
+    "mgw":   (0.45, -0.10),   # 45% -> 35%  3-gameweek horizon
+    "sq":    (0.25,  0.20),   # 25% -> 45%  season quality (actuals + preseason)
+    "form":  (0.15, -0.05),   # 15% -> 10%  trajectory
+    "start": (0.10,  0.00),   # 10%         start consistency
+    "fdr":   (0.05, -0.05),   #  5% ->  0%  fixture ease, fades into `sq`
+}
+
+#: Baseline alpha in `Score = alpha * 1GW + (1 - alpha) * ROS`, per format.
+#: Draft leans on ROS because a dropped player goes to the waiver wire and is
+#: hard to get back; Classic allows a cheap weekly transfer.
+ALPHA_BASELINE = {"draft": 0.35, "classic": 0.55}
+
+#: Player-tier adjustments to alpha, as `(ros_above, delta)` tried in order.
+#: A negative delta weights ROS more -- i.e. protects the player from being
+#: dropped over a short-term dip.
+#:
+#: **The protection bands were raised from 0.80/0.60 to 0.85/0.75.** Protecting
+#: everyone above the 60th percentile treated a merely above-average player as
+#: an irreplaceable asset, and that band is exactly where the churn happens: a
+#: mid-tier player is one you are actively deciding whether to replace *this
+#: week*, so the near term is what matters. Everything at or below the top
+#: quartile now tilts towards 1GW instead of away from it.
+ALPHA_TIERS = (
+    (0.85, -0.10),   # elite: genuinely irreplaceable, hold through a bad week
+    (0.75, -0.05),   # strong
+    (0.00, +0.05),   # the churn zone -- short term dominates
+)
+
 # A floor on start probability for players Rotowire prices. Rotowire projects
 # only expected starters, so its listing a player is itself a confidence signal
 # and stops FFP's uncertainty from fully overriding an expert lineup call.

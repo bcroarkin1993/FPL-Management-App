@@ -3,6 +3,7 @@
 All tests use mock DataFrames — no network calls.
 """
 
+import config
 import pandas as pd
 import numpy as np
 import pytest
@@ -1028,21 +1029,28 @@ class TestMergeSeasonProjections:
 class TestComputeDynamicAlpha:
     """Tests for compute_dynamic_alpha() — dynamic 1GW/ROS blend weight."""
 
-    def test_draft_baseline(self):
-        """Draft baseline alpha = 0.35 for a MID with average ROS."""
-        alpha = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
-        assert alpha == pytest.approx(0.35)
+    # NOTE: there is no longer a ROS score that attracts *no* tier adjustment.
+    # Every band carries a delta: above the top quartile protects the player
+    # (negative), and the whole churn zone below it tilts towards this gameweek
+    # (positive). So these tests read the baseline from config and compare
+    # like-for-like at a fixed ROS rather than assuming 0.50 is neutral.
 
-    def test_classic_baseline(self):
-        """Classic baseline alpha = 0.55 for a MID with average ROS."""
-        alpha = compute_dynamic_alpha("M", ros_score=0.50, format_context="classic")
-        assert alpha == pytest.approx(0.55)
+    def test_draft_leans_on_rest_of_season_more_than_classic(self):
+        """A dropped Draft player goes to the waiver wire; a Classic transfer
+        is cheap and weekly."""
+        draft = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
+        classic = compute_dynamic_alpha("M", ros_score=0.50, format_context="classic")
+        assert draft < classic
+        assert draft == pytest.approx(
+            config.ALPHA_BASELINE["draft"] + 0.05)      # churn-zone tilt
+        assert classic == pytest.approx(
+            config.ALPHA_BASELINE["classic"] + 0.05)
 
     def test_gk_position_adjustment(self):
         """GK gets -0.10 alpha (more ROS-oriented)."""
         alpha_gk = compute_dynamic_alpha("G", ros_score=0.50, format_context="draft")
         alpha_mid = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
-        assert alpha_gk == alpha_mid - 0.10
+        assert alpha_gk == pytest.approx(alpha_mid - 0.10)
 
     def test_fwd_position_adjustment(self):
         """FWD gets -0.05 alpha."""
@@ -1051,22 +1059,35 @@ class TestComputeDynamicAlpha:
         assert alpha_fwd == alpha_mid - 0.05
 
     def test_elite_rank_tier(self):
-        """Elite player (ROS > 0.80) gets -0.10 (protect with more ROS weight)."""
-        alpha_elite = compute_dynamic_alpha("M", ros_score=0.85, format_context="draft")
-        alpha_avg = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
-        assert alpha_elite == alpha_avg - 0.10
+        """An elite player (ROS > 0.85) is protected: weight ROS, not one week."""
+        alpha_elite = compute_dynamic_alpha("M", ros_score=0.90, format_context="draft")
+        alpha_mid = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
+        assert alpha_elite == pytest.approx(alpha_mid - 0.15)
+        assert alpha_elite < config.ALPHA_BASELINE["draft"]
 
-    def test_above_avg_rank_tier(self):
-        """Above-average player (ROS > 0.60) gets -0.05."""
-        alpha_above = compute_dynamic_alpha("M", ros_score=0.65, format_context="draft")
-        alpha_avg = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
-        assert alpha_above == alpha_avg - 0.05
+    def test_strong_but_not_elite_is_protected_less(self):
+        alpha_strong = compute_dynamic_alpha("M", ros_score=0.80, format_context="draft")
+        alpha_elite = compute_dynamic_alpha("M", ros_score=0.90, format_context="draft")
+        assert alpha_elite < alpha_strong < config.ALPHA_BASELINE["draft"]
 
-    def test_below_avg_rank_tier(self):
-        """Below-average player (ROS < 0.40) gets +0.05."""
-        alpha_below = compute_dynamic_alpha("M", ros_score=0.35, format_context="draft")
-        alpha_avg = compute_dynamic_alpha("M", ros_score=0.50, format_context="draft")
-        assert alpha_below == alpha_avg + 0.05
+    def test_a_merely_above_average_player_is_no_longer_protected(self):
+        """This replaces `test_above_avg_rank_tier`, and the change is the
+        point. Protecting everyone above ROS 0.60 treated the 60th percentile
+        as an irreplaceable asset -- and that band is exactly where the churn
+        happens, so it was weighting rest-of-season for the very players whose
+        next few gameweeks are the whole question."""
+        alpha = compute_dynamic_alpha("M", ros_score=0.65, format_context="draft")
+        assert alpha > config.ALPHA_BASELINE["draft"]
+
+    def test_the_whole_churn_zone_tilts_the_same_way(self):
+        """Replaces `test_below_avg_rank_tier`: below the top quartile the old
+        model had three different behaviours (−0.05 / nothing / +0.05), and the
+        distinction was not doing useful work."""
+        alphas = {ros: compute_dynamic_alpha("M", ros_score=ros,
+                                             format_context="draft")
+                  for ros in (0.30, 0.50, 0.65, 0.74)}
+        assert len(set(alphas.values())) == 1, alphas
+        assert all(a > config.ALPHA_BASELINE["draft"] for a in alphas.values())
 
     def test_critical_depth_adjustment(self):
         """Critical depth adds +0.15 (urgency → favor 1GW)."""

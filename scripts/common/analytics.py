@@ -219,6 +219,39 @@ def positional_percentile(
     return result
 
 
+#: Config-unreadable fallback. Must track `config.ROS_WEIGHTS`, or the app and
+#: its own fallback would disagree about how it scores -- the same rule
+#: `DEFAULT_START_FLOORS` carries in `projection_engine`.
+_DEFAULT_ROS_WEIGHTS = {
+    "mgw":   (0.45, -0.10),
+    "sq":    (0.25,  0.20),
+    "form":  (0.15, -0.05),
+    "start": (0.10,  0.00),
+    "fdr":   (0.05, -0.05),
+}
+
+
+def _ros_weights(progress: float) -> Dict[str, float]:
+    """The ROS term weights at this point in the season.
+
+    Each entry is ``(base, slope)`` and resolves to ``base + slope * progress``,
+    so the set sums to 1.0 at every gameweek provided the slopes cancel -- which
+    a test asserts, because a set that does not sum to 1 silently rescales every
+    ROS score rather than failing.
+    """
+    spec = getattr(config, "ROS_WEIGHTS", None) or _DEFAULT_ROS_WEIGHTS
+    out = {}
+    for name, pair in spec.items():
+        try:
+            base, slope = pair
+        except (TypeError, ValueError):
+            base, slope = float(pair), 0.0
+        out[name] = float(base) + float(slope) * float(progress)
+    for name in ("mgw", "sq", "form", "start", "fdr"):
+        out.setdefault(name, 0.0)
+    return out
+
+
 def compute_dynamic_alpha(
     position: str,
     ros_score: float,
@@ -249,7 +282,10 @@ def compute_dynamic_alpha(
         Alpha value in [0.15, 0.75].
     """
     # 1. Format baseline
-    alpha = 0.35 if format_context == "draft" else 0.55
+    _baselines = getattr(config, "ALPHA_BASELINE", None) or {
+        "draft": 0.35, "classic": 0.55}
+    alpha = float(_baselines.get(
+        format_context, _baselines.get("classic", 0.55)))
 
     # 2. Position adjustment
     if position == "G":
@@ -257,13 +293,16 @@ def compute_dynamic_alpha(
     elif position == "F":
         alpha -= 0.05
 
-    # 3. Rank tier adjustment (elite players → protect with more ROS weight)
-    if ros_score > 0.80:
-        alpha -= 0.10
-    elif ros_score > 0.60:
-        alpha -= 0.05
-    elif ros_score < 0.40:
-        alpha += 0.05
+    # 3. Rank tier adjustment. A negative delta weights ROS more -- it protects
+    # a player from being dropped over a short-term dip. Protection is reserved
+    # for genuinely elite assets: a mid-tier player is one you are actively
+    # deciding whether to replace *this week*, so the near term is what matters
+    # for him, and the bands below tilt him towards 1GW rather than away from it.
+    for _above, _delta in (getattr(config, "ALPHA_TIERS", None)
+                           or ((0.85, -0.10), (0.75, -0.05), (0.00, +0.05))):
+        if ros_score > _above:
+            alpha += _delta
+            break
 
     # 4. Squad depth adjustment (low depth → urgency → favor 1GW)
     if depth_map is not None:
@@ -517,15 +556,19 @@ def compute_player_scores(
     else:
         fdr_ease_pctile = _min_max_norm_series(result["_FDREase"]).fillna(0.5)
 
-    # Dynamic ROS weights (sum = 1.0 at all gameweeks)
-    # FDR fades with season progress: overlaps with multi-GW (which already prices in fixtures),
-    # and at late season the FDR window covers phantom games that won't be played.
-    # Its freed weight shifts to season quality, which becomes the most reliable late-season signal.
-    w_mgw = 0.40 - 0.10 * p          # 40% → 30% (multi-GW projections dominant)
-    w_sq = 0.30 + 0.20 * p           # 30% → 49% (season quality grows; absorbs fading FDR)
-    w_form = 0.15 - 0.05 * p         # 15% → 10% (trajectory indicator)
-    w_start = 0.10                   # 10% constant (start consistency)
-    w_fdr = 0.05 * (1 - p)           #  5% → ~0% (fades as remaining fixtures shrink)
+    # Dynamic ROS weights (sum = 1.0 at all gameweeks), from
+    # `config.ROS_WEIGHTS` as `base + slope * season_progress`.
+    #
+    # FDR fades with season progress: it overlaps with the multi-GW term (which
+    # already prices in fixtures), and late on its window covers phantom games
+    # that will not be played. Its freed weight shifts to season quality, the
+    # most reliable late-season signal.
+    _rw = _ros_weights(p)
+    w_mgw = _rw["mgw"]       # the 3-gameweek horizon -- forward-looking
+    w_sq = _rw["sq"]         # actuals blended with Rotowire's preseason projection
+    w_form = _rw["form"]     # trajectory indicator
+    w_start = _rw["start"]   # start consistency
+    w_fdr = _rw["fdr"]       # fixture ease
 
     result["ROS"] = (
         w_mgw * multigw_pctile +
