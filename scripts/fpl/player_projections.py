@@ -2043,6 +2043,36 @@ def _render_weight_fit(scored):
                projection_accuracy.MIN_GAMEWEEKS_FOR_CONFIDENCE)
         )
 
+    # **"Would adding an unused source help?" is a different question from
+    # "which weighting is best".** The grid search answers the second, and its
+    # argmin always names something -- a one-step improvement is exactly what
+    # noise looks like. A source sitting at zero gets the two tests the rest of
+    # this tab trusts instead: the paired interval, and consistency across
+    # gameweeks.
+    unused = [k for k, v in current.items() if not v]
+    marginals = [projection_accuracy.marginal_source_value(k) for k in unused]
+    marginals = [m for m in marginals if m]
+    if marginals:
+        st.markdown("##### Would adding an unused source help?")
+        render_styled_table(pd.DataFrame([{
+            "Source": _SOURCE_LABELS.get(m["source"], m["source"]),
+            "At weight": m["weight"] * 100,
+            "MAE change": -m["mean"],
+            "95% interval": "%+.3f to %+.3f" % (-m["ci_high"], -m["ci_low"]),
+            "Helped in": "%d of %d GW" % (m["gameweeks_helped"], m["gameweeks"]),
+            "Verdict": "worth adding" if m["supported"] else "no evidence",
+        } for m in marginals]), col_formats={"At weight": "{:.0f}%",
+                                             "MAE change": "{:+.3f}"})
+        st.caption(
+            "A negative *MAE change* would mean the blend got more accurate. "
+            "**No evidence** means the interval still contains zero, or it "
+            "helped in half the gameweeks or fewer — either way the sample "
+            "cannot tell the source apart from noise, so its weight stays 0. "
+            "That is a result, not a gap: a source can be the worst of the "
+            "four on its own and still carry information none of the others "
+            "do, and this is the test that would find it."
+        )
+
 
 def _gw_list(gws) -> str:
     """'GW1, GW2 and GW3', or 'none'."""

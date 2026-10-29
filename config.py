@@ -195,8 +195,25 @@ def _parse_projection_weights(raw, default):
 # prices, and would state that an expert lineup-led projection is worth nothing,
 # which 923 rows is too thin to assert.
 #
-# `fpl_ep` stays at 0: its fitted 0.05 buys 0.08% of MAE, itself well inside the
-# band, and it is the weakest of the sources on points (MAE 2.760 alone).
+# **`fpl_ep` stays at 0, and that is now a measured answer rather than an
+# absence of one.** "Which weighting is best" and "does adding this source
+# help" are different questions, and only the second settles a source the blend
+# does not use -- the grid search's argmin always names something, and it named
+# 0.05, which is one grid step and exactly what noise looks like.
+#
+# `marginal_source_value()` applies the two tests the rest of the harness
+# trusts. Adding it at 0.05 on GW4-8 moves MAE by +0.0017 with a 95% paired
+# interval of [-0.006, +0.010] -- containing zero -- and helps in **3 of 5
+# gameweeks**. Rank correlation agrees it is marginal: 0.1739 -> 0.1761, against
+# a standard error of about 0.033. On its own it is the weakest of the four
+# (MAE 3.040 against FFP's 2.500, rank corr 0.065 against 0.157).
+#
+# It keeps its *fallback* job, which is unaffected by the weight: it prices
+# players no weighted source covers. That is harmless rather than valuable --
+# on the 120 such rows in the archive those players average 0.47 points and
+# resolve to a 0.12 start probability, so the expected-points contribution
+# rounds to nothing and MAE is 0.475 either way, identical to projecting 0.
+# A test pins the weight at 0 and fails if the archive ever supports moving it.
 #
 # None of this touches the *start* model. Rotowire's projected XIs and its
 # positional floor are weight-independent, and the omission prior's strength is

@@ -1849,9 +1849,55 @@ players, since only a player both sources priced can be reweighted.
 **`Start_Pct` and `Proj_Next3` are byte-identical**, which is the decoupling
 working. Haaland stays top; Foden rises 9th to 5th.
 
-Still open in 4b: an odds-derived source, and giving `fpl_ep` a real weight —
-the latter now has a measurement against it rather than merely no measurement
-for it.
+Still open in 4b: an odds-derived source. `fpl_ep`'s weight is **settled at 0**
+on a measurement rather than on an absence of one — see "Does an unused source
+earn a weight?".
+
+### Does an unused source earn a weight? — `fpl_ep` says no
+
+`marginal_source_value()` (`projection_accuracy.py`), rendered as "Would adding
+an unused source help?" on the Accuracy tab.
+
+**"Which weighting is best" and "does adding this help" are different
+questions**, and only the second can settle a source the blend does not use.
+`fit_blend_weights()` answers the first, and its argmin always names something:
+it put `fpl_ep` at **0.05**, which is one grid step, inside the tie band, and
+exactly what noise looks like. Acting on that would have given a source a weight
+on the strength of the search being obliged to return a maximum.
+
+So a zero-weight source gets the two tests the rest of the harness already
+trusts — the **paired** per-player interval ("level with" means it contains
+zero) and **consistency across gameweeks**, since the interval is across players
+and a source that read one week well looks identical to one that helps. Measured
+on GW4–8 at a candidate weight of 0.05:
+
+| | `fpl_ep` |
+|---|---|
+| MAE change | **+0.0017** (worse) |
+| 95% paired interval | **[−0.006, +0.010]** — contains zero |
+| Helped in | **3 of 5 gameweeks** |
+| Rank corr | 0.1739 → 0.1761, against an SE of ~0.033 |
+
+So: **no evidence, weight stays 0.** On its own it is also the weakest of the
+four (MAE 3.040 against FFP's 2.500; rank correlation 0.065 against 0.157).
+`test_fpl_ep_stays_at_zero_until_something_supports_it` pins the decision *to
+the measurement* — it fails if the archive ever starts supporting a weight, so
+the question re-answers itself rather than needing to be re-litigated.
+
+**The fallback job is separate from the weight, and is harmless rather than
+valuable.** `fpl_ep` prices players no weighted source covers — 120 rows across
+the archive. Those players average **0.47** actual points and resolve to a
+**0.12** start probability, so their expected-points contribution rounds to
+nothing: MAE 0.475, *identical* to projecting 0. Worth knowing before anyone
+"fixes" or removes it in either direction.
+
+One measurement trap recorded because it nearly produced a wrong conclusion:
+scoring the fallback on `proj_start__fpl_ep` — the **conditional** value — gives
+MAE 3.232 against an actual mean of 0.47, which reads as a catastrophic source.
+It is the wrong basis. These players mostly did not play, so the only fair
+comparison is expected points, and on that basis it is level with zero. Judging
+a conditional projection against a population that largely did not start is the
+same basis confusion the engine exists to prevent, arriving in the *harness*.
 
 ### A score needs something to compare against
 

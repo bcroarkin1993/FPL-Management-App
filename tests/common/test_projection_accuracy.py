@@ -973,3 +973,104 @@ class TestAScoreNeedsSomethingToCompareAgainst:
             ref = acc.no_skill_reference(scope)
             if ref:
                 assert ref["metric"] in acc.METRIC_GLOSSARY
+
+
+class TestWhetherAnUnusedSourceEarnsAWeight:
+    """"Which weighting is best" and "does adding this help" are not the same
+    question, and only the second settles a zero-weight source.
+
+    The grid search answers the first, and its argmin always names something:
+    `fpl_ep` fitted to 0.05 on the live archive, which is one grid step and
+    exactly what noise looks like. The paired interval and gameweek-consistency
+    tests -- the two the rest of the tab already trusts -- say it is not there.
+    """
+
+    def test_a_source_the_blend_does_not_use_is_still_testable(self, _archive):
+        got = acc.marginal_source_value("fpl_ep")
+        if not got:
+            pytest.skip("fpl_ep not scoreable in this fixture")
+        assert got["source"] == "fpl_ep"
+        assert set(got) >= {"mean", "ci_low", "ci_high", "gameweeks_helped",
+                            "gameweeks", "decided", "supported"}
+
+    def test_an_interval_containing_zero_is_not_support(self, _archive):
+        """The same rule `head_to_head` uses for "level with"."""
+        got = acc.marginal_source_value("fpl_ep")
+        if not got:
+            pytest.skip("fpl_ep not scoreable in this fixture")
+        if got["ci_low"] <= 0 <= got["ci_high"]:
+            assert not got["supported"]
+
+    def test_helping_in_half_the_gameweeks_or_fewer_is_not_support(self):
+        """The interval is across *players*, so a source that read one week
+        well looks identical to a source that helps."""
+        import pandas as pd
+        from unittest.mock import patch
+        frame = pd.DataFrame({
+            "ffp": [1.0] * 8,
+            "fpl_ep": [5.0, 0.0] * 4,
+            "_outcome": [1.0] * 8,
+            "_gameweek": [1, 1, 2, 2, 3, 3, 4, 4],
+        })
+        with patch.object(acc, "_paired_frame", return_value=frame), \
+                patch.object(acc, "_weights_map", return_value={"ffp": 1.0}), \
+                patch.object(acc, "MIN_HEAD_TO_HEAD_ROWS", 1):
+            got = acc.marginal_source_value("fpl_ep")
+        assert got
+        assert got["gameweeks"] == 4
+        assert not got["supported"], "it hurts every week; nothing should support it"
+
+    def test_a_source_that_really_helps_is_supported(self):
+        """The test has to be able to say yes, or it is not a test."""
+        import numpy as np
+        import pandas as pd
+        from unittest.mock import patch
+        rng = np.random.default_rng(0)
+        n = 400
+        outcome = rng.normal(4, 3, n)
+        frame = pd.DataFrame({
+            # a weak source, and one that is nearly the outcome
+            "ffp": rng.normal(4, 1, n),
+            "fpl_ep": outcome + rng.normal(0, 0.2, n),
+            "_outcome": outcome,
+            "_gameweek": np.repeat([1, 2, 3, 4, 5], n // 5),
+        })
+        with patch.object(acc, "_paired_frame", return_value=frame), \
+                patch.object(acc, "_weights_map", return_value={"ffp": 1.0}):
+            got = acc.marginal_source_value("fpl_ep", weight=0.5)
+        assert got["supported"], got
+        assert got["mean"] > 0 and got["ci_low"] > 0
+        assert got["gameweeks_helped"] == got["gameweeks"]
+
+    def test_a_source_with_no_other_weighted_source_is_unanswerable(self):
+        import pandas as pd
+        from unittest.mock import patch
+        frame = pd.DataFrame({"fpl_ep": [1.0, 2.0], "_outcome": [1.0, 2.0],
+                              "_gameweek": [1, 1]})
+        with patch.object(acc, "_paired_frame", return_value=frame), \
+                patch.object(acc, "_weights_map", return_value={"fpl_ep": 0.0}):
+            assert acc.marginal_source_value("fpl_ep") == {}
+
+    def test_fpl_ep_stays_at_zero_until_something_supports_it(self):
+        """The decision this class exists to pin.
+
+        Live on GW4-8: adding `fpl_ep` at 0.05 moves MAE by +0.0017 with a 95%
+        interval of [-0.006, +0.010] and helps in 3 of 5 gameweeks. If this ever
+        fails, the archive has grown enough to change the answer -- which is the
+        moment to give it a weight, not a reason to weaken the test.
+        """
+        import config
+        if not acc.projection_archive.scoreable_gameweeks():
+            pytest.skip("no scoreable gameweek in the archive")
+        got = acc.marginal_source_value("fpl_ep")
+        if not got:
+            pytest.skip("fpl_ep not scoreable yet")
+        if got["supported"]:
+            assert config.PROJECTION_SOURCE_WEIGHTS.get("fpl_ep", 0) > 0, (
+                "the archive now supports giving fpl_ep a weight (mean %+.4f, "
+                "CI [%+.4f, %+.4f], helped %d of %d gameweeks) but it is still "
+                "configured at 0"
+                % (got["mean"], got["ci_low"], got["ci_high"],
+                   got["gameweeks_helped"], got["gameweeks"]))
+        else:
+            assert config.PROJECTION_SOURCE_WEIGHTS.get("fpl_ep", 0) == 0

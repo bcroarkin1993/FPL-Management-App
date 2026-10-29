@@ -871,6 +871,96 @@ def head_to_head(scope: str = SCOPE_STARTERS, pre_only: bool = True) -> pd.DataF
     return pd.DataFrame(rows)
 
 
+def marginal_source_value(source: str, scope: str = SCOPE_STARTERS,
+                          pre_only: bool = True,
+                          weight: float = 0.05) -> dict:
+    """Does **adding** this source to the configured blend help?
+
+    `head_to_head` asks which source is better than which, and `fit_blend_weights`
+    asks which weighting minimises the metric. Neither answers the question a
+    weight decision for a *currently unused* source actually turns on, which is
+    whether it adds anything **on top of what the blend already has**. A source
+    can be the worst of the four on its own and still carry information none of
+    the others do -- and the grid search cannot tell that apart from noise,
+    because its argmin always names something and a one-step improvement is
+    exactly what noise looks like.
+
+    So this applies the two tests the rest of the tab already trusts: the
+    **paired** per-player difference with its interval -- "level with" means the
+    interval contains zero -- and **consistency across gameweeks**, since the
+    interval is across players and a source that happened to read one week well
+    looks identical to a source that helps.
+
+    ``weight`` is the share to try giving it, taken from the rest
+    proportionally so the blend still sums to one.
+
+    Returns ``{}`` when the source is unscoreable here. ``supported`` is the
+    answer: True only when the interval excludes zero *and* it helps in more
+    than half the gameweeks.
+    """
+    frame = _paired_frame(scope, pre_only=pre_only)
+    if frame.empty or source not in frame.columns:
+        return {}
+
+    configured = _weights_map()
+    others = {k: v for k, v in configured.items()
+              if k != source and v > 0 and k in frame.columns}
+    if not others:
+        return {}
+
+    needed = list(others) + [source, "_outcome", "_gameweek"]
+    both = frame.dropna(subset=[c for c in needed if c in frame.columns])
+    if len(both) < 2:
+        return {}
+
+    total = sum(others.values())
+    base = sum((w / total) * both[k] for k, w in others.items())
+    candidate = (1.0 - weight) * base + weight * both[source]
+
+    scored = both.assign(_base=base, _cand=candidate)
+    loss_base = _loss(scored, "_base", scope)
+    loss_cand = _loss(scored, "_cand", scope)
+    diff = loss_base - loss_cand                 # positive => adding it helps
+
+    n = len(diff)
+    se = float(diff.std(ddof=1)) / np.sqrt(n) if n > 1 else np.nan
+    mean = float(diff.mean())
+    lo, hi = mean - _Z95 * se, mean + _Z95 * se
+
+    helped = 0
+    gameweeks = 0
+    for _gw, grp in scored.groupby("_gameweek"):
+        gameweeks += 1
+        if _loss(grp, "_cand", scope).mean() < _loss(grp, "_base", scope).mean():
+            helped += 1
+
+    decided = n >= MIN_HEAD_TO_HEAD_ROWS and (lo > 0 or hi < 0)
+    return {
+        "source": source,
+        "weight": float(weight),
+        "mean": mean,
+        "ci_low": lo,
+        "ci_high": hi,
+        "n": int(n),
+        "gameweeks_helped": int(helped),
+        "gameweeks": int(gameweeks),
+        "decided": bool(decided),
+        "supported": bool(decided and mean > 0 and helped * 2 > gameweeks),
+    }
+
+
+def _weights_map() -> Dict[str, float]:
+    """The configured weights as a dict, however config spells them."""
+    try:
+        import config
+        w = getattr(config, "PROJECTION_SOURCE_WEIGHTS", None)
+        if isinstance(w, dict) and w:
+            return {k: float(v) for k, v in w.items()}
+    except Exception:                               # pragma: no cover
+        pass
+    return {}
+
+
 def verdict(scope: str = SCOPE_STARTERS, pre_only: bool = True) -> dict:
     """Which source is best at ``scope``, and whether that is settled.
 
