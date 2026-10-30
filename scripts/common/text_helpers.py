@@ -333,6 +333,36 @@ def to_display_name(first_name, second_name=None, web_name=None) -> str:
     #    surname.
     if "." in web:
         surname = web.split(".")[-1].strip()
+        initial = web.split(".")[0].strip()
+
+        # The ordinary shape: the trailing segment really is the surname.
+        # Checked against `second_name` specifically, not against the whole
+        # name -- see 1a for why.
+        if len(surname) > 1 and second and _name_contains(second, surname):
+            return ("%s %s" % (first, surname)).strip()
+
+        # 1a. "O.Dango" -- the initial is the *surname's* and the trailing
+        #     segment is the forename, which is the reverse of every other
+        #     abbreviation FPL publishes. Of the 31 players with a leading
+        #     initial, 30 are `FirstInitial.Surname` ("J.Timber") and this is
+        #     the only inversion -- so the discriminator is which field the
+        #     trailing segment belongs to, not its position in `web_name`.
+        #
+        #     Checking the trailing segment against the *full* name instead of
+        #     against `second_name` is what produced "Dango Dango": his own
+        #     forename was accepted as his surname because the name does
+        #     contain it. Reported from the app.
+        if (len(surname) > 1 and len(initial) == 1 and second
+                and _name_contains(first, surname)):
+            initial_norm = _strip_accents(initial).lower()
+            for word in second.split():
+                if _strip_accents(word)[:1].lower() == initial_norm:
+                    return ("%s %s" % (first, word)).strip()
+            return ("%s %s" % (first, second.split()[-1])).strip()
+
+        # Any other word the player actually has. Kept so a shape neither
+        # branch above recognises still renders a real name rather than
+        # falling through to the raw abbreviation.
         if len(surname) > 1 and _name_contains(full_name, surname):
             return ("%s %s" % (first, surname)).strip()
 

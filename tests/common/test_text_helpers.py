@@ -50,6 +50,18 @@ class TestToDisplayName:
         # "Jr" is a suffix, not a surname: unexpandable, so the complete name
         # wins over the abbreviation.
         ("Junior", "Kroupi", "Kroupi.Jr", "Junior Kroupi"),
+        # The initial is the SURNAME's and the trailing segment is the
+        # forename -- the reverse of every other abbreviation FPL publishes.
+        # Of 31 players with a leading initial this is the only inversion, so
+        # the discriminator is which field the trailing segment belongs to.
+        # Accepting it against the *full* name rendered "Dango Dango": his own
+        # forename passed as his surname because the name does contain it.
+        ("Dango", "Ouattara", "O.Dango", "Dango Ouattara"),
+        # The other 30 must keep working: a leading initial is normally the
+        # first name's and the trailing segment really is the surname.
+        ("Jurriën", "Timber", "J.Timber", "Jurriën Timber"),
+        ("Gabriel", "Fernando de Jesus", "G.Jesus", "Gabriel Jesus"),
+        ("Benoît", "Badiashile Mukinayi", "B.Badiashile", "Benoît Badiashile"),
     ])
     def test_returns_the_common_name(self, first, second, web, expected):
         assert to_display_name(first, second, web) == expected
@@ -60,6 +72,7 @@ class TestToDisplayName:
         ("Alex", "Tóth", "Tóth.A"),
         ("Junior", "Kroupi", "Kroupi.Jr"),
         ("Djiamgone Jocelin Ta", "Bi", "Jocelin.T"),
+        ("Dango", "Ouattara", "O.Dango"),
     ])
     def test_an_abbreviation_is_never_what_we_render(self, first, second, web):
         """The property behind the five cases above.
@@ -264,3 +277,27 @@ class TestFormatTimeUntil:
         """Empty rather than a placeholder, so a caller can append it blind."""
         assert format_time_until(None) == ""
         assert format_time_until("not a datetime") == ""
+
+
+class TestNoDisplayNameRepeatsAWord:
+    """A rendered name must never say the same word twice.
+
+    Reported from the app as "Dango Dango" on the Projections Hub. It is the
+    cheapest possible tripwire for the whole family of abbreviation bugs --
+    every previous one of them (printing an initial, a generational suffix, or
+    a forename where a surname belongs) either repeats a token or leaves an
+    abbreviation behind, and the other property test above covers the second
+    case.
+    """
+
+    @pytest.mark.parametrize("first, second, web", [
+        ("Dango", "Ouattara", "O.Dango"),
+        ("Bruno", "Borges Fernandes", "B.Fernandes"),
+        ("Alex", "Tóth", "Tóth.A"),
+        ("Gabriel", "dos Santos Magalhães", "Gabriel"),
+        ("Igor Thiago", "Nascimento Rodrigues", "Thiago"),
+    ])
+    def test_tokens_are_distinct(self, first, second, web):
+        rendered = to_display_name(first, second, web) or ""
+        tokens = [t.lower() for t in rendered.split()]
+        assert len(tokens) == len(set(tokens)), rendered
