@@ -537,8 +537,20 @@ def _render_classic_review(gw, bootstrap):
 # ─────────────────────────────────────────────────────────────
 # Section 3: Draft GW Review
 # ─────────────────────────────────────────────────────────────
-def _get_draft_gw_data(entry_id, gw, bootstrap):
-    """Fetch and enrich Draft team data for a single GW."""
+def _get_draft_gw_data(entry_id, gw):
+    """Fetch and enrich Draft team data for a single GW.
+
+    **Takes no bootstrap, deliberately.** It used to be handed the *Classic*
+    one and to look each Draft pick's `element` up in it -- preferring that
+    over `player_map` as "more reliable" -- but the two APIs number 64 of 669
+    players differently, so for those picks the name and club came off another
+    player's row. `get_fpl_player_mapping()` is already keyed in the Draft
+    space these picks are published in, and carries the same fields.
+
+    The Classic bootstrap is left out of scope rather than guarded: a space
+    cannot be crossed by code that cannot reach the other space. See
+    `scripts/common/element_ids.py`.
+    """
     try:
         url = f"https://draft.premierleague.com/api/entry/{entry_id}/event/{gw}"
         resp = requests.get(url, timeout=30)
@@ -562,21 +574,10 @@ def _get_draft_gw_data(entry_id, gw, bootstrap):
         pos_short = pinfo.get("Position", "M")
         pos = _DRAFT_POS_MAP.get(pos_short, "MID")
 
-        # Try bootstrap for web_name first (more reliable), fall back to player_map
-        bootstrap_elem = None
-        for el in bootstrap.get("elements", []):
-            if el["id"] == eid:
-                bootstrap_elem = el
-                break
-
-        if bootstrap_elem:
-            web_name = bootstrap_elem.get("web_name", "Unknown")
-            team_id = bootstrap_elem.get("team")
-            teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
-            team = teams.get(team_id, "?")
-        else:
-            web_name = pinfo.get("Web_Name") or pinfo.get("Player", "Unknown")
-            team = pinfo.get("Team", "?")
+        # `Web_Name` is None where it equals the full name, by design in
+        # `get_fpl_player_mapping` -- so fall through to `Player`.
+        web_name = pinfo.get("Web_Name") or pinfo.get("Player") or "Unknown"
+        team = pinfo.get("Team", "?")
 
         all_players.append({
             "element_id": eid,
@@ -603,7 +604,7 @@ def _get_draft_gw_data(entry_id, gw, bootstrap):
     }
 
 
-def _render_draft_review(gw, bootstrap):
+def _render_draft_review(gw):
     """Full Draft GW review section."""
     entry_id = getattr(config, "FPL_DRAFT_TEAM_ID", None)
     if not entry_id:
@@ -611,7 +612,7 @@ def _render_draft_review(gw, bootstrap):
 
     _section_header("📋", f"Draft FPL — GW{gw} Review")
 
-    data = _get_draft_gw_data(entry_id, gw, bootstrap)
+    data = _get_draft_gw_data(entry_id, gw)
     if not data:
         st.info(f"No pick data available for GW{gw}. This gameweek may not have started yet.")
         return
@@ -697,7 +698,7 @@ def show_gw_review_page():
         st.divider()
 
     if draft_id:
-        _render_draft_review(selected_gw, bootstrap)
+        _render_draft_review(selected_gw)
 
     if not classic_id and not draft_id:
         st.info("Configure FPL_CLASSIC_TEAM_ID or FPL_DRAFT_TEAM_ID in your .env file to see your personal GW review.")

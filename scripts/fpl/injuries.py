@@ -1,14 +1,19 @@
 # injuries_official.py
-import requests
 import pandas as pd
 import streamlit as st
 from scripts.common.error_helpers import get_logger
+from scripts.common.utils import get_classic_bootstrap_static
 from scripts.common.styled_tables import render_styled_table
 
 _logger = get_logger("fpl_app.injuries")
 
 # FPL element_type -> position letter
 _POS_LETTER = {1:"G", 2:"D", 3:"M", 4:"F"}
+
+_AVAILABILITY_COLUMNS = [
+    "Player_ID", "Player", "Web_Name", "Team", "Position", "Status",
+    "PlayPct", "StatusBucket", "News", "News_Added",
+]
 
 def _bucket_from_playpct(pct: float) -> str:
     if pct is None: return "Questionable"
@@ -31,8 +36,20 @@ def get_fpl_availability_df() -> pd.DataFrame:
     Returns a DataFrame with columns:
       ['Player_ID','Player','Web_Name','Team','Position','Status','PlayPct','StatusBucket','News','News_Added']
     using only the public FPL bootstrap-static endpoint.
+
+    **The Classic bootstrap, because `Player_ID` leaves this function.** Every
+    field read below is published identically by both APIs -- names, club,
+    position, status, chances, news -- so for a year this read the Draft one and
+    nothing looked wrong. Only `id` differs, and it differs for 64 of 669
+    players (see `scripts/common/element_ids.py`). Every consumer of this frame
+    joins it to Classic-keyed data: `availability.py` maps it against the
+    Classic bootstrap, `projected_lineups.py` joins it to Classic elements, and
+    `_attach_pl_injuries` below merges on `Player_ID`. A Draft id resolves to
+    *somebody* on each of those joins, just the wrong somebody -- measured
+    live, 10 of the affected players carry news, so this page was attributing
+    ten injuries to the wrong player.
     """
-    js = requests.get("https://draft.premierleague.com/api/bootstrap-static", timeout=30).json()
+    js = get_classic_bootstrap_static() or {}
     teams = {t["id"]: t["short_name"] for t in js.get("teams", [])}
 
     rows = []
@@ -65,7 +82,11 @@ def get_fpl_availability_df() -> pd.DataFrame:
             "News": news,
             "News_Added": news_added,
         })
-    df = pd.DataFrame(rows)
+    # Columns are declared even when there are no rows. `get_classic_bootstrap_static`
+    # returns {} on failure where the old raw `requests.get` raised, so an empty
+    # bootstrap now reaches this line instead of propagating -- and a frame with
+    # no columns raises KeyError below, on a page that has no try/except.
+    df = pd.DataFrame(rows, columns=_AVAILABILITY_COLUMNS)
     # basic clean
     df["Team"] = df["Team"].astype("string")
     df["Position"] = df["Position"].astype("string")

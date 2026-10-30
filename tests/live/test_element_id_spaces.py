@@ -183,3 +183,36 @@ def test_the_check_would_notice_an_untranslated_roster():
             "back should have been caught and was not" % affected
         )
         pytest.skip("this roster holds no player the two APIs number differently")
+
+
+def test_the_availability_frame_is_self_consistent():
+    """The reported failure on this frame: it was built from the *Draft*
+    bootstrap and then joined to Classic-keyed data by three pages.
+
+    Every field it reads is published identically by both APIs, so nothing
+    looked wrong -- only `id` differs. Measured on 2026-10-30, 10 of the
+    affected players carried news, so the Availability and Injuries pages were
+    attributing ten injuries to the wrong player.
+    """
+    from scripts.fpl.injuries import get_fpl_availability_df
+    pool = skip_if_unreachable(get_fpl_availability_df, "FPL availability")
+    if pool is None or pool.empty:
+        pytest.skip("no availability frame")
+    _check(pool, "get_fpl_availability_df")
+
+
+def test_the_draft_actual_lineup_is_self_consistent():
+    """This frame's id reaches `simulate_auto_subs` beside Classic live stats
+    and a Classic `element_to_team`, so a cross-space id there is an auto-sub
+    decision made on another player's minutes."""
+    import config
+    from scripts.common.fpl_draft_api import get_team_actual_lineup
+    team_id = getattr(config, "FPL_DRAFT_TEAM_ID", None)
+    if not team_id:
+        pytest.skip("no Draft team configured")
+    lineup = skip_if_unreachable(
+        lambda: get_team_actual_lineup(team_id, config.CURRENT_GAMEWEEK),
+        "Draft actual lineup")
+    if lineup is None or lineup.empty:
+        pytest.skip("no actual lineup for this gameweek")
+    _check(lineup, "get_team_actual_lineup")

@@ -58,9 +58,12 @@ def _code_maps(draft_bootstrap, classic_bootstrap):
 def draft_to_classic_ids() -> Dict[int, str]:
     """``{draft element id: classic element id}``.
 
-    Empty on any failure, which callers must read as "cannot translate" and
-    handle by *not* joining -- never by assuming the spaces agree, which is the
-    bug this module exists for.
+    Empty on any failure. A caller holding an empty bridge has no way to
+    translate and must decide what that means for it: the `translate_*`
+    helpers below keep the Draft ids and log, while
+    `get_team_composition_for_gameweek` keeps them and warns. Neither is
+    silent, because the one thing that must not happen is a Draft id being
+    *presented* as a Classic one.
     """
     import requests
     from scripts.common.fpl_classic_api import get_classic_bootstrap_static
@@ -132,10 +135,20 @@ def translate_ids(ids: Iterable, mapping: Optional[Dict[int, int]] = None) -> li
 
     An untranslatable id is dropped rather than passed through: passing it
     through is exactly what resolves it to the wrong player.
+
+    **With no bridge at all the ids are returned unchanged**, which is a
+    deliberate trade rather than an oversight: emptying a roster on a transient
+    bootstrap failure is a visible functional loss, where passing ids through
+    is wrong for 9.6% of players. The cost is that the result is then
+    indistinguishable from a successful translation, so the no-bridge path
+    logs -- it must never be silent.
     """
     mapping = draft_to_classic_ids() if mapping is None else mapping
     if not mapping:
-        return list(ids)        # no bridge -- caller must decide what that means
+        _logger.warning(
+            "No Draft->Classic bridge: %d id(s) stay in the Draft space and may "
+            "resolve to the wrong player downstream.", len(list(ids) or []))
+        return list(ids)
     out = []
     for raw in ids:
         try:
@@ -146,9 +159,16 @@ def translate_ids(ids: Iterable, mapping: Optional[Dict[int, int]] = None) -> li
 
 
 def translate_keyed(values: Dict, mapping: Optional[Dict[int, int]] = None) -> Dict:
-    """Re-key a ``{draft element id: anything}`` dict into the Classic space."""
+    """Re-key a ``{draft element id: anything}`` dict into the Classic space.
+
+    No bridge leaves the keys alone -- see :func:`translate_ids` for why, and
+    for why that path is logged rather than silent.
+    """
     mapping = draft_to_classic_ids() if mapping is None else mapping
     if not mapping:
+        _logger.warning(
+            "No Draft->Classic bridge: %d key(s) stay in the Draft space.",
+            len(values or {}))
         return dict(values)
     out, dropped = {}, 0
     for raw, val in (values or {}).items():
@@ -163,9 +183,15 @@ def translate_keyed(values: Dict, mapping: Optional[Dict[int, int]] = None) -> D
 
 def translate_series(series: pd.Series,
                      mapping: Optional[Dict[int, int]] = None) -> pd.Series:
-    """Draft ids in a Series as Classic ids, NaN where untranslatable."""
+    """Draft ids in a Series as Classic ids, NaN where untranslatable.
+
+    No bridge leaves the ids alone -- see :func:`translate_ids`.
+    """
     mapping = draft_to_classic_ids() if mapping is None else mapping
     nums = pd.to_numeric(series, errors="coerce")
     if not mapping:
+        _logger.warning(
+            "No Draft->Classic bridge: %d id(s) stay in the Draft space.",
+            int(nums.notna().sum()))
         return nums
     return nums.map(lambda v: mapping.get(int(v)) if pd.notna(v) else None)

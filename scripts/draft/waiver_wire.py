@@ -49,7 +49,7 @@ from scripts.common.waiver_priority import (
     my_waiver_pick,
     rank_claim_plan,
 )
-from scripts.common.player_matching import canonical_normalize, get_player_registry
+from scripts.common.player_matching import canonical_normalize
 from scripts.common.text_helpers import (_strip_accents, compact_html,
                                          format_deadline_stamp, format_time_until,
                                          to_display_name)
@@ -135,7 +135,13 @@ SUGGESTION_VIEW_LIMITS = {"Top 5": 5, "Top 10": 10}
 
 @st.cache_data(show_spinner=False)
 def _load_bootstrap() -> Dict[str, Any]:
-    """bootstrap-static with players & teams (cached)."""
+    """bootstrap-static with players & teams (cached).
+
+    The **Draft** bootstrap, and only its `teams` are read -- team ids and short
+    names are identical in both APIs, so that is safe. Do not take `elements`
+    from here: the two APIs number 64 of 669 players differently, and this
+    page's frames are Classic-keyed. See `scripts/common/element_ids.py`.
+    """
     url = "https://draft.premierleague.com/api/bootstrap-static"
     return requests.get(url, timeout=30).json()
 

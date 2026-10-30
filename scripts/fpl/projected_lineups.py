@@ -157,6 +157,12 @@ def build_player_index() -> PlayerIndex:
 
         # Availability is keyed on the element id, not the name: this frame and
         # the bootstrap are the same source, so there is nothing to match.
+        # That is only true because `get_fpl_availability_df` reads the
+        # *Classic* bootstrap, which it did not until 2026-10-30 -- it read the
+        # Draft one, whose ids name a different player for 64 of 669. The
+        # comment above was false for as long as it had been written, and the
+        # join it describes silently attached one player's injury news to
+        # another's lineup card. See `scripts/common/element_ids.py`.
         avail_lookup = {}
         try:
             avail_df = get_fpl_availability_df()

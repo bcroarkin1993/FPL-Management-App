@@ -781,6 +781,14 @@ def get_team_actual_lineup(team_id: int, gameweek: int) -> pd.DataFrame:
     - DataFrame with columns ['Player', 'Team', 'Position', 'Is_Starter', 'Player_ID', 'squad_position']
       for all 15 players. Is_Starter is True for positions 1-11, False for bench (12-15).
       squad_position is the raw position slot (1-15) from the FPL picks API.
+
+    `Player_ID` is a **Classic** element id, like
+    :func:`get_team_composition_for_gameweek`'s and for the same reason: the
+    picks arrive in the Draft space, and every consumer is Classic-keyed. This
+    frame's id reaches `simulate_auto_subs` beside `get_live_gameweek_stats`
+    and a Classic `element_to_team`, so an untranslated id read another
+    player's minutes and another club's finished state -- which is an auto-sub
+    decision, not a cosmetic slip. See `scripts/common/element_ids.py`.
     """
     player_map = get_fpl_player_mapping()
 
@@ -813,7 +821,25 @@ def get_team_actual_lineup(team_id: int, gameweek: int) -> pd.DataFrame:
             'squad_position': position_slot,
         })
 
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+
+    # Draft element ids -> Classic. The player_map lookup above is correctly in
+    # the Draft space; only the published id crosses. An id with no counterpart
+    # becomes None rather than passing through, which is what resolves it to the
+    # wrong player.
+    if not out.empty:
+        from scripts.common.element_ids import draft_to_classic_ids
+        _map = draft_to_classic_ids()
+        if _map:
+            out['Player_ID'] = [
+                _map.get(int(pid)) if pid is not None and not pd.isna(pid) else None
+                for pid in out['Player_ID']
+            ]
+        else:
+            _logger.warning(
+                "Element id translation unavailable; actual-lineup ids stay in "
+                "the Draft space and may resolve to the wrong player.")
+    return out
 
 
 @st.cache_data(ttl=600)

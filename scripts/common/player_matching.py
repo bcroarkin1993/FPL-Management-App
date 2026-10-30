@@ -1,25 +1,21 @@
 """
 Player Matching Module
 
-Provides canonical name normalization, a PlayerRegistry for consistent
-player matching across FPL and Rotowire data sources, and fuzzy matching
-functions for merging FPL rosters with projection data.
+Provides canonical name normalization and the fuzzy merge that attaches
+Rotowire projections to an FPL roster.
+
+For resolving a name to a player, prefer ``ReferenceMatcher``
+(``scripts/common/name_matching.py``): every tier below the first is scoped by
+team and position, and one reference row is given to at most one player.
 
 The key insight is that FPL names often contain accents (e.g., "Raúl Jiménez")
 while Rotowire uses ASCII names (e.g., "Raul Jimenez"). By normalizing both
 to a canonical form, we can match players reliably.
 """
 
-import difflib
-import unicodedata
-import re
-from typing import Dict, Optional, NamedTuple
-
 from fuzzywuzzy import process, fuzz
 import numpy as np
 import pandas as pd
-import requests
-import streamlit as st
 
 from scripts.common.text_helpers import (
     PLAYER_ALIASES,
@@ -32,299 +28,21 @@ from scripts.common.text_helpers import (
 )
 
 
-class PlayerRecord(NamedTuple):
-    """Immutable record for a player from FPL bootstrap data."""
-    player_id: int
-    name: str
-    web_name: str
-    team_short: str
-    position: str
-    norm_name: str  # Canonical normalized name for matching
-
-
-# canonical_normalize now lives in text_helpers (Streamlit-free, so it is
-# importable from GitHub Actions). Re-exported here: every existing caller
-# imports it from this module.
-
-
-
-class PlayerRegistry:
-    """
-    Centralized player lookup using FPL Player_ID as primary key.
-
-    Provides O(1) lookups by:
-    - Player ID
-    - Normalized name (optionally filtered by team/position)
-
-    Usage:
-        registry = get_player_registry()
-
-        # Lookup by ID
-        player = registry.lookup_by_id(123)
-
-        # Lookup by name
-        player = registry.lookup_by_name("Raul Jimenez", team="FUL", position="F")
-
-        # Enrich a DataFrame with Player_ID
-        df = registry.enrich_dataframe(df, name_col="Player")
-    """
-
-    def __init__(self):
-        self._by_id: Dict[int, PlayerRecord] = {}
-        self._by_norm_name: Dict[str, list] = {}  # norm_name -> [PlayerRecord, ...]
-        self._built = False
-
-    def build_from_bootstrap(self, bootstrap_data: dict) -> None:
-        """
-        Build indices from FPL bootstrap-static data.
-
-        Args:
-            bootstrap_data: Response from FPL bootstrap-static API
-        """
-        self._by_id.clear()
-        self._by_norm_name.clear()
-
-        players = bootstrap_data.get("elements", [])
-        teams = bootstrap_data.get("teams", [])
-
-        # Build team ID -> short_name mapping
-        team_map = {t["id"]: t["short_name"] for t in teams}
-
-        # Position mapping
-        pos_map = {1: "G", 2: "D", 3: "M", 4: "F"}
-
-        for p in players:
-            player_id = p.get("id")
-            if player_id is None:
-                continue
-
-            first_name = p.get("first_name", "")
-            second_name = p.get("second_name", "")
-            full_name = f"{first_name} {second_name}".strip()
-            web_name = p.get("web_name", full_name)
-
-            team_id = p.get("team", 0)
-            team_short = team_map.get(team_id, "???")
-
-            element_type = p.get("element_type", 0)
-            position = pos_map.get(element_type, "?")
-
-            norm_name = canonical_normalize(full_name)
-
-            record = PlayerRecord(
-                player_id=player_id,
-                name=full_name,
-                web_name=web_name,
-                team_short=team_short,
-                position=position,
-                norm_name=norm_name
-            )
-
-            self._by_id[player_id] = record
-
-            # Index by normalized name (handle collisions)
-            if norm_name not in self._by_norm_name:
-                self._by_norm_name[norm_name] = []
-            self._by_norm_name[norm_name].append(record)
-
-            # Also index by normalized web_name if different
-            norm_web = canonical_normalize(web_name)
-            if norm_web and norm_web != norm_name:
-                if norm_web not in self._by_norm_name:
-                    self._by_norm_name[norm_web] = []
-                self._by_norm_name[norm_web].append(record)
-
-        self._built = True
-
-    def lookup_by_id(self, player_id: int) -> Optional[PlayerRecord]:
-        """
-        Lookup a player by their FPL ID.
-
-        Args:
-            player_id: FPL player ID
-
-        Returns:
-            PlayerRecord or None if not found
-        """
-        return self._by_id.get(int(player_id))
-
-    def lookup_by_name(
-        self,
-        name: str,
-        team: str = None,
-        position: str = None
-    ) -> Optional[PlayerRecord]:
-        """
-        Lookup a player by normalized name, optionally filtered by team/position.
-
-        Args:
-            name: Player name (will be canonically normalized)
-            team: Optional team short code (e.g., "MCI") to filter matches
-            position: Optional position (G/D/M/F) to filter matches
-
-        Returns:
-            Best matching PlayerRecord or None if not found
-        """
-        norm = canonical_normalize(name)
-        if not norm:
-            return None
-
-        candidates = self._by_norm_name.get(norm, [])
-        if not candidates:
-            return None
-
-        # Filter by team and/or position if provided
-        if team or position:
-            filtered = []
-            for c in candidates:
-                team_match = (team is None) or (c.team_short == team)
-                pos_match = (position is None) or (c.position == position)
-                if team_match and pos_match:
-                    filtered.append(c)
-            if filtered:
-                return filtered[0]
-
-        # Return first match if no filter or no filtered matches
-        return candidates[0] if candidates else None
-
-    def get_player_id(
-        self,
-        name: str,
-        team: str = None,
-        position: str = None
-    ) -> Optional[int]:
-        """
-        Get a player's ID by name lookup.
-
-        Convenience method that wraps lookup_by_name.
-
-        Args:
-            name: Player name
-            team: Optional team short code
-            position: Optional position
-
-        Returns:
-            Player ID or None if not found
-        """
-        record = self.lookup_by_name(name, team, position)
-        return record.player_id if record else None
-
-    def enrich_dataframe(
-        self,
-        df: pd.DataFrame,
-        name_col: str = "Player",
-        team_col: str = "Team",
-        position_col: str = "Position",
-        add_cols: bool = True
-    ) -> pd.DataFrame:
-        """
-        Enrich a DataFrame with Player_ID from the registry.
-
-        For each row, looks up the player by normalized name (optionally
-        constrained by team and position) and adds the Player_ID.
-
-        Args:
-            df: DataFrame to enrich
-            name_col: Name of the column containing player names
-            team_col: Name of the column containing team codes (optional)
-            position_col: Name of the column containing positions (optional)
-            add_cols: If True, also add __norm_name column
-
-        Returns:
-            DataFrame with Player_ID column added/updated
-        """
-        result = df.copy()
-
-        # Add normalized name column
-        if add_cols and name_col in result.columns:
-            result["__norm_name"] = result[name_col].apply(canonical_normalize)
-
-        # Prepare Player_ID column
-        if "Player_ID" not in result.columns:
-            result["Player_ID"] = pd.NA
-
-        has_team = team_col in result.columns
-        has_pos = position_col in result.columns
-
-        for idx in result.index:
-            # Skip if already has valid Player_ID
-            if pd.notna(result.at[idx, "Player_ID"]):
-                continue
-
-            name = result.at[idx, name_col] if name_col in result.columns else None
-            if pd.isna(name):
-                continue
-
-            team = result.at[idx, team_col] if has_team else None
-            pos = result.at[idx, position_col] if has_pos else None
-
-            player_id = self.get_player_id(str(name), team, pos)
-            if player_id is not None:
-                result.at[idx, "Player_ID"] = player_id
-
-        return result
-
-    @property
-    def is_built(self) -> bool:
-        """Check if the registry has been built."""
-        return self._built
-
-    def __len__(self) -> int:
-        """Return the number of players in the registry."""
-        return len(self._by_id)
-
-
-@st.cache_resource(ttl=3600, show_spinner=False)
-def get_player_registry() -> PlayerRegistry:
-    """
-    Get the cached PlayerRegistry singleton.
-
-    Uses Streamlit's cache_resource for session-level caching, with a 1-hour
-    TTL (matching get_fpl_player_mapping's convention) so roster changes —
-    transfers, newly promoted teams' players appearing, etc. — aren't stuck
-    for the lifetime of the process.
-    The registry is built from FPL bootstrap-static data on first access.
-
-    Returns:
-        Initialized PlayerRegistry instance
-    """
-    registry = PlayerRegistry()
-
-    try:
-        url = "https://draft.premierleague.com/api/bootstrap-static"
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        registry.build_from_bootstrap(data)
-    except Exception as e:
-        # Log but don't fail - registry will just be empty
-        st.warning(f"Failed to build player registry: {e}")
-
-    return registry
-
-
-def add_normalized_name_column(
-    df: pd.DataFrame,
-    name_col: str = "Player",
-    norm_col: str = "__norm_name"
-) -> pd.DataFrame:
-    """
-    Add a normalized name column to a DataFrame.
-
-    Utility function for preparing DataFrames for normalized matching.
-
-    Args:
-        df: Input DataFrame
-        name_col: Column containing player names
-        norm_col: Name for the new normalized column
-
-    Returns:
-        DataFrame with normalized name column added
-    """
-    result = df.copy()
-    if name_col in result.columns:
-        result[norm_col] = result[name_col].apply(canonical_normalize)
-    return result
+# ``PlayerRecord``, ``PlayerRegistry``, ``get_player_registry`` and
+# ``add_normalized_name_column`` were removed on 2026-10-30.
+#
+# The registry was built from the **Draft** bootstrap and stamped its ids as
+# ``Player_ID``, which is the one id space the rest of the app does not speak:
+# `draft.premierleague.com` and `fantasy.premierleague.com` number 64 of 669
+# players differently, so an id from it resolves to a real but wrong player
+# downstream, silently. Nothing in the app ever called it -- only its own tests
+# did -- so it was not a live bug but a loaded one: the first caller would have
+# reintroduced the failure `scripts/common/element_ids.py` exists for.
+#
+# ``add_normalized_name_column`` and ``normalize_for_merge`` had no callers at
+# all. Left deleted rather than deprecated so a future caller cannot reach for
+# them; `ReferenceMatcher` (`name_matching.py`) is the supported way to resolve
+# a name, and the element id is carried, never re-derived.
 
 
 # =============================================================================
@@ -747,25 +465,6 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
     merged.index = pd.RangeIndex(start=1, stop=len(merged) + 1, step=1)
     return merged
 
-
-def normalize_for_merge(fpl_df: pd.DataFrame,
-                        rotowire_df: pd.DataFrame,
-                        teams_df: pd.DataFrame = None):
-    """
-    Convenience wrapper: returns (fpl_norm, rw_norm) aligned to the same
-    schema so downstream code can rely on ['Player','Team','Position'] and helpers.
-    """
-    fpl_norm = normalize_fpl_players_to_rotowire_schema(fpl_df, teams_df=teams_df)
-    rw_norm = normalize_rotowire_players(rotowire_df)
-
-    # IMPORTANT: align Team to the same representation (short codes).
-    # RotoWire often uses full names; we add Team_Short there too, and then
-    # overwrite 'Team' to be the short code for both dataframes to make
-    # equality checks reliable.
-    fpl_norm["Team"] = fpl_norm["Team_Short"]
-    rw_norm["Team"] = rw_norm["Team_Short"]
-
-    return fpl_norm, rw_norm
 
 
 def normalize_fpl_players_to_rotowire_schema(fpl_df: pd.DataFrame,
