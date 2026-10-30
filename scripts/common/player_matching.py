@@ -127,6 +127,20 @@ def _backfill_player_ids(roster_df: pd.DataFrame, fpl_stats: pd.DataFrame) -> pd
 # deleted rather than deprecated so a future caller cannot reach for them.
 
 
+#: Copied from the FPL side on every merge, whether or not the caller asks.
+#:
+#: A matched row otherwise takes *all* its fields from the projection source,
+#: which publishes names and no ids -- so the element id the caller already had
+#: was discarded, and anything keyed on it downstream silently did nothing.
+#: `carry_cols=['Player_ID']` was the workaround, and **four of six callsites
+#: used it while two forgot** -- the two that run pre-deadline, which is when a
+#: projection is read. That is the recurring shape of this bug in this codebase,
+#: so the fix belongs inside the function where no caller can forget it, the
+#: same reasoning as locked-player filtering living inside
+#: `_compute_transfer_suggestions`.
+_IDENTITY_COLS = ("Player_ID", "Player_Code")
+
+
 def merge_fpl_players_and_projections(fpl_players_df, projections_df,
                                       fuzzy_threshold=80, lower_fuzzy_threshold=60,
                                       carry_cols=None):
@@ -137,9 +151,13 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
     - Tries exact match on normalized names first, then falls back to fuzzy matching.
     - Returns a table with players that *did* or *did not* match; unmatched get NA fields.
 
-    carry_cols: FPL-side columns to copy onto the output rows (e.g. ['Player_ID']).
-    A matched row takes its 'Player' from the *projection* source, so anything keyed
-    on the FPL name is lost here -- carry the element id instead and join on that.
+    carry_cols: extra FPL-side columns to copy onto the output rows. The
+    identity columns in `_IDENTITY_COLS` are copied unconditionally, so a
+    caller no longer has to ask for the element id -- passing it remains
+    harmless.
+
+    A matched row takes its 'Player' from the *projection* source, so anything
+    keyed on the FPL name is lost here; join on the id, which now survives.
     """
 
     # -------- normalize projections to RW schema --------
@@ -442,8 +460,10 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
                 'Pos Rank': 'NA'
             }
 
-        for col in (carry_cols or []):
-            if col in fpl_players_df.columns:
+        # Identity first, then whatever else the caller asked for. A caller
+        # naming an identity column in carry_cols is a no-op, not a conflict.
+        for col in tuple(_IDENTITY_COLS) + tuple(carry_cols or []):
+            if col in fpl_players_df.columns and col not in row:
                 row[col] = r[col]
 
         out.append(row)
@@ -458,7 +478,9 @@ def merge_fpl_players_and_projections(fpl_players_df, projections_df,
 
     # final column order (don't fail if some are missing)
     order = ['Player','Team','Matchup','Position','Price','TSB %','Points','Pos Rank']
-    order += [c for c in (carry_cols or []) if c in merged.columns]
+    for col in tuple(_IDENTITY_COLS) + tuple(carry_cols or []):
+        if col in merged.columns and col not in order:
+            order.append(col)
     merged = merged[[c for c in order if c in merged.columns]]
 
     # 1-based index

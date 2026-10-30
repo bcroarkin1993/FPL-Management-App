@@ -1154,9 +1154,37 @@ def ffp_gameweek_matches(ffp_df, expected_gw, source_name="FFP") -> bool:
     return False
 
 
+def _claim_by_id(player_df, ref_df, id_col):
+    """``({player index: ref index}, {claimed ref indexes})`` on an exact id.
+
+    A duplicated id on either side is not a join key, so those are dropped
+    rather than resolved arbitrarily -- the same rule `ReferenceMatcher` applies
+    to an ambiguous name, and for the same reason: picking one of two
+    candidates is how a frame comes to carry another player's numbers.
+    """
+    player_ids = pd.to_numeric(player_df[id_col], errors="coerce")
+    ref_ids = pd.to_numeric(ref_df[id_col], errors="coerce")
+    ref_lookup = {}
+    for ref_idx, value in ref_ids.items():
+        if pd.isna(value):
+            continue
+        key = int(value)
+        ref_lookup[key] = None if key in ref_lookup else ref_idx
+    claims, taken = {}, set()
+    for idx, value in player_ids.items():
+        if pd.isna(value):
+            continue
+        ref_idx = ref_lookup.get(int(value))
+        if ref_idx is None or ref_idx in taken:
+            continue
+        claims[idx] = ref_idx
+        taken.add(ref_idx)
+    return claims, taken
+
+
 def _claim_ffp_rows(player_df, ffp, name_col, source_name, stats=None,
                     id_col="Player_ID"):
-    """Map player rows onto FFP rows, element id first and names second.
+    """Map player rows onto FFP rows, id first and names second.
 
     FFP's site payload publishes the FPL ``code`` for every player, which
     resolves to an element id exactly -- 368 of 368 live. An id join cannot make
@@ -1169,29 +1197,24 @@ def _claim_ffp_rows(player_df, ffp, name_col, source_name, stats=None,
     remaining = player_df
     id_matched = 0
 
-    if id_col in player_df.columns and id_col in ffp.columns:
-        player_ids = pd.to_numeric(player_df[id_col], errors="coerce")
-        ref_ids = pd.to_numeric(ffp[id_col], errors="coerce")
-        # A duplicated id on either side is not a join key -- drop those rather
-        # than pick arbitrarily.
-        ref_lookup = {}
-        for ref_idx, value in ref_ids.items():
-            if pd.isna(value):
-                continue
-            ref_lookup[int(value)] = None if int(value) in ref_lookup else ref_idx
-        taken = set()
-        for idx, value in player_ids.items():
-            if pd.isna(value):
-                continue
-            ref_idx = ref_lookup.get(int(value))
-            if ref_idx is None or ref_idx in taken:
-                continue
-            claims[idx] = ref_idx
-            taken.add(ref_idx)
-        id_matched = len(claims)
-        if id_matched:
-            remaining = player_df.loc[~player_df.index.isin(claims.keys())]
-            ffp = ffp.loc[~ffp.index.isin(taken)]
+    # `Player_Code` before `Player_ID`, because the code is FFP's *native* key
+    # -- the payload publishes it and `Player_ID` is derived from it through
+    # `bootstrap_code_to_id`. So the code join needs one fewer resolution step,
+    # and unlike an element id it cannot be confused between the two FPL API
+    # spaces. `Player_ID` stays as the second pass for frames that carry only
+    # it, which is most of them until every producer is stamped.
+    for key in ("Player_Code", id_col):
+        if remaining.empty or ffp.empty:
+            break
+        if key not in remaining.columns or key not in ffp.columns:
+            continue
+        pass_claims, taken = _claim_by_id(remaining, ffp, key)
+        if not pass_claims:
+            continue
+        claims.update(pass_claims)
+        id_matched += len(pass_claims)
+        remaining = remaining.loc[~remaining.index.isin(pass_claims.keys())]
+        ffp = ffp.loc[~ffp.index.isin(taken)]
 
     if not remaining.empty and not ffp.empty:
         name_stats = {} if stats is not None else None
@@ -1957,112 +1980,19 @@ def blend_fixture_projections(
     return result
 
 
-def _add_fdr_and_form(
-    df: pd.DataFrame,
-    fpl_player_statistics_df: pd.DataFrame,
-    current_gw: int,
-    weeks: int
-) -> pd.DataFrame:
-    """
-    Join AvgFDRNextN and Form onto df.
-
-    - Requires df to have Player/Team/Position (will create if missing).
-    - Merges in Player_ID, then computes Form via element-summary.
-    - Fallback chain for Form: element-summary -> FPL 'form' -> 'points_per_game' -> 0.
-
-    NOTE: This function references _avg_fdr_for_team and _avg_form_last_n which
-    are not yet implemented. It will fail at runtime if called until those are added.
-    """
-    base = df.copy()
-    # Ensure join keys exist
-    for col in ("Player", "Team", "Position"):
-        if col not in base.columns:
-            base[col] = np.nan
-
-    # Safely select merge cols from stats
-    stats = fpl_player_statistics_df.copy()
-    for col in ("Player", "Team", "Position", "Player_ID", "form", "points_per_game"):
-        if col not in stats.columns:
-            stats[col] = np.nan
-
-    # Merge in Player_ID + FPL fallback stats
-    base = base.merge(
-        stats[["Player", "Team", "Position", "Player_ID", "form", "points_per_game"]],
-        on=["Player", "Team", "Position"],
-        how="left"
-    )
-
-    # Ensure Player_ID exists (for downstream)
-    if "Player_ID" not in base.columns:
-        base["Player_ID"] = np.nan
-
-    # Compute Avg FDR next N GWs
-    # NOTE: _avg_fdr_for_team is not implemented - this will fail at runtime
-    base["AvgFDRNextN"] = base["Team"].apply(lambda t: _avg_fdr_for_team(str(t), current_gw, weeks))
-    base["AvgFDRNextN"] = pd.to_numeric(base["AvgFDRNextN"], errors="coerce")
-
-    # Robust Form calculation with fallbacks
-    def _safe_form(pid, fallback_form, fallback_ppg):
-        # element-summary average of last N
-        val = None
-        if pd.notna(pid):
-            try:
-                # NOTE: _avg_form_last_n is not implemented - this will fail at runtime
-                val = _avg_form_last_n(int(pid), config.FORM_LOOKBACK_WEEKS)
-            except Exception:
-                val = None
-        if val is None or (isinstance(val, float) and np.isnan(val)):
-            val = pd.to_numeric(fallback_form, errors="coerce")
-        if val is None or (isinstance(val, float) and np.isnan(val)):
-            val = pd.to_numeric(fallback_ppg, errors="coerce")
-        if val is None or (isinstance(val, float) and np.isnan(val)):
-            val = 0.0
-        return float(val)
-
-    base["Form"] = base.apply(
-        lambda r: _safe_form(r.get("Player_ID"), r.get("form"), r.get("points_per_game")),
-        axis=1
-    )
-    base["Form"] = pd.to_numeric(base["Form"], errors="coerce").fillna(0.0)
-
-    return base
-
-
-# ``apply_availability_penalty()`` was removed here. It had zero callsites and
-# its docstring invited exactly the bug the projection engine exists to prevent:
-# "multiply a score column by PlayPct/100". Applied to ``_effective_proj`` --
-# which is already expected value, start probability included -- it would have
-# charged availability twice, the same shape as the FFP double discount. A
-# loaded gun on the shelf beside a contract that now makes basis explicit.
-# Availability belongs in ``Start_Pct``, priced once, inside the engine.
-
-
-def attach_availability(df: pd.DataFrame, avail_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Left-merge PlayPct/StatusBucket/News onto df using Player+Team first,
-    then try Player_ID if present.
-    """
-    base = df.copy()
-    cols_keep = ["PlayPct","StatusBucket","News"]
-    # Try exact Player+Team first (your normalizers map Team to short codes)
-    base = base.merge(
-        avail_df[["Player","Team","PlayPct","StatusBucket","News"]],
-        on=["Player","Team"], how="left", suffixes=("","")
-    )
-    # If still missing and we have IDs, try by Player_ID
-    if "Player_ID" in base.columns and "Player_ID" in avail_df.columns:
-        mask = base["PlayPct"].isna()
-        if mask.any():
-            left = base.loc[mask, ["Player_ID"]].copy()
-            right = avail_df[["Player_ID"] + cols_keep].copy()
-            joined = left.merge(right, on="Player_ID", how="left")
-            base.loc[mask, cols_keep] = joined[cols_keep].values
-
-    # Fill PlayPct neutral defaults
-    base["PlayPct"] = pd.to_numeric(base["PlayPct"], errors="coerce").fillna(50.0)
-    base["StatusBucket"] = base["StatusBucket"].fillna("Questionable")
-    base["News"] = base["News"].fillna("")
-    return base
+# ``_add_fdr_and_form`` was removed on 2026-10-30.
+#
+# It was a *twin* of ``draft.waiver_wire._add_fdr_and_form``, and the drift had
+# reached its terminal form: this copy called ``_avg_fdr_for_team`` and
+# ``_avg_form_last_n``, neither of which exists in this module, so any call
+# raised NameError. Its own comments said so. It also joined on
+# ``(Player, Team, Position)`` by raw string equality where the surviving copy
+# prefers ``Player_ID``, and it did not accept the ``form_weeks`` argument its
+# only apparent caller passes -- ``scripts/test_scoring.py`` imports the
+# waiver_wire one, so this had no callers at all.
+#
+# Two implementations of one join is the failure this codebase keeps paying
+# for; see "Projection Engine -- one blend, one contract" in CLAUDE.md.
 
 
 def simulate_auto_subs(squad_df, live_stats, element_to_team, finished_team_ids):
@@ -2170,34 +2100,3 @@ def simulate_auto_subs(squad_df, live_stats, element_to_team, finished_team_ids)
     return df, sub_list
 
 
-def team_optimizer(player_rankings):
-    """
-    Optimize team lineup based on player rankings.
-
-    NOTE: This function references config.TEAM_LIST which may not exist.
-    """
-    # Loop over each team in the team_list
-    for team_name, team_data in config.TEAM_LIST.items():
-        # Convert the JSON to a DataFrame
-        team_player_list = []
-        for position, players in team_data.items():
-            for player in players:
-                team_player_list.append({'player_name': player, 'position': position})
-
-        team_df = pd.DataFrame(team_player_list)
-
-        # Perform a left join, filling missing Pts with 0
-        merged_df = team_df.merge(player_rankings, left_on='player_name', right_on='Player', how='left')
-
-        # Fill NaN values in the Pts column with 0
-        merged_df['Pts'] = merged_df['Pts'].fillna(0)
-
-        # Select relevant columns for the final output and rename them
-        final_df = merged_df[['player_name', 'position', 'Pts']]
-        final_df.columns = ['Player', 'Position', 'Projected_Points']
-
-        # Ensure the 'Projected_Points' column is numeric
-        final_df.loc[:, 'Projected_Points'] = pd.to_numeric(final_df['Projected_Points'], errors='coerce')
-
-        # Return the DataFrame
-        return(final_df)
