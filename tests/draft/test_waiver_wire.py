@@ -1162,3 +1162,106 @@ class TestEverySuggestionIsPositionLocked:
         from scripts.draft import waiver_wire as ww
         src = inspect.getsource(ww._render_transfer_suggestions)
         assert "position-locked" in src
+
+
+class TestOwnedPlayersAreExcludedByCode:
+    """An owned player must never be offered, even when the names disagree.
+
+    The ownership anti-join is a three-step name chain: `league_ownership`
+    publishes a name, that name is matched to the FPL stats frame for
+    Team/Position, and the result is fuzzy matched to Rotowire. A miss anywhere
+    leaves an owned player in the available pool, where the page ranks him as a
+    waiver target.
+
+    Measured against the live league at GW9 it lost two of 125 owned players:
+    FPL spells one "Oli McBurnie" where Rotowire says "Oliver McBurnie", and
+    the other "Đorđe Petrović" against "Djordje Petrovic". McBurnie sat on
+    *that* manager's own roster, projected 5.13 points.
+
+    `element-status` knows ownership by element id and needs no names, so it is
+    unioned into the anti-join -- never substituted for it, so a code that
+    fails to resolve cannot re-admit a player the names correctly removed.
+    """
+
+    PROJ = pd.DataFrame([
+        # The Rotowire spelling, which is not the FPL spelling.
+        {"Player": "Oliver McBurnie", "Team": "LEE", "Position": "F",
+         "Points": 5.13, "Pos Rank": 1, "Matchup": "LEE v ARS",
+         "Player_ID": 295, "Player_Code": 169432},
+        {"Player": "Free Agent", "Team": "ARS", "Position": "M",
+         "Points": 4.0, "Pos Rank": 2, "Matchup": "ARS v LEE",
+         "Player_ID": 10, "Player_Code": 100010},
+    ])
+
+    STATS = pd.DataFrame([
+        {"Player": "Oli McBurnie", "Team": "Leeds", "Position": "FWD"},
+        {"Player": "Free Agent", "Team": "Arsenal", "Position": "MID"},
+    ])
+
+    #: The Draft player map, as `get_fpl_player_mapping` returns it.
+    PMAP = {
+        295: {"Player": "Oli McBurnie", "Web_Name": "McBurnie", "Team": "LEE",
+              "Position": "F", "Player_Code": 169432},
+        10: {"Player": "Free Agent", "Web_Name": "Agent", "Team": "ARS",
+             "Position": "M", "Player_Code": 100010},
+    }
+
+    def _run(self, ownership, states):
+        from unittest.mock import patch
+        from scripts.draft import waiver_wire as W
+        with patch.object(W, "get_fpl_player_mapping", return_value=self.PMAP):
+            return W._available_from_projections(
+                self.PROJ.copy(), self.STATS.copy(), ownership, states)
+
+    def test_the_name_chain_alone_would_offer_him(self):
+        """The control. With no element-status the page has only the names, and
+        "Oli McBurnie" does not reach "Oliver McBurnie" -- so this asserts the
+        gap the id path closes, rather than assuming it."""
+        avail = self._run({1: {"players": ["Oli McBurnie"]}}, None)
+        assert "Oliver McBurnie" in set(avail["Player"])
+
+    def test_element_status_excludes_him_despite_the_name_mismatch(self):
+        states = {295: {"status": "o", "owner": 56086},
+                  10: {"status": "a", "owner": None}}
+        avail = self._run({1: {"players": ["Oli McBurnie"]}}, states)
+        assert "Oliver McBurnie" not in set(avail["Player"])
+        assert "Free Agent" in set(avail["Player"]), "the free agent must survive"
+
+    def test_an_unresolvable_code_still_leaves_the_name_leg_working(self):
+        """The union is what makes this safe: if the code cannot be resolved,
+        the answer must be no worse than it was, never worse."""
+        from unittest.mock import patch
+        from scripts.draft import waiver_wire as W
+        proj = self.PROJ.drop(columns=["Player_Code"])
+        with patch.object(W, "get_fpl_player_mapping", return_value=self.PMAP):
+            avail = W._available_from_projections(
+                proj, self.STATS.copy(),
+                {1: {"players": ["Free Agent"]}},
+                {10: {"status": "o", "owner": 1}})
+        # The name leg still removes the one it can match.
+        assert "Free Agent" not in set(avail["Player"])
+
+
+class TestCodesInState:
+    def test_it_reads_the_draft_space_without_translating(self):
+        """`element-status` is keyed on the *Draft* element id and the player
+        map carries each one's code, so this crosses to the join key with no
+        name matching and no element-id translation."""
+        from unittest.mock import patch
+        from scripts.draft import waiver_wire as W
+        pmap = {295: {"Player_Code": 169432}, 57: {"Player_Code": 457569}}
+        states = {295: {"status": "o"}, 57: {"status": "l"}, 1: {"status": "a"}}
+        with patch.object(W, "get_fpl_player_mapping", return_value=pmap):
+            assert W._codes_in_state(states, "o") == {169432}
+            assert W._codes_in_state(states, "l") == {457569}
+
+    def test_an_element_the_map_does_not_know_is_skipped(self):
+        from unittest.mock import patch
+        from scripts.draft import waiver_wire as W
+        with patch.object(W, "get_fpl_player_mapping", return_value={}):
+            assert W._codes_in_state({1: {"status": "o"}}, "o") == set()
+
+    def test_no_states_is_not_an_error(self):
+        from scripts.draft import waiver_wire as W
+        assert W._codes_in_state(None, "o") == set()
+        assert W._codes_in_state({}, "o") == set()

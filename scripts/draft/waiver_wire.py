@@ -36,6 +36,7 @@ from scripts.common.fpl_draft_api import (
     get_league_waiver_order,
     ELEMENT_STATE_LOCKED,
     ELEMENT_STATE_AVAILABLE,
+    ELEMENT_STATE_OWNED,
     TRANSACTION_MODE_FREE_AGENCY,
 )
 from scripts.common.waiver_priority import (
@@ -534,10 +535,17 @@ def _flatten_owned_names(league_ownership: Dict[int, Dict[str, Any]]) -> List[st
             uniq.append(n)
     return uniq
 
+#: Identity is preserved through every schema coercion on this page. Rotowire
+#: publishes names only, so these are resolved once at the fetch boundary
+#: (`scraping._attach_projection_ids`); a coercion that drops them sends the
+#: whole page back to name matching, silently.
+_IDENTITY_COLS = ("Player_ID", "Player_Code")
+
+
 def _prepare_proj_for_merge(df_in: pd.DataFrame) -> pd.DataFrame:
     """
     Coerce projections to the exact schema the fuzzy merge expects:
-    ['Player','Team','Matchup','Position','Points','Pos Rank'].
+    ['Player','Team','Matchup','Position','Points','Pos Rank'], plus identity.
 
     - Renames common variants
     - Creates missing columns with safe defaults
@@ -587,8 +595,48 @@ def _prepare_proj_for_merge(df_in: pd.DataFrame) -> pd.DataFrame:
     # Dtypes
     df["Points"] = pd.to_numeric(df["Points"], errors="coerce")
 
-    # Only the columns used by the merge helper
-    return df[required]
+    # The columns the merge helper uses, plus identity. Returning `required`
+    # alone discarded `Player_ID`/`Player_Code` -- which `scraping` now resolves
+    # once at the boundary -- so every consumer downstream was back to matching
+    # on names. Same mistake as the merge helper's own, one layer up.
+    keep = required + [c for c in _IDENTITY_COLS if c in df.columns]
+    return df[keep]
+
+def _codes_in_state(element_states, status) -> set:
+    """Player codes of every element in ``status``, via the Draft player map.
+
+    `element-status` is the league's own ground truth, keyed on the *Draft*
+    element id, and `get_fpl_player_mapping` carries the `Player_Code` for each
+    -- so this crosses from the Draft space to the app's join key without any
+    name matching and without the element-id translation step. See
+    `scripts/common/element_ids.py`.
+    """
+    if not element_states:
+        return set()
+    try:
+        player_map = get_fpl_player_mapping()
+    except Exception:
+        _logger.warning("Could not read the Draft player map for %r state", status,
+                        exc_info=True)
+        return set()
+    out = set()
+    for element_id, state in (element_states or {}).items():
+        if (state or {}).get("status") != status:
+            continue
+        code = (player_map.get(element_id) or {}).get("Player_Code")
+        if code is not None and not pd.isna(code):
+            out.add(int(code))
+    return out
+
+
+def _names_for_codes(proj_for_merge: pd.DataFrame, codes: set) -> set:
+    """The projection table's own names for a set of player codes."""
+    if not codes or "Player_Code" not in proj_for_merge.columns:
+        return set()
+    pc = pd.to_numeric(proj_for_merge["Player_Code"], errors="coerce")
+    hit = proj_for_merge.loc[pc.isin(codes), "Player"]
+    return set(hit.dropna().unique().tolist())
+
 
 def _locked_rotowire_names(
     element_states: Optional[Dict[int, Dict[str, Any]]],
@@ -638,7 +686,16 @@ def _locked_rotowire_names(
         _logger.warning("Failed to map locked players onto projections", exc_info=True)
         return set()
 
-    return set(mapped["Player"].dropna().unique().tolist())
+    by_name = set(mapped["Player"].dropna().unique().tolist())
+
+    # Union with the id path, never a replacement. The name path can only ever
+    # *fail to flag* a locked player (its unmatched branch returns the FPL name,
+    # which matches no Rotowire row and so does nothing), so adding the code
+    # resolution can only flag more -- it cannot un-flag anyone the name path
+    # got right. Measured live at GW9 the two agree exactly, on the same 4 of
+    # 14 locked players who appear in the Rotowire table at all.
+    return by_name | _names_for_codes(
+        proj_for_merge, _codes_in_state(element_states, ELEMENT_STATE_LOCKED))
 
 
 def _available_from_projections(
@@ -739,8 +796,23 @@ def _available_from_projections(
             f"Error: {e}"
         )
 
-    # 4) Anti-join
+    # 4) Anti-join, by name *and* by player code.
+    #
+    # The name leg is a three-step chain -- league_ownership publishes a name,
+    # which is matched to FPL stats for Team/Position, which is then fuzzy
+    # matched to Rotowire -- and a miss anywhere leaves an owned player in the
+    # available pool, where he is offered as a waiver target. Measured live at
+    # GW9 it lost two of 125: FPL spells one "Oli McBurnie" against Rotowire's
+    # "Oliver McBurnie", and the other "Đorđe Petrović" against "Djordje
+    # Petrovic". McBurnie was on *this* manager's own roster and projected 5.13
+    # points, so he ranked as a target worth claiming.
+    #
+    # `element-status` knows ownership by element id and needs no names at all.
+    # It is unioned in rather than replacing the name leg, so a code that fails
+    # to resolve cannot re-admit a player the names correctly removed.
     owned_rw_names = set(mapped_owned["Player"].dropna().unique().tolist())
+    owned_rw_names |= _names_for_codes(
+        proj_for_merge, _codes_in_state(element_states, ELEMENT_STATE_OWNED))
     avail = proj_for_merge[~proj_for_merge["Player"].isin(owned_rw_names)].copy()
     return _stamp_state(avail)
 

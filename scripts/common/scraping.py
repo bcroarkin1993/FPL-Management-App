@@ -77,15 +77,71 @@ def _rotowire_article_html(url: str):
         return None
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _bootstrap_player_pool():
+    """The FPL pool the name resolvers match against, fetched once an hour.
+
+    Wraps ``rotowire_lineups._bootstrap_pool`` -- which is Streamlit-free by
+    hard constraint and so does its own request -- so the page path pays for it
+    once rather than once per consumer.
+    """
+    from scripts.common.rotowire_lineups import _bootstrap_pool
+    return _bootstrap_pool()
+
+
+def _attach_projection_ids(df):
+    """Stamp ``Player_ID`` and ``Player_Code`` onto a names-only projection table.
+
+    **Rotowire publishes names and nothing else**, so for a year every consumer
+    resolved those names itself: the projection engine via ``_resolve_ids``,
+    ``attach_weekly_projections`` at five page callsites and
+    ``merge_season_projections`` at eleven more -- three independent code paths
+    over the same 220 rows, each able to reach a different answer. Resolving
+    once here, at the boundary, is what makes the identity durable: downstream
+    joins get an integer, and the engine finds ``Player_ID`` already present
+    and skips its own matching.
+
+    The resolution itself is ``projection_engine.resolve_player_ids``, which is
+    ``ReferenceMatcher`` with position normalised on both sides and a
+    ``Web_Name`` retry -- not a fourth copy of a matcher. Measured live, it
+    claims 220 of 220 rows.
+
+    Failure is silent and harmless by design: no pool, no ids, and every
+    consumer falls back to the name matching it did before this existed.
+    """
+    if df is None or getattr(df, "empty", True) or "Player" not in df.columns:
+        return df
+    try:
+        from scripts.common.projection_engine import resolve_player_ids
+
+        pool = _bootstrap_player_pool()
+        if pool is None or pool.empty or "Player_ID" not in pool.columns:
+            return df
+        out = df.copy()
+        ids = resolve_player_ids(out, pool)
+        out["Player_ID"] = pd.to_numeric(ids, errors="coerce").astype("Int64")
+        if "Player_Code" in pool.columns:
+            code_of = dict(zip(pd.to_numeric(pool["Player_ID"], errors="coerce"),
+                               pd.to_numeric(pool["Player_Code"], errors="coerce")))
+            out["Player_Code"] = out["Player_ID"].map(code_of).astype("Int64")
+        return out
+    except Exception as exc:
+        _logger.warning("Could not resolve projection ids: %s", exc)
+        return df
+
+
 @st.cache_data(ttl=3600)
 def get_rotowire_player_projections(url, limit=None):
-    """Fetch Rotowire's weekly rankings table (cached).
+    """Fetch Rotowire's weekly rankings table (cached), resolved to element ids.
 
     Thin wrapper over ``projection_sources.fetch_rotowire_projections``. See
-    there for the table-shape handling and the multi-gameweek article refusal.
+    there for the table-shape handling and the multi-gameweek article refusal,
+    and ``_attach_projection_ids`` for why the ids are resolved here rather
+    than by each of the six consumers separately.
     """
     html = _rotowire_article_html(url)
-    return projection_sources.fetch_rotowire_projections(url, limit=limit, html=html)
+    df = projection_sources.fetch_rotowire_projections(url, limit=limit, html=html)
+    return _attach_projection_ids(df)
 
 
 @st.cache_data(ttl=300)

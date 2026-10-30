@@ -188,7 +188,12 @@ def _min_club_coverage() -> int:
 
 
 def _resolve_ids(source: SourceResult, pool: pd.DataFrame) -> pd.Series:
-    """Map each of ``source.df``'s rows to a pool ``Player_ID``.
+    """Map each of ``source.df``'s rows to a pool ``Player_ID``."""
+    return resolve_player_ids(source.df, pool)
+
+
+def resolve_player_ids(df: pd.DataFrame, pool: pd.DataFrame) -> pd.Series:
+    """Map each of ``df``'s rows to a pool ``Player_ID``.
 
     An integer id join is always preferred and is the only join FFP and the FPL
     bootstrap need -- FFP resolves 368/368 through the bootstrap ``code``. Only
@@ -197,7 +202,6 @@ def _resolve_ids(source: SourceResult, pool: pd.DataFrame) -> pd.Series:
     most frequent source of silent bugs in this app, and there is exactly one
     implementation of it on purpose.
     """
-    df = source.df
     if "Player_ID" in df.columns:
         ids = pd.to_numeric(df["Player_ID"], errors="coerce")
         if ids.notna().any():
