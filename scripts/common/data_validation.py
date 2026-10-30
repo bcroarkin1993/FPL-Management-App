@@ -20,9 +20,13 @@
 # No Streamlit, no requests — importable from anywhere, including GitHub Actions.
 
 import math
-from typing import List, NamedTuple, Optional, Sequence
+from typing import Dict, List, NamedTuple, Optional, Sequence
 
 import pandas as pd
+
+# `text_helpers` is Streamlit-free, so importing it here keeps this module
+# safe for the GitHub Actions collector (see the module docstring).
+from scripts.common.text_helpers import canonical_normalize
 
 __all__ = [
     "Issue",
@@ -1472,6 +1476,125 @@ def format_issues(issues: Sequence[Issue]) -> str:
     if not issues:
         return "no issues"
     return "\n".join(str(i) for i in issues)
+
+
+def check_element_id_names(
+    df,
+    id_to_names: Dict[int, Sequence[str]],
+    *,
+    id_col: str = "Player_ID",
+    name_col: str = "Player",
+    source: str = "",
+    sample: int = 6,
+) -> List[Issue]:
+    """Assert each row's element id refers to the player the row is named after.
+
+    **The failure this exists for is an id that crosses between the two FPL
+    APIs.** `draft.premierleague.com` and `fantasy.premierleague.com` publish
+    the same 669 players and number 64 of them differently, so an id taken from
+    a Draft-only endpoint and looked up in Classic-keyed data does not fail to
+    match -- it matches the *wrong player*, and every value on the resulting
+    row stays entirely plausible. It surfaced four separate times before this
+    check existed: a Waiver Wire card captioned with another player's name,
+    Power Rankings scoring 7 of 150 rostered players off somebody else's stats,
+    an ownership column labelling the wrong manager, and a defender benched as a
+    "2nd Sub" because the engine could not find him in a projected XI.
+
+    None of those is detectable from the numbers. The only thing that reveals
+    it is that the row carries *both* an id and a name, and they disagree.
+
+    ``id_to_names`` maps an element id to every name that legitimately
+    identifies that player -- the full legal name, the web name, and the display
+    name. Pass it from the same API the ids are supposed to belong to;
+    ``element_ids.classic_id_names()`` builds the Classic one.
+
+    A row passes when its name shares a complete token with any of the
+    reference names, or is a token subset of one in either direction. That is
+    deliberately generous, because the frames carry whichever name form their
+    source publishes: "Antonio Silva" against "António João Pereira de
+    Albuquerque Tavares da Silva" is the *same* player, "Ao Tanaka" against
+    "Tanaka Ao" is too, and "Costinha" matches only through the web name. The
+    cost of the generosity is that an id landing on a player who happens to
+    share a forename would slip through; the four real failures shared no token
+    at all.
+
+    Rows whose id is absent from the reference are skipped, not failed -- a new
+    signing the bootstrap has not caught up with is not a mismatch.
+    """
+    issues: List[Issue] = []
+    label = f"{source}: " if source else ""
+
+    if df is None or getattr(df, "empty", True):
+        return issues
+    cols = getattr(df, "columns", [])
+    if id_col not in cols or name_col not in cols:
+        return issues
+    if not id_to_names:
+        issues.append(Issue(
+            "element_id_names", "warning",
+            f"{label}no element-id reference available, so ids could not be "
+            f"checked against names.",
+            "Without it an id from the wrong API space is undetectable."))
+        return issues
+
+    def _tokens(value):
+        return set(canonical_normalize(str(value or "")).split())
+
+    # Tokens for the comparison, and the names themselves for the message --
+    # a report that prints sorted token sets is unreadable at the moment
+    # somebody needs it.
+    reference = {}
+    for pid, names in id_to_names.items():
+        try:
+            key = int(pid)
+        except (TypeError, ValueError):
+            continue
+        kept = [(str(n), _tokens(n)) for n in (names or ()) if _tokens(n)]
+        if kept:
+            reference[key] = kept
+
+    checked = 0
+    bad = []
+    for idx in df.index:
+        raw_id = df.at[idx, id_col]
+        try:
+            if raw_id is None or pd.isna(raw_id):
+                continue
+            pid = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        ref_tokens = reference.get(pid)
+        if not ref_tokens:
+            continue
+        row_tokens = _tokens(df.at[idx, name_col])
+        if not row_tokens:
+            continue
+        checked += 1
+        ok = any(
+            (row_tokens & ref) or row_tokens <= ref or ref <= row_tokens
+            for _name, ref in ref_tokens
+        )
+        if not ok:
+            bad.append((pid, str(df.at[idx, name_col]), ref_tokens[0][0]))
+
+    if not checked:
+        return issues
+
+    if bad:
+        shown = "; ".join(
+            f"id {pid} is named {name!r} here but is {ref!r}"
+            for pid, name, ref in bad[:sample]
+        )
+        more = f" (+{len(bad) - sample} more)" if len(bad) > sample else ""
+        issues.append(Issue(
+            "element_id_names", "error",
+            f"{label}{len(bad)} of {checked} rows carry an element id for a "
+            f"different player than the row is named after: {shown}{more}",
+            "An id has crossed between the Draft and Classic API spaces, which "
+            "number 64 of 669 players differently. Translate it with "
+            "scripts/common/element_ids.py -- the id resolves to somebody on "
+            "both sides, so nothing raises and every number stays plausible."))
+    return issues
 
 
 def raise_on_error(issues: Sequence[Issue], context: str = "") -> None:

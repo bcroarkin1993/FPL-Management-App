@@ -76,3 +76,110 @@ def test_the_id_spaces_still_disagree(bootstraps):
         "more than half the ids disagree (%d of %d) -- that is not the "
         "late-signing drift this is known for" % (len(disagree), len(shared))
     )
+
+
+# ---------------------------------------------------------------------------
+# Does any real frame carry an id for a player it is not named after?
+#
+# This is the layer that catches the *next* occurrence. Four separate surfaces
+# had already shipped with a cross-space id before the check existed, and none
+# was visible in the numbers -- the id resolves to somebody on both sides, so
+# nothing raises and every value stays plausible.
+# ---------------------------------------------------------------------------
+
+def _names():
+    from scripts.common.element_ids import classic_id_names
+    ref = classic_id_names()
+    if not ref:
+        pytest.skip("Classic bootstrap unreachable")
+    return ref
+
+
+def _check(df, label, name_col="Player"):
+    from scripts.common.data_validation import check_element_id_names, raise_on_error
+    raise_on_error(check_element_id_names(df, _names(), name_col=name_col,
+                                          source=label), context=label)
+
+
+def test_the_classic_player_pool_is_self_consistent():
+    from scripts.common.fpl_draft_api import pull_fpl_player_stats
+    stats = skip_if_unreachable(pull_fpl_player_stats, "FPL player stats")
+    if stats is None or stats.empty:
+        pytest.skip("no FPL player stats")
+    _check(stats, "pull_fpl_player_stats")
+
+
+def test_the_blended_pool_is_self_consistent():
+    import config
+    from scripts.common.player_pool import blended_pool
+    pool = skip_if_unreachable(
+        lambda: blended_pool(config.CURRENT_GAMEWEEK, config.ROTOWIRE_URL),
+        "blended pool")
+    if pool is None or pool.empty:
+        pytest.skip("no blended pool")
+    _check(pool, "blended_pool")
+
+
+def test_the_draft_roster_frame_is_self_consistent():
+    """The reported failure: this frame resolved its ids through the Draft
+    bootstrap and then every consumer joined it against Classic-keyed data."""
+    import config
+    from scripts.common.fpl_draft_api import get_team_composition_for_gameweek
+    league_id = getattr(config, "FPL_DRAFT_LEAGUE_ID", None)
+    team_id = getattr(config, "FPL_DRAFT_TEAM_ID", None)
+    if not league_id or not team_id:
+        pytest.skip("no Draft league configured")
+    comp = skip_if_unreachable(
+        lambda: get_team_composition_for_gameweek(
+            league_id, team_id, config.CURRENT_GAMEWEEK),
+        "Draft roster")
+    if comp is None or comp.empty:
+        pytest.skip("no roster for this gameweek")
+    _check(comp, "get_team_composition_for_gameweek")
+
+
+def test_the_check_would_notice_an_untranslated_roster():
+    """The negative control.
+
+    A check that never fires is indistinguishable from one that cannot. This
+    puts the same roster back into the Draft space and asserts it is caught --
+    so if the id spaces are ever reconciled, or the check stops working, this
+    is what says so.
+    """
+    import config
+    import pandas as pd
+    from scripts.common.data_validation import check_element_id_names
+    from scripts.common.element_ids import draft_to_classic_ids
+    from scripts.common.fpl_draft_api import get_team_composition_for_gameweek
+
+    league_id = getattr(config, "FPL_DRAFT_LEAGUE_ID", None)
+    team_id = getattr(config, "FPL_DRAFT_TEAM_ID", None)
+    if not league_id or not team_id:
+        pytest.skip("no Draft league configured")
+    comp = skip_if_unreachable(
+        lambda: get_team_composition_for_gameweek(
+            league_id, team_id, config.CURRENT_GAMEWEEK),
+        "Draft roster")
+    if comp is None or comp.empty:
+        pytest.skip("no roster for this gameweek")
+
+    inverse = {v: k for k, v in draft_to_classic_ids().items()}
+    if not inverse:
+        pytest.skip("no id translation available")
+    rolled_back = comp.copy()
+    rolled_back["Player_ID"] = [
+        inverse.get(int(p)) if pd.notna(p) else None
+        for p in rolled_back["Player_ID"]
+    ]
+    issues = check_element_id_names(rolled_back, _names(),
+                                    source="untranslated roster")
+    if not any(i.severity == "error" for i in issues):
+        # Possible and not a defect: this roster may hold none of the ~64
+        # players the two APIs disagree about. Say which it was.
+        affected = sum(1 for p in comp["Player_ID"].dropna()
+                       if inverse.get(int(p)) != int(p))
+        assert affected == 0, (
+            "%d roster player(s) have a different Draft id, so rolling them "
+            "back should have been caught and was not" % affected
+        )
+        pytest.skip("this roster holds no player the two APIs number differently")

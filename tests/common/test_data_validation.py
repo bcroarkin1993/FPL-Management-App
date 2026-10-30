@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from scripts.common.data_validation import (
+    check_element_id_names,
     check_mini_league_ownership,
     check_start_calibration,
     check_ffp_feed,
@@ -1804,3 +1805,107 @@ class TestCheckMiniLeagueOwnership:
         squads = self._league(4)
         issues = _errors(check_mini_league_ownership(pd.DataFrame(), squads, 4))
         assert any("ownership table is empty" in i.message for i in issues)
+
+
+class TestCheckElementIdNames:
+    """An id that has crossed between the two FPL API spaces.
+
+    Every fixture here is a real name from the live bootstraps. The four
+    failures this was written after -- a Waiver Wire card under another
+    player's name, Power Rankings scoring 7 of 150 rostered players off
+    somebody else's stats, an ownership column naming the wrong manager, and a
+    defender benched because the engine could not find him in a projected XI --
+    were all invisible in the numbers. The row carrying both an id and a name,
+    and the two disagreeing, is the only thing that reveals it.
+    """
+
+    REF = {
+        566: ("António João Pereira de Albuquerque Tavares da Silva",
+              "A.Silva", "António João Silva"),
+        555: ("Remi Matthews", "Matthews", "Remi Matthews"),
+        119: ("João Pedro Loureiro da Costa", "Costinha", "Costinha"),
+        345: ("Tanaka Ao", "Tanaka", "Ao Tanaka"),
+        514: ("Mathys Tel", "Tel", "Mathys Tel"),
+    }
+
+    @staticmethod
+    def _frame(rows):
+        return pd.DataFrame(rows, columns=["Player", "Player_ID"])
+
+    def test_the_reported_failure_is_caught(self):
+        """Silva is Classic 566; 555 is him in the *Draft* space, and Classic
+        555 is Remi Matthews."""
+        issues = check_element_id_names(
+            self._frame([["António João Pereira de Albuquerque Tavares da Silva",
+                          555]]), self.REF, source="Draft roster")
+        assert len(issues) == 1
+        assert issues[0].severity == "error"
+        assert "555" in issues[0].message
+        assert "Remi Matthews" in issues[0].message, (
+            "the message must name the player the id really points at, or it "
+            "cannot be acted on"
+        )
+
+    def test_a_short_name_against_a_long_legal_one_passes(self):
+        """Rotowire publishes "Antonio Silva"; the bootstrap publishes the full
+        legal name. Same player."""
+        assert check_element_id_names(
+            self._frame([["Antonio Silva", 566]]), self.REF) == []
+
+    def test_a_reversed_name_passes(self):
+        assert check_element_id_names(
+            self._frame([["Ao Tanaka", 345]]), self.REF) == []
+
+    def test_a_nickname_passes_through_the_web_name(self):
+        """"Costinha" shares no token with "João Pedro Loureiro da Costa", so
+        only the web name can vouch for him. Without it this check would cry
+        wolf on a working frame, and a check that cries wolf gets muted."""
+        assert check_element_id_names(
+            self._frame([["Costinha", 119]]), self.REF) == []
+
+    def test_an_accentless_spelling_passes(self):
+        assert check_element_id_names(
+            self._frame([["Antonio Joao Silva", 566]]), self.REF) == []
+
+    def test_an_unknown_id_is_skipped_not_failed(self):
+        """A new signing the bootstrap has not caught up with is not a
+        mismatch."""
+        assert check_element_id_names(
+            self._frame([["Brand New Player", 99999]]), self.REF) == []
+
+    def test_rows_without_an_id_are_skipped(self):
+        assert check_element_id_names(
+            self._frame([["Antonio Silva", None]]), self.REF) == []
+
+    def test_a_frame_without_the_columns_is_skipped(self):
+        assert check_element_id_names(
+            pd.DataFrame({"Team": ["BOU"]}), self.REF) == []
+
+    def test_an_empty_frame_is_skipped(self):
+        assert check_element_id_names(pd.DataFrame(), self.REF) == []
+
+    def test_a_missing_reference_warns_rather_than_passing_silently(self):
+        """"Could not check" and "checked and fine" must not look the same."""
+        issues = check_element_id_names(
+            self._frame([["Antonio Silva", 566]]), {})
+        assert len(issues) == 1 and issues[0].severity == "warning"
+
+    def test_several_mismatches_are_counted_and_sampled(self):
+        issues = check_element_id_names(
+            self._frame([
+                ["António João Pereira de Albuquerque Tavares da Silva", 555],
+                ["Mathys Tel", 119],
+            ]), self.REF)
+        assert len(issues) == 1
+        assert "2 of 2 rows" in issues[0].message
+
+    def test_a_clean_frame_produces_nothing(self):
+        issues = check_element_id_names(
+            self._frame([["Antonio Silva", 566], ["Mathys Tel", 514],
+                         ["Costinha", 119], ["Ao Tanaka", 345]]), self.REF)
+        assert issues == []
+
+    def test_it_reads_an_alternative_name_column(self):
+        df = pd.DataFrame({"Display_Name": ["Remi Matthews"], "Player_ID": [566]})
+        issues = check_element_id_names(df, self.REF, name_col="Display_Name")
+        assert len(issues) == 1 and issues[0].severity == "error"

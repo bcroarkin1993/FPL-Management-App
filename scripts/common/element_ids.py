@@ -87,6 +87,46 @@ def draft_to_classic_ids() -> Dict[int, str]:
     return out
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def classic_id_names() -> Dict[int, tuple]:
+    """``{classic element id: (full name, web name, display name)}``.
+
+    The reference `data_validation.check_element_id_names` compares a frame's
+    own names against, so that an id which has crossed from the Draft space can
+    be caught by the one thing that reveals it: the row carries both an id and
+    a name, and they disagree.
+
+    All three name forms are returned because the app's frames carry whichever
+    one their source publishes -- Rotowire the common name, the bootstrap the
+    full legal name, and a handful of players (``Costinha`` for "João Pedro
+    Loureiro da Costa") are only reachable through the web name.
+    """
+    from scripts.common.fpl_classic_api import get_classic_bootstrap_static
+    from scripts.common.text_helpers import to_display_name
+
+    try:
+        bootstrap = get_classic_bootstrap_static()
+    except Exception as exc:
+        _logger.warning("Could not read the Classic bootstrap for id names: %s", exc)
+        return {}
+
+    out = {}
+    for el in (bootstrap or {}).get("elements", []) or []:
+        try:
+            pid = int(el["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        first = el.get("first_name") or ""
+        second = el.get("second_name") or ""
+        web = el.get("web_name") or ""
+        out[pid] = (
+            ("%s %s" % (first, second)).strip(),
+            web,
+            to_display_name(first, second, web) or "",
+        )
+    return out
+
+
 def translate_ids(ids: Iterable, mapping: Optional[Dict[int, int]] = None) -> list:
     """Draft ids as Classic ids, dropping any that cannot be translated.
 
