@@ -49,82 +49,22 @@ from scripts.common.text_helpers import (
 # FUZZY MATCHING & MERGE FUNCTIONS (merged from utils.py Section 8)
 # =============================================================================
 
-def _backfill_player_ids(roster_df: pd.DataFrame, fpl_stats: pd.DataFrame) -> pd.DataFrame:
-    """
-    For rows where Player_ID is NaN, fill via fuzzy match against fpl_stats
-    constrained by Team and Position (prefer exact team+pos matches).
-    Safe if any expected columns are missing.
-    """
-    df = roster_df.copy()
-
-    # Ensure required columns exist
-    for col in ("Player", "Team", "Position"):
-        if col not in df.columns:
-            df[col] = np.nan
-    if "Player_ID" not in df.columns:
-        df["Player_ID"] = np.nan
-
-    # Prepare candidate table safely
-    cand = fpl_stats.copy()
-    for col in ("Player", "Team", "Position", "Player_ID"):
-        if col not in cand.columns:
-            cand[col] = np.nan
-
-    # Normalized names for matching (uses module-level _norm_text)
-    cand["__name_norm"] = cand["Player"].apply(_norm_text)
-    df["__name_norm"] = df["Player"].apply(_norm_text)
-
-    # Indices to backfill
-    try:
-        missing_idx = df[df["Player_ID"].isna()].index
-    except KeyError:
-        # Safety: create it and mark all as missing
-        df["Player_ID"] = np.nan
-        missing_idx = df.index
-
-    for i in missing_idx:
-        name_norm = df.at[i, "__name_norm"]
-        team = df.at[i, "Team"]
-        pos = df.at[i, "Position"]
-
-        # Try team+pos scope; then pos; then all
-        scope = cand[(cand["Team"] == team) & (cand["Position"] == pos)]
-        if scope.empty:
-            scope = cand[cand["Position"] == pos]
-        if scope.empty:
-            scope = cand
-
-        if scope.empty or scope["__name_norm"].isna().all():
-            continue
-
-        match = process.extractOne(name_norm, scope["__name_norm"].dropna().tolist(), scorer=fuzz.WRatio)
-        if match:
-            m_name, score = match[0], match[1]
-            if score >= 85:
-                pid = scope.loc[scope["__name_norm"] == m_name, "Player_ID"]
-                if not pid.empty and pd.notna(pid.iloc[0]):
-                    df.at[i, "Player_ID"] = float(pid.iloc[0])
-
-    return df.drop(columns=["__name_norm"], errors="ignore")
-
-
-# ``_fuzzy_match_player()``, ``find_best_match()`` and
-# ``clean_fpl_player_names()`` were removed here. They fuzzy-matched a player
-# against a projection source's name list and *renamed* him to the best hit,
-# scored with ``fuzzywuzzy.WRatio`` at a threshold of 80. WRatio falls back to
-# partial-token ratios once two strings differ enough in length, so one shared
-# token carries it: "Maxim De Cuyper" scores 86 against "João Pedro Junqueira
-# de Jesus" on the word *de*. Measured live on their only remaining callsite,
-# 87 of 667 players were renamed and 66 ended up sharing a name with another
-# player -- eleven of them rendered as "Maxim De Cuyper", and Alex Palmer
-# rendered as Cole Palmer.
+# ``_backfill_player_ids`` was removed on 2026-10-30.
 #
-# Nothing needs a name match to *display* a name: ``to_display_name()`` builds
-# the common name from the bootstrap's own fields. Nothing needs a hand-rolled
-# ladder to match one either: ``ReferenceMatcher`` /
-# ``analytics._claim_reference_rows()`` scope every loose tier by team and
-# position and give one reference row to at most one player. They are left
-# deleted rather than deprecated so a future caller cannot reach for them.
+# It filled a missing ``Player_ID`` by scoring names with ``fuzz.WRatio`` at a
+# threshold of 85, falling through team+position to position to **the whole
+# league** -- the shape that gave Alex Palmer (backup GK) Cole Palmer's numbers,
+# and the pattern CLAUDE.md bans outright. Comments at ``analytics`` and in the
+# Waiver Wire already said not to use it.
+#
+# It could only go once the id it was patching over actually survived: the merge
+# below used to take every field from the projection source and drop the
+# caller's id, which is what created the gap. With ``_IDENTITY_COLS`` carried
+# unconditionally and Rotowire resolved at the fetch boundary, measured on the
+# live roster the name merge resolves 15 of 15 and this filled **0**.
+#
+# A name the merges genuinely cannot reach should now fall through to no id and
+# degrade, rather than be guessed at league-wide scope.
 
 
 #: Copied from the FPL side on every merge, whether or not the caller asks.

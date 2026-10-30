@@ -216,3 +216,79 @@ def test_the_draft_actual_lineup_is_self_consistent():
     if lineup is None or lineup.empty:
         pytest.skip("no actual lineup for this gameweek")
     _check(lineup, "get_team_actual_lineup")
+
+
+def test_codes_and_element_ids_cannot_be_confused(bootstraps):
+    """The property the whole design rests on.
+
+    Keying cross-source joins on `code` is worth doing because a code and an
+    element id are **range-disjoint** -- measured 2026-10-30, codes 17761-700308
+    against element ids 1-669. So putting one where the other belongs resolves
+    to *nothing*, which is a visible empty join, where a Draft element id used
+    as a Classic one resolves to a real but wrong player and nothing raises.
+
+    If FPL ever renumbered codes down into the element-id range, that whole
+    argument would quietly stop holding and `check_player_identity` would go
+    blind. This is here so the change is noticed rather than assumed.
+    """
+    from scripts.common.element_ids import ELEMENT_ID_MAX, PLAYER_CODE_MIN
+    draft, classic = bootstraps
+
+    codes = {int(e["code"]) for e in classic["elements"] if e.get("code")}
+    ids = ({int(e["id"]) for e in classic["elements"]}
+           | {int(e["id"]) for e in draft["elements"]})
+
+    assert not (codes & ids), (
+        "%d value(s) are both a player code and an element id, e.g. %s -- a "
+        "code/id mixup is no longer detectable by range"
+        % (len(codes & ids), sorted(codes & ids)[:5]))
+    assert min(codes) >= PLAYER_CODE_MIN, (
+        "a code (%d) now sits below PLAYER_CODE_MIN (%d), so "
+        "check_player_identity would report it as an element id"
+        % (min(codes), PLAYER_CODE_MIN))
+    assert max(ids) <= ELEMENT_ID_MAX, (
+        "an element id (%d) now exceeds ELEMENT_ID_MAX (%d)"
+        % (max(ids), ELEMENT_ID_MAX))
+
+
+def test_the_rotowire_table_resolves_to_the_right_players():
+    """Rotowire publishes names and nothing else, and the fetch boundary
+    resolves them once so six consumers do not each resolve them separately.
+
+    A mis-resolution here is the worst case in the app: the row carries a
+    projection, so the wrong player is not merely mislabelled but *priced*.
+    """
+    import config
+    from scripts.common.scraping import get_rotowire_player_projections
+
+    proj = skip_if_unreachable(
+        lambda: get_rotowire_player_projections(config.ROTOWIRE_URL),
+        "Rotowire weekly rankings")
+    if proj is None or proj.empty:
+        pytest.skip("no Rotowire table published")
+    assert "Player_Code" in proj.columns, (
+        "the Rotowire fetch boundary no longer stamps a player code, so every "
+        "consumer is back to matching on names")
+
+    resolved = proj["Player_ID"].notna().sum()
+    print("\nRotowire rows resolved to an element id: %d of %d"
+          % (resolved, len(proj)))
+    assert resolved >= len(proj) * 0.95, (
+        "only %d of %d Rotowire rows resolved to an element id"
+        % (resolved, len(proj)))
+    _check(proj, "Rotowire weekly rankings")
+
+
+def test_every_identity_column_holds_one_kind_of_id():
+    """`check_player_identity` over the frames that carry both, live."""
+    import config
+    from scripts.common.data_validation import check_player_identity, raise_on_error
+    from scripts.common.fpl_classic_api import get_classic_bootstrap_static
+    from scripts.common.player_pool import build_pool
+
+    bootstrap = skip_if_unreachable(get_classic_bootstrap_static, "FPL bootstrap")
+    if not bootstrap:
+        pytest.skip("no bootstrap")
+    pool = build_pool(bootstrap)
+    raise_on_error(check_player_identity(pool, source="player_pool.build_pool"),
+                   context="build_pool")

@@ -27,7 +27,6 @@ from scripts.common.utils import (
     normalize_rotowire_players,
     _bootstrap_teams_df,
     _norm_text,
-    _backfill_player_ids,
     TEAM_FULL_TO_SHORT
 )
 from scripts.common.fpl_draft_api import (
@@ -3039,9 +3038,11 @@ def show_waiver_wire_page():
 
         my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
 
-        # Backfill Player_IDs and recompute form/FDR
-        my_roster = _backfill_player_ids(my_roster, fpl_stats)
-        # After the backfill, so ids resolve before names are looked up.
+        # `_attach_display_names` resolves by id first, so the ids must already
+        # be on the frame -- they come from the normalized-name merge above,
+        # which resolves 15 of 15 on the live roster. The `fuzz.WRatio`
+        # backfill that used to sit here filled 0 and is deleted; see the
+        # tombstone in `player_matching`.
         my_roster = _attach_display_names(my_roster)
         my_roster = _add_fdr_and_form(my_roster, fpl_stats, current_gw, lookahead)
         my_roster = _add_injury_data(my_roster, fpl_stats)

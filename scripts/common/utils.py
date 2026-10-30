@@ -36,4 +36,3 @@ from scripts.common.text_helpers import (          # noqa: F401
     _to_short_team_code,
 )
 from scripts.common.fixture_helpers import _bootstrap_teams_df  # noqa: F401
-from scripts.common.player_matching import _backfill_player_ids  # noqa: F401

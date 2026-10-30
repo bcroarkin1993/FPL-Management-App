@@ -40,7 +40,6 @@ from scripts.common.utils import (
     normalize_fpl_players_to_rotowire_schema,
     normalize_rotowire_players,
     _bootstrap_teams_df,
-    _backfill_player_ids,
     get_league_player_ownership,
     merge_fpl_players_and_projections,
     get_current_gameweek,
@@ -197,7 +196,6 @@ def _fetch_and_prepare_data() -> dict:
         )
         my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
 
-        my_roster = _backfill_player_ids(my_roster, fpl_stats)
         my_roster = _add_fdr_and_form(my_roster, fpl_stats, current_gw, lookahead)
         my_roster = _add_injury_data(my_roster, fpl_stats)
 
