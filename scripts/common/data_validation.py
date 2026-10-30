@@ -1597,6 +1597,107 @@ def check_element_id_names(
     return issues
 
 
+def check_player_identity(
+    df,
+    *,
+    code_col: str = "Player_Code",
+    id_col: str = "Player_ID",
+    source: str = "",
+    sample: int = 6,
+) -> List[Issue]:
+    """A code must be a code, and an element id must be an element id.
+
+    **This check exists because it can actually fire, where the equivalent for
+    element ids cannot.** `code` and the element id occupy disjoint numeric
+    ranges -- measured live 2026-10-30, codes run 17761-700308 and element ids
+    1-669 -- so putting one where the other belongs is detectable by range
+    alone. That is the entire argument for keying cross-source joins on `code`:
+    a Draft element id used as a Classic one resolves to a real but wrong
+    player and nothing raises, while a code used as an element id resolves to
+    nothing and this says so.
+
+    Three findings, in order of how badly they bite:
+
+    * a value in the **code** column small enough to be an element id -- the
+      join key has been filled from the wrong field, so every join on it is
+      either empty or wrong;
+    * a value in the **element id** column large enough to be a code -- the
+      mirror image, and it reaches the FPL API as a lookup that cannot resolve;
+    * a column holding values from **both** ranges, which is the signature of
+      two sources being concatenated with their identifiers mixed.
+
+    A duplicated code is also an error: a code identifies exactly one player
+    for the life of the game, so two rows sharing one means a frame has been
+    merged against itself or a join has fanned out.
+
+    Absent or empty columns are not findings. Most frames legitimately carry
+    only one of the two, and a frame carrying neither is not making a claim
+    about identity at all.
+    """
+    from scripts.common.element_ids import ELEMENT_ID_MAX, PLAYER_CODE_MIN
+
+    issues: List[Issue] = []
+    label = f"{source}: " if source else ""
+    if df is None or getattr(df, "empty", True):
+        return issues
+    cols = getattr(df, "columns", [])
+
+    def _values(col):
+        if col not in cols:
+            return None
+        nums = pd.to_numeric(df[col], errors="coerce").dropna()
+        return nums if not nums.empty else None
+
+    codes = _values(code_col)
+    if codes is not None:
+        too_small = codes[codes < PLAYER_CODE_MIN]
+        if len(too_small):
+            issues.append(Issue(
+                "player_identity", "error",
+                f"{label}{len(too_small)} of {len(codes)} values in {code_col!r} "
+                f"are below {PLAYER_CODE_MIN} and so are element ids, not codes: "
+                f"{sorted(set(int(v) for v in too_small))[:sample]}",
+                "The join key has been filled from the element id. Take `code` "
+                "from the bootstrap element, or map it with "
+                "`element_ids.code_maps()`."))
+        dupes = codes.value_counts()
+        dupes = dupes[dupes > 1]
+        if len(dupes):
+            issues.append(Issue(
+                "player_identity", "error",
+                f"{label}{len(dupes)} player code(s) appear more than once: "
+                f"{[int(c) for c in list(dupes.index)[:sample]]}",
+                "A code identifies one player for the life of the game, so a "
+                "repeat means a frame was merged against itself or a join "
+                "fanned out."))
+
+    ids = _values(id_col)
+    if ids is not None:
+        too_big = ids[ids > ELEMENT_ID_MAX]
+        if len(too_big):
+            issues.append(Issue(
+                "player_identity", "error",
+                f"{label}{len(too_big)} of {len(ids)} values in {id_col!r} are "
+                f"above {ELEMENT_ID_MAX} and so are codes, not element ids: "
+                f"{sorted(set(int(v) for v in too_big))[:sample]}",
+                "A code cannot be used to call the FPL API. Map it back with "
+                "`element_ids.code_maps().code_to_classic_id`."))
+
+    for col, nums in ((code_col, codes), (id_col, ids)):
+        if nums is None:
+            continue
+        low = int((nums < PLAYER_CODE_MIN).sum())
+        if low and low != len(nums):
+            issues.append(Issue(
+                "player_identity", "error",
+                f"{label}{col!r} holds both element ids ({low}) and codes "
+                f"({len(nums) - low}) in the same column",
+                "Two sources have been combined with their identifiers mixed. "
+                "Nothing downstream can tell which a given row carries."))
+
+    return issues
+
+
 def raise_on_error(issues: Sequence[Issue], context: str = "") -> None:
     """Raise AssertionError if any issue is an error. Warnings pass through.
 

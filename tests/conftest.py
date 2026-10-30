@@ -88,12 +88,47 @@ _stub_lineup_xi()
 
 
 # =====================================================================
+# 2c. The element-id cross-check is network I/O too
+# =====================================================================
+# `analytics._warn_on_crossed_ids` runs on every blend and reads the Classic
+# bootstrap for its id->name reference. `st.cache_data` is a pass-through in
+# this suite (see section 1), so that is a real HTTP request *per call* --
+# measured at +31 seconds on the offline run, which is the same regression the
+# lineup stubs above exist to prevent.
+#
+# Stubbed to an empty reference, which the check reads as "no reference
+# available" and skips. That is its documented degraded state, so no existing
+# expectation changes. `tests/common/test_id_space_producers.py` and the live
+# suite exercise the real thing.
+REAL_CLASSIC_ID_NAMES = None
+
+
+def _stub_classic_id_names():
+    global REAL_CLASSIC_ID_NAMES
+    from scripts.common import element_ids
+
+    REAL_CLASSIC_ID_NAMES = element_ids.classic_id_names
+    element_ids.classic_id_names = lambda: {}
+
+
+_stub_classic_id_names()
+
+
+# =====================================================================
 # 3. Mock data fixtures
 # =====================================================================
 
 @pytest.fixture
 def mock_bootstrap_data():
-    """Minimal bootstrap-static data with 6 players across positions and 3 teams."""
+    """Minimal bootstrap-static data with 6 players across positions and 3 teams.
+
+    Every element carries a `code`. Without one, any producer that stamps
+    `Player_Code` yields <NA> here, every join keyed on it silently falls back
+    to names, and the whole suite passes having exercised none of the code
+    path -- the silent test-weakening CLAUDE.md records for `_blended_pool`.
+    The values are above `element_ids.PLAYER_CODE_MIN` so they are
+    distinguishable from the ids, which is the property the design rests on.
+    """
     return {
         "teams": [
             {"id": 1, "short_name": "ARS", "name": "Arsenal"},
@@ -102,32 +137,32 @@ def mock_bootstrap_data():
         ],
         "elements": [
             {
-                "id": 1, "first_name": "Aaron", "second_name": "Ramsdale",
+                "id": 1, "code": 100001, "first_name": "Aaron", "second_name": "Ramsdale",
                 "web_name": "Ramsdale", "team": 1, "element_type": 1,
                 "total_points": 80, "goals_scored": 0, "assists": 1, "starts": 20,
             },
             {
-                "id": 2, "first_name": "William", "second_name": "Saliba",
+                "id": 2, "code": 100002, "first_name": "William", "second_name": "Saliba",
                 "web_name": "Saliba", "team": 1, "element_type": 2,
                 "total_points": 120, "goals_scored": 3, "assists": 2, "starts": 24,
             },
             {
-                "id": 3, "first_name": "Kevin", "second_name": "De Bruyne",
+                "id": 3, "code": 100003, "first_name": "Kevin", "second_name": "De Bruyne",
                 "web_name": "De Bruyne", "team": 2, "element_type": 3,
                 "total_points": 160, "goals_scored": 10, "assists": 15, "starts": 22,
             },
             {
-                "id": 4, "first_name": "Erling", "second_name": "Haaland",
+                "id": 4, "code": 100004, "first_name": "Erling", "second_name": "Haaland",
                 "web_name": "Haaland", "team": 2, "element_type": 4,
                 "total_points": 200, "goals_scored": 25, "assists": 5, "starts": 25,
             },
             {
-                "id": 5, "first_name": "Mohamed", "second_name": "Salah",
+                "id": 5, "code": 100005, "first_name": "Mohamed", "second_name": "Salah",
                 "web_name": "Salah", "team": 3, "element_type": 3,
                 "total_points": 180, "goals_scored": 18, "assists": 10, "starts": 24,
             },
             {
-                "id": 6, "first_name": "Virgil", "second_name": "van Dijk",
+                "id": 6, "code": 100006, "first_name": "Virgil", "second_name": "van Dijk",
                 "web_name": "Van Dijk", "team": 3, "element_type": 2,
                 "total_points": 130, "goals_scored": 4, "assists": 1, "starts": 25,
             },

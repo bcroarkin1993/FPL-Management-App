@@ -34,15 +34,30 @@ def _classic():
 
 
 def _mapping():
-    d2c, c2cl = _code_maps(_draft(), _classic())
-    return {d: c2cl[code] for d, code in d2c.items() if code in c2cl}
+    m = _code_maps(_draft(), _classic())
+    return {d: m.code_to_classic_id[c] for d, c in m.draft_id_to_code.items()
+            if c in m.code_to_classic_id}
 
 
 class TestTheBridge:
     def test_code_links_the_two_spaces(self):
-        d2c, c2cl = _code_maps(_draft(), _classic())
-        assert d2c == {60: 1001, 566: 2002, 567: 3003}
-        assert c2cl == {1001: 60, 2002: 567, 3003: 558}
+        m = _code_maps(_draft(), _classic())
+        assert m.draft_id_to_code == {60: 1001, 566: 2002, 567: 3003}
+        assert m.code_to_classic_id == {1001: 60, 2002: 567, 3003: 558}
+
+    def test_every_direction_is_available(self):
+        """`code` is the join key, so a producer needs id->code as often as a
+        boundary needs code->id."""
+        m = _code_maps(_draft(), _classic())
+        assert m.classic_id_to_code == {60: 1001, 567: 2002, 558: 3003}
+        assert m.code_to_draft_id == {1001: 60, 2002: 566, 3003: 567}
+
+    def test_a_code_cannot_be_mistaken_for_an_element_id(self):
+        """The property the whole design rests on: the two ranges are
+        disjoint, so a mixup resolves to nothing instead of to a real but
+        wrong player. Pinned live in tests/live/test_element_id_spaces.py."""
+        from scripts.common.element_ids import ELEMENT_ID_MAX, PLAYER_CODE_MIN
+        assert ELEMENT_ID_MAX < PLAYER_CODE_MIN
 
     def test_the_mapping_moves_only_what_moved(self):
         m = _mapping()
@@ -51,12 +66,14 @@ class TestTheBridge:
         assert m[567] == 558
 
     def test_a_malformed_element_is_skipped_not_fatal(self):
-        d2c, _ = _code_maps({"elements": [{"id": "x", "code": 1}, {"code": 2}]}, {})
-        assert d2c == {}
+        m = _code_maps({"elements": [{"id": "x", "code": 1}, {"code": 2}]}, {})
+        assert m.draft_id_to_code == {}
 
     def test_empty_bootstraps_yield_empty_maps(self):
-        assert _code_maps({}, {}) == ({}, {})
-        assert _code_maps(None, None) == ({}, {})
+        m = _code_maps({}, {})
+        assert not m.ok
+        assert m.draft_id_to_code == {} and m.code_to_classic_id == {}
+        assert not _code_maps(None, None).ok
 
 
 class TestTranslateIds:

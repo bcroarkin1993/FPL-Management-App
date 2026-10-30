@@ -80,7 +80,13 @@ def test_the_draft_roster_frame_publishes_the_element_id():
     src = inspect.getsource(fpl_draft_api.get_team_composition_for_gameweek)
     assert "'Player_ID': pid" in src, (
         "the composition frame must publish the element id it already resolves")
-    assert "columns=['Player', 'Team', 'Position', 'Player_ID']" in src
+    # Membership, not an exact column list: pinning the list meant any
+    # legitimate addition failed this test, which is a guard that punishes
+    # unrelated work rather than catching the regression it names.
+    for col in ("Player_ID", "Player_Code"):
+        assert col in fpl_draft_api._COMPOSITION_COLUMNS, (
+            "the composition frame must publish %s" % col)
+    assert "Player_ID" in fpl_draft_api._ACTUAL_LINEUP_COLUMNS
 
 
 class TestOverrideReachesBothFrameShapes:

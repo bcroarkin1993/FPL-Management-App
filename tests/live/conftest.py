@@ -61,8 +61,16 @@ def _unpin_offline_env():
     # pytest imports this conftest during collection even for a `-m "not live"`
     # run -- doing it at import put the whole offline suite back on the network
     # and cost it 40 seconds.
-    from scripts.common import rotowire_lineups, sportsgambler_lineups
+    from scripts.common import element_ids, rotowire_lineups, sportsgambler_lineups
     from tests import conftest as root_conftest
+
+    # Same reasoning as the lineup fetchers: the offline suite stubs the
+    # element-id reference to avoid a bootstrap fetch per blend, and the live
+    # suite wants the real one.
+    _stubbed_names = element_ids.classic_id_names
+    _real_names = getattr(root_conftest, "REAL_CLASSIC_ID_NAMES", None)
+    if _real_names is not None:
+        element_ids.classic_id_names = _real_names
 
     _modules = (rotowire_lineups, sportsgambler_lineups)
     stubs = {m.__name__: m.fetch_lineup_xi for m in _modules}
@@ -75,6 +83,7 @@ def _unpin_offline_env():
     finally:
         for m in _modules:
             m.fetch_lineup_xi = stubs[m.__name__]
+        element_ids.classic_id_names = _stubbed_names
         for key, value in saved.items():
             if value is not None:
                 os.environ[key] = value

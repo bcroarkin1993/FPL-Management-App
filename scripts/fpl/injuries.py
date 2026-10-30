@@ -11,8 +11,8 @@ _logger = get_logger("fpl_app.injuries")
 _POS_LETTER = {1:"G", 2:"D", 3:"M", 4:"F"}
 
 _AVAILABILITY_COLUMNS = [
-    "Player_ID", "Player", "Web_Name", "Team", "Position", "Status",
-    "PlayPct", "StatusBucket", "News", "News_Added",
+    "Player_ID", "Player_Code", "Player", "Web_Name", "Team", "Position",
+    "Status", "PlayPct", "StatusBucket", "News", "News_Added",
 ]
 
 def _bucket_from_playpct(pct: float) -> str:
@@ -72,6 +72,7 @@ def get_fpl_availability_df() -> pd.DataFrame:
 
         rows.append({
             "Player_ID": pid,
+            "Player_Code": p.get("code"),
             "Player": full,
             "Web_Name": web,
             "Team": team_short,

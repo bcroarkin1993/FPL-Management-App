@@ -26,7 +26,7 @@ Measured against one live 10-team league, 7 of its 150 rostered players were
 affected.
 """
 
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, NamedTuple, Optional
 
 import pandas as pd
 import streamlit as st
@@ -38,9 +38,42 @@ _logger = get_logger(__name__)
 _DRAFT_BOOTSTRAP = "https://draft.premierleague.com/api/bootstrap-static"
 
 
-def _code_maps(draft_bootstrap, classic_bootstrap):
-    """``(draft_id -> code, code -> classic_id)``, the two halves of the bridge."""
-    draft_to_code, code_to_classic = {}, {}
+#: `code` and element ids occupy disjoint numeric ranges, and that is a
+#: load-bearing safety property rather than a coincidence worth noting.
+#: Measured live 2026-10-30: codes run 17761-700308 and element ids 1-669, with
+#: **zero** overlap. So a code used where an element id is expected -- or the
+#: reverse -- resolves to *nothing*, where a Draft id used as a Classic id
+#: resolves to the wrong player. One failure is an empty join you can see; the
+#: other is a plausible number you cannot. `tests/live/` pins the separation,
+#: because the whole point of keying on `code` rests on it.
+PLAYER_CODE_MIN = 10000
+
+#: Generous: 669 live, and the pool grows through the season as players are
+#: registered. Only the gap to PLAYER_CODE_MIN matters.
+ELEMENT_ID_MAX = 2000
+
+
+class CodeMaps(NamedTuple):
+    """Every direction of the bridge, built from one pair of bootstraps.
+
+    `code` is FPL's permanent per-player identifier and the only id the two
+    APIs agree on, so it is the app's join key. The element-id maps exist to
+    translate at a boundary, never to join across one.
+    """
+
+    draft_id_to_code: Dict[int, int]
+    code_to_classic_id: Dict[int, int]
+    classic_id_to_code: Dict[int, int]
+    code_to_draft_id: Dict[int, int]
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.draft_id_to_code or self.classic_id_to_code)
+
+
+def _code_maps(draft_bootstrap, classic_bootstrap) -> CodeMaps:
+    """:class:`CodeMaps` from two bootstrap payloads. Pure."""
+    draft_to_code, classic_to_code = {}, {}
     for el in (draft_bootstrap or {}).get("elements", []) or []:
         try:
             draft_to_code[int(el["id"])] = int(el["code"])
@@ -48,14 +81,50 @@ def _code_maps(draft_bootstrap, classic_bootstrap):
             continue
     for el in (classic_bootstrap or {}).get("elements", []) or []:
         try:
-            code_to_classic[int(el["code"])] = int(el["id"])
+            classic_to_code[int(el["id"])] = int(el["code"])
         except (KeyError, TypeError, ValueError):
             continue
-    return draft_to_code, code_to_classic
+    return CodeMaps(
+        draft_id_to_code=draft_to_code,
+        code_to_classic_id={c: i for i, c in classic_to_code.items()},
+        classic_id_to_code=classic_to_code,
+        code_to_draft_id={c: i for i, c in draft_to_code.items()},
+    )
+
+
+def _fetch_bootstraps():
+    """``(draft, classic)``, either of which may be None."""
+    import requests
+    from scripts.common.fpl_classic_api import get_classic_bootstrap_static
+
+    draft = classic = None
+    try:
+        draft = requests.get(_DRAFT_BOOTSTRAP, timeout=30).json()
+    except Exception as exc:
+        _logger.warning("Could not read the Draft bootstrap: %s", exc)
+    try:
+        classic = get_classic_bootstrap_static()
+    except Exception as exc:
+        _logger.warning("Could not read the Classic bootstrap: %s", exc)
+    return draft, classic
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def draft_to_classic_ids() -> Dict[int, str]:
+def code_maps() -> CodeMaps:
+    """The bridge, fetched once and shared.
+
+    One cached reader so the two bootstraps are fetched once per hour rather
+    than per consumer -- :func:`draft_to_classic_ids` and
+    :func:`classic_id_names` previously each fetched their own, and every
+    further consumer would have added another.
+
+    Empty maps on failure; see :func:`draft_to_classic_ids` for what a caller
+    must do with that.
+    """
+    return _code_maps(*_fetch_bootstraps())
+
+
+def draft_to_classic_ids() -> Dict[int, int]:
     """``{draft element id: classic element id}``.
 
     Empty on any failure. A caller holding an empty bridge has no way to
@@ -65,24 +134,10 @@ def draft_to_classic_ids() -> Dict[int, str]:
     silent, because the one thing that must not happen is a Draft id being
     *presented* as a Classic one.
     """
-    import requests
-    from scripts.common.fpl_classic_api import get_classic_bootstrap_static
-
-    try:
-        draft = requests.get(_DRAFT_BOOTSTRAP, timeout=30).json()
-    except Exception as exc:
-        _logger.warning("Could not read the Draft bootstrap for id translation: %s", exc)
-        return {}
-    try:
-        classic = get_classic_bootstrap_static()
-    except Exception as exc:
-        _logger.warning("Could not read the Classic bootstrap for id translation: %s", exc)
-        return {}
-
-    draft_to_code, code_to_classic = _code_maps(draft, classic)
+    maps = code_maps()
     out = {}
-    for draft_id, code in draft_to_code.items():
-        classic_id = code_to_classic.get(code)
+    for draft_id, code in maps.draft_id_to_code.items():
+        classic_id = maps.code_to_classic_id.get(code)
         if classic_id is not None:
             out[draft_id] = classic_id
     if not out:

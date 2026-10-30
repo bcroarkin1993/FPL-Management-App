@@ -116,7 +116,7 @@ def get_fpl_player_mapping():
 
     Returns:
     - fpl_player_data: Dictionary with Player_ID as key and dict with 'Player',
-      'Web_Name', 'Team', 'Position', 'Draft_Rank'.
+      'Web_Name', 'Team', 'Position', 'Player_Code', 'Draft_Rank'.
     """
     # Fetch data from the FPL Draft API
     player_url = "https://draft.premierleague.com/api/bootstrap-static"
@@ -155,6 +155,12 @@ def get_fpl_player_mapping():
             'Web_Name': web_name,
             'Team': team_short_name,
             'Position': position,
+            # The one id both APIs agree on. This dict is keyed by *Draft*
+            # element id, so `code` is what lets a consumer reach Classic-keyed
+            # data without the translation step -- and a code cannot be
+            # mistaken for an element id, the ranges being disjoint. See
+            # `scripts/common/element_ids.py`.
+            'Player_Code': player.get('code'),
             # FPL's own board ordering, and the order an absent manager's picks are
             # auto-made in when they have set no watchlist. Published on every
             # element of the Draft bootstrap and discarded here for years.
@@ -765,6 +771,19 @@ def get_starting_team_composition(league_id):
     return draft_picks
 
 
+#: The pre-deadline roster frame's columns, declared so a guard test can read
+#: them instead of grepping the function's source -- an exact-source assertion
+#: fails on any legitimate addition, which is how adding `Player_Code` broke
+#: `test_the_draft_roster_frame_publishes_the_element_id`.
+_COMPOSITION_COLUMNS = ['Player', 'Team', 'Position', 'Player_ID', 'Player_Code']
+
+#: Declared once so the empty-frame returns below cannot drift from the
+#: populated one. A frame with the wrong columns raises only at the consumer,
+#: which is where it is hardest to read.
+_ACTUAL_LINEUP_COLUMNS = ['Player', 'Team', 'Position', 'Is_Starter',
+                          'Player_ID', 'Player_Code', 'squad_position']
+
+
 @st.cache_data(ttl=60)
 def get_team_actual_lineup(team_id: int, gameweek: int) -> pd.DataFrame:
     """
@@ -778,8 +797,8 @@ def get_team_actual_lineup(team_id: int, gameweek: int) -> pd.DataFrame:
     - gameweek: The gameweek number
 
     Returns:
-    - DataFrame with columns ['Player', 'Team', 'Position', 'Is_Starter', 'Player_ID', 'squad_position']
-      for all 15 players. Is_Starter is True for positions 1-11, False for bench (12-15).
+    - DataFrame with columns ['Player', 'Team', 'Position', 'Is_Starter',
+      'Player_ID', 'Player_Code', 'squad_position'] for all 15 players. Is_Starter is True for positions 1-11, False for bench (12-15).
       squad_position is the raw position slot (1-15) from the FPL picks API.
 
     `Player_ID` is a **Classic** element id, like
@@ -799,11 +818,11 @@ def get_team_actual_lineup(team_id: int, gameweek: int) -> pd.DataFrame:
         data = resp.json()
     except Exception as e:
         _logger.warning("Failed to fetch team picks for team %s GW %s: %s", team_id, gameweek, e)
-        return pd.DataFrame(columns=['Player', 'Team', 'Position', 'Is_Starter', 'Player_ID', 'squad_position'])
+        return pd.DataFrame(columns=_ACTUAL_LINEUP_COLUMNS)
 
     picks = data.get('picks', [])
     if not picks:
-        return pd.DataFrame(columns=['Player', 'Team', 'Position', 'Is_Starter', 'Player_ID', 'squad_position'])
+        return pd.DataFrame(columns=_ACTUAL_LINEUP_COLUMNS)
 
     rows = []
     for pick in picks:
@@ -818,6 +837,7 @@ def get_team_actual_lineup(team_id: int, gameweek: int) -> pd.DataFrame:
             'Position': player_info.get('Position', '?'),
             'Is_Starter': is_starter,
             'Player_ID': element_id,
+            'Player_Code': player_info.get('Player_Code'),
             'squad_position': position_slot,
         })
 
@@ -853,7 +873,8 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
     - gameweek (int | None): The gameweek for which to determine the team's composition.
 
     Returns:
-    - DataFrame with columns ['Player', 'Team', 'Position', 'Player_ID'] for the
+    - DataFrame with columns ['Player', 'Team', 'Position', 'Player_ID',
+      'Player_Code'] for the
       specified gameweek. ``Player_ID`` is the **Classic** FPL element id, and
       is None only for a roster name that could not be mapped back to the
       player map, or whose Draft id has no Classic counterpart.
@@ -942,6 +963,7 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
                 'Team':   player_map[pid]['Team'],
                 'Position': player_map[pid]['Position'],
                 'Player_ID': pid,
+                'Player_Code': player_map[pid].get('Player_Code'),
             })
         else:
             rows.append({
@@ -949,9 +971,10 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
                 'Team':   'Unknown',
                 'Position': 'Unknown',
                 'Player_ID': None,
+                'Player_Code': None,
             })
 
-    out = pd.DataFrame(rows, columns=['Player', 'Team', 'Position', 'Player_ID'])
+    out = pd.DataFrame(rows, columns=_COMPOSITION_COLUMNS)
 
     # Draft element ids -> Classic, because everything downstream is
     # Classic-keyed. An id with no counterpart becomes None, which is the

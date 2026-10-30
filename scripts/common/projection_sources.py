@@ -831,6 +831,7 @@ def fpl_ep_source(bootstrap=None, gameweek=None, timeout: int = 20) -> SourceRes
     for e in elements:
         rows.append({
             "Player_ID": int(e.get("id")),
+            "Player_Code": e.get("code"),
             "Position": pos_map.get(e.get("element_type")),
             "Proj": pd.to_numeric(e.get(ep_field), errors="coerce"),
             "Chance_Of_Playing": e.get("chance_of_playing_next_round"),

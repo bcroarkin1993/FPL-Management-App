@@ -1848,10 +1848,66 @@ def blend_projections_onto(
     result = players_df.copy()
     gw = _resolve_expected_gw(expected_gw)
 
+    _warn_on_crossed_ids(result)
+
     if ffp_df is not None and not ffp_df.empty:
         result = merge_ffp_single_gw_data(result, ffp_df, expected_gw=expected_gw)
 
     return _blend_frame(result, rotowire_col, with_fpl_ep=True, gameweek=gw)
+
+
+def _warn_on_crossed_ids(df: pd.DataFrame) -> None:
+    """Log -- never raise -- when a frame's ids disagree with its own names.
+
+    This is the single funnel every page frame passes through, so it is the one
+    place that can notice an element id which has crossed between the two FPL
+    APIs. The detector existed for weeks before this and ran only in
+    `tests/live/`, which catches the frames a test happens to build; a page
+    assembling its own frame got no cover at all, and four separate surfaces
+    had already shipped with a crossed id.
+
+    Logged rather than raised for the reason `check_source_scale_agreement`
+    is: a page must degrade, not die. The symptom this reports is otherwise
+    entirely invisible -- the id resolves to somebody on both sides, so every
+    number on the row stays plausible.
+    """
+    try:
+        from scripts.common.data_validation import (
+            check_element_id_names, check_player_identity)
+        from scripts.common.element_ids import classic_id_names
+
+        for issue in check_player_identity(df, source="projection blend"):
+            if issue.severity == "error":
+                _logger.warning("%s -- %s", issue.message, issue.hint)
+
+        # The frame's own spelling, not the default: the Classic squad
+        # builders emit `element_id` and the Draft merges `Player_ID`, and
+        # `check_element_id_names` skips a frame whose id column it cannot
+        # find -- so defaulting here would silently cover only half the pages.
+        # Same reasoning as `_player_id_col` existing at all.
+        id_col = next((c for c in _PLAYER_ID_COLS if c in df.columns), None)
+        if id_col is None or "Player" not in df.columns:
+            return
+        names = classic_id_names()
+        if not names:
+            return
+        # Pruned to the ids this frame actually carries. The check tokenises
+        # every reference name it is given, so handing it all 669 costs the
+        # same 32ms whether the frame holds 15 players or 669 -- and this runs
+        # on every rerun of every page. Pruned, a 15-player squad costs well
+        # under a millisecond. The check skips ids absent from the reference,
+        # so pruning cannot change its verdict.
+        present = pd.to_numeric(df[id_col], errors="coerce").dropna()
+        wanted = {int(v) for v in present}
+        names = {k: v for k, v in names.items() if int(k) in wanted}
+        if not names:
+            return
+        for issue in check_element_id_names(df, names, id_col=id_col,
+                                            source="projection blend"):
+            if issue.severity == "error":
+                _logger.warning("%s -- %s", issue.message, issue.hint)
+    except Exception as exc:                      # never take a page down
+        _logger.debug("Element id cross-check skipped: %s", exc)
 
 
 def _normalized_positions(df: pd.DataFrame) -> pd.Series:

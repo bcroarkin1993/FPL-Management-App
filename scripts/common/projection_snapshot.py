@@ -82,6 +82,12 @@ def build_pool(bootstrap) -> pd.DataFrame:
         first, second = e.get("first_name", ""), e.get("second_name", "")
         rows.append({
             "Player_ID": e.get("id"),
+            # Archived beside the element id because these files are a
+            # long-lived record and the element id is **reassigned at season
+            # rollover**, where `code` is permanent. Without it a snapshot can
+            # only ever be joined to the season that wrote it. See
+            # `scripts/common/element_ids.py`.
+            "Player_Code": e.get("code"),
             "Player": f"{first} {second}".strip(),
             "Display_Name": to_display_name(first, second, e.get("web_name", "")),
             "Web_Name": e.get("web_name", ""),
@@ -197,9 +203,11 @@ def collect_pre(gameweek: int, bootstrap, deadline=None,
     frame = projections.copy()
     frame.index.name = "player_id"
     frame = frame.reset_index()
-    meta_cols = pool.set_index("Player_ID")[["Player", "Display_Name", "Team", "Position"]]
+    meta_cols = pool.set_index("Player_ID")[
+        ["Player_Code", "Player", "Display_Name", "Team", "Position"]]
     frame = frame.join(meta_cols, on="player_id")
     frame = frame.rename(columns={
+        "Player_Code": "player_code",
         "Player": "player", "Display_Name": "display_name",
         "Team": "team", "Position": "position",
         "Proj": "proj", "Proj_Start": "proj_start", "Start_Pct": "start_pct",
@@ -207,6 +215,12 @@ def collect_pre(gameweek: int, bootstrap, deadline=None,
         "Proj_Spread": "proj_spread",
     })
     frame = frame.drop(columns=["Proj_GW"], errors="ignore")
+    # Nullable Int64 rather than whatever the join produced: a single missing
+    # player turns the column float, and `_rows_of` rounds floats, so the
+    # archive would record `500001.0` for an integer identifier.
+    if "player_code" in frame.columns:
+        frame["player_code"] = pd.to_numeric(
+            frame["player_code"], errors="coerce").astype("Int64")
     # Lowercase the per-source columns too. These files are a long-lived data
     # contract -- 38 of them a season -- so a mixed-case schema is worth fixing
     # before any history accrues rather than after.

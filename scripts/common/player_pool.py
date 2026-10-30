@@ -39,6 +39,13 @@ def build_pool(bootstrap) -> pd.DataFrame:
         first, second = e.get("first_name", ""), e.get("second_name", "")
         rows.append({
             "Player_ID": e.get("id"),
+            # FPL's permanent per-player id, and the only one the Draft and
+            # Classic APIs agree on -- 669 of 669, against 605 for the element
+            # id. Carried so a cross-source join has an id it cannot
+            # misinterpret: codes and element ids occupy disjoint ranges, so a
+            # mixup resolves to nothing rather than to the wrong player. See
+            # `scripts/common/element_ids.py`.
+            "Player_Code": e.get("code"),
             "Player": f"{first} {second}".strip(),
             "Display_Name": to_display_name(first, second, e.get("web_name", "")),
             "Web_Name": e.get("web_name", ""),

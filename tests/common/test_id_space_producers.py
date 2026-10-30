@@ -164,3 +164,80 @@ def test_the_registry_that_stamped_draft_ids_is_gone():
         assert not hasattr(pm, name), (
             "%s is back; if it is needed, resolve names with ReferenceMatcher "
             "and take ids from the Classic bootstrap" % name)
+
+
+class TestCheckPlayerIdentity:
+    """`code` and element ids are range-disjoint, so a mixup is detectable.
+
+    This is the half of the identity problem that *can* be checked cheaply.
+    `check_element_id_names` has to compare an id against a name, because a
+    Draft id and a Classic id are indistinguishable as numbers; a code and an
+    element id are not.
+    """
+
+    def _df(self, **cols):
+        return pd.DataFrame(cols)
+
+    def test_a_clean_frame_is_silent(self):
+        from scripts.common.data_validation import check_player_identity
+        df = self._df(Player_Code=[100001, 100002], Player_ID=[1, 2])
+        assert check_player_identity(df) == []
+
+    def test_an_element_id_in_the_code_column_is_an_error(self):
+        from scripts.common.data_validation import check_player_identity
+        issues = check_player_identity(self._df(Player_Code=[1, 2, 3]))
+        assert [i.severity for i in issues].count("error") >= 1
+        assert "are element ids, not codes" in issues[0].message
+
+    def test_a_code_in_the_element_id_column_is_an_error(self):
+        from scripts.common.data_validation import check_player_identity
+        issues = check_player_identity(self._df(Player_ID=[1, 2, 500123]))
+        assert any("are codes, not element ids" in i.message for i in issues)
+
+    def test_one_column_holding_both_ranges_is_an_error(self):
+        """The signature of two sources concatenated with their identifiers
+        mixed -- after which nothing downstream can tell which a row carries."""
+        from scripts.common.data_validation import check_player_identity
+        issues = check_player_identity(self._df(Player_Code=[100001, 7]))
+        assert any("holds both element ids" in i.message for i in issues)
+
+    def test_a_repeated_code_is_an_error(self):
+        from scripts.common.data_validation import check_player_identity
+        issues = check_player_identity(self._df(Player_Code=[100001, 100001]))
+        assert any("appear more than once" in i.message for i in issues)
+
+    def test_absent_or_empty_columns_are_not_findings(self):
+        """Most frames carry one of the two, and a frame carrying neither is
+        making no claim about identity. A check that fires on expected
+        ignorance gets muted."""
+        from scripts.common.data_validation import check_player_identity
+        assert check_player_identity(self._df(Player=["a"])) == []
+        assert check_player_identity(self._df(Player_Code=[None, None])) == []
+        assert check_player_identity(pd.DataFrame()) == []
+
+
+class TestTheFixtureCarriesCodes:
+    def test_the_shared_bootstrap_fixture_has_a_code_per_element(self, mock_bootstrap_data):
+        """Without this the code path is never exercised and the suite still
+        passes -- the failure mode is a green tick over untested code."""
+        els = mock_bootstrap_data["elements"]
+        codes = [e.get("code") for e in els]
+        assert all(codes), "every fixture element needs a `code`"
+        assert len(set(codes)) == len(codes), "codes identify one player each"
+
+    def test_the_fixture_codes_are_distinguishable_from_its_ids(self, mock_bootstrap_data):
+        from scripts.common.element_ids import PLAYER_CODE_MIN
+        for e in mock_bootstrap_data["elements"]:
+            assert e["code"] >= PLAYER_CODE_MIN
+            assert e["id"] < PLAYER_CODE_MIN
+
+    def test_build_pool_really_stamps_it(self, mock_bootstrap_data):
+        """Asserts the column is *populated*, not merely present: a pool whose
+        `Player_Code` is all <NA> passes any 'is the column there' check while
+        every join on it silently falls back to names."""
+        from scripts.common.player_pool import build_pool
+        pool = build_pool(mock_bootstrap_data)
+        assert "Player_Code" in pool.columns
+        assert pool["Player_Code"].notna().all()
+        assert sorted(pool["Player_Code"]) == sorted(
+            e["code"] for e in mock_bootstrap_data["elements"])

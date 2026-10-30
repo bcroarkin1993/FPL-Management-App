@@ -159,6 +159,7 @@ def _bootstrap_pool() -> pd.DataFrame:
     for e in payload.get("elements", []):
         rows.append({
             "Player_ID": int(e["id"]),
+            "Player_Code": e.get("code"),
             "Player": ("%s %s" % (e.get("first_name", ""),
                                   e.get("second_name", ""))).strip(),
             "Web_Name": e.get("web_name", ""),
