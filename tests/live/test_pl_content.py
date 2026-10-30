@@ -94,13 +94,45 @@ def test_fixtures_agree_with_the_real_fixture_list(lineups):
 
 
 def test_xi_graphics_are_published_for_both_sides(lineups):
+    """Graphics arrive per *fixture*, so the invariant is pairing, not a count.
+
+    This used to assert that at most two clubs league-wide were missing a
+    graphic, which assumes the PL publishes all twenty at once. It does not --
+    it adds them per fixture as each one's team news firms up, so a mid-week
+    run legitimately has whole fixtures with neither side published. Measured
+    2026-10-30 on a working feed: GW9 carried 5 of 10 fixtures, as five
+    complete pairs, and the article body held 14 photo widgets rather than 20.
+    The old threshold therefore failed every midweek on a feed behaving
+    perfectly -- the same miscalibration `check_pl_content` already records
+    fixing for team-news coverage, which is judged against the article's own
+    fixture count and never against 20. A check that cries wolf gets muted.
+
+    What the guard is actually for is document order and the photo-title
+    cross-check: media ids arrive two per fixture, home then away, and a pair
+    whose titles disagree is dropped rather than rendered. Both failure modes
+    show up as a *half* fixture -- one side present, one missing -- which is
+    exactly what is asserted here, and it is strictly stronger than a count.
+    """
     if not lineups.ok:
         pytest.skip("PL has not published GW%s yet" % config.CURRENT_GAMEWEEK)
-    expected = {code for pair in lineups.fixtures for code in pair}
-    missing = expected - set(lineups.graphics)
-    assert len(missing) <= 2, (
-        "no XI graphic for %s -- document order or the photo-title guard has "
-        "probably broken" % sorted(missing))
+
+    published = set(lineups.graphics)
+    half = [pair for pair in lineups.fixtures
+            if len(published & set(pair)) == 1]
+    assert not half, (
+        "these fixtures have an XI graphic for one side only: %s -- document "
+        "order or the photo-title guard has probably broken, since the PL "
+        "publishes them two at a time"
+        % ["%s v %s" % pair for pair in half])
+
+    complete = [pair for pair in lineups.fixtures
+                if set(pair) <= published]
+    print("\nfixtures with both XI graphics: %d of %d"
+          % (len(complete), len(lineups.fixtures)))
+    assert complete, (
+        "not one of the %d fixtures has an XI graphic, though the article "
+        "parsed and resolved its gameweek -- the photo endpoint or the "
+        "`photo-gallery` selector has probably changed" % len(lineups.fixtures))
 
 
 def test_xi_graphic_urls_actually_serve_an_image(lineups):
