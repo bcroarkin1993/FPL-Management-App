@@ -128,6 +128,165 @@ Forest" (absent from `TEAM_FULL_TO_SHORT` until 2026-09-03) sent all 28 Forest
 rows past the exact tiers into the loose ones. `tests/live/` now fails on an FFP
 label that does not resolve, as well as on a missing current club.
 
+**Matching is now a *boundary* concern, not a per-page one.** A name is resolved
+to a player once, where the source is fetched, and every join downstream uses
+the resulting id. See "Player identity — one join key, resolved once at the
+boundary" below for the rules, the two id spaces, and what is forbidden.
+
+### Player identity — one join key, resolved once at the boundary
+
+`scripts/common/element_ids.py` (the bridge and the constants),
+`scraping._attach_projection_ids()` (the Rotowire boundary),
+`data_validation.check_player_identity()` (the tripwire),
+`tests/common/test_player_identity_wiring.py` (the guard).
+
+**`Player_Code` is the only key a cross-source join may use. `Player_ID` is a
+Classic-space scalar for talking to the FPL API — never a join key between two
+frames of different provenance.**
+
+**The two FPL APIs do not agree about element ids.** Measured live 2026-10-30,
+both publish the same 669 players and **64 of them (9.6%) are numbered
+differently**. Every one of those collisions lands on a *real but wrong* player
+— never on a missing row — so nothing raises and every value on the row stays
+plausible. Draft id 566 is Horníček; read as Classic it is Silva. The
+divergence is confined to ids ≥ 554, i.e. players registered after the season
+began, which is why it never fires on an established player and always fires on
+the in-season-signing cohort the Waiver Wire exists to surface.
+
+`code` is FPL's permanent per-player identifier and agrees on **669 of 669**.
+The reason to key on it is not only that it agrees:
+
+| | range |
+|---|---|
+| `code` | 17761 – 700308 |
+| element id | 1 – 669 |
+
+**They are disjoint.** So a code used where an element id is expected — or the
+reverse — resolves to *nothing*, which is a visible empty join, where a Draft
+id used as a Classic id resolves to the wrong player. One failure you can see;
+the other has now cost this app five separate surfaces.
+`tests/live/test_element_id_spaces.py` pins the separation, because the whole
+argument rests on it, and `check_player_identity()` is blind without it.
+
+**`code_maps()` is the single cached bridge**, returning all four directions
+(`draft_id_to_code`, `code_to_classic_id`, `classic_id_to_code`,
+`code_to_draft_id`). `draft_to_classic_ids()` derives from it, so the two
+bootstraps are fetched once an hour rather than once per consumer.
+
+**Ten crossings, not four.** Four were patched in the commits that discovered
+the problem; six more were live, and one was user-visible:
+`get_fpl_availability_df` built the availability frame from the **Draft**
+bootstrap while three pages joined that frame's `Player_ID` against the
+Classic one. Every field it reads is published identically by both APIs, so
+nothing looked wrong — only `id` differs. Ten of the affected players carry FPL
+news, so **Availability and Injuries were attributing ten injuries to the wrong
+player** (Tzolis's hamstring rendered as Van Oevelen's).
+`check_element_id_names` on that frame: 64 errors before, 0 after.
+
+The fix at `_get_draft_gw_data` is the shape to copy: it no longer *takes* the
+Classic bootstrap. **A space cannot be crossed by code that cannot reach the
+other space** — prefer removing the wrong-space object from scope over guarding
+its use.
+
+#### Resolution happens once, at the fetch boundary
+
+**Rotowire publishes names and nothing else**, and for a year every consumer
+resolved those names itself — the projection engine via `_resolve_ids`,
+`attach_weekly_projections` at five page callsites and `merge_season_projections`
+at eleven more. Three independent code paths over the same 220 rows, each able
+to reach a different answer.
+
+`scraping._attach_projection_ids()` now resolves them once inside the cached
+`get_rotowire_player_projections`, so all six consumers share one resolution
+and the engine finds `Player_ID` already present. It calls
+`projection_engine.resolve_player_ids` — the existing `_resolve_ids` body, made
+public and frame-based — so this is a *relocation*, not a fourth matcher.
+Measured live: **219 of 220 rows, zero id/name disagreements, 1.93s cold**
+inside a 3600s cache. The one miss is "Chema", the Brighton nickname that is
+absent from the FPL name.
+
+**Identity must survive every coercion, and twice it did not.**
+`merge_fpl_players_and_projections` took *all* a matched row's fields from the
+projection source, discarding the caller's id; `carry_cols=['Player_ID']` was
+the workaround and **four of six callsites used it while two forgot** — the two
+that run pre-deadline. `_prepare_proj_for_merge` then returned exactly the six
+columns the merge wants, discarding the ids the boundary had just resolved.
+Both now carry `_IDENTITY_COLS` unconditionally, inside the function, for the
+same reason locked-player filtering lives inside
+`_compute_transfer_suggestions`: no caller can forget.
+
+#### What it found: two owned players offered as waiver targets
+
+The ownership anti-join was a three-step name chain — `league_ownership`
+publishes a name, matched to the FPL stats frame for Team/Position, then fuzzy
+matched to Rotowire — and a miss anywhere leaves an owned player in the
+available pool. Measured on the live league at GW9 it lost two of 125:
+
+| Player | FPL spelling | Rotowire | Owner | Proj |
+|---|---|---|---|---|
+| Oliver McBurnie | `Oli McBurnie` | `Oliver McBurnie` | **this manager** | 5.13 |
+| Đorđe Petrović | `Đorđe Petrović` | `Djordje Petrovic` | another | 3.41 |
+
+McBurnie sat on the user's own roster, projected 5.13, and ranked as a target
+worth claiming. `element-status` knows ownership by element id and needs no
+names, and `get_fpl_player_mapping` carries each element's code, so
+`_codes_in_state()` crosses from the Draft space to the join key with neither
+name matching nor the id-translation step.
+
+**It is unioned into the anti-join, never substituted for it.** A code that
+fails to resolve can then only fail to *remove* someone — it cannot re-admit a
+player the names correctly removed. The same union is applied to the locked
+flag, where the two paths already agree exactly, so that half is robustness
+rather than a fix.
+
+#### The guard, and what is deliberately still allowed
+
+`tests/common/test_player_identity_wiring.py` asserts that fuzzy scoring has
+one home (`player_matching`, the last fuzzy matcher and on its way out rather
+than endorsed), that `ReferenceMatcher` is built only in the five boundary
+modules, and that identity survives the three places that used to drop it. The
+allowlists are commented per entry, so adding a sixth resolver is a reviewed
+act rather than an accident.
+
+**Nine sources publish no identifier of any kind** — Rotowire's weekly and
+season tables and projected XIs, Sportsgambler, the FFP spreadsheet fallback,
+`archive/ffp/GW03.json`, premierleague.com's injuries, the odds index, and
+transfer-news prose. A name match is irreducible for those; it just happens
+once, at fetch, and produces a code.
+
+Deleted, all name-keyed joins that were loaded rather than live:
+`_backfill_player_ids` (`fuzz.WRatio` ≥ 85 falling through to **league-wide,
+position-agnostic** scope — the Alex/Cole Palmer shape, and the live roster
+measurement showed the name merge resolving 15 of 15 with this filling 0),
+`PlayerRegistry` / `get_player_registry` (built from the Draft bootstrap and
+stamped its ids as `Player_ID`; no callers, so the first one would have
+reintroduced the bug), `attach_availability` (joined `(Player, Team)` *first*
+and fell back to the id — the priority inverted), `team_optimizer`, and
+`analytics._add_fdr_and_form` (a twin of the waiver_wire function whose drift
+had reached calling two functions that do not exist in that module).
+
+**The archive is keyed on the code too.** `projection_snapshot` writes
+`player_code` beside `player_id`, which is not cosmetic: element ids are
+**reassigned at season rollover**, so a snapshot keyed only on `player_id` can
+never be joined to a later season, and accumulated history is the accuracy
+harness's whole value.
+
+**Live effect on everything else: none.** The blended pool over all 669 players
+is byte-identical across the whole change — `Proj`, `Proj_Start`, `Start_Pct`
+and `Proj_Next3` all 0 rows differing, and no rendered name changed. The
+refactor moves the *key*, not the numbers; the only intended behaviour change
+is the two owned players leaving the available pool (97 → 95).
+
+Two test-infrastructure notes, both of which were the difference between a test
+and a green tick. **Fixture elements carry `code`** (`tests/conftest.py`):
+without one every producer stamps `<NA>`, every join falls back to names, and
+the suite passes having exercised none of the code path — so
+`test_build_pool_really_stamps_it` asserts the column is *populated*, not
+merely present. And **`classic_id_names` is stubbed offline**: `st.cache_data`
+is a pass-through in this suite, so the blend's new cross-check made a real
+bootstrap request per call and cost the offline run **+31 seconds**, which is
+the regression the lineup-XI stubs already exist to prevent.
+
 ### Fantasy Football Pundit feed
 
 `scripts/common/ffp_feed.py` (pure, Streamlit-free), `scraping.get_ffp_feed()`
