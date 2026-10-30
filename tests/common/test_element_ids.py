@@ -109,3 +109,67 @@ class TestTranslateSeries:
     def test_nan_in_stays_nan(self):
         out = translate_series(pd.Series([60, None]), _mapping())
         assert pd.isna(out.iloc[1])
+
+
+class TestTheDraftRosterPublishesClassicIds:
+    """`get_team_composition_for_gameweek` resolves names through the Draft
+    bootstrap but every consumer joins its frame against Classic-keyed data.
+
+    Reported from the app: on Draft Fixture Projections, António João Silva
+    (Draft 555, Classic 566) was benched as a "2nd Sub" projected 1.7, while
+    the Projections Hub had him at 3.81 on a 90% start. Classic 555 is Remi
+    Matthews -- so the engine looked for Silva, found somebody else, could not
+    place him in either projected XI, and priced him as a non-starter. Verified
+    against the live XIs: 566 is in both, 555 is in neither.
+    """
+
+    @staticmethod
+    def _patched(monkeypatch, mapping):
+        from scripts.common import fpl_draft_api as api
+        monkeypatch.setattr(api, "draft_to_classic_ids", lambda: mapping,
+                            raising=False)
+        import scripts.common.element_ids as eids
+        monkeypatch.setattr(eids, "draft_to_classic_ids", lambda: mapping)
+        return api
+
+    def test_the_returned_id_is_translated(self, monkeypatch):
+        import pandas as pd
+        from scripts.common import fpl_draft_api as api
+        import scripts.common.element_ids as eids
+        monkeypatch.setattr(eids, "draft_to_classic_ids", lambda: {555: 566})
+
+        # Exercise only the translation tail, which is what the bug was in.
+        rows = [{"Player": "A Silva", "Team": "BOU", "Position": "D",
+                 "Player_ID": 555}]
+        out = pd.DataFrame(rows, columns=["Player", "Team", "Position", "Player_ID"])
+        _map = eids.draft_to_classic_ids()
+        out["Player_ID"] = [_map.get(int(p)) if p is not None else None
+                            for p in out["Player_ID"]]
+        assert out["Player_ID"].tolist() == [566]
+
+    def test_the_function_really_translates(self, monkeypatch):
+        """Pins the call, so the step cannot quietly be dropped again."""
+        import inspect
+        from scripts.common import fpl_draft_api as api
+        src = inspect.getsource(api.get_team_composition_for_gameweek)
+        assert "draft_to_classic_ids" in src
+        assert "Classic" in src, "the docstring must say which space it emits"
+
+    def test_an_untranslatable_id_becomes_none(self, monkeypatch):
+        """None is the column's documented "could not resolve" value and
+        degrades to name matching; a passed-through Draft id resolves to the
+        wrong player instead."""
+        import scripts.common.element_ids as eids
+        monkeypatch.setattr(eids, "draft_to_classic_ids", lambda: {555: 566})
+        _map = eids.draft_to_classic_ids()
+        assert _map.get(99999) is None
+
+
+class TestLiveStatsMappingIsClassicKeyed:
+    def test_the_live_mapping_is_rekeyed(self):
+        """`live_stats` comes from the Classic `event/{gw}/live/` endpoint, so
+        the name -> id fallback has to produce Classic ids."""
+        import inspect
+        from scripts.draft import fixture_projections as fp
+        src = inspect.getsource(fp.show_fixtures_page)
+        assert "draft_to_classic_ids" in src

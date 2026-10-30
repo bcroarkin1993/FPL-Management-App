@@ -1086,7 +1086,20 @@ def show_fixtures_page():
 
     # Get live stats if gameweek is live
     live_stats = get_live_gameweek_stats(current_gw) if gw_is_live else {}
-    player_mapping = get_fpl_player_mapping() if gw_is_live else {}
+    # Re-keyed into the Classic element id space, because it is used to resolve
+    # a name to an id that is then looked up in `live_stats` -- and that comes
+    # from `fantasy.premierleague.com/api/event/{gw}/live/`, i.e. Classic ids.
+    # `get_fpl_player_mapping()` is the Draft bootstrap, and the two APIs number
+    # 64 of 669 players differently, so the name fallback would resolve those
+    # players' live points off another player's row. The primary path matches on
+    # the frame's own `Player_ID`, which is already Classic.
+    player_mapping = {}
+    if gw_is_live:
+        from scripts.common.element_ids import draft_to_classic_ids
+        _raw = get_fpl_player_mapping() or {}
+        _map = draft_to_classic_ids()
+        player_mapping = ({_map[eid]: v for eid, v in _raw.items() if eid in _map}
+                          if _map else _raw)
 
     # Find the fixtures for the current gameweek
     gameweek_fixtures = get_gameweek_fixtures(config.FPL_DRAFT_LEAGUE_ID, current_gw)

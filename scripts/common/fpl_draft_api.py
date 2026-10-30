@@ -828,8 +828,24 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
 
     Returns:
     - DataFrame with columns ['Player', 'Team', 'Position', 'Player_ID'] for the
-      specified gameweek. ``Player_ID`` is the FPL element id, and is None only
-      for a roster name that could not be mapped back to the player map.
+      specified gameweek. ``Player_ID`` is the **Classic** FPL element id, and
+      is None only for a roster name that could not be mapped back to the
+      player map, or whose Draft id has no Classic counterpart.
+
+    **The id is translated out of the Draft space before it is returned**, and
+    that is load-bearing. It is resolved through ``get_fpl_player_mapping()``,
+    i.e. the Draft bootstrap, but every consumer of this frame joins it against
+    Classic-keyed data: the projection engine and its projected XIs, the
+    Rotowire/FFP merges, and ``get_live_gameweek_stats`` (which reads
+    ``fantasy.premierleague.com/api/event/{gw}/live/``). The two APIs number 64
+    of 669 players differently, so an untranslated id does not fail to match --
+    it matches the *wrong player*.
+
+    Reported from the app: on Draft Fixture Projections, António João Silva
+    (Draft 555, Classic 566) was benched as a "2nd Sub" projected 1.7 while the
+    Projections Hub had him at 3.81 on a 90% start. Classic 555 is Remi
+    Matthews, so the engine looked for Silva, found a different player, could
+    not place him in any projected XI, and priced him as a non-starter.
     """
     # Coerce IDs and settle the gameweek
     try:
@@ -909,7 +925,26 @@ def get_team_composition_for_gameweek(league_id, team_id, gameweek):
                 'Player_ID': None,
             })
 
-    return pd.DataFrame(rows, columns=['Player', 'Team', 'Position', 'Player_ID'])
+    out = pd.DataFrame(rows, columns=['Player', 'Team', 'Position', 'Player_ID'])
+
+    # Draft element ids -> Classic, because everything downstream is
+    # Classic-keyed. An id with no counterpart becomes None, which is the
+    # column's documented "could not resolve" value and degrades to name
+    # matching -- passing a Draft id through is what resolves it to the wrong
+    # player. See `scripts/common/element_ids.py`.
+    if not out.empty:
+        from scripts.common.element_ids import draft_to_classic_ids
+        _map = draft_to_classic_ids()
+        if _map:
+            out['Player_ID'] = [
+                _map.get(int(pid)) if pid is not None and not pd.isna(pid) else None
+                for pid in out['Player_ID']
+            ]
+        else:
+            _logger.warning(
+                "Element id translation unavailable; roster ids stay in the "
+                "Draft space and may resolve to the wrong player downstream.")
+    return out
 
 
 def get_team_id_by_name(league_id, team_name):
