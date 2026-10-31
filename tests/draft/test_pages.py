@@ -93,8 +93,10 @@ class TestWaiverWirePage:
 
 class TestTeamAnalysisPage:
     def test_smoke(self, mock_all_utils):
-        with patch("scripts.draft.team_analysis.get_league_player_ownership", return_value={}), \
-             patch("scripts.draft.team_analysis.get_league_teams", return_value={"1": "Test Team"}), \
+        # `get_league_player_ownership` was patched here too, but the page
+        # never called it -- a dead import, now removed. Patching a name a
+        # module does not use asserts nothing and breaks when the import goes.
+        with patch("scripts.draft.team_analysis.get_league_teams", return_value={"1": "Test Team"}), \
              patch("scripts.draft.team_analysis.get_rotowire_player_projections", return_value=pd.DataFrame()), \
              patch("scripts.draft.team_analysis.get_team_composition_for_gameweek", return_value={}), \
              patch("scripts.draft.team_analysis.get_team_id_by_name", return_value=0), \

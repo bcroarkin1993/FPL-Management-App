@@ -2570,6 +2570,19 @@ Verified after the fix: zero of 669 display names contain a dot.
 -- `squad_df[squad_df["Player"] == selected]` -- ambiguous the moment two players
 share a display name.
 
+**A frame indexed by player name uses `resolve_display(row, dmap)`**, which is
+the same resolution for one row -- `attach_display_names` needs a name
+*column*, which the Draft lineup cards do not have. Those cards previously
+rendered the index, which comes from `merge_fpl_players_and_projections`:
+Rotowire's common name for a matched row and the FPL legal name for an
+unmatched one, so the card read "Bruno Fernandes" or "Rúben dos Santos Gato
+Alves Dias" depending only on whether Rotowire had listed him. Live at GW9, 5
+of 15 card names change -- four of them restoring diacritics Rotowire strips
+("Caoimhín Kelleher", "Enzo Le Fée", "Tarik Muharemović"). The `.player-name`
+CSS is `nowrap` with `text-overflow: ellipsis`, so a longer name truncates
+rather than wrapping; card heights are computed in Python and the iframe does
+not scroll, so wrapping would clip.
+
 Neither raw FPL field is presentable on its own. The bootstrap's full legal name
 is what nobody says out loud ("Bruno Borges Fernandes", "Rúben dos Santos Gato
 Alves Dias"), and `web_name` is frequently abbreviated or too terse to stand

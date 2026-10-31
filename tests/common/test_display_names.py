@@ -20,6 +20,7 @@ from scripts.common.display_names import (
     build_display_map,
     display_of,
     display_series,
+    resolve_display,
 )
 
 BOOTSTRAP = {
@@ -130,6 +131,46 @@ class TestAttachDisplayNames:
         re-derivations got wrong: the surname is in `first_name`."""
         df = pd.DataFrame([{"Player": "x", "Player_Code": 482973}])
         assert attach_display_names(df, dmap).loc[0, "Display_Name"] == "Igor Thiago"
+
+
+class TestResolveDisplay:
+    """The row-level resolver, for frames with no name *column*.
+
+    The Draft lineup cards are indexed by player name, so
+    `attach_display_names` -- which needs a column -- does not fit. This is the
+    same resolution for one row.
+    """
+
+    def test_it_resolves_by_code_then_id(self, dmap):
+        assert resolve_display({"Player_Code": 141746}, dmap) == "Bruno Fernandes"
+        assert resolve_display({"Player_ID": 17}, dmap) == "Bruno Fernandes"
+
+    def test_the_code_wins(self, dmap):
+        """An element id can have crossed between the two FPL APIs; a code
+        cannot."""
+        row = {"Player_Code": 141746, "Player_ID": 201}   # id 201 is Alex Palmer
+        assert resolve_display(row, dmap) == "Bruno Fernandes"
+
+    def test_it_falls_back_to_the_rows_own_name(self, dmap):
+        assert resolve_display({"Player": "Bruno Borges Fernandes"}, dmap) == "Bruno Fernandes"
+
+    def test_an_unknown_name_is_passed_through(self, dmap):
+        assert resolve_display({"Player": "Rotowire Only Guy"}, dmap) == "Rotowire Only Guy"
+
+    def test_an_ambiguous_name_is_passed_through(self, dmap):
+        """The Palmer rule again: resolve to nothing rather than to one of two."""
+        assert resolve_display({"Player": "Palmer"}, dmap) == "Palmer"
+
+    def test_a_nan_id_is_skipped_not_crashed(self, dmap):
+        row = {"Player_Code": float("nan"), "Player_ID": 17}
+        assert resolve_display(row, dmap) == "Bruno Fernandes"
+
+    def test_nothing_usable_gives_the_default(self, dmap):
+        assert resolve_display({}, dmap, default="—") == "—"
+
+    def test_no_map_leaves_the_rows_name(self):
+        row = {"Player": "Bruno Borges Fernandes", "Player_Code": 141746}
+        assert resolve_display(row, DisplayMap({}, {}, {})) == "Bruno Borges Fernandes"
 
 
 class TestDisplayOf:

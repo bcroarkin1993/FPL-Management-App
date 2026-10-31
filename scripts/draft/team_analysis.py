@@ -2,8 +2,8 @@ import config
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from scripts.common.display_names import attach_display_names
 from scripts.common.utils import (
-    get_league_player_ownership,
     get_league_teams,
     get_rotowire_player_projections,
     get_team_composition_for_gameweek,
@@ -62,10 +62,17 @@ def show_team_projections(team_id, fpl_player_projections, gameweek, ffp_df=None
     team_player_projections["If Starts"] = team_player_projections["Proj_Start"]
     team_player_projections["Start %"] = pd.to_numeric(
         team_player_projections["Start_Pct"], errors="coerce") * 100
+    # One name for every row. A matched row takes `Player` from Rotowire (the
+    # common name) while an unmatched one keeps the FPL legal name, so the
+    # column mixed "Bruno Fernandes" with "Rúben dos Santos Gato Alves Dias"
+    # depending only on whether Rotowire had listed the player. The merge now
+    # carries the element id and code, so the name resolves for both.
+    team_player_projections = attach_display_names(team_player_projections)
     team_player_projections = team_player_projections[
-        ['Player', 'Team', 'Matchup', 'Position', 'Proj', 'If Starts', 'Start %',
-         'Proj_Src', 'Pos Rank']
-    ].rename(columns={'Proj': 'Proj Pts', 'Proj_Src': 'Src'})
+        ['Display_Name', 'Team', 'Matchup', 'Position', 'Proj', 'If Starts',
+         'Start %', 'Proj_Src', 'Pos Rank']
+    ].rename(columns={'Display_Name': 'Player', 'Proj': 'Proj Pts',
+                      'Proj_Src': 'Src'})
 
     # Return the df
     return(team_player_projections)

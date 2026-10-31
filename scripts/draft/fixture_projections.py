@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from typing import Optional
+from scripts.common.display_names import display_map, resolve_display
 from scripts.common.analytics import simulate_auto_subs, blend_fixture_projections, numeric_col
 from scripts.common.error_helpers import get_logger
 from scripts.common.scraping import get_ffp_feed, render_ffp_status
@@ -266,6 +267,10 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
     Render a styled team lineup with player cards grouped by position.
     Shows live points, projected points, and performance indicators.
     """
+    # One map per render rather than per card: `display_map` is cached, but
+    # resolving it 15 times a team is pointless work.
+    _dmap = display_map()
+
     # Position display order and colors
     pos_config = {
         'G': {'name': 'Goalkeeper', 'color': '#f39c12', 'short': 'GK'},
@@ -333,6 +338,13 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
         """
 
         for player_name, row in pos_players.iterrows():
+            # These frames are indexed by player name, and that name comes from
+            # `merge_fpl_players_and_projections`: Rotowire's common name for a
+            # matched row, the FPL legal name for an unmatched one. So the card
+            # read "Bruno Fernandes" or "Rúben dos Santos Gato Alves Dias"
+            # depending only on whether Rotowire had listed him. Resolved from
+            # the element id/code the merge now carries; falls back to the index.
+            shown = resolve_display(row, _dmap, default=str(player_name))
             team = row.get('Team', '')
             matchup = row.get('Matchup', '')
             proj_pts = pd.to_numeric(row.get('Points', 0), errors='coerce')
@@ -389,7 +401,7 @@ def _render_team_lineup(team_df: pd.DataFrame, team_name: str, is_live: bool = F
             html += f"""
             <div class="{card_class}">
                 <div class="player-info">
-                    <div class="player-name">{player_name}{status_html}</div>
+                    <div class="player-name">{shown}{status_html}</div>
                     <div class="player-team">{team}</div>
                     <div class="player-matchup">{matchup}</div>
                 </div>
@@ -421,6 +433,7 @@ def _render_draft_bench_section(bench_df: pd.DataFrame, is_live: bool = False):
     if bench_df.empty:
         return
 
+    _dmap = display_map()
     bench_df = bench_df.copy()
     bench_df['Points'] = numeric_col(bench_df, 'Points', 0.0)
     bench_df['Proj_Blended'] = numeric_col(bench_df, 'Proj_Blended', float('nan')).fillna(bench_df['Points'])
@@ -502,7 +515,7 @@ def _render_draft_bench_section(bench_df: pd.DataFrame, is_live: bool = False):
         <div class="{card_class}">
             <div class="sub-label">{label}</div>
             <div class="bench-player-info">
-                <div class="bench-player-name">{player_name}</div>
+                <div class="bench-player-name">{resolve_display(row, _dmap, default=str(player_name))}</div>
                 <div class="bench-player-meta">{meta}</div>
             </div>
             <div class="bench-pts">{points_html}</div>

@@ -165,6 +165,39 @@ def attach_display_names(df: pd.DataFrame,
     return out
 
 
+def resolve_display(row, dmap: Optional[DisplayMap] = None,
+                    default: str = "") -> str:
+    """One row's display name, resolved from its ids rather than a column.
+
+    :func:`attach_display_names` needs a name *column*; some frames -- the
+    Draft lineup cards among them -- are indexed by player name and have none.
+    This is the same resolution (code, then element id, then a unique name)
+    for a single row, so a renderer over such a frame does not have to
+    reshape it.
+
+    Falls back to ``display_of(row)`` and then ``default``, so a frame carrying
+    no usable id degrades to whatever name it already had.
+    """
+    dmap = display_map() if dmap is None else dmap
+    for col, attr in _ID_COLUMNS:
+        value = row.get(col) if hasattr(row, "get") else None
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            continue
+        try:
+            hit = getattr(dmap, attr).get(int(value))
+        except (TypeError, ValueError):
+            continue
+        if hit:
+            return hit
+    shown = display_of(row, default="")
+    if shown:
+        hit = dmap.by_name.get(canonical_normalize(shown))
+        if hit:
+            return hit
+        return shown
+    return default
+
+
 def display_of(row, default: str = "") -> str:
     """The name to render for one row.
 

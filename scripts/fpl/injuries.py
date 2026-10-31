@@ -2,6 +2,7 @@
 import pandas as pd
 import streamlit as st
 from scripts.common.error_helpers import get_logger
+from scripts.common.display_names import attach_display_names
 from scripts.common.utils import get_classic_bootstrap_static
 from scripts.common.styled_tables import render_styled_table
 
@@ -149,9 +150,11 @@ def _render_pl_disagreements(df: pd.DataFrame):
             "This is a watchlist, not a correction — the PL table can lag FPL "
             "just as easily as lead it."
         )
-        show = flagged[["Player", "Team", "Position", "PL_Injury"]].copy()
+        name_col = "Display_Name" if "Display_Name" in flagged.columns else "Player"
+        show = flagged[[name_col, "Team", "Position", "PL_Injury"]].copy()
         show["PL_Injury"] = show["PL_Injury"].replace("", "Unspecified")
-        show = show.rename(columns={"PL_Injury": "PL Injury"})
+        show = show.rename(columns={"PL_Injury": "PL Injury",
+                                    name_col: "Player"})
         render_styled_table(show, max_height=340)
 
 
@@ -168,6 +171,10 @@ def render_injuries_tab(key_prefix: str = "inj"):
         st.warning("No data from FPL. Try again in a bit.")
         return
 
+    # Resolved here rather than inside `_attach_pl_injuries`, which returns the
+    # frame untouched when the PL feed is down -- the rendered name must not
+    # depend on an optional source being reachable.
+    df = attach_display_names(df)
     df = _attach_pl_injuries(df)
     _render_pl_disagreements(df)
 
@@ -189,12 +196,17 @@ def render_injuries_tab(key_prefix: str = "inj"):
     # Nice view. "PL Injury" is the Premier League's own injury-type taxonomy
     # (ACL, Achilles, Hamstring...), which FPL's free-text News does not carry
     # reliably. Absent when the PL feed is unavailable, so it is opt-in here.
-    cols = ["Player","Web_Name","Team","Position","PlayPct","StatusBucket","News","News_Added"]
+    # `Display_Name` instead of `Player` *and* `Web_Name`: this table showed
+    # both "Bruno Borges Fernandes" and "B.Fernandes", which are precisely the
+    # two fields CLAUDE.md says are not presentable. `Player` stays on the
+    # frame for matching.
+    cols = ["Display_Name","Team","Position","PlayPct","StatusBucket","News","News_Added"]
     if "PL_Injury" in show.columns:
         show = show.rename(columns={"PL_Injury": "PL Injury"})
         show["PL Injury"] = show["PL Injury"].fillna("")
         cols.insert(6, "PL Injury")
-    show = show[cols].copy()
+    show = show[[c for c in cols if c in show.columns]].copy()
+    show = show.rename(columns={"Display_Name": "Player"})
     show["PlayPct"] = show["PlayPct"].round(0).astype("Int64")
 
     render_styled_table(
