@@ -33,6 +33,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import config
+from scripts.common.display_names import display_of
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import format_deadline_stamp, format_time_until
 from scripts.common.player_matching import canonical_normalize
@@ -123,12 +124,14 @@ def _load_all_rosters(league_id: int) -> Dict[int, Dict]:
                     if canonical_normalize(p_info.get("Player", "")) == norm_name:
                         pid = p_id
                         break
-                # Use FPL web_name (e.g., "Beto") for display when available
+                # `Display_Name` is the app's common name, from
+                # `to_display_name`. This used to be `Web_Name or name`, which
+                # renders an abbreviation when FPL has one ("B.Fernandes") and
+                # the full legal name when it does not.
                 p_info = player_map.get(pid, {}) if pid else {}
-                web_name = p_info.get("Web_Name")  # None when same as full name
                 players.append({
                     "name": name,
-                    "display_name": web_name or name,
+                    "display_name": display_of(p_info, default=name),
                     "position": pos_display,
                     "pos_short": pos_short,
                     "team": p_info.get("Team", "???"),

@@ -116,8 +116,11 @@ def get_fpl_player_mapping():
 
     Returns:
     - fpl_player_data: Dictionary with Player_ID as key and dict with 'Player',
-      'Web_Name', 'Team', 'Position', 'Player_Code', 'Draft_Rank'.
+      'Web_Name', 'Display_Name', 'Team', 'Position', 'Player_Code',
+      'Draft_Rank'.
     """
+    from scripts.common.text_helpers import to_display_name
+
     # Fetch data from the FPL Draft API
     player_url = "https://draft.premierleague.com/api/bootstrap-static"
     try:
@@ -153,6 +156,13 @@ def get_fpl_player_mapping():
         fpl_player_map[player_id] = {
             'Player': full_name,
             'Web_Name': web_name,
+            # The name to *render*. `Player` is the full legal name that every
+            # merge keys on and `Web_Name` is frequently an abbreviation, so
+            # neither is presentable -- five Draft pages read this dict and
+            # rendered one or the other. See "Player Display Names" in
+            # CLAUDE.md.
+            'Display_Name': to_display_name(first_name, second_name,
+                                            player.get('web_name')),
             'Team': team_short_name,
             'Position': position,
             # The one id both APIs agree on. This dict is keyed by *Draft*

@@ -25,6 +25,7 @@ from scripts.common.bench_analysis import (
     compute_draft_league_bench_data,
     render_bench_analysis,
 )
+from scripts.common.display_names import display_of
 from scripts.common.fpl_classic_api import get_classic_bootstrap_static
 from scripts.common.fpl_draft_api import (
     _get_draft_entry_full_picks_for_gw,
@@ -305,8 +306,10 @@ def _compute_transfer_stats(
         return total
 
     def _player_name(element_id: int) -> str:
+        """`Display_Name` first: this rendered the full legal name, so a trade
+        summary read "Rúben dos Santos Gato Alves Dias"."""
         info = player_map.get(element_id, {})
-        return info.get("Player") or info.get("Web_Name") or f"Player {element_id}"
+        return display_of(info, default=f"Player {element_id}")
 
     transfers = []
     for tx in all_transactions:

@@ -2526,8 +2526,49 @@ clubs, or states the wrong matchweek.
 
 ### Player Display Names
 
-**Always render player names via `to_display_name()` (`scripts/common/text_helpers.py`).
-This is the preferred format for player names on every page.**
+**Always render player names via `display_names.display_of()`, and resolve them
+with `display_names.attach_display_names()`.** `to_display_name()`
+(`text_helpers`) is the formatter underneath; call it directly only where you
+hold the bootstrap element's three name fields.
+
+`scripts/common/display_names.py` exists because there were **three**
+bootstrap->display maps (`waiver_wire._display_name_maps`,
+`element_ids.classic_id_names`, `player_pool.build_pool`), **four** copies of the
+`Display_Name or Player` fallback, each with a different default and different
+NaN handling, and **two** re-derivations that recovered `first`/`second` by
+splitting a legal name on whitespace. That last pair is the lossy one: "Igor
+Thiago Nascimento Rodrigues" splits to first="Igor", and `to_display_name`
+cannot then recover "Igor Thiago", whose surname sits in `first_name`. The wrong
+answer it gives is plausible.
+
+Resolution order is **player code, then element id, then a name that identifies
+exactly one player**, which is the app's join-key order. The code matters for
+the same reason it does everywhere else: it is the only id both FPL APIs agree
+on, so a frame carrying one cannot be mislabelled by an id that crossed API
+spaces -- which is exactly how a tenth of the pool came to show another player's
+name on the Waiver Wire.
+
+**Diacritics are kept.** The common name is the one with its accents in it. The
+Waiver Wire stripped them for no reason recorded in the commit that introduced
+it, so one page rendered "Odegaard" and "Hornicek" while every other surface
+rendered them properly.
+
+Two guards in `tests/common/test_display_names.py`: nothing outside that module
+may re-derive the `Display_Name or Player` fallback, and no `to_display_name`
+call may be fed from a split string. The second tracks the *variable* a split
+was assigned to, because the real bug was two statements -- a detector looking
+only inside the call saw nothing, which the self-check caught.
+
+Pages that render a raw `web_name` are a recurring regression: Classic
+Transfers, Wildcard, Free Hit and Price Changes all built pools straight from
+the bootstrap and rendered `web_name`, so they read "B.Fernandes", "Matheus N."
+and "Tóth.A". All four held the real name fields while building the rows.
+Verified after the fix: zero of 669 display names contain a dot.
+
+**A selectbox keeps `Player` as its option value and changes only the label**
+(`format_func`). Using the display name as the key makes the lookup that follows
+-- `squad_df[squad_df["Player"] == selected]` -- ambiguous the moment two players
+share a display name.
 
 Neither raw FPL field is presentable on its own. The bootstrap's full legal name
 is what nobody says out loud ("Bruno Borges Fernandes", "Rúben dos Santos Gato

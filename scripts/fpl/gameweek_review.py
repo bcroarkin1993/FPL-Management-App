@@ -15,6 +15,7 @@ import requests
 import streamlit as st
 
 import config
+from scripts.common.display_names import display_of
 from scripts.common.bench_analysis import find_optimal_gw_lineup
 from scripts.common.fpl_classic_api import (
     get_classic_bootstrap_static,
@@ -576,7 +577,7 @@ def _get_draft_gw_data(entry_id, gw):
 
         # `Web_Name` is None where it equals the full name, by design in
         # `get_fpl_player_mapping` -- so fall through to `Player`.
-        web_name = pinfo.get("Web_Name") or pinfo.get("Player") or "Unknown"
+        web_name = display_of(pinfo, default="Unknown")
         team = pinfo.get("Team", "?")
 
         all_players.append({

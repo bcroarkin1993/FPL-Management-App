@@ -171,3 +171,147 @@ class TestDisplaySeries:
         out = display_series(pd.DataFrame(columns=["Player"]))
         assert isinstance(out, pd.Series)
         assert out.empty
+
+
+# ---------------------------------------------------------------------------
+# Guards: the two shapes that actually duplicated
+# ---------------------------------------------------------------------------
+
+import ast
+import pathlib
+
+SCRIPTS = pathlib.Path(__file__).resolve().parents[2] / "scripts"
+
+#: `display_names.py` owns the fallback; nothing else may re-derive it.
+FALLBACK_ALLOWED = {"display_names.py"}
+
+
+def _display_name_fallbacks(tree):
+    """Line numbers of `<expr>.get("Display_Name") or <expr>`.
+
+    Four copies of this had drifted apart on their default ("N/A", "Unknown",
+    "", a KeyError) and on whether they tolerated a non-string -- a `Display_Name`
+    of `NaN` is truthy enough to slip through some of them and not others.
+    """
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BoolOp) or not isinstance(node.op, ast.Or):
+            continue
+        first = node.values[0]
+        if not isinstance(first, ast.Call):
+            continue
+        fn = first.func
+        if getattr(fn, "attr", None) != "get" or not first.args:
+            continue
+        arg = first.args[0]
+        if isinstance(arg, ast.Constant) and arg.value == "Display_Name":
+            out.append(node.lineno)
+    return out
+
+
+_SPLITTERS = ("split", "partition", "rpartition")
+
+
+def _split_bound_names(scope):
+    """Local names bound from a `.split()`/`.partition()` call in ``scope``.
+
+    Needed because the real bug was two statements, not one:
+
+        first, _, rest = player.partition(" ")
+        return to_display_name(first, rest, row.get("Web_Name"))
+
+    A detector that only looked inside the `to_display_name` call itself saw
+    nothing -- which is what the self-check below caught.
+    """
+    names = set()
+    for node in ast.walk(scope):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        if value is None:
+            continue
+        calls = [n for n in ast.walk(value)
+                 if isinstance(n, ast.Call)
+                 and getattr(n.func, "attr", None) in _SPLITTERS]
+        if not calls:
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            for sub in ast.walk(target):
+                if isinstance(sub, ast.Name):
+                    names.add(sub.id)
+    return names
+
+
+def _lossy_rederivations(tree):
+    """Line numbers of `to_display_name(...)` fed from a split of one string.
+
+    The bug: `first, _, rest = player.partition(" ")` to fake the bootstrap's
+    name fields. It cannot recover "Igor Thiago", whose surname sits in
+    `first_name`, and it silently produced a *plausible* wrong name.
+
+    Scoped per function, plus module level, so a name split in one function
+    cannot flag an unrelated call in another.
+    """
+    scopes = [tree] + [n for n in ast.walk(tree)
+                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    out = []
+    for scope in scopes:
+        tainted = _split_bound_names(scope)
+        for node in ast.walk(scope):
+            if not isinstance(node, ast.Call):
+                continue
+            if (getattr(node.func, "id", None)
+                    or getattr(node.func, "attr", None)) != "to_display_name":
+                continue
+            for arg in node.args:
+                hit = False
+                for inner in ast.walk(arg):
+                    if isinstance(inner, ast.Call) and \
+                            getattr(inner.func, "attr", None) in _SPLITTERS:
+                        hit = True
+                    elif isinstance(inner, ast.Name) and inner.id in tainted:
+                        hit = True
+                if hit:
+                    out.append(node.lineno)
+                    break
+    return sorted(set(out))
+
+
+def test_nothing_re_derives_the_display_name_fallback():
+    offenders = []
+    for path in sorted(SCRIPTS.rglob("*.py")):
+        if path.name in FALLBACK_ALLOWED:
+            continue
+        for lineno in _display_name_fallbacks(ast.parse(path.read_text())):
+            offenders.append("%s:%d" % (path.relative_to(SCRIPTS), lineno))
+    assert not offenders, (
+        "a re-derived Display_Name fallback at %s -- use "
+        "`display_names.display_of(row)`, which owns the "
+        "Display_Name -> Player -> Web_Name order and the NaN handling"
+        % offenders)
+
+
+def test_no_display_name_is_built_by_splitting_a_legal_name():
+    offenders = []
+    for path in sorted(SCRIPTS.rglob("*.py")):
+        for lineno in _lossy_rederivations(ast.parse(path.read_text())):
+            offenders.append("%s:%d" % (path.relative_to(SCRIPTS), lineno))
+    assert not offenders, (
+        "to_display_name fed from a split string at %s -- it needs the "
+        "bootstrap's real first_name/second_name/web_name. Splitting a legal "
+        "name cannot recover 'Igor Thiago', whose surname is in first_name, "
+        "and the wrong answer it gives is plausible. Resolve through "
+        "`display_names.attach_display_names` instead." % offenders)
+
+
+def test_the_guards_can_actually_fail(tmp_path):
+    """A guard that cannot fail is indistinguishable from one that does not run."""
+    bad = tmp_path / "offender.py"
+    bad.write_text(
+        'name = row.get("Display_Name") or row["Player"]\n'
+        'first, _, rest = player.partition(" ")\n'
+        'shown = to_display_name(first, rest, row.get("Web_Name"))\n')
+    tree = ast.parse(bad.read_text())
+    assert _display_name_fallbacks(tree) == [1]
+    assert _lossy_rederivations(tree) == [3]

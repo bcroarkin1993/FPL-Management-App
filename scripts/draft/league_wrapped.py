@@ -22,6 +22,7 @@ import streamlit as st
 
 import config
 from scripts.common.bench_analysis import compute_draft_league_bench_data
+from scripts.common.display_names import display_of
 from scripts.common.error_helpers import get_logger
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.fpl_draft_api import (
@@ -78,15 +79,15 @@ _TEAM_COLORS = [
 # ---------------------------------------------------------------------------
 
 def _fpl_display_name(info: dict) -> str:
-    """Return the best short display name from a player_map entry.
+    """The rendered name from a `player_map` entry.
 
-    FPL web_name is often a single surname ("Semenyo"). When that happens,
-    fall back to Player (first_name + second_name = "Antoine Semenyo").
-    Only use web_name when it contains multiple words, e.g. "Bruno Fernandes".
+    This was a heuristic -- "use web_name when it has more than one word, else
+    the full name" -- which gets "Bruno Fernandes" right and
+    "Rúben dos Santos Gato Alves Dias" wrong, because his web_name is the
+    single word "Dias". `get_fpl_player_mapping` now carries the app's
+    `Display_Name` from `to_display_name`, so there is nothing to approximate.
     """
-    web = info.get("Web_Name") or ""
-    full = info.get("Player") or ""
-    return web if len(web.split()) > 1 else full
+    return display_of(info)
 
 
 # ---------------------------------------------------------------------------

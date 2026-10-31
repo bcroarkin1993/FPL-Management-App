@@ -115,6 +115,33 @@ _stub_classic_id_names()
 
 
 # =====================================================================
+# 2d. The display-name map reads the bootstrap too
+# =====================================================================
+# `display_names.display_map()` is the shared bootstrap->common-name resolver.
+# `st.cache_data` is a pass-through in this suite, so a page that renders a
+# player name reaches the real Classic bootstrap -- measured at 3 requests
+# across the page smoke tests alone. Same class of leak as sections 2b and 2c.
+#
+# Stubbed to an empty map, which `attach_display_names` reads as "could not
+# resolve" and handles by leaving the frame's own name in place. Tests that
+# care about the resolution inject their own map (see
+# `tests/draft/test_waiver_wire.py::_with_bootstrap` and
+# `tests/common/test_display_names.py`).
+REAL_DISPLAY_MAP = None
+
+
+def _stub_display_map():
+    global REAL_DISPLAY_MAP
+    from scripts.common import display_names
+
+    REAL_DISPLAY_MAP = display_names.display_map
+    display_names.display_map = lambda: display_names.DisplayMap({}, {}, {})
+
+
+_stub_display_map()
+
+
+# =====================================================================
 # 3. Mock data fixtures
 # =====================================================================
 

@@ -72,6 +72,12 @@ def _unpin_offline_env():
     if _real_names is not None:
         element_ids.classic_id_names = _real_names
 
+    from scripts.common import display_names as _dn
+    _stubbed_display = _dn.display_map
+    _real_display = getattr(root_conftest, "REAL_DISPLAY_MAP", None)
+    if _real_display is not None:
+        _dn.display_map = _real_display
+
     _modules = (rotowire_lineups, sportsgambler_lineups)
     stubs = {m.__name__: m.fetch_lineup_xi for m in _modules}
     reals = getattr(root_conftest, "REAL_LINEUP_FETCHERS", None) or {}
@@ -84,6 +90,7 @@ def _unpin_offline_env():
         for m in _modules:
             m.fetch_lineup_xi = stubs[m.__name__]
         element_ids.classic_id_names = _stubbed_names
+        _dn.display_map = _stubbed_display
         for key, value in saved.items():
             if value is not None:
                 os.environ[key] = value
