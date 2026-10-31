@@ -27,6 +27,8 @@ from scripts.common.utils import (
     get_classic_team_picks,
     position_converter,
 )
+from scripts.common.display_names import display_of
+from scripts.common.text_helpers import to_display_name
 from scripts.common.styled_tables import render_styled_table
 
 
@@ -127,7 +129,10 @@ def _build_player_pool(
         full_name = f"{p.get('first_name', '')} {p.get('second_name', '')}".strip()
         rows.append({
             "Player_ID": p.get("id"),
+            "Player_Code": p.get("code"),
             "Player": full_name or p.get("web_name"),
+            "Display_Name": to_display_name(
+                p.get("first_name"), p.get("second_name"), p.get("web_name")),
             "Web_Name": p.get("web_name", ""),
             "Team": team_short,
             "Team_ID": team_id,
@@ -416,7 +421,8 @@ def show_free_hit_page():
             fixture = _get_team_fixture_info(team_id, target_gw, teams_map) if team_id else ""
 
             is_captain = row.name == cap_idx
-            player_display = f"⭐ {row['Player']} (C)" if is_captain else row['Player']
+            shown = display_of(row)
+            player_display = f"⭐ {shown} (C)" if is_captain else shown
 
             starter_rows.append({
                 "Player": player_display,
@@ -443,7 +449,7 @@ def show_free_hit_page():
         bench_rows = []
         for _, row in bench.iterrows():
             bench_rows.append({
-                "Player": row['Player'],
+                "Player": display_of(row),
                 "Team": row['Team'],
                 "Pos": row['Position'],
                 "Price": f"£{row['Price']:.1f}m",

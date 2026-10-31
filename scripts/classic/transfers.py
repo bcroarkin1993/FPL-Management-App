@@ -36,7 +36,8 @@ from scripts.common.optimization import (
     solve_squad_ilp,
 )
 from scripts.common.styled_tables import render_styled_table
-from scripts.common.text_helpers import compact_html
+from scripts.common.display_names import display_of, display_series
+from scripts.common.text_helpers import compact_html, to_display_name
 from scripts.common.transfer_sanity import (horizon_column, horizon_points,
                                              sanity_check_suggestion)
 from scripts.common.analytics import (
@@ -308,7 +309,13 @@ def _build_all_players_df(bootstrap: dict, current_gw: int, n_weeks: int) -> pd.
 
         rows.append({
             "Player_ID": p.get("id"),
+            "Player_Code": p.get("code"),
+            # `Player` is the web_name because every merge on this page keys
+            # on it; `Display_Name` is what a human is shown. Match on one,
+            # display the other -- see "Player Display Names" in CLAUDE.md.
             "Player": p.get("web_name"),
+            "Display_Name": to_display_name(
+                p.get("first_name"), p.get("second_name"), p.get("web_name")),
             "Full Name": f"{p.get('first_name', '')} {p.get('second_name', '')}".strip(),
             "Team": team_info.get("short_name", "???"),
             "Team_ID": team_id,
@@ -352,7 +359,11 @@ def _build_squad_df(picks: list, bootstrap: dict, entry_history: dict) -> pd.Dat
 
         rows.append({
             "Player_ID": element_id,
+            "Player_Code": player.get("code"),
             "Player": player.get("web_name", "Unknown"),
+            "Display_Name": to_display_name(
+                player.get("first_name"), player.get("second_name"),
+                player.get("web_name")) or "Unknown",
             "Full Name": f"{player.get('first_name', '')} {player.get('second_name', '')}".strip(),
             "Team": teams.get(team_id, "???"),
             "Team_ID": team_id,
@@ -1051,7 +1062,11 @@ def _render_log_transfer_ui(team_id: int, current_gw: int,
         for pick in picks:
             el      = elements_by_id.get(pick["element"], {})
             ep_next = float(el.get("ep_next") or 0)
-            name    = el.get("web_name", str(pick["element"]))
+            # The common name, not `web_name`: this dropdown read
+            # "B.Fernandes" and "A.Becker". The bootstrap element is in hand,
+            # so the real name fields are available.
+            name    = to_display_name(el.get("first_name"), el.get("second_name"),
+                                      el.get("web_name")) or str(pick["element"])
             pos     = pos_map.get(el.get("element_type"), "?")
             cost    = el.get("now_cost", 0)
             squad_options.append({
@@ -1083,7 +1098,8 @@ def _render_log_transfer_ui(team_id: int, current_gw: int,
             return
 
         in_labels = [
-            f"{e['web_name']} ({pos_map.get(e.get('element_type'), '?')}, "
+            f"{to_display_name(e.get('first_name'), e.get('second_name'), e.get('web_name'))} "
+            f"({pos_map.get(e.get('element_type'), '?')}, "
             f"£{e.get('now_cost',0)/10:.1f}m)"
             for e in in_candidates
         ]
@@ -1625,7 +1641,7 @@ def _plan_card(drop_row, add_row, pos_labels: Dict, depth_map: Optional[Dict],
     return {
         "position": pos_labels.get(pos, pos),
         "score_diff": float(add_row.get("Transfer Score", 0)) - float(drop_row.get("Keep Score", 0)),
-        "drop_player": drop_row["Player"],
+        "drop_player": display_of(drop_row),
         "drop_full_name": drop_row.get("Full Name") or drop_row["Player"],
         "drop_team": drop_row["Team"],
         "drop_price": f"£{_selling_price(drop_row)/10:.1f}m",
@@ -1633,7 +1649,7 @@ def _plan_card(drop_row, add_row, pos_labels: Dict, depth_map: Optional[Dict],
         "drop_season_pts": drop_row.get("total_points", 0),
         "drop_injury": _get_availability_indicator(
             drop_row.get("chance_of_playing_next_round"), drop_row.get("news", "")),
-        "add_player": add_row["Player"],
+        "add_player": display_of(add_row),
         "add_full_name": add_row.get("Full Name") or add_row["Player"],
         "add_team": add_row["Team"],
         "add_price": f"£{add_row['now_cost']/10:.1f}m",
@@ -1818,7 +1834,7 @@ def _render_blank_gw_alert(squad_df: pd.DataFrame, blanking_team_ids: set, curre
         return
 
     names = ", ".join(
-        f"**{r['Player']}** ({r['Team']})" for _, r in blanking_starters.iterrows()
+        f"**{display_of(r)}** ({r['Team']})" for _, r in blanking_starters.iterrows()
     )
     ep_vals = [float(r.get("ep_next", 0) or 0) for _, r in blanking_starters.iterrows()]
     max_ep = max(ep_vals) if ep_vals else 0
@@ -2026,7 +2042,7 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
             reasons.append(f"blank GW{drop_row.get('Team', '')} — no cover in this position")
         elif has_blank and has_non_blanking_backup:
             backup = squad_same_pos[~squad_same_pos["Team_ID"].isin(blanking_team_ids)].iloc[0]
-            reasons.append(f"covered by {backup['Player']} this week — low priority")
+            reasons.append(f"covered by {display_of(backup)} this week — low priority")
 
         form_diff = float(add_row.get(add_form_col, 0) or 0) - float(drop_row.get(drop_form_col, 0) or 0)
         if form_diff > 0:
@@ -2102,14 +2118,14 @@ def _build_transfer_suggestions(squad_df: pd.DataFrame, available_df: pd.DataFra
             # cards without going through names.
             "drop_id": drop_row.get("Player_ID"),
             "add_id": add_row.get("Player_ID"),
-            "drop_player": drop_row["Player"],
+            "drop_player": display_of(drop_row),
             "drop_full_name": drop_row.get("Full Name") or drop_row["Player"],
             "drop_team": drop_row["Team"],
             "drop_price": f"£{drop_row['now_cost']/10:.1f}m",
             "drop_form": f"{drop_form_val:.1f}",
             "drop_season_pts": drop_row.get("total_points", 0),
             "drop_injury": drop_injury,
-            "add_player": add_row["Player"],
+            "add_player": display_of(add_row),
             "add_full_name": add_row.get("Full Name") or add_row["Player"],
             "add_team": add_row["Team"],
             "add_price": f"£{add_row['now_cost']/10:.1f}m",
@@ -3101,12 +3117,19 @@ def show_classic_transfers_page():
 
     with col_out:
         st.subheader("Transfer Out")
+        # The option *value* stays `Player`, because the lookup below keys on
+        # it and two players can share a display name -- `format_func` changes
+        # only the label. Using the display name as the key would make
+        # `squad_df[squad_df["Player"] == selected]` ambiguous.
         squad_options = squad_df["Player"].tolist()
-        selected_out = st.selectbox("Select player to transfer out", squad_options)
+        squad_labels = dict(zip(squad_df["Player"], display_series(squad_df)))
+        selected_out = st.selectbox(
+            "Select player to transfer out", squad_options,
+            format_func=lambda key: squad_labels.get(key, key))
 
         if selected_out:
             out_player = squad_df[squad_df["Player"] == selected_out].iloc[0]
-            st.markdown(f"**{out_player['Player']}** ({out_player['Team']})")
+            st.markdown(f"**{display_of(out_player)}** ({out_player['Team']})")
             st.caption(f"Position: {out_player['Position']} | Price: £{out_player['now_cost']/10:.1f}m")
             st.caption(f"Form: {out_player['form']:.1f} | Season Pts: {out_player['total_points']}")
 
@@ -3135,11 +3158,15 @@ def show_classic_transfers_page():
                 st.warning("No affordable replacements found.")
             else:
                 in_options = replacements["Player"].tolist()
-                selected_in = st.selectbox("Select replacement", in_options)
+                in_labels = dict(zip(replacements["Player"],
+                                     display_series(replacements)))
+                selected_in = st.selectbox(
+                    "Select replacement", in_options,
+                    format_func=lambda key: in_labels.get(key, key))
 
                 if selected_in:
                     in_player = replacements[replacements["Player"] == selected_in].iloc[0]
-                    st.markdown(f"**{in_player['Player']}** ({in_player['Team']})")
+                    st.markdown(f"**{display_of(in_player)}** ({in_player['Team']})")
                     st.caption(f"Position: {in_player['Position']} | Price: £{in_player['now_cost']/10:.1f}m")
                     st.caption(f"Form: {in_player['form']:.1f} | Season Pts: {in_player['total_points']}")
                     st.caption(f"Ownership: {in_player['selected_by_percent']:.1f}%")

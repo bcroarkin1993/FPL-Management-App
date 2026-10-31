@@ -4,6 +4,8 @@
 import pandas as pd
 import streamlit as st
 
+from scripts.common.display_names import display_of
+from scripts.common.text_helpers import to_display_name
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.utils import get_classic_bootstrap_static
 
@@ -38,7 +40,10 @@ def _build_price_data() -> pd.DataFrame:
     rows = []
     for p in bootstrap.get("elements", []):
         rows.append({
+            "Player_Code": p.get("code"),
             "Player": p.get("web_name", ""),
+            "Display_Name": to_display_name(
+                p.get("first_name"), p.get("second_name"), p.get("web_name")),
             "Team": teams.get(p.get("team"), ""),
             "Pos": _POS_LETTER.get(p.get("element_type"), "?"),
             "now_cost": p.get("now_cost", 0),
@@ -107,7 +112,7 @@ def _render_gw_price_changes(df: pd.DataFrame):
             for _, row in risers.iterrows():
                 html += (
                     f'<div class="price-row price-row-rise">'
-                    f'<span class="price-row-name">{row["Player"]}</span>'
+                    f'<span class="price-row-name">{display_of(row)}</span>'
                     f'<span class="price-row-meta">{row["Team"]} · {row["Pos"]}</span>'
                     f'<span class="price-row-price">{_format_price(row["now_cost"])}</span>'
                     f'<span class="price-row-change change-rise">{_format_change(row["cost_change_event"])}</span>'
@@ -126,7 +131,7 @@ def _render_gw_price_changes(df: pd.DataFrame):
             for _, row in fallers.iterrows():
                 html += (
                     f'<div class="price-row price-row-fall">'
-                    f'<span class="price-row-name">{row["Player"]}</span>'
+                    f'<span class="price-row-name">{display_of(row)}</span>'
                     f'<span class="price-row-meta">{row["Team"]} · {row["Pos"]}</span>'
                     f'<span class="price-row-price">{_format_price(row["now_cost"])}</span>'
                     f'<span class="price-row-change change-fall">{_format_change(row["cost_change_event"])}</span>'

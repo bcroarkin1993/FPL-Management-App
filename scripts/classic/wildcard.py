@@ -28,6 +28,8 @@ from scripts.common.utils import (
     get_fixture_difficulty_grid,
     position_converter,
 )
+from scripts.common.display_names import display_of
+from scripts.common.text_helpers import to_display_name
 from scripts.common.styled_tables import render_styled_table
 
 
@@ -208,7 +210,13 @@ def _build_player_pool(
 
         rows.append({
             "Player_ID": p.get("id"),
+            "Player_Code": p.get("code"),
+            # `Player` is the web_name because every merge on this page keys
+            # on it; `Display_Name` is what a human is shown. Match on one,
+            # display the other -- see "Player Display Names" in CLAUDE.md.
             "Player": p.get("web_name"),
+            "Display_Name": to_display_name(
+                p.get("first_name"), p.get("second_name"), p.get("web_name")),
             # The matcher wants the full legal name; `Player` here is the web
             # name because that is what this page renders, so the legal one
             # rides alongside purely to be matched on.
@@ -599,8 +607,12 @@ def show_wildcard_page():
         # Prepare starter display data
         starter_rows = []
         for _, row in starters.iterrows():
+            # The captain is identified by `Player` (the merge key) and
+            # rendered by `Display_Name`. Comparing display names would break
+            # the moment two players shared one.
             is_captain = row['Player'] == cap_name
-            player_display = f"{row['Player']} (C)" if is_captain else row['Player']
+            shown = display_of(row)
+            player_display = f"{shown} (C)" if is_captain else shown
 
             row_data = {
                 "Player": player_display,
@@ -640,7 +652,7 @@ def show_wildcard_page():
         for _, row in bench_ordered.iterrows():
             row_data = {
                 "Order": int(row['Bench_Order']),
-                "Player": row['Player'],
+                "Player": display_of(row),
                 "Team": row['Team'],
                 "Pos": row['Position'],
                 "Price": f"£{row['Price']:.1f}m",
