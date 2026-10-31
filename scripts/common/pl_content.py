@@ -49,7 +49,6 @@ from bs4 import BeautifulSoup
 from scripts.common.text_helpers import (
     TEAM_FULL_TO_SHORT,
     canonical_normalize,
-    to_display_name,
 )
 
 _logger = logging.getLogger("fpl_app.pl_content")
@@ -672,19 +671,19 @@ def add_display_names(pool_df: pd.DataFrame) -> pd.DataFrame:
     "Cody Gakpo" is what the PL writes and what ``to_display_name`` produces;
     the bootstrap's ``Player`` is "Cody Gakpo" only by luck and is usually the
     full legal name. Having both as exact keys is most of the 97.6%.
+
+    This used to recover the name fields by **splitting ``Player`` on the first
+    space**, which is lossy: "Igor Thiago Nascimento Rodrigues" becomes
+    first="Igor", rest="Thiago Nascimento Rodrigues", and ``to_display_name``
+    cannot recover "Igor Thiago" from that the way it can from the real fields.
+    It now resolves through ``display_names``, by player code or element id,
+    and falls back to the frame's own name.
     """
     if pool_df is None or getattr(pool_df, "empty", True):
         return pool_df
     if "Display_Name" in pool_df.columns:
         return pool_df
-    out = pool_df.copy()
-    if "Player" not in out.columns:
-        return out
-
-    def _display(row):
-        player = str(row.get("Player") or "")
-        first, _, rest = player.partition(" ")
-        return to_display_name(first, rest, row.get("Web_Name"))
-
-    out["Display_Name"] = out.apply(_display, axis=1)
-    return out
+    if "Player" not in getattr(pool_df, "columns", []):
+        return pool_df
+    from scripts.common.display_names import attach_display_names
+    return attach_display_names(pool_df)

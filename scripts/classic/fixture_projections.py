@@ -15,7 +15,7 @@ import streamlit.components.v1 as components
 from datetime import datetime, timezone
 from scripts.common.error_helpers import show_api_error
 from scripts.common.text_helpers import to_display_name
-from scripts.common.player_matching import canonical_normalize
+from scripts.common.display_names import display_of
 from scripts.common.cache import purge_cache_prefix
 from scripts.common.fpl_classic_api import get_classic_team_history
 from scripts.common.fpl_auth import STATUS_EXPIRED, STATUS_NO_AUTH, fetch_my_team
@@ -39,7 +39,6 @@ from scripts.common.utils import (
     get_classic_transfers,
     get_current_gameweek,
     get_entry_details,
-    get_fpl_player_mapping,
     get_gw_finished_teams,
     get_h2h_league_matches,
     get_league_standings,
@@ -56,17 +55,14 @@ from scripts.common.styled_tables import render_styled_table
 # =============================================================================
 
 def _row_display_name(rows: pd.DataFrame) -> str:
-    """The rendered name of a one-row selection: ``Display_Name``, else ``Player``.
+    """The rendered name of a one-row selection.
 
-    Both are present on every squad frame this page builds, but the live and
-    H2H paths pass frames through merges that do not all carry the display
-    column, so the legal name stays as the fallback.
+    Thin wrapper over the shared `display_of`, which owns the
+    ``Display_Name`` -> ``Player`` -> ``Web_Name`` order. Four copies of that
+    fallback had drifted on their default and on whether they accepted a
+    non-string.
     """
-    row = rows.iloc[0]
-    name = row.get("Display_Name")
-    if isinstance(name, str) and name.strip():
-        return name
-    return row.get("Player", "N/A")
+    return display_of(rows.iloc[0], default="N/A")
 
 
 def _strip_accents(name: str) -> str:
@@ -433,7 +429,7 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
         """
 
         for _, row in pos_players.iterrows():
-            player_name = row.get("Display_Name") or row.get("Player", "Unknown")
+            player_name = display_of(row, default="Unknown")
             team = row.get("Team", "")
             matchup = row.get("Matchup", "")
             proj_pts = pd.to_numeric(row.get("Points", 0), errors="coerce") or 0
@@ -574,7 +570,7 @@ def _render_classic_bench_section(bench_df: pd.DataFrame, is_live: bool = False,
 
     for i, (_, row) in enumerate(ordered.iterrows()):
         label = labels[i] if i < len(labels) else f'{i}th Sub'
-        player_name = row.get('Display_Name') or row.get('Player', 'Unknown')
+        player_name = display_of(row, default="Unknown")
         team = row.get('Team', '')
         position = row.get('Position', '')
         proj_pts = row.get('Points', 0) or 0

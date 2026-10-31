@@ -219,36 +219,36 @@ from unittest.mock import patch
 
 BOOTSTRAP = {
     "elements": [
-        {"id": 403, "first_name": "Sávio", "second_name": "Moreira de Oliveira",
-         "web_name": "Sávio"},
-        {"id": 10, "first_name": "Bruno", "second_name": "Borges Fernandes",
-         "web_name": "B.Fernandes"},
+        {"id": 403, "code": 400403, "first_name": "Sávio",
+         "second_name": "Moreira de Oliveira", "web_name": "Sávio"},
+        {"id": 10, "code": 400010, "first_name": "Bruno",
+         "second_name": "Borges Fernandes", "web_name": "B.Fernandes"},
         # Two players sharing a surname: the name-only fallback must refuse both
         # rather than print one player's name on the other's card.
-        {"id": 20, "first_name": "Cole", "second_name": "Palmer", "web_name": "Palmer"},
-        {"id": 21, "first_name": "Alex", "second_name": "Palmer", "web_name": "Palmer"},
+        {"id": 20, "code": 400020, "first_name": "Cole",
+         "second_name": "Palmer", "web_name": "Palmer"},
+        {"id": 21, "code": 400021, "first_name": "Alex",
+         "second_name": "Palmer", "web_name": "Palmer"},
     ]
 }
 
 
 def _with_bootstrap(fn, *args, **kwargs):
-    """Run `fn` against a stubbed bootstrap.
+    """Run `fn` against the stubbed bootstrap above.
 
-    `_display_name_maps()` is `st.cache_data`-wrapped in the app; the test
-    conftest replaces that with a pass-through, but clear the cache anyway if it
-    is real so a memoized map from another test can't leak in.
+    **This fixture used to be dead.** The helper patched `_load_bootstrap`,
+    which is the Draft API and is not what the display map ever read, so these
+    tests resolved against the *live* Classic bootstrap and passed only because
+    real element id 403 happens to be Sávio. The two Palmers -- the whole point
+    of the ambiguity case below -- were never exercised at all.
+
+    Patching the shared module's `display_map` is what actually injects it.
     """
-    from scripts.draft import waiver_wire as ww
+    from scripts.common import display_names as dn
 
-    clear = getattr(ww._display_name_maps, "clear", None)
-    if clear:
-        clear()
-    try:
-        with patch.object(ww, "_load_bootstrap", return_value=BOOTSTRAP):
-            return fn(*args, **kwargs)
-    finally:
-        if clear:
-            clear()
+    dmap = dn.build_display_map(BOOTSTRAP)
+    with patch.object(dn, "display_map", return_value=dmap):
+        return fn(*args, **kwargs)
 
 
 class TestDisplayNames:
@@ -303,9 +303,9 @@ class TestDisplayNames:
 
         suggestions, debug = _compute_transfer_suggestions(avail, roster, top_n=3)
 
-        assert suggestions[0]["drop_player"] == "Savio"
+        assert suggestions[0]["drop_player"] == "Sávio"
         assert suggestions[0]["add_player"] == "Bruno Fernandes"
-        assert debug[2]["pairs"][0]["drop"] == "Savio"
+        assert debug[2]["pairs"][0]["drop"] == "Sávio"
 
     def test_display_name_survives_scoring(self):
         """compute_player_scores() rebuilds the frame; if it stopped carrying
@@ -1076,19 +1076,32 @@ class TestTheDefaultView:
 
 
 class TestWaiverDisplayNamesUseTheRightSpace:
-    def test_the_map_is_built_from_the_classic_bootstrap(self):
-        """`Player_ID` on every Waiver Wire frame comes from
-        `pull_fpl_player_stats()`, i.e. the Classic space, so the display map
-        has to be keyed the same way. Reading the Draft bootstrap here labelled
-        a tenth of the pool with another player's name."""
-        import inspect
+    """`Player_ID` on every Waiver Wire frame comes from
+    `pull_fpl_player_stats()`, i.e. the Classic space. Labelling rows from the
+    Draft bootstrap gave a tenth of the pool another player's name.
+
+    The page no longer owns a map at all -- it delegates to
+    `scripts.common.display_names`, which reads the Classic bootstrap and
+    prefers `Player_Code`, the one id both APIs agree on. So what is pinned
+    here is the delegation, behaviourally: a frame whose `Player_ID` would
+    resolve to the *wrong* player under the other API must still render the
+    right name when a code is present."""
+
+    def test_the_page_delegates_to_the_shared_resolver(self):
+        from scripts.common import display_names as dn
         from scripts.draft import waiver_wire as ww
-        src = inspect.getsource(ww._display_name_maps)
-        assert "get_classic_bootstrap_static" in src
-        assert "_load_bootstrap" not in src, (
-            "_load_bootstrap is the Draft API, whose ids disagree with "
-            "Player_ID on these frames"
-        )
+        assert ww._attach_display_names is dn.attach_display_names
+        assert ww._display_of is dn.display_of
+        assert ww._display_names is dn.display_series
+
+    def test_the_code_beats_an_id_from_the_other_api_space(self):
+        import pandas as pd
+        from scripts.draft.waiver_wire import _attach_display_names
+        # id 20 is Cole Palmer in this bootstrap; the code says Sávio.
+        df = pd.DataFrame([{"Player": "whoever", "Player_ID": 20,
+                            "Player_Code": 400403}])
+        out = _with_bootstrap(_attach_display_names, df)
+        assert out.loc[0, "Display_Name"] == "Sávio"
 
 
 class TestEverySuggestionIsPositionLocked:

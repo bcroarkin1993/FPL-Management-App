@@ -28,7 +28,8 @@ from scripts.common.scraping import (get_player_odds_ladder, get_transfer_news,
                                      get_transfer_odds_index,
                                      transfer_news_cache_status)
 from scripts.common.styled_tables import render_styled_table
-from scripts.common.text_helpers import to_display_name
+from scripts.common.display_names import (attach_display_names,
+                                          display_series)
 from scripts.common.transfer_odds import (age_band, group_ladder,
                                           ladder_overround, odds_age_days)
 from scripts.common.transfer_risk import (TIER_A, TIER_B, TIER_C,
@@ -236,14 +237,6 @@ def _build_board(pool, news_df, odds_index, pl_teams):
         return pd.DataFrame(), matched_odds
 
 
-def _display_name(row):
-    parts = str(row.get("Player") or "").split()
-    first = parts[0] if parts else ""
-    second = " ".join(parts[1:]) if len(parts) > 1 else ""
-    try:
-        return to_display_name(first, second, row.get("Web_Name"))
-    except Exception:
-        return str(row.get("Player") or "")
 
 
 # --- Tabs -------------------------------------------------------------------
@@ -408,7 +401,12 @@ def render_tracker_tab(pool, odds_index, pl_teams):
         st.success("No transfer activity found for any player right now.")
         return
 
-    board["Display"] = board.apply(_display_name, axis=1)
+    # Resolved from the bootstrap's real name fields, by player code or element
+    # id. This used to fake `first`/`second` by splitting the legal name on
+    # whitespace, which cannot recover "Igor Thiago" (the surname is in
+    # `first_name`). See `scripts/common/display_names.py`.
+    board = attach_display_names(board)
+    board["Display"] = display_series(board)
     board = board.sort_values("Transfer_Risk", ascending=False)
 
     show = pd.DataFrame({

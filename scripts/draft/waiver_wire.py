@@ -49,10 +49,14 @@ from scripts.common.waiver_priority import (
     my_waiver_pick,
     rank_claim_plan,
 )
+from scripts.common.display_names import (
+    attach_display_names,
+    display_of,
+    display_series,
+)
 from scripts.common.player_matching import canonical_normalize
-from scripts.common.text_helpers import (_strip_accents, compact_html,
-                                         format_deadline_stamp, format_time_until,
-                                         to_display_name)
+from scripts.common.text_helpers import (compact_html, format_deadline_stamp,
+                                         format_time_until)
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.transfer_sanity import (horizon_column, horizon_points,
                                              sanity_check_suggestion)
@@ -155,104 +159,20 @@ def _team_id_by_short(short_name: str) -> Optional[int]:
     m = {v: k for k, v in _teams_map_short().items()}
     return m.get(short_name)
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def _display_name_maps() -> Tuple[Dict[int, str], Dict[str, str]]:
-    """Bootstrap element id -> display name, plus a normalized-name fallback map.
-
-    The frames on this page carry whichever name their source publishes: the
-    Draft roster and FPL stats use the full legal name ("Savio Moreira de
-    Oliveira"), projections use Rotowire's. Neither is what a manager calls the
-    player, so every rendered name resolves through `to_display_name()`.
-
-    The name map only keeps keys that resolve to exactly one player. A colliding
-    surname would otherwise print somebody else's name onto this player's card —
-    the display-side version of the Alex/Cole Palmer match.
-    """
-    by_id: Dict[int, str] = {}
-    seen: Dict[str, set] = {}
-    try:
-        # The **Classic** bootstrap, deliberately, because `Player_ID` on every
-        # frame this page builds comes from `pull_fpl_player_stats()` and is
-        # therefore a Classic element id. This read the *Draft* bootstrap, and
-        # the two APIs disagree about 64 of 669 ids -- so a tenth of the pool
-        # was being labelled with another player's name. The symptom was a
-        # suggestion to "drop Nordi Mukiele for Lukas Hornicek", a defender for
-        # a goalkeeper: António Silva (Classic 566) had been given the name of
-        # whoever Draft calls 566, which is Horníček. See
-        # `scripts/common/element_ids.py`.
-        from scripts.common.fpl_classic_api import get_classic_bootstrap_static
-        elements = get_classic_bootstrap_static().get("elements", [])
-    except Exception:
-        _logger.warning("Could not load bootstrap for display names", exc_info=True)
-        return {}, {}
-
-    for el in elements:
-        display = to_display_name(
-            el.get("first_name"), el.get("second_name"), el.get("web_name")
-        )
-        if not display:
-            continue
-        try:
-            by_id[int(el["id"])] = display
-        except (KeyError, TypeError, ValueError):
-            pass
-        full = " ".join(
-            str(el.get(k) or "") for k in ("first_name", "second_name")
-        ).strip()
-        for raw in (full, el.get("web_name"), display):
-            key = canonical_normalize(str(raw or ""))
-            if key:
-                seen.setdefault(key, set()).add(display)
-
-    by_name = {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
-    return by_id, by_name
-
-
-def _attach_display_names(df: pd.DataFrame) -> pd.DataFrame:
-    """Add a `Display_Name` column — the name to render — keeping `Player` intact.
-
-    `Player` is what every downstream merge matches on, so it must not change;
-    see "Player Display Names" in CLAUDE.md. Resolution is by element id first
-    and normalized name second, falling back to the accent-stripped source name
-    so a player the bootstrap can't resolve still renders something sane.
-    """
-    if df is None or df.empty or "Player" not in df.columns:
-        return df
-
-    by_id, by_name = _display_name_maps()
-    out = df.copy()
-
-    names = out["Player"].astype(str).tolist()
-    if "Player_ID" in out.columns:
-        ids = pd.to_numeric(out["Player_ID"], errors="coerce").tolist()
-    else:
-        ids = [None] * len(names)
-
-    resolved = []
-    for raw, pid in zip(names, ids):
-        hit = by_id.get(int(pid)) if pid is not None and pd.notna(pid) else None
-        if not hit:
-            hit = by_name.get(canonical_normalize(raw))
-        resolved.append(hit or _strip_accents(raw))
-
-    out["Display_Name"] = resolved
-    return out
-
-
-def _display_of(row) -> str:
-    """Render one row's player name: `Display_Name` when present, else `Player`."""
-    name = row.get("Display_Name")
-    if name is None or (isinstance(name, float) and pd.isna(name)) or not str(name).strip():
-        name = row.get("Player", "")
-    return _strip_accents(str(name))
-
-
-def _display_names(df: pd.DataFrame) -> pd.Series:
-    """Render-ready name column for `df`. Empty-frame safe: `DataFrame.apply` over
-    an empty frame returns a *DataFrame*, which cannot be assigned to a column."""
-    if df.empty:
-        return pd.Series(dtype=str, index=df.index)
-    return df.apply(_display_of, axis=1)
+# Display names live in `scripts/common/display_names.py`. This page had its own
+# bootstrap->display map, its own `Display_Name or Player` fallback and its own
+# vectorised wrapper; two other pages had the same fallback inline and two more
+# re-derived first/second names by splitting a legal name on whitespace. One
+# implementation now, resolving by player code first -- which is the only id
+# both FPL APIs agree on, so a frame cannot be labelled by an id that crossed
+# API spaces. That is the bug that gave a tenth of the pool another player's
+# name here.
+#
+# These three names are kept as thin aliases because this module's call sites
+# and tests are written against them.
+_attach_display_names = attach_display_names
+_display_of = display_of
+_display_names = display_series
 
 
 @st.cache_data(show_spinner=False)

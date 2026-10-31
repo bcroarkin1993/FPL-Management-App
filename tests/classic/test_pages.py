@@ -115,7 +115,9 @@ class TestClassicFixtureProjectionsPage:
             "get_classic_transfers": [],
             "is_gameweek_live": False,
             "get_live_gameweek_stats": {},
-            "get_fpl_player_mapping": {},
+            # `get_fpl_player_mapping` was patched here but the page never
+            # called it -- a dead import, now removed. Patching a name the
+            # module does not use asserts nothing and breaks when it goes.
             "get_gw_finished_teams": set(),
             "simulate_auto_subs": (pd.DataFrame(), []),
             "compute_key_differentials": ([], []),

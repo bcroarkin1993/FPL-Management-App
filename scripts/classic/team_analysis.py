@@ -11,6 +11,7 @@ import plotly.express as px
 import streamlit as st
 from scripts.common.error_helpers import show_api_error
 from scripts.common.analytics import attach_weekly_projections
+from scripts.common.display_names import display_of
 from scripts.common.text_helpers import to_display_name
 from scripts.common.utils import (
     get_classic_bootstrap_static,
@@ -511,7 +512,7 @@ def show_classic_team_analysis_page():
 
     # Format player names with captain indicators
     def format_player_name(row):
-        name = row.get("Display_Name") or row["Player"]
+        name = display_of(row)
         if row["is_captain"]:
             return f"{name} (C)"
         elif row["is_vice_captain"]:

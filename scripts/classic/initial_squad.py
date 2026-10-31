@@ -45,6 +45,7 @@ from scripts.common.utils import (
     position_converter,
 )
 from scripts.common.fixture_helpers import style_fixture_difficulty
+from scripts.common.display_names import display_of
 from scripts.common.text_helpers import format_last_updated, to_display_name
 from scripts.common.analytics import (
     compute_player_scores,
@@ -503,7 +504,7 @@ def _display_rows(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, row in df.iterrows():
         is_cap = bool(row.get("Is_Captain", False))
-        display = row.get("Display_Name") or row["Player"]
+        display = display_of(row)
         name = f"{display} (C)" if is_cap else display
         rows.append({
             "Player": name,
