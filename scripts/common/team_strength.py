@@ -297,6 +297,12 @@ def _build_reference_pool(current_gw: int) -> pd.DataFrame:
 
     pool = pd.DataFrame({
         "Player_ID": pd.to_numeric(stats["id"], errors="coerce"),
+        # `code` is already on `pull_fpl_player_stats`'s frame and is the only
+        # id both FPL APIs agree on, so carrying it lets a consumer resolve a
+        # display name without the Draft/Classic question. See
+        # `scripts/common/element_ids.py`.
+        "Player_Code": pd.to_numeric(stats.get("code"), errors="coerce")
+        if "code" in stats.columns else pd.NA,
         "Player": stats["player"],
         "Web_Name": stats["web_name"],
         "Team": stats["team_name_abbrv"],

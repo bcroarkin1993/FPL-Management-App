@@ -20,6 +20,7 @@ from scripts.common.bench_analysis import compute_draft_league_bench_data, rende
 from scripts.common.error_helpers import get_logger, show_api_error
 from scripts.common.utils import get_current_gameweek, get_draft_points_by_position
 from scripts.common.luck_analysis import calculate_h2h_streaks
+from scripts.common.display_names import attach_display_names
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.team_strength import build_league_strength, describe_blend
 
@@ -633,9 +634,15 @@ def _render_power_rankings(league_id, current_gw):
                 for g in squad["GWs_Missed"]
             ]
             squad["Pts/Start"] = squad["PPS"]
+            # The strength frame's `Player` is the full legal name from
+            # `pull_fpl_player_stats`, so this breakdown read "Rúben dos Santos
+            # Gato Alves Dias". `Player` stays on the frame for matching.
+            squad = attach_display_names(squad)
             render_styled_table(
-                squad[["Player", "Pos", "Team", "Strength", "Pts/Start", "form", "Status"]]
-                .rename(columns={"Team": "Club", "form": "Form"}),
+                squad[["Display_Name", "Pos", "Team", "Strength", "Pts/Start",
+                       "form", "Status"]]
+                .rename(columns={"Display_Name": "Player", "Team": "Club",
+                                 "form": "Form"}),
                 col_formats={"Strength": "{:.0f}", "Pts/Start": "{:.1f}", "Form": "{:.1f}"},
                 positive_color_cols=["Strength"],
                 font_size=13,
