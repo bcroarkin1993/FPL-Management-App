@@ -9,8 +9,8 @@ A Streamlit-based Fantasy Premier League (FPL) management app supporting both **
 ## Commands
 
 ```bash
-# Setup
-python -m venv venv
+# Setup  (Python 3.12; 3.11 works, 3.9/3.10 do not)
+python3.12 -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env  # Then edit with your league/team IDs

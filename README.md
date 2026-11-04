@@ -134,9 +134,10 @@ cd FPL-Management-App
 
 ### 2. Install Dependencies
 
-Create a virtual environment and install the required packages:
+Requires **Python 3.12** (3.11 also works; 3.9 and 3.10 do not). Create a
+virtual environment and install the required packages:
 ```bash
-python -m venv venv
+python3.12 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```

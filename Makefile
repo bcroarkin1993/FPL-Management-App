@@ -8,7 +8,7 @@ PYTEST := $(VENV)/bin/pytest
 
 # Create venv, install deps, copy .env, and enable the pre-push test hook
 setup:
-	python3 -m venv $(VENV)
+	python3.12 -m venv $(VENV)
 	$(PIP) install -r requirements.txt
 	test -f .env || cp .env.example .env
 	git config core.hooksPath .githooks

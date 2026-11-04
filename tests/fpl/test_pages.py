@@ -66,6 +66,22 @@ class TestFixturesPage:
 
 
 class TestProjectedLineupsPage:
+    @staticmethod
+    def _image_mock(mock_streamlit):
+        """The `st.image` mock conftest already installed, call count reset.
+
+        These four tests used to patch that attribute again with autospec, which
+        raises InvalidSpecError from Python 3.12 on: autospeccing a Mock is no
+        longer allowed, and conftest has already replaced `streamlit.image` with
+        an autospec mock. Re-patching it plainly would run, and would quietly
+        drop the signature checking conftest installs it for -- the check that
+        caught `st.image(..., use_container_width=True)` against a pinned
+        Streamlit 1.38, where that argument does not exist.
+        """
+        image = mock_streamlit["image"]
+        image.reset_mock()
+        return image
+
     def test_smoke(self, mock_all_utils):
         with patch("scripts.fpl.projected_lineups.get_classic_bootstrap_static", return_value={"elements": [], "teams": [], "events": []}), \
              patch("scripts.fpl.projected_lineups.requests.get", return_value=MagicMock(content=b"<html></html>", status_code=200)):
@@ -86,40 +102,40 @@ class TestProjectedLineupsPage:
                       "NFO": "https://example.test/nfo.png"},
         )
 
-    def test_pl_section_renders_for_the_current_gameweek(self, mock_all_utils):
+    def test_pl_section_renders_for_the_current_gameweek(self, mock_all_utils, mock_streamlit):
         import config
         from scripts.fpl import projected_lineups as pl_page
+        image = self._image_mock(mock_streamlit)
         with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
-                   return_value=self._lineups(config.CURRENT_GAMEWEEK)), \
-             patch("scripts.fpl.projected_lineups.st.image", autospec=True) as image:
+                   return_value=self._lineups(config.CURRENT_GAMEWEEK)):
             pl_page._render_pl_section("Aston Villa", "Nottingham Forest")
         assert image.call_count == 2
 
-    def test_pl_section_is_gated_on_the_matchweek(self, mock_all_utils):
+    def test_pl_section_is_gated_on_the_matchweek(self, mock_all_utils, mock_streamlit):
         """Last week's predicted XI under this week's heading is the failure
         the gate exists to prevent."""
         import config
         from scripts.fpl import projected_lineups as pl_page
+        image = self._image_mock(mock_streamlit)
         with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
-                   return_value=self._lineups(config.CURRENT_GAMEWEEK - 1)), \
-             patch("scripts.fpl.projected_lineups.st.image", autospec=True) as image:
+                   return_value=self._lineups(config.CURRENT_GAMEWEEK - 1)):
             pl_page._render_pl_section("Aston Villa", "Nottingham Forest")
         assert image.call_count == 0
 
-    def test_pl_section_skips_a_fixture_the_pl_does_not_carry(self, mock_all_utils):
+    def test_pl_section_skips_a_fixture_the_pl_does_not_carry(self, mock_all_utils, mock_streamlit):
         import config
         from scripts.fpl import projected_lineups as pl_page
+        image = self._image_mock(mock_streamlit)
         with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
-                   return_value=self._lineups(config.CURRENT_GAMEWEEK)), \
-             patch("scripts.fpl.projected_lineups.st.image", autospec=True) as image:
+                   return_value=self._lineups(config.CURRENT_GAMEWEEK)):
             pl_page._render_pl_section("Chelsea", "Hull City")
         assert image.call_count == 0
 
-    def test_pl_section_survives_a_dead_feed(self, mock_all_utils):
+    def test_pl_section_survives_a_dead_feed(self, mock_all_utils, mock_streamlit):
         from scripts.fpl import projected_lineups as pl_page
+        image = self._image_mock(mock_streamlit)
         with patch("scripts.fpl.projected_lineups.get_pl_predicted_lineups",
-                   side_effect=RuntimeError("PL API down")), \
-             patch("scripts.fpl.projected_lineups.st.image", autospec=True) as image:
+                   side_effect=RuntimeError("PL API down")):
             pl_page._render_pl_section("Aston Villa", "Nottingham Forest")
         assert image.call_count == 0
 

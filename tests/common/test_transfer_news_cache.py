@@ -42,12 +42,57 @@ def sqlite_cache(tmp_path):
     conn.close()
 
 
+#: Every prefetch worker `scraping` starts is named "<something>-prefetch", and
+#: the join below matches on that suffix rather than on one thread's name.
+#: Matching "transfer-news-prefetch" exactly missed "club-news-prefetch", which
+#: writes to the same connection through the same `_read_cached_club_news` --
+#: so the club worker outlived the fixture, read a connection the teardown had
+#: closed, and segfaulted inside SQLite's C layer in whichever test was running
+#: when it came back. On Python 3.9 that lost the race often enough to look
+#: clean; on 3.12 the suite died about three runs in five.
+_PREFETCH_THREAD_SUFFIX = "-prefetch"
+
+
 def _join_prefetch_threads(timeout: float = 10.0):
     for thread in threading.enumerate():
-        if thread.name == "transfer-news-prefetch":
+        if thread.name.endswith(_PREFETCH_THREAD_SUFFIX):
             thread.join(timeout=timeout)
             assert not thread.is_alive(), (
-                "transfer-news prefetch thread outlived its cache connection")
+                "%s thread outlived its cache connection" % thread.name)
+
+
+def test_every_prefetch_worker_is_named_so_the_join_finds_it():
+    """The fixture can only join threads whose names it can recognise.
+
+    A worker named off-pattern is not a failing test: it is a use-after-close
+    on a connection the teardown has already shut, surfacing as a segfault
+    somewhere else entirely. So the naming convention is asserted at the
+    source rather than trusted.
+    """
+    import ast
+    import pathlib as _pathlib
+
+    src = _pathlib.Path("scripts/common/scraping.py").read_text()
+    names = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        attr = getattr(func, "attr", None)
+        if attr != "Thread":
+            continue
+        kw = {k.arg: k.value for k in node.keywords}
+        name = kw.get("name")
+        assert isinstance(name, ast.Constant), (
+            "a background thread in scraping.py is started without a literal "
+            "name, so the test fixture cannot join it")
+        names.append(name.value)
+
+    assert names, "no background threads found -- has scraping.py moved?"
+    off_pattern = [n for n in names if not n.endswith(_PREFETCH_THREAD_SUFFIX)]
+    assert not off_pattern, (
+        "thread(s) %s do not end in %r, so _join_prefetch_threads will not "
+        "join them" % (off_pattern, _PREFETCH_THREAD_SUFFIX))
 
 
 class TestBatchFetching:
@@ -200,6 +245,11 @@ class TestPrefetch:
             m.side_effect = lambda n, t, timeout=15: pd.DataFrame([_news_row(n)])
             assert scraping.start_transfer_news_prefetch((("A", "X"),), label="unit-test")
             assert not scraping.start_transfer_news_prefetch((("A", "X"),), label="unit-test")
+            # Inside the patch, deliberately: the worker runs asynchronously, so
+            # leaving the block first lets it reach the real Google News feed --
+            # the test then measures the network instead of the mock, and the
+            # fixture's backstop join waits on an actual HTTP round trip.
+            _join_prefetch_threads()
         scraping._PREFETCH_STARTED.discard("unit-test")
 
     def test_prefetch_with_no_players_does_nothing(self):
@@ -282,6 +332,7 @@ class TestPerClubCache:
             m.side_effect = lambda c, timeout=15: pd.DataFrame([_club_row(c)])
             assert scraping.start_club_news_prefetch(["Arsenal"], label="unit-test")
             assert not scraping.start_club_news_prefetch(["Arsenal"], label="unit-test")
+            _join_prefetch_threads()
         scraping._PREFETCH_STARTED.discard("clubs:unit-test")
 
     def test_club_and_player_prefetch_labels_do_not_collide(self, sqlite_cache):
@@ -296,5 +347,6 @@ class TestPerClubCache:
             mc.side_effect = lambda c, timeout=15: pd.DataFrame([_club_row(c)])
             assert scraping.start_transfer_news_prefetch((("A", "X"),), label="collide")
             assert scraping.start_club_news_prefetch(["Arsenal"], label="collide")
+            _join_prefetch_threads()
         scraping._PREFETCH_STARTED.discard("collide")
         scraping._PREFETCH_STARTED.discard("clubs:collide")
