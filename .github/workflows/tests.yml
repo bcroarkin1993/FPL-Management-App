@@ -31,4 +31,13 @@ jobs:
           FPL_DRAFT_TEAM_ID: "67890"
           FPL_CLASSIC_TEAM_ID: "11111"
           FPL_CLASSIC_LEAGUE_IDS: "99999:Test League"
+          # The league and team ids above are placeholders, so the live suite
+          # cannot do its job here: its Draft checks resolve the *configured*
+          # league, and against a league this manager is not in they fail on
+          # configuration rather than on upstream data -- "FPL_DRAFT_TEAM_ID
+          # does not resolve against entry_id", which is exactly the id-space
+          # crossing the check exists to catch. Upstream-shape coverage comes
+          # from the pre-push hook, which runs the full suite against the real
+          # league before anything reaches main.
+          FPL_SKIP_LIVE_TESTS: "1"
         run: pytest
