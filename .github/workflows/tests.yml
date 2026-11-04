@@ -7,7 +7,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label moved to Ubuntu 26.04, for which
+    # actions/python-versions publishes no Python 3.9 build, so every run
+    # failed at setup-python with "version '3.9' ... was not found". 3.9 is
+    # what this app is developed against; 24.04 is the newest image carrying it.
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
