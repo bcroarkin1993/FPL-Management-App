@@ -1295,9 +1295,20 @@ class TestCheckLineupConsensus:
     well-formed says nothing about *which* week it describes.
     """
 
-    def _xi(self, ids, clubs=("MCI",), gw=9):
+    def _xi(self, ids, clubs=("MCI",), gw=9, club_ids=None):
+        """``club_ids`` is populated, and must stay populated.
+
+        The comparison is scoped to the clubs both sources completed, and a
+        source carrying no per-club ids is skipped rather than compared
+        wrongly -- so a helper that omitted them would make every test in this
+        class pass without comparing anything.
+        """
         from scripts.common.rotowire_lineups import LineupXI
-        return LineupXI(set(ids), set(clubs), gw, "")
+        ids = set(ids)
+        if club_ids is None:
+            club_ids = {c: set(ids) for c in clubs}
+        return LineupXI(ids, set(clubs), gw, "",
+                        published_clubs=len(set(clubs)), club_ids=club_ids)
 
     def test_two_sources_that_mostly_agree_are_clean(self):
         from scripts.common.data_validation import check_lineup_consensus
@@ -1311,6 +1322,43 @@ class TestCheckLineupConsensus:
                                          "b": self._xi(range(50, 61))})
         assert issues and issues[0].severity == "error"
         assert "agree on only" in issues[0].message
+
+    def test_unequal_coverage_is_not_disagreement(self):
+        """The bug this check shipped with.
+
+        It compared every starter of one source against every starter of the
+        other, so the score measured the gap in their *coverage*. Two sources
+        agreeing perfectly on the clubs they share scored 18% when one covered
+        18 clubs and the other 4 -- which is what fired live on 2026-11-04,
+        mid-week, while both sources were working correctly. Scoped properly
+        the same data agrees 83%.
+        """
+        from scripts.common.data_validation import check_lineup_consensus
+        wide = self._xi(
+            list(range(1, 12)) + list(range(100, 111)),
+            clubs=("MCI", "ARS"),
+            club_ids={"MCI": set(range(1, 12)), "ARS": set(range(100, 111))})
+        narrow = self._xi(range(1, 12), clubs=("MCI",))
+        assert check_lineup_consensus({"wide": wide, "narrow": narrow}) == []
+
+    def test_disagreement_inside_a_shared_club_still_errors(self):
+        """The scoping must not blind the check to the thing it is for."""
+        from scripts.common.data_validation import check_lineup_consensus
+        wide = self._xi(
+            list(range(1, 12)) + list(range(100, 111)),
+            clubs=("MCI", "ARS"),
+            club_ids={"MCI": set(range(1, 12)), "ARS": set(range(100, 111))})
+        narrow = self._xi(range(50, 61), clubs=("MCI",))
+        issues = check_lineup_consensus({"wide": wide, "narrow": narrow})
+        assert issues and issues[0].severity == "error"
+        assert "agree on only" in issues[0].message
+
+    def test_a_source_without_per_club_ids_is_skipped_not_guessed(self):
+        from scripts.common.data_validation import check_lineup_consensus
+        from scripts.common.rotowire_lineups import LineupXI
+        bare = LineupXI(set(range(50, 61)), {"MCI"}, 9, "")
+        assert check_lineup_consensus(
+            {"a": self._xi(range(1, 12)), "b": bare}) == []
 
     def test_different_gameweeks_error_outright(self):
         from scripts.common.data_validation import check_lineup_consensus

@@ -3234,6 +3234,11 @@ def check_transfer_plan(plan: Optional[dict],
 #: shape change at Rotowire is the likeliest reason.
 MIN_LINEUP_CLUBS = 14
 
+#: Of the clubs a source *published*, the share whose XI must resolve
+#: completely. A published club that does not resolve is a matcher or label
+#: failure; a club that was never published is just team news not landing yet.
+MIN_LINEUP_CLUB_COMPLETION = 0.75
+
 #: A club fields eleven. Mirrors ``rotowire_lineups.XI_SIZE``, restated here
 #: because this module is deliberately dependency-free.
 XI_SIZE = 11
@@ -3290,15 +3295,46 @@ def check_rotowire_lineup_xi(xi, gameweek=None, expected_clubs=20,
                       "dropped every matchup. Check scrape_lineups() against the "
                       "live page.")]
 
-    if len(clubs) < MIN_LINEUP_CLUBS:
+    # Judged against the clubs this source actually published, not against 20.
+    # Those are different failures that a flat count cannot tell apart: a club
+    # the page has not published yet is normal mid-week -- measured 2026-11-04,
+    # Sportsgambler had posted 2 of 10 GW10 fixtures, both parsed perfectly --
+    # while a club it *did* publish and that did not resolve is a label or
+    # transliteration break. Only the second is an error. This is the same
+    # miscalibration already fixed for the PL's XI graphics, which were judged
+    # against 20 clubs and failed every midweek on a working feed.
+    published = int(getattr(xi, "published_clubs", 0) or 0)
+    if published:
+        if len(clubs) < published * MIN_LINEUP_CLUB_COMPLETION:
+            issues.append(Issue(
+                check, "error",
+                f"only {len(clubs)} of the {published} clubs {source} published "
+                f"resolved completely ({note})",
+                "A club is complete only when all eleven of its starters match "
+                "the FPL pool, and only a complete club can bench anybody. These "
+                "clubs *were* published, so this is not a timing gap: check the "
+                "unresolved names in the log for a club label missing from "
+                "TEAM_FULL_TO_SHORT, or a transliteration the matcher cannot "
+                "bridge."))
+        if published < MIN_LINEUP_CLUBS:
+            issues.append(Issue(
+                check, "warning",
+                f"{source} has published XIs for only {published} of "
+                f"{expected_clubs} clubs ({note})",
+                "Normal before a deadline -- these pages fill up as team news "
+                "lands. The engine is unaffected: a club with no XI yields no "
+                "opinion, and benching requires all eleven of a club's "
+                "starters."))
+    elif len(clubs) < MIN_LINEUP_CLUBS:
+        # No published count on this XI (an older `LineupXI`), so the flat
+        # threshold is the only thing available. Judging the two cases apart
+        # needs the denominator.
         issues.append(Issue(
             check, "error",
             f"only {len(clubs)} of {expected_clubs} clubs' XIs resolved completely "
             f"({note})",
             "A club is complete only when all eleven of its starters match the FPL "
-            "pool, and only a complete club can bench anybody. Check the unresolved "
-            "names in the log: this is normally a club label missing from "
-            "TEAM_FULL_TO_SHORT, or a transliteration the matcher cannot bridge."))
+            "pool, and only a complete club can bench anybody."))
 
     # Judged against the whole league rather than per club, because
     # `player_ids` deliberately includes the starters of clubs that did not
@@ -3351,8 +3387,13 @@ def check_lineup_consensus(xis: Optional[dict],
     two does.
 
     Agreement is measured over the clubs both sources completed, since those are
-    the only players both have an opinion about. Two XIs for one fixture
-    legitimately differ on two or three of eleven; they do not differ on nine.
+    the only players both have an opinion about -- and it is measured over
+    *only* those clubs' starters. Comparing each source's whole set scores the
+    gap in their coverage, not their disagreement, and two sources rarely cover
+    the same number of fixtures mid-week.
+
+    Two XIs for one fixture legitimately differ on two or three of eleven; they
+    do not differ on nine.
 
     A single source is **not** a finding: it is the state this app shipped in for
     a year and the state every source but one failing degrades to.
@@ -3375,11 +3416,25 @@ def check_lineup_consensus(xis: Optional[dict],
                 # Early in a gameweek the two can legitimately have published
                 # disjoint halves of the fixture list.
                 continue
-            l_ids = set(left.player_ids)
-            r_ids = set(right.player_ids)
-            # Scoped to the shared clubs via the ids each source resolved there;
-            # a club is only "shared" when both resolved all eleven, so the two
-            # sets are comparable eleven-for-eleven.
+            # **Scoped to the shared clubs, which this did not actually do.**
+            # It compared every starter of one source against every starter of
+            # the other, so the score measured the difference in their
+            # *coverage* rather than their disagreement: two sources agreeing
+            # perfectly on 4 shared clubs still scored ~18% when one covered 18
+            # clubs and the other 4. That is exactly what fired on 2026-11-04,
+            # mid-week, with Rotowire on 217 starters and Sportsgambler on 44.
+            # It could only ever pass while both sources happened to have
+            # similar coverage, which is why it never fired before.
+            l_by_club = getattr(left, "club_ids", None) or {}
+            r_by_club = getattr(right, "club_ids", None) or {}
+            if not l_by_club or not r_by_club:
+                # Without per-club ids there is no honest comparison; say
+                # nothing rather than compute the wrong number.
+                continue
+            l_ids = set().union(*(l_by_club[c] for c in shared if c in l_by_club)) \
+                if any(c in l_by_club for c in shared) else set()
+            r_ids = set().union(*(r_by_club[c] for c in shared if c in r_by_club)) \
+                if any(c in r_by_club for c in shared) else set()
             union = l_ids | r_ids
             if not union:
                 continue

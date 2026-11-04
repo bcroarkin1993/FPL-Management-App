@@ -290,6 +290,36 @@ class TestValidation:
         issues = check_rotowire_lineup_xi(xi)
         assert any(i.severity == "error" for i in issues)
 
+    def test_a_club_that_published_and_did_not_resolve_is_an_error(self):
+        """The failure this check is for: a label or transliteration break.
+        Twenty clubs on the page, four of them resolving."""
+        from scripts.common.data_validation import check_rotowire_lineup_xi
+        xi = rl.LineupXI(set(range(44)), {"T%d" % i for i in range(4)}, 8, "",
+                         published_clubs=20)
+        issues = check_rotowire_lineup_xi(xi)
+        assert any(i.severity == "error" for i in issues)
+
+    def test_a_club_that_has_not_published_yet_is_only_a_warning(self):
+        """Measured live on 2026-11-04: Sportsgambler had posted 2 of 10 GW10
+        fixtures, five days out, and every club it posted resolved 11 of 11.
+        Judged against twenty that read as a broken matcher and failed the
+        build; judged against what it published, it is a timing gap.
+
+        The engine is unaffected either way -- a club with no XI yields no
+        opinion, and benching needs all eleven."""
+        from scripts.common.data_validation import check_rotowire_lineup_xi
+        xi = rl.LineupXI(set(range(44)), {"T%d" % i for i in range(4)}, 8, "",
+                         published_clubs=4)
+        issues = check_rotowire_lineup_xi(xi)
+        assert not any(i.severity == "error" for i in issues)
+        assert any(i.severity == "warning" for i in issues)
+
+    def test_a_full_page_that_resolves_completely_is_clean(self):
+        from scripts.common.data_validation import check_rotowire_lineup_xi
+        xi = rl.LineupXI(set(range(220)), {"T%d" % i for i in range(20)}, 8, "",
+                         published_clubs=20)
+        assert check_rotowire_lineup_xi(xi) == []
+
 
 class TestEveryFrameShapeCanReachTheOverride:
     """The id column is spelled differently on every page, and a lookup keyed

@@ -442,12 +442,26 @@ class LineupXI(NamedTuple):
     ``clubs`` is the clubs whose XI resolved *completely*. Saying "this man does
     **not** start" is a claim about everyone the XI leaves out, so it needs the
     whole XI: one unresolved starter is indistinguishable from a benching.
+
+    ``published_clubs`` is how many clubs the page carried an XI for at all,
+    complete or not. It is the honest denominator for "how much of this
+    resolved": judging completion against all 20 cannot tell a club the source
+    has not published yet from one whose label the matcher failed on, and the
+    two mean opposite things. Mid-week a source legitimately publishes two
+    fixtures of ten.
+
+    ``club_ids`` is each *complete* club's resolved starters. Needed to compare
+    two publications over the clubs both completed -- without it the only
+    available comparison is every starter against every starter, which measures
+    the difference in their coverage rather than their disagreement.
     """
 
     player_ids: Set[int]
     clubs: Set[str]
     gameweek: Optional[int] = None
     note: str = ""
+    published_clubs: int = 0
+    club_ids: Optional[Dict[str, Set[int]]] = None
 
     @property
     def ok(self) -> bool:
@@ -508,7 +522,9 @@ def lineup_starters(players: pd.DataFrame, pool: pd.DataFrame,
 
     resolved: Set[int] = set()
     clubs: Set[str] = set()
+    club_ids: Dict[str, Set[int]] = {}
     partial = []
+    published = 0
     for club_label, rows in players.groupby(players["Team"].astype(str), sort=False):
         code = TEAM_FULL_TO_SHORT.get(club_label.strip())
         if not code:
@@ -516,6 +532,7 @@ def lineup_starters(players: pd.DataFrame, pool: pd.DataFrame,
             # would silently bench every player at it.
             _logger.info("%s lineups: unmapped club label %r", source, club_label)
             continue
+        published += 1
         found = set()
         for _, row in rows.iterrows():
             tactical = ROTOWIRE_TACTICAL_TO_POSITION.get(
@@ -530,6 +547,7 @@ def lineup_starters(players: pd.DataFrame, pool: pd.DataFrame,
         resolved |= found
         if len(found) == XI_SIZE and len(rows) == XI_SIZE:
             clubs.add(code)
+            club_ids[code] = found
         else:
             partial.append("%s %d/%d" % (code, len(found), len(rows)))
 
@@ -543,4 +561,5 @@ def lineup_starters(players: pd.DataFrame, pool: pd.DataFrame,
         len(clubs), "" if len(clubs) == 1 else "s")
     if partial:
         note += " (%d partial: %s)" % (len(partial), ", ".join(partial))
-    return LineupXI(resolved, clubs, gameweek, note)
+    return LineupXI(resolved, clubs, gameweek, note,
+                    published_clubs=published, club_ids=club_ids)
