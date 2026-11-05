@@ -1052,6 +1052,69 @@ FIT_TIE_BAND = 0.005
 MIN_IMPLIED_START = 0.02
 
 
+def _recorded_constants(gameweek: int) -> dict:
+    """The start-model constants a snapshot states it was built with.
+
+    Preferred over recovering them from ``start_pct__rotowire``, and from
+    revision 4 the only thing that can work -- see `_snapshot_constants`.
+    Older files state nothing and fall back to recovery.
+    """
+    _frame, meta = projection_archive.load_pre(gameweek)
+    recorded = meta.get("start_model_constants")
+    return dict(recorded) if isinstance(recorded, dict) else {}
+
+
+def _starts_before(gameweek: int) -> Optional[pd.Series]:
+    """Each player's start count entering ``gameweek``, from archived actuals.
+
+    The engine floors the omitted prior on a player's own start rate, so a
+    replay without this reproduces a different number for everyone who has
+    started anything. New snapshots carry the column; this reconstructs it for
+    the ones written before it was archived, which is the difference between
+    GW9 being scoreable and being lost.
+
+    It is exact only if every earlier gameweek has an actuals file -- a gap
+    would silently understate a player's rate, which is a wrong replay rather
+    than a refused one. So a gap returns None and the caller refuses.
+    """
+    wanted = list(range(1, int(gameweek)))
+    if not wanted:
+        return None
+    have = set(projection_archive.list_actuals())
+    if not set(wanted).issubset(have):
+        return None
+    total = None
+    for gw in wanted:
+        df, _meta = projection_archive.load_actuals(gw)
+        if df is None or df.empty or "started" not in df.columns \
+                or "player_id" not in df.columns:
+            return None
+        one = (pd.to_numeric(df["started"], errors="coerce").fillna(0)
+               .groupby(pd.to_numeric(df["player_id"], errors="coerce")).sum())
+        total = one if total is None else total.add(one, fill_value=0)
+    return None if total is None else total.astype(float)
+
+
+def _frame_starter_overrides(one: pd.DataFrame) -> dict:
+    """Each publication's archived XI opinion, as the engine's tri-state.
+
+    ``Start_XI__<source>`` is written from revision 4 precisely so this is
+    replayable. Ignoring it does not merely lose precision: a benched player
+    takes the omitted prior, so a replay that cannot see the XI resolves him to
+    the floor instead and deviates in the direction that looks like drift.
+    """
+    out = {}
+    for col in one.columns:
+        low = str(col).lower()
+        if not low.startswith("start_xi__"):
+            continue
+        name = low[len("start_xi__"):]
+        series = pd.to_numeric(one[col], errors="coerce")
+        if series.notna().any():
+            out[name] = series
+    return out
+
+
 def _start_replay_inputs(gameweeks: Optional[Sequence[int]] = None) -> List[dict]:
     """Per-gameweek arguments for replaying the engine's start model.
 
@@ -1087,13 +1150,44 @@ def _start_replay_inputs(gameweeks: Optional[Sequence[int]] = None) -> List[dict
         priced = raw["rotowire"].gt(0).fillna(False)
         coverage = one.loc[priced, "team"].astype(str).value_counts().to_dict() \
             if "team" in one.columns else {}
-        as_built = _snapshot_constants(one, priced)
+        recorded = _recorded_constants(int(gw))
         revisions = pd.to_numeric(
             one.get("start_model_revision"), errors="coerce").dropna().unique() \
             if "start_model_revision" in one.columns else []
+        # The player start counts the history floor reads. Archived from the
+        # revision that introduced it; reconstructed from earlier actuals for
+        # the snapshots written before the column existed. Resolved *before* the
+        # constants, which need them to tell a prior the floor raised from one
+        # it did not.
+        starts = pd.to_numeric(one.get("starts"), errors="coerce") \
+            if "starts" in one.columns else None
+        if starts is None or not starts.notna().any():
+            recovered = _starts_before(int(gw))
+            starts = recovered.reindex(one.index) if recovered is not None else None
+        if recorded.get("start_floors") and recorded.get("omitted_starts"):
+            as_built = (dict(recorded["start_floors"]),
+                        dict(recorded["omitted_starts"]))
+        else:
+            as_built = _snapshot_constants(
+                one, priced, starts=starts,
+                history_weight=recorded.get("omitted_history_weight"))
+        # FPL's availability ceiling. Archived from the revision that made the
+        # replay exact; a snapshot without it is refused rather than judged,
+        # because the rows it lowers are lowered a long way.
+        chance = pd.to_numeric(one.get("chance_of_playing"), errors="coerce") \
+            if "chance_of_playing" in one.columns else None
+        status = one.get("status") if "status" in one.columns else None
         out.append({
             "gameweek": int(gw),
             "revision": int(revisions[0]) if len(revisions) == 1 else None,
+            "starts": starts,
+            "chance_of_playing": chance,
+            "status": status,
+            "availability_recorded": status is not None or (
+                chance is not None and chance.notna().any()),
+            "starter_overrides": _frame_starter_overrides(one),
+            "as_built_history_weight": recorded.get("omitted_history_weight"),
+            "as_built_omission_share": recorded.get("omission_share"),
             "index": one.index,
             "per_source_raw": raw,
             "per_source_startpct": startpct,
@@ -1107,6 +1201,7 @@ def _start_replay_inputs(gameweeks: Optional[Sequence[int]] = None) -> List[dict
             # necessarily the ones configured today -- see `_snapshot_constants`.
             "as_built_floors": as_built[0],
             "as_built_omitted": as_built[1],
+            "constants_recorded": bool(recorded),
         })
     return out
 
@@ -1119,7 +1214,9 @@ def _start_replay_inputs(gameweeks: Optional[Sequence[int]] = None) -> List[dict
 MIN_COHORT_DOMINANCE = 0.75
 
 
-def _snapshot_constants(one: pd.DataFrame, priced: pd.Series):
+def _snapshot_constants(one: pd.DataFrame, priced: pd.Series,
+                        starts: Optional[pd.Series] = None,
+                        history_weight: Optional[float] = None):
     """The floors and implied values this snapshot was built with, recovered.
 
     Fidelity has to be judged against the constants that were in force when the
@@ -1158,12 +1255,50 @@ def _snapshot_constants(one: pd.DataFrame, priced: pd.Series):
     if positions is None:
         return None, None
 
+    # The per-player share of the omitted prior, so a value the floor raised can
+    # be told from one it did not. Absent `starts` this is None and the floor is
+    # assumed never to have fired, which is right for every revision before 4.
+    history = None
+    if starts is not None:
+        gw = pd.to_numeric(one.get("gameweek"), errors="coerce").dropna()
+        played = max(1, int(gw.iloc[0]) - 1) if len(gw) else None
+        if played:
+            weight = (float(history_weight) if history_weight is not None
+                      else projection_engine.DEFAULT_OMITTED_START_HISTORY_WEIGHT)
+            rate = (pd.to_numeric(starts.reindex(one.index), errors="coerce")
+                    / float(played)).clip(0.0, 1.0)
+            history = weight * rate.fillna(0.0)
+
     recovered = {}
     for cohort, mask in (("listed", priced), ("omitted", ~priced)):
         found = {}
         for pos, grp in values[mask].groupby(positions[mask]):
             vals = grp.dropna()
             if vals.empty:
+                continue
+            if cohort == "omitted":
+                # **The prior is a lower bound, not a value, from revision 4.**
+                # It is applied as `max(prior, w x starts/(gw-1))`, so the
+                # cohort holds one value per player and the modal rule below
+                # cannot read it -- which is what refused every revision-4
+                # snapshot.
+                #
+                # A player the floor did not raise still carries the prior
+                # exactly, so the recoverable value is the minimum over *those*
+                # players. They are identified rather than assumed: the history
+                # term is recomputed, and anyone whose stored value it could
+                # have produced is set aside. Taking the plain minimum instead
+                # reads a raised value as the prior wherever a position has no
+                # unraised player -- a wrong constant, which is worse than a
+                # refused gameweek, because the replay would then be judged
+                # against a model nothing ran.
+                unraised = vals
+                if history is not None:
+                    term = history.reindex(vals.index)
+                    unraised = vals[~(vals <= term + 1e-9)]
+                if unraised.empty:
+                    return None, None
+                found[str(pos)] = float(unraised.min())
                 continue
             counts = vals.value_counts()
             # A cohort with no dominant value is not the constant it is being
@@ -1195,6 +1330,16 @@ def _replay_start_pct(job: dict, floors=None, omitted=None) -> pd.Series:
         source_club_coverage=job["source_club_coverage"],
         start_floors=floors,
         omitted_starts=omitted,
+        # Held at the snapshot's own values so the only thing varying across a
+        # fit is the candidate. Falling back to today's config here would make
+        # a retune of either one read as the archive and the engine parting
+        # company, which is the failure the whole as-built path exists to stop.
+        omitted_history_weight=job.get("as_built_history_weight"),
+        omission_share=job.get("as_built_omission_share"),
+        starts=job.get("starts"),
+        chance_of_playing=job.get("chance_of_playing"),
+        status=job.get("status"),
+        starter_overrides=job.get("starter_overrides") or {},
         gameweek=job["gameweek"],
     )
     return pd.to_numeric(out["Start_Pct"], errors="coerce").reindex(job["index"])
@@ -1210,10 +1355,16 @@ def _replay_fidelity(jobs: List[dict]) -> dict:
     today produces 0.02 where it recorded 1.00. That gameweek must be refused,
     not quietly fitted on.
 
-    Two known gaps are why this is a tolerance rather than equality:
-    ``chance_of_playing`` is not archived, so FPL's availability ceiling cannot be
-    reapplied (it moved 9 rows in 1,315), and ``priced`` reads a genuine zero
-    projection as unpriced.
+    A snapshot is refused for one of three reasons, and only the third is a
+    defect: it predates the current revision, it does not record an input the
+    start model reads (the constants, the player start counts, or FPL's
+    availability -- each refused by name), or it records everything and still
+    deviates, which is the archive and the engine having parted company.
+
+    Why a tolerance and not equality: archived values are rounded to three
+    decimals, and ``priced`` reads a genuine zero projection as unpriced. A
+    snapshot written since every engine input was archived replays to 0.0004 --
+    measured end to end on a real capture, not asserted.
     """
     per_gw, usable, refused = {}, [], {}
     for job in jobs:
@@ -1237,6 +1388,25 @@ def _replay_fidelity(jobs: List[dict]) -> dict:
             # establish that the engine still would.
             per_gw[gw] = float("nan")
             refused[gw] = "the snapshot does not record the constants that built it"
+            continue
+        if job.get("starts") is None:
+            # The history floor is per-player, so without the start counts the
+            # replay is of a different model -- reported as the missing input
+            # rather than as the deviation it would otherwise produce.
+            per_gw[gw] = float("nan")
+            refused[gw] = ("the snapshot does not record player start counts, and "
+                           "they cannot be reconstructed from earlier actuals")
+            continue
+        if not job.get("availability_recorded"):
+            # Same reasoning, for FPL's ceiling. Measured on GW9, which records
+            # everything else: 663 of 669 players replay exactly and the other
+            # six are precisely the ones FPL had rated doubtful, each up to 0.61
+            # low. Reporting that as drift accuses the engine of having changed
+            # when the snapshot is simply missing an input.
+            per_gw[gw] = float("nan")
+            refused[gw] = ("the snapshot does not record FPL's availability "
+                           "(status / chance_of_playing), which caps the "
+                           "resolved start probability")
             continue
         diff = (_replay_start_pct(job, floors=floors, omitted=omitted)
                 - job["archived"]).abs()

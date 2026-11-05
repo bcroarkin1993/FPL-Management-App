@@ -203,8 +203,23 @@ def collect_pre(gameweek: int, bootstrap, deadline=None,
     frame = projections.copy()
     frame.index.name = "player_id"
     frame = frame.reset_index()
+    # The three engine inputs that are neither projections nor recoverable from
+    # the rest of the file, and without which a replay is of a different model:
+    #
+    #   starts   from revision 4 the omitted prior is floored on the player's
+    #            own start rate, so this moves every player who has started
+    #            anything.
+    #   status / chance_of_playing
+    #            FPL's availability is a *ceiling* on the resolved start
+    #            probability. It fires on few rows -- 6 of 669 at GW9 -- but it
+    #            lowers each of them by up to 0.61, so a fidelity check judged
+    #            on the worst row can never absorb it.
+    #
+    # Measured before they were archived: GW9 replayed 0.610 from what it
+    # stored, entirely on those 6 rows, and was refused as drift.
     meta_cols = pool.set_index("Player_ID")[
-        ["Player_Code", "Player", "Display_Name", "Team", "Position"]]
+        ["Player_Code", "Player", "Display_Name", "Team", "Position",
+         "starts", "status", "chance_of_playing_next_round"]]
     frame = frame.join(meta_cols, on="player_id")
     frame = frame.rename(columns={
         "Player_Code": "player_code",
@@ -213,6 +228,7 @@ def collect_pre(gameweek: int, bootstrap, deadline=None,
         "Proj": "proj", "Proj_Start": "proj_start", "Start_Pct": "start_pct",
         "Proj_Next3": "proj_next3", "Proj_Src": "proj_src",
         "Proj_Spread": "proj_spread",
+        "chance_of_playing_next_round": "chance_of_playing",
     })
     frame = frame.drop(columns=["Proj_GW"], errors="ignore")
     # Nullable Int64 rather than whatever the join produced: a single missing
@@ -244,6 +260,13 @@ def collect_pre(gameweek: int, bootstrap, deadline=None,
         # replay is only evidence if the engine still resolves start probability
         # the way it did here -- see `projection_engine.START_MODEL_REVISION`.
         "start_model_revision": int(projection_engine.START_MODEL_REVISION),
+        # And the constants that revision ran with. Recovering them from
+        # `start_pct__rotowire` was sound while each cohort held exactly one
+        # value; revision 4's history floor made that column per-player, so the
+        # constants have to be stated. Without them the fitter refuses every
+        # snapshot the current engine writes -- the "broken by its own last
+        # answer" failure `_snapshot_constants` exists to avoid.
+        "start_model_constants": projection_engine.start_model_constants(),
         "sources": source_status,
         "ffp_provenance": ffp_prov,
         # Odds describe whatever fixtures are *upcoming*, so they only line up

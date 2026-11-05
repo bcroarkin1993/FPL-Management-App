@@ -447,6 +447,25 @@ def _pool_col(pool, col, index, default=None):
 #:    as the `Start_XI__<source>` columns.
 START_MODEL_REVISION = 4
 
+
+def start_model_constants() -> Dict[str, object]:
+    """Every constant the start model resolves from config, plus the revision.
+
+    The snapshot collector records this so a replay can be judged against the
+    constants that *built* a file rather than against today's. Recovering them
+    from `Start_Pct__rotowire` worked while every cohort held exactly one value,
+    and revision 4 ended that: the omitted prior is now floored on each player's
+    own start rate, so the column is per-player and the constant is no longer
+    in it. See `projection_accuracy._snapshot_constants`.
+    """
+    return {
+        "start_floors": _start_floors(),
+        "omitted_starts": _omitted_starts(),
+        "omitted_history_weight": _history_weight(),
+        "omission_share": _omission_share(),
+        "revision": int(START_MODEL_REVISION),
+    }
+
 #: Sources that may resolve a player's start probability, in precedence order.
 START_MODEL_SOURCES = ("ffp", "fpl_ep", "odds")
 
@@ -640,6 +659,8 @@ def blend_aligned(
     weights: Optional[Dict[str, float]] = None,
     start_floors: Optional[Dict[str, float]] = None,
     omitted_starts: Optional[Dict[str, float]] = None,
+    omitted_history_weight: Optional[float] = None,
+    omission_share: Optional[float] = None,
     fallback_names: Optional[Sequence[str]] = None,
     gameweek: Optional[int] = None,
     source_club_coverage: Optional[Dict[str, Dict[str, int]]] = None,
@@ -665,6 +686,14 @@ def blend_aligned(
     # candidate values. Fitting a separate model *of* the engine rather than the
     # engine itself is how two implementations of one blend come to disagree.
     floors = dict(start_floors) if start_floors is not None else _start_floors()
+    # The other two start-model constants, overridable for the same reason: a
+    # replay has to be able to pin *every* constant the snapshot was written
+    # with, or a later retune of one of them reads as the engine and the archive
+    # having parted company.
+    history_weight = (float(omitted_history_weight)
+                      if omitted_history_weight is not None else _history_weight())
+    omission_share_ = (float(omission_share)
+                       if omission_share is not None else _omission_share())
     source_club_coverage = dict(source_club_coverage or {})
     starter_overrides = dict(starter_overrides or {})
     # One combined opinion, resolved once -- see `combine_starter_overrides`
@@ -865,7 +894,7 @@ def blend_aligned(
             # A mid-season signing is understated by this denominator (three
             # starts in three games reads 0.43, not 1.0). That is the safe
             # direction, since the floor can only raise.
-            implied = np.maximum(implied, _history_weight() * rate.fillna(0.0))
+            implied = np.maximum(implied, history_weight * rate.fillna(0.0))
 
         target = covered & ~listed & implied.notna()
         if not target.any():
@@ -886,7 +915,7 @@ def blend_aligned(
         #
         # One constant rather than a per-source mapping because there is one
         # starters-only source. A second would need one.
-        share = _omission_share()
+        share = omission_share_
 
         # "Another opinion" is judged by the same rule as the resolution above:
         # a bare `chance_of_playing = 100` is not one. Counting it left the

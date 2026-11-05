@@ -118,6 +118,81 @@ class TestPool:
         assert row["ep_next"] == pytest.approx(5.2)
 
 
+class TestTheSnapshotRecordsWhatAReplayNeeds:
+    """A snapshot is only evidence if the engine can reproduce it.
+
+    Three of the start model's inputs are neither projections nor recoverable
+    from the rest of the file, and before they were archived the accuracy
+    harness refused every snapshot this engine wrote: the constants (revision 4
+    made `start_pct__rotowire` per-player, so they can no longer be read back
+    out of it), the player start counts that per-player floor reads, and FPL's
+    availability ceiling.
+    """
+
+    @staticmethod
+    def _bootstrap():
+        return {
+            "teams": [{"id": 1, "short_name": "ARS"}],
+            "elements": [{
+                "id": 1, "code": 111, "first_name": "Bukayo", "second_name": "Saka",
+                "web_name": "Saka", "team": 1, "element_type": 3, "ep_next": "6.1",
+                "status": "d", "chance_of_playing_next_round": 75, "starts": 7,
+                "news": "Knock - 75% chance of playing",
+            }],
+            "events": [],
+        }
+
+    @pytest.fixture
+    def _captured(self, monkeypatch):
+        """`collect_pre` with every fetch stubbed, returning what it tried to save."""
+        import pandas as pd
+        from scripts.common import projection_archive
+
+        saved = {}
+
+        def _save(gameweek, frame, meta):
+            saved["gameweek"], saved["frame"], saved["meta"] = gameweek, frame, meta
+            return True
+
+        monkeypatch.setattr(projection_archive, "save_pre", _save)
+        monkeypatch.setattr(snap, "_rotowire_url", lambda gw: None)
+        blank = type("S", (), {"name": "rw", "ok": False, "df": pd.DataFrame(),
+                               "basis": "conditional", "gameweek": 4,
+                               "updated": None, "note": "stub"})()
+        monkeypatch.setattr(snap, "rotowire_source", lambda *a, **k: blank)
+        monkeypatch.setattr(snap, "fetch_ffp_table",
+                            lambda **k: (pd.DataFrame(), 4, None, "none", "stub"))
+        monkeypatch.setattr(snap, "ffp_source", lambda *a, **k: blank)
+        monkeypatch.setattr(snap, "fpl_ep_source", lambda **k: blank)
+        monkeypatch.setattr(snap.rotowire_lineups, "fetch_lineup_xi", lambda **k: None)
+        monkeypatch.setattr(snap.sportsgambler_lineups, "fetch_lineup_xi",
+                            lambda **k: None)
+        monkeypatch.setattr(snap, "build_projections", lambda *a, **k: pd.DataFrame(
+            {"Proj": [4.0], "Proj_Start": [5.0], "Start_Pct": [0.8]},
+            index=pd.Index([1], name="Player_ID")))
+        assert snap.collect_pre(4, self._bootstrap(), deadline=None,
+                                before_deadline=True)
+        return saved
+
+    def test_the_engine_inputs_are_archived_beside_the_projections(self, _captured):
+        row = _captured["frame"].iloc[0]
+        assert row["starts"] == 7
+        assert row["status"] == "d"
+        assert row["chance_of_playing"] == 75
+
+    def test_the_constants_that_built_it_are_recorded(self, _captured):
+        from scripts.common import projection_engine
+
+        stated = _captured["meta"]["start_model_constants"]
+        assert stated == projection_engine.start_model_constants()
+        # The revision alone is not enough: a *constant* retune leaves the
+        # revision untouched, and a replay judged against today's values would
+        # then read as the archive and the engine having parted company.
+        assert stated["revision"] == projection_engine.START_MODEL_REVISION
+        assert set(stated) >= {"start_floors", "omitted_starts",
+                               "omitted_history_weight", "omission_share"}
+
+
 class TestRunSkipsWorkItDoesNotNeedToDo:
     def test_outside_the_window_no_pre_snapshot_is_taken(self, monkeypatch):
         calls = []

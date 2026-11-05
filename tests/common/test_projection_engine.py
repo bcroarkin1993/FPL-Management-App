@@ -1046,6 +1046,62 @@ class TestTheOmittedPriorRespectsStartHistory:
         base = self._blend()
         assert zero.loc[2, "Start_Pct"] == pytest.approx(base.loc[2, "Start_Pct"])
 
+    def test_the_weight_is_overridable_per_call(self):
+        """So a replay can pin the value a snapshot was written with.
+
+        Reading it from config during a replay makes a later retune look like
+        the archive and the engine having parted company -- which is the whole
+        reason `start_floors` and `omitted_starts` are overridable too.
+        """
+        starts = pd.Series([0, 5, 0], index=self.IDX)
+        assert (self._blend(starts=starts, omitted_history_weight=0.0)
+                .loc[2, "Start_Pct"]
+                == pytest.approx(self._blend().loc[2, "Start_Pct"]))
+        assert (self._blend(starts=starts, omitted_history_weight=0.5)
+                .loc[2, "Start_Pct"]
+                > self._blend(starts=starts).loc[2, "Start_Pct"])
+
+
+class TestTheStartModelConstantsAreReportable:
+    """The snapshot collector records these, because from revision 4 they can
+    no longer be recovered from `Start_Pct__rotowire`: the omitted prior is
+    floored per player, so the column holds no single constant."""
+
+    def test_it_reports_every_constant_the_start_model_reads(self):
+        got = projection_engine.start_model_constants()
+        assert got["start_floors"] == projection_engine._start_floors()
+        assert got["omitted_starts"] == projection_engine._omitted_starts()
+        assert got["omitted_history_weight"] == projection_engine._history_weight()
+        assert got["omission_share"] == projection_engine._omission_share()
+        assert got["revision"] == projection_engine.START_MODEL_REVISION
+
+    def test_every_reported_constant_is_overridable(self):
+        """Otherwise recording it is no use: a replay could not pin it."""
+        import inspect
+
+        params = set(inspect.signature(projection_engine.blend_aligned).parameters)
+        assert {"start_floors", "omitted_starts", "omitted_history_weight",
+                "omission_share"} <= params
+
+    def test_the_omission_share_is_overridable_per_call(self):
+        idx = pd.Index([1, 2])
+        def _blend(**extra):
+            return projection_engine.blend_aligned(
+                index=idx,
+                per_source_raw={"rotowire": pd.Series([5.0, 0.0], index=idx)},
+                per_source_basis={"rotowire": "conditional"},
+                per_source_startpct={"ffp": pd.Series([0.5, 0.5], index=idx)},
+                starters_only={"rotowire"},
+                positions=pd.Series(["M", "M"], index=idx),
+                teams=pd.Series(["MCI", "MCI"], index=idx),
+                source_club_coverage={"rotowire": {"MCI": 11}},
+                gameweek=8, **extra)
+
+        # The share is how much of the omitted prior survives the blend, so at
+        # zero the omission says nothing and FFP's own figure stands.
+        assert _blend(omission_share=0.0).loc[2, "Start_Pct"] == pytest.approx(0.5)
+        assert _blend(omission_share=1.0).loc[2, "Start_Pct"] < 0.5
+
 
 class TestEachXIsOpinionIsRecorded:
     def test_every_source_gets_its_own_start_xi_column(self):

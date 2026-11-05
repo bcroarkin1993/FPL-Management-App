@@ -88,6 +88,27 @@ class TestUnchangedRunsWriteNothing:
         df, _ = projection_archive.load_pre(3)
         assert df["proj"].iloc[0] == 6.0
 
+    def test_identical_rows_and_metadata_are_not_rewritten(self, _isolated_archive):
+        meta = {"start_model_revision": 4, "start_model_constants": {"a": 1}}
+        projection_archive.save_pre(3, _pre(), meta)
+        before = (_isolated_archive / "GW03_pre.json").read_bytes()
+        assert not projection_archive.save_pre(3, _pre(), meta)
+        assert (_isolated_archive / "GW03_pre.json").read_bytes() == before
+
+    def test_changed_metadata_is_written_even_when_the_rows_match(self):
+        """Metadata is not decoration.
+
+        `start_model_constants` is what lets a replay be judged against the
+        constants that built the file. Skipping on rows alone meant a field
+        added to the metadata never reached a file already on disk -- and the
+        rows of a pre snapshot are usually identical from one hourly run to the
+        next, so "never" was the normal case rather than an edge one.
+        """
+        projection_archive.save_pre(3, _pre(), {"start_model_revision": 3})
+        assert projection_archive.save_pre(3, _pre(), {"start_model_revision": 4})
+        _, meta = projection_archive.load_pre(3)
+        assert meta["start_model_revision"] == 4
+
     def test_capture_time_survives_a_rewrite(self):
         """captured_at marks when this gameweek was first seen. Resetting it on
         every update would make the record of *when* we projected meaningless."""

@@ -299,6 +299,15 @@ def _pre_start(self_consistent=False, **over):
         "start_pct__fpl_ep": [1.00] * 10,
         "start_pct": [0.90, 0.85, 0.80, 0.85, 0.80, 0.95,
                       0.20, 0.15, 0.12, 0.05],
+        # The three engine inputs that are not projections. A snapshot the
+        # current collector writes records all three, and a replay without one
+        # of them is a replay of a different model -- so the fixture carries
+        # them, and the tests that drop one assert the refusal by its name.
+        # Neutral values by default (nobody has started, nobody is doubtful) so
+        # that every expectation elsewhere in this file is unaffected.
+        "starts": [0] * 10,
+        "status": ["a"] * 10,
+        "chance_of_playing": [np.nan] * 10,
     })
     for k, v in over.items():
         base[k] = v
@@ -349,6 +358,13 @@ def _engine_start_columns(pre: pd.DataFrame) -> pd.DataFrame:
         source_club_coverage={"rotowire": {
             k: int(v) for k, v in one.loc[priced, "team"].astype(str)
             .value_counts().items()}},
+        # Forwarded so the stored columns are what these inputs really produce.
+        # Leaving them out made the fixture self-consistent with a model that
+        # ignores the history floor and FPL's ceiling, which is not the model.
+        starts=one["starts"] if "starts" in one.columns else None,
+        status=one["status"] if "status" in one.columns else None,
+        chance_of_playing=(one["chance_of_playing"]
+                           if "chance_of_playing" in one.columns else None),
         gameweek=4,
     )
 
@@ -366,6 +382,13 @@ def _start_archive(monkeypatch):
     monkeypatch.setattr(acc.projection_archive, "load_actuals",
                         lambda gw: (state["actual"], {}))
     monkeypatch.setattr(acc.projection_archive, "scoreable_gameweeks", lambda: [4])
+    # Without this, `_starts_before` consults the *real* archive's actuals list,
+    # finds GW1-3 committed, and then reconstructs start counts out of this
+    # fixture's single actual frame returned three times over. Patched to the
+    # one gameweek the fixture has, reconstruction is correctly impossible and
+    # the start counts have to come from the pre frame -- which is what a real
+    # snapshot does.
+    monkeypatch.setattr(acc.projection_archive, "list_actuals", lambda: [4])
     return state
 
 
@@ -555,6 +578,148 @@ class TestFittingTheStartConstants:
         assert acc.MIN_IMPLIED_START > 0
 
 
+class TestASnapshotMustRecordWhatTheEngineReads:
+    """Revision 4 made two engine inputs irrecoverable from the file.
+
+    The constants used to be readable straight out of `start_pct__rotowire`,
+    because each cohort held exactly one value. Revision 4 floored the omitted
+    prior on each player's own start rate, so that column became per-player and
+    the recovery returned nothing -- which refused **every** snapshot the
+    current engine writes, the "broken by its own last answer" failure the
+    as-built machinery exists to prevent. Measured on the real GW9 file before
+    this: refused for want of constants, and once they were recovered it
+    replayed 0.610 away on the six players FPL had rated doubtful, because
+    FPL's ceiling was not archived either.
+    """
+
+    def test_a_snapshot_recording_every_input_replays_exactly(self, _start_archive):
+        """The round trip, with both of the inputs that used to break it live:
+        players who have started, and a player FPL rates doubtful."""
+        _start_archive["pre"] = _pre_start(
+            self_consistent=True,
+            starts=[3, 3, 2, 2, 1, 1, 2, 0, 0, 0],
+            chance_of_playing=[100, 75, np.nan, np.nan, np.nan, np.nan,
+                               np.nan, np.nan, np.nan, 0],
+            status=["a", "d", "a", "a", "a", "a", "a", "a", "a", "i"],
+        )
+        jobs = acc._start_replay_inputs()
+        assert len(jobs) == 1
+        fid = acc._replay_fidelity(jobs)
+        assert fid["refused"] == {}, fid["refused"]
+        assert fid["per_gameweek"][4] <= acc.REPLAY_TOLERANCE
+        assert [j["gameweek"] for j in fid["usable"]] == [4]
+
+    def test_the_history_floor_really_moved_the_column(self, _start_archive):
+        """Otherwise the test above would pass against a no-op.
+
+        A player every XI leaves out who has nonetheless been starting must not
+        sit on the bare positional prior -- that is the whole of revision 4, and
+        it is what makes the cohort's values per-player.
+        """
+        with_history = _pre_start(self_consistent=True,
+                                  starts=[3, 3, 2, 2, 1, 1, 3, 0, 0, 0])
+        without = _pre_start(self_consistent=True)
+        omitted = with_history["player_id"].isin([7, 8, 9, 10])
+        assert (with_history.loc[omitted, "start_pct__rotowire"].nunique() > 1)
+        assert (with_history.loc[omitted, "start_pct__rotowire"].max()
+                > without.loc[omitted, "start_pct__rotowire"].max())
+
+    @staticmethod
+    def _recover(starts):
+        pre = _pre_start(self_consistent=True, starts=starts)
+        one = pre.assign(gameweek=4).set_index("player_id")
+        priced = (pd.to_numeric(one["proj_start__rotowire"], errors="coerce")
+                  .gt(0).fillna(False))
+        return acc._snapshot_constants(one, priced, starts=one["starts"])
+
+    def test_the_prior_is_recovered_from_a_per_player_cohort(self, _start_archive):
+        """Recovery survives the floor having raised some of the cohort.
+
+        The prior is applied as `max(prior, w x rate)`, so the players it did
+        not raise are the ones still carrying it. Here player 7 has started
+        everything and is raised well above the midfield prior, and the cohort
+        still recovers it from his team-mates -- which the modal rule, reading
+        the cohort as one value, could not do.
+        """
+        floors, omitted = self._recover([3, 3, 2, 2, 1, 1, 3, 0, 0, 0])
+        # Only the positions present in each cohort are recoverable -- this
+        # club's XI has no forward in it -- so the comparison is per position
+        # over what was recovered.
+        assert floors and omitted
+        for pos, value in floors.items():
+            assert value == pytest.approx(projection_engine._start_floors()[pos])
+        for pos, value in omitted.items():
+            assert value == pytest.approx(projection_engine._omitted_starts()[pos])
+
+    def test_a_cohort_the_floor_raised_entirely_recovers_nothing(self, _start_archive):
+        """A wrong constant is worse than a refused gameweek.
+
+        The only omitted defender here has started every game, so his stored
+        value is the floor rather than the prior and nothing at that position
+        carries the constant. Reading the cohort minimum anyway would hand the
+        fitter a prior nothing ran, and the replay would then be judged against
+        a model that never existed.
+        """
+        assert self._recover([3, 3, 2, 2, 1, 1, 3, 3, 3, 0]) == (None, None)
+
+    def test_recorded_constants_beat_recovery(self, _start_archive, monkeypatch):
+        """A file that states its constants is believed over the column.
+
+        Recovery is the fallback for files written before the constants were
+        archived; it must not override a snapshot that says what built it, or a
+        retune would be read out of the column it changed.
+        """
+        stated = {"start_floors": {"M": 0.5, "D": 0.5, "G": 0.5, "F": 0.5},
+                  "omitted_starts": {"M": 0.11, "D": 0.11, "G": 0.11, "F": 0.11},
+                  "omitted_history_weight": 0.25, "omission_share": 0.6,
+                  "revision": projection_engine.START_MODEL_REVISION}
+        _start_archive["meta"] = dict(_start_archive["meta"],
+                                      start_model_constants=stated)
+        job = acc._start_replay_inputs()[0]
+        assert job["constants_recorded"]
+        assert job["as_built_floors"] == stated["start_floors"]
+        assert job["as_built_omitted"] == stated["omitted_starts"]
+
+    @pytest.mark.parametrize("dropped, expected", [
+        (["starts"], "player start counts"),
+        (["status", "chance_of_playing"], "FPL's availability"),
+    ])
+    def test_a_missing_input_is_refused_by_name_not_reported_as_drift(
+            self, _start_archive, dropped, expected):
+        """The distinction that matters to whoever reads the refusal.
+
+        An incomplete file and an engine that has changed produce the same
+        symptom -- a deviation -- and only one of them is a defect. Reporting
+        the first as drift sends the reader looking for a regression that is not
+        there.
+        """
+        _start_archive["pre"] = _pre_start(
+            self_consistent=True, starts=[3, 3, 2, 2, 1, 1, 2, 0, 0, 0],
+        ).drop(columns=dropped)
+        fid = acc._replay_fidelity(acc._start_replay_inputs())
+        assert expected in fid["refused"].get(4, "")
+        assert fid["per_gameweek"][4] != fid["per_gameweek"][4]   # NaN, not a number
+        assert not fid["usable"]
+
+    def test_start_counts_are_reconstructed_from_earlier_actuals(self, monkeypatch):
+        """So a snapshot written before the column existed is not lost.
+
+        Exact only when every earlier gameweek has an actuals file; a gap
+        understates a player's rate, which is a wrong replay rather than a
+        refused one, so it must return nothing instead.
+        """
+        actuals = {1: pd.DataFrame({"player_id": [1, 2], "started": [1, 0]}),
+                   2: pd.DataFrame({"player_id": [1, 2], "started": [1, 1]})}
+        monkeypatch.setattr(acc.projection_archive, "list_actuals", lambda: [1, 2])
+        monkeypatch.setattr(acc.projection_archive, "load_actuals",
+                            lambda gw: (actuals.get(gw), {}))
+        got = acc._starts_before(3)
+        assert got.loc[1] == 2 and got.loc[2] == 1
+
+        monkeypatch.setattr(acc.projection_archive, "list_actuals", lambda: [2])
+        assert acc._starts_before(3) is None
+
+
 class TestAgainstTheRealArchive:
     """The committed snapshots, not a fixture.
 
@@ -580,7 +745,7 @@ class TestAgainstTheRealArchive:
         """The fitter's own precondition, asserted rather than assumed.
 
         A snapshot the running engine cannot reproduce must be refused, not
-        quietly fitted on. There are two reasons it might be, and only one of
+        quietly fitted on. There are three reasons it might be, and only one of
         them is a defect:
 
         * It **predates the current start-model revision** -- the engine no
@@ -588,6 +753,14 @@ class TestAgainstTheRealArchive:
           written. Expected, attributable, and self-healing: the next
           pre-deadline capture is written by this engine. Every committed
           snapshot is in this state as of revision 2.
+        * It **does not record an input the start model reads** -- the player
+          start counts the omitted prior is floored on, or FPL's availability
+          ceiling. Replaying without one of those is replaying a different
+          model, so it is refused by the missing input's name. GW9 is in this
+          state: it carries both projected XIs and the constants recover, and
+          663 of its 669 players replay exactly, but the six FPL had rated
+          doubtful come back up to 0.61 high because the ceiling cannot be
+          reapplied. Also self-healing, from the capture that archives them.
         * It replays to a *numeric* deviation at the current revision. That is
           the archive and the engine having silently parted company, which is
           the thing this test exists to catch.
@@ -616,9 +789,18 @@ class TestAgainstTheRealArchive:
                 "every committed snapshot predates start-model revision %d, so "
                 "none is replayable yet: %s"
                 % (projection_engine.START_MODEL_REVISION, fidelity["refused"]))
+        complete = [j for j in current
+                    if j.get("constants_recorded") or j.get("as_built_floors")]
+        complete = [j for j in complete
+                    if j.get("starts") is not None and j.get("availability_recorded")]
+        if not complete:
+            pytest.skip(
+                "no snapshot at revision %d records every input the start model "
+                "reads, so none is replayable yet: %s"
+                % (projection_engine.START_MODEL_REVISION, fidelity["refused"]))
         assert fidelity["usable"], (
-            "snapshots at the current revision must replay: %s"
-            % fidelity["refused"])
+            "snapshots at the current revision that record every engine input "
+            "must replay: %s" % fidelity["refused"])
 
     def test_a_snapshot_at_the_current_revision_is_not_refused_for_its_revision(self):
         """The revision gate must not be a blanket refusal.
@@ -638,8 +820,15 @@ class TestAgainstTheRealArchive:
         assert not any("revision" in why
                        for why in fidelity["refused"].values()), fidelity["refused"]
         # And they are then judged numerically -- a real deviation, reported as
-        # one, for snapshots revision 2 did change the answer for.
-        assert all(d == d for d in fidelity["per_gameweek"].values())
+        # one, for snapshots revision 2 did change the answer for. The exception
+        # is a snapshot missing an engine *input*, which is refused by that
+        # input's name: there is no honest number to report for it, and calling
+        # it drift would accuse the engine of changing when the file is simply
+        # incomplete.
+        for gw, d in fidelity["per_gameweek"].items():
+            assert d == d or "does not record" in fidelity["refused"].get(gw, ""), (
+                "GW%s produced no deviation and no missing-input reason: %s"
+                % (gw, fidelity["refused"].get(gw)))
 
 
 class TestWhichSourceIsBest:

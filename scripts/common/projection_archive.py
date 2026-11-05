@@ -25,9 +25,11 @@ Two files per gameweek:
 
 **A write that changes nothing is skipped.** These files are committed by a
 scheduled workflow, so an hourly job that rewrote an identical file would
-produce an hourly commit. Rows are compared before writing and ``captured_at``
-is preserved when they match, which makes every commit in the history a real
-change in the projections.
+produce an hourly commit. Rows *and metadata* are compared before writing and
+``captured_at`` is preserved when they match, which makes every commit in the
+history a real change. Metadata counts because it is not decoration:
+``start_model_constants`` is what lets a replay be judged against the constants
+that built the file.
 
 Pure and Streamlit-free: the Actions collector imports this, and that workflow
 installs requirements best-effort.
@@ -74,6 +76,28 @@ def _rows_of(df: pd.DataFrame) -> list:
     return json.loads(out.to_json(orient="records"))
 
 
+#: Metadata keys that change on every run by construction, so comparing them
+#: would defeat the unchanged-write skip below.
+_VOLATILE_META = ("captured_at", "updated_at")
+
+
+def _meta_matches(existing: dict, meta: Optional[dict]) -> bool:
+    """Does the stored file already carry this metadata?
+
+    The skip exists so an hourly job that re-derives identical rows produces no
+    commit. But metadata is not decoration -- `start_model_constants` is what
+    lets the accuracy harness judge a replay against the constants that built
+    the file -- so a metadata-only change has to be written, or adding a field
+    silently never reaches the files already on disk.
+    """
+    for key, value in (meta or {}).items():
+        if key in _VOLATILE_META:
+            continue
+        if existing.get(key) != value:
+            return False
+    return True
+
+
 def _save(gameweek: int, kind: str, df: pd.DataFrame, meta: Optional[dict] = None,
           overwrite: bool = True) -> bool:
     if df is None or df.empty or gameweek is None:
@@ -91,7 +115,7 @@ def _save(gameweek: int, kind: str, df: pd.DataFrame, meta: Optional[dict] = Non
         if existing is not None:
             if not overwrite:
                 return False
-            if existing.get("rows") == rows:
+            if existing.get("rows") == rows and _meta_matches(existing, meta):
                 # Nothing changed. Keep the original capture time so the file is
                 # byte-identical and the scheduled commit is a no-op.
                 return False
