@@ -634,3 +634,124 @@ def compact_html(html: str) -> str:
     lines survives intact.
     """
     return " ".join(line.strip() for line in html.splitlines() if line.strip())
+
+
+# ---------------------------------------------------------------------------
+# Club colours for charts
+# ---------------------------------------------------------------------------
+
+#: Labels that appear in FPL's `team_name` but not in ``config.TEAM_COLORS``.
+#: Measured against the live bootstrap, "Ipswich Town" was the only mismatch --
+#: but the point of the map is that the next one costs a grey bar rather than a
+#: KeyError.
+_TEAM_COLOR_ALIASES = {
+    "Ipswich Town": "Ipswich",
+    "Manchester City": "Man City",
+    "Manchester United": "Man Utd",
+    "Man United": "Man Utd",
+    "Tottenham": "Spurs",
+    "Tottenham Hotspur": "Spurs",
+    "Nottingham Forest": "Nott'm Forest",
+    "Nottm Forest": "Nott'm Forest",
+    "Newcastle United": "Newcastle",
+    "Wolverhampton Wanderers": "Wolves",
+    "Brighton & Hove Albion": "Brighton",
+    "AFC Bournemouth": "Bournemouth",
+    "Leeds United": "Leeds",
+    "West Ham United": "West Ham",
+    "Sheffield United": "Sheffield Utd",
+}
+
+#: Fallback for a club with no colour on file. Deliberately a neutral grey
+#: rather than a palette colour: an unmapped club should look unmapped, not like
+#: somebody else.
+TEAM_COLOR_FALLBACK = "#8A8F98"
+
+#: Above this relative luminance a colour is too pale to tell from another pale
+#: one on a dark chart. Two clubs ship a white primary (Fulham and Spurs), so
+#: without a tie-break they render identically.
+_PALE_LUMINANCE = 0.80
+
+
+def _luminance(hex_color: str) -> float:
+    """Rec. 601 relative luminance, 0-1. Good enough to ask "is this pale?"."""
+    h = str(hex_color or "").lstrip("#")
+    if len(h) != 6:
+        return 0.5
+    try:
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return 0.5
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+
+
+def _mix(hex_color: str, amount: float, towards: int) -> str:
+    """Mix a colour ``amount`` of the way towards 255 (white) or 0 (black)."""
+    h = str(hex_color or "").lstrip("#")
+    if len(h) != 6:
+        return TEAM_COLOR_FALLBACK
+    try:
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return TEAM_COLOR_FALLBACK
+    f = lambda c: int(round(c + (towards - c) * amount))
+    return "#%02X%02X%02X" % (f(r), f(g), f(b))
+
+
+def _lighten(hex_color: str, amount: float = 0.55) -> str:
+    """Mix towards white, so a near-black club colour reads on a dark chart.
+    Spurs' navy secondary (#132257) is invisible as-is."""
+    return _mix(hex_color, amount, 255)
+
+
+def _darken(hex_color: str, amount: float = 0.32) -> str:
+    """Mix towards black, to separate two clubs that publish the *same* hex."""
+    return _mix(hex_color, amount, 0)
+
+
+def team_color_map(team_names, dark_background: bool = True) -> dict:
+    """``{team_name: hex}`` for a Plotly ``color_discrete_map``.
+
+    Charts coloured a club's own colour are read at a glance -- Haaland's bar in
+    Man City's sky blue says "City" before the label does, where Plotly's default
+    categorical palette assigns whatever colour the club happened to sort into
+    and reuses it for a different club on the next chart.
+
+    Two rules, both because of the dark chart background:
+
+    * **A colour is claimed once.** Several clubs collide: Bournemouth and Man
+      Utd publish the *same* hex (#DA291C), and Fulham and Spurs both publish a
+      white primary. Assignment walks the names in sorted order -- not
+      first-seen, so the same clubs get the same colours on every chart and
+      every rerun -- and the loser of a collision is shifted rather than
+      replaced, because a club's identity is in its hue:
+
+      - a **pale** primary falls back to a *lightened secondary* (Spurs' navy
+        becomes a periwinkle; a tint of white would still read as white), and
+      - any other primary is simply **darkened** (Man Utd stays red, a shade
+        deeper than Bournemouth). Jumping to the secondary here sent United to
+        grey, which is worse than a near-miss on the red.
+    * **An unmapped club is grey**, not a palette colour. It should look
+      unmapped rather than look like somebody else -- the same reasoning as the
+      matchup filter failing closed.
+    """
+    import config
+
+    palette = getattr(config, "TEAM_COLORS", {}) or {}
+    out, used = {}, set()
+    for name in sorted({str(n) for n in team_names if n is not None and str(n) != "nan"}):
+        entry = palette.get(name) or palette.get(_TEAM_COLOR_ALIASES.get(name, ""))
+        if not entry:
+            out[name] = TEAM_COLOR_FALLBACK
+            continue
+        primary = str(entry.get("primary") or "")
+        chosen = primary
+        if not primary:
+            chosen = TEAM_COLOR_FALLBACK
+        elif primary.upper() in used:
+            pale = dark_background and _luminance(primary) > _PALE_LUMINANCE
+            chosen = (_lighten(str(entry.get("secondary") or primary)) if pale
+                      else _darken(primary))
+        out[name] = chosen
+        used.add(chosen.upper())
+    return out

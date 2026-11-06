@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from scripts.common.text_helpers import team_color_map
 import plotly.express as px
 import streamlit as st
 from scripts.common.utils import (
@@ -391,6 +392,7 @@ def display_top_goal_scorers(player_statistics, position_filter, top_n=10):
         y=top_scorers['player'],  # Player names on y-axis
         x='goals_scored',
         color='team_name',
+        color_discrete_map=team_color_map(top_scorers['team_name']),
         text='goals_scored',  # Display Goals at the end of the bars
         title="🏆 Top Goal Scorers",
         labels={'player': 'Player', 'goals_scored': 'Goals', 'team_name': 'Team'},
@@ -438,6 +440,7 @@ def display_top_assisters(player_statistics, position_filter, top_n=10):
         y='player',
         x='assists',
         color='team_name',
+        color_discrete_map=team_color_map(top_assisters['team_name']),
         text='assists',  # Display Assists at the end of the bars
         title="🎯 Top Assist Providers",
         labels={'player': 'Player', 'assists': 'Assists', 'team_name': 'Team'},
@@ -486,6 +489,7 @@ def display_top_clean_sheets(player_statistics, clean_sheets_filter, top_n=10):
         y='player',
         x='clean_sheets',
         color='team_name',
+        color_discrete_map=team_color_map(top_clean_sheets['team_name']),
         text='clean_sheets',  # Display Clean Sheets at the end of the bars
         title="🧤 Clean Sheet Leaders",
         labels={'player': 'Player', 'clean_sheets': 'Clean Sheets', 'team_name': 'Team'},
@@ -572,8 +576,36 @@ def display_expected_vs_actual_goals(player_statistics, position_filter, team_fi
         yaxis_title="Actual Goal Involvements (Goals + Assists)",
         legend_title="Position",
     )
-    fig.update_xaxes(tickmode="linear", dtick=5, showgrid=True, zeroline=True)
-    fig.update_yaxes(showgrid=True, zeroline=True)
+    # **The ticks were hardcoded at dtick=5 on single-digit data.** Live at GW10
+    # the top ten players by xGI span 4.61 to 7.41, so the axis drew ticks at
+    # 0, 5 and 10 -- one of them inside the data -- and the chart could not be
+    # read. Plotly's own tick selection is fine here; the range is what needed
+    # fixing, not the labelling.
+    #
+    # Both axes are given the **same** range, because the thing this chart is
+    # for is the distance from the diagonal: a player at (6, 3) is
+    # underperforming by three goal involvements, and that is only legible if
+    # one unit is the same length on both axes.
+    _vals = pd.concat([
+        pd.to_numeric(filtered_data["expected_goal_involvements"], errors="coerce"),
+        pd.to_numeric(filtered_data["actual_goal_involvements"], errors="coerce"),
+    ]).dropna()
+    _hi = float(_vals.max()) if not _vals.empty else 1.0
+    _hi = max(1.0, _hi) * 1.12
+    fig.update_xaxes(range=[0, _hi], showgrid=True, zeroline=True,
+                     ticks="outside", nticks=8)
+    fig.update_yaxes(range=[0, _hi], showgrid=True, zeroline=True,
+                     ticks="outside", nticks=8, scaleanchor="x", scaleratio=1)
+
+    # The break-even line. Expected-versus-actual is a chart about over- and
+    # under-performance, and without the diagonal a reader has to do the
+    # subtraction by eye on two differently-scaled axes. Above it is
+    # outperforming xGI, below it is due a correction.
+    fig.add_shape(type="line", x0=0, y0=0, x1=_hi, y1=_hi,
+                  line=dict(color="#6b7280", width=1, dash="dash"), layer="below")
+    fig.add_annotation(x=_hi * 0.97, y=_hi * 0.97, text="xGI = actual",
+                       showarrow=False, xanchor="right", yanchor="bottom",
+                       font=dict(color="#9aa0a6", size=10))
 
     # Display chart in Streamlit
     st.plotly_chart(fig, use_container_width=True)

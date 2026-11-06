@@ -13,6 +13,10 @@ from scripts.common.text_helpers import (
     format_last_updated,
     format_time_until,
     to_display_name,
+
+    team_color_map,
+    TEAM_COLOR_FALLBACK,
+    _luminance,
 )
 
 
@@ -301,3 +305,55 @@ class TestNoDisplayNameRepeatsAWord:
         rendered = to_display_name(first, second, web) or ""
         tokens = [t.lower() for t in rendered.split()]
         assert len(tokens) == len(set(tokens)), rendered
+
+
+class TestTeamColorMap:
+    """Club colours for charts.
+
+    Plotly's default categorical palette assigns whatever colour a club happens
+    to sort into and reuses it for a different club on the next chart. Haaland's
+    bar in Man City's sky blue says "City" before the label does.
+    """
+
+    def test_a_club_gets_its_own_colour(self):
+        got = team_color_map(["Man City", "Arsenal", "Liverpool"])
+        assert got["Man City"] == "#6CABDD"      # the sky blue, as asked for
+        assert got["Arsenal"] == "#EF0107"
+
+    def test_an_alias_resolves(self):
+        """`team_name` from the bootstrap says "Ipswich Town"; the palette says
+        "Ipswich". Measured live, that was the only mismatch of twenty."""
+        assert team_color_map(["Ipswich Town"])["Ipswich Town"] == "#3A64A3"
+        assert team_color_map(["Manchester City"])["Manchester City"] == "#6CABDD"
+
+    def test_an_unmapped_club_is_grey_not_a_palette_colour(self):
+        """It should look unmapped rather than look like somebody else."""
+        assert team_color_map(["Atlantis FC"])["Atlantis FC"] == TEAM_COLOR_FALLBACK
+
+    def test_two_clubs_sharing_a_hex_are_separated(self):
+        """Bournemouth and Man Utd both publish #DA291C. United must stay *red*
+        -- falling back to their black secondary sent them to grey, which is
+        worse than a near-miss on the shade."""
+        got = team_color_map(["Bournemouth", "Man Utd"])
+        assert got["Bournemouth"] != got["Man Utd"]
+        assert got["Man Utd"].upper().startswith("#9")   # a deeper red
+
+    def test_two_white_clubs_are_separated_and_both_visible(self):
+        """Fulham and Spurs both publish a white primary. The loser takes a
+        *lightened* secondary, because Spurs' navy and Fulham's black are both
+        invisible on a dark panel."""
+        got = team_color_map(["Fulham", "Spurs"])
+        assert got["Fulham"] != got["Spurs"]
+        for hexv in got.values():
+            assert _luminance(hexv) > 0.3, "every bar must be visible on dark"
+
+    def test_assignment_is_stable_across_calls_and_orders(self):
+        """Sorted rather than first-seen, so the same two clubs get the same two
+        colours on every chart and every Streamlit rerun."""
+        a = team_color_map(["Spurs", "Fulham", "Man Utd", "Bournemouth"])
+        b = team_color_map(["Bournemouth", "Man Utd", "Fulham", "Spurs"])
+        assert a == b
+
+    def test_it_tolerates_junk(self):
+        got = team_color_map([None, float("nan"), "", "Arsenal"])
+        assert got["Arsenal"] == "#EF0107"

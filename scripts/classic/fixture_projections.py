@@ -274,6 +274,49 @@ def _build_squad_from_elements(element_ids: list, bootstrap: dict) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
+#: How the engine labels each projected-XI source on the frame.
+_XI_SOURCE_LABELS = {"rotowire": "Rotowire", "sportsgambler": "Sportsgambler"}
+
+
+def _xi_split_badge(row) -> str:
+    """A badge when the projected XIs disagree about whether this player starts.
+
+    The engine combines the XIs **unanimous-to-bench**: any source naming a
+    player promotes him, and he is benched only where every source with an
+    opinion leaves him out. That asymmetry is deliberate -- an unresolved name
+    is indistinguishable from a benching, so a matching failure there would not
+    degrade a projection but invert it -- and it means a player can carry a
+    starter's number here while one publication has him on the bench.
+
+    Reported from the app, and the reconciliation this exists for: Rayan Cherki
+    rendered in the XI at 5.20 projected, promoted to the midfield start floor
+    of 0.86 by Sportsgambler, while Rotowire -- which is what the app's own
+    Projected Lineups page shows -- left him out of a *complete* Man City
+    eleven. Both pages were reporting their source faithfully. Nothing said they
+    were different sources.
+
+    Renders "" unless the sources actually disagree, so the common case is
+    unchanged. Only a club whose XI resolved completely can bench anyone, so a
+    0 here is a real omission rather than an unresolved name.
+    """
+    out_names, in_names = [], []
+    for key, label in _XI_SOURCE_LABELS.items():
+        val = pd.to_numeric(row.get("Start_XI__%s" % key), errors="coerce")
+        if pd.isna(val):
+            continue                      # no opinion is not a vote either way
+        (out_names if float(val) <= 0 else in_names).append(label)
+    # A badge means the sources *disagree*. Counting against the number of
+    # labels instead of the number with an **opinion** flagged a player one
+    # source benched and the other had not published on -- where the engine
+    # benches him too, so there is nothing to reconcile.
+    if not out_names or not in_names:
+        return ""
+    names = out_names
+    return ('<span class="xi-split" title="%s %s him out of the XI; another '
+            'source names him. The projection takes the optimistic view.">XI?</span>'
+            % (" and ".join(names), "leave" if len(names) > 1 else "leaves"))
+
+
 def _assign_optimal_captain(squad_df: pd.DataFrame) -> pd.DataFrame:
     """
     Assign captain to the highest projected scorer.
@@ -394,6 +437,9 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
         .player-card.upcoming { border-left-color: #6c757d; }
         .player-info { flex: 1; min-width: 0; }
         .player-name { font-weight: 600; font-size: 13px; line-height: 18px; color: #1a1a2e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .xi-split { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 7px;
+                    background: #fff3cd; color: #8a6116; font-size: 10px; font-weight: 700;
+                    vertical-align: middle; }
         .player-team { font-size: 10px; line-height: 14px; color: #888; text-transform: uppercase; }
         .player-matchup { font-size: 10px; line-height: 14px; color: #666; }
         .player-points { text-align: right; min-width: 70px; }
@@ -490,12 +536,24 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
                 card_class = "player-card"
                 status_html = ""
 
+            # **When the two projected XIs disagree, say so.** The engine is
+            # unanimous-to-bench -- any source naming a player promotes him to
+            # the positional start floor -- so a player one page leaves out can
+            # still carry a starter's projection here. Reported from the app:
+            # Rayan Cherki appeared in this XI on 5.20 projected while the app's
+            # own Projected Lineups page (Rotowire) had him out of Man City's
+            # eleven. Both numbers were right; nothing reconciled them.
+            #
+            # `Start_XI__<source>` is the engine's own per-source record, so this
+            # renders a decision already made rather than re-deriving one.
+            split_html = _xi_split_badge(row)
+
             matchup_html = f'<div class="player-matchup">{matchup}</div>' if matchup else ""
 
             html += f"""
             <div class="{card_class}">
                 <div class="player-info">
-                    <div class="player-name">{player_name}{captain_html}{status_html}</div>
+                    <div class="player-name">{player_name}{captain_html}{status_html}{split_html}</div>
                     <div class="player-team">{team}</div>
                     {matchup_html}
                 </div>
