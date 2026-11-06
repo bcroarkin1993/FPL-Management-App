@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 
 from scripts.common import projection_engine
+from scripts.common import projection_engine as pe
 from scripts.common.projection_engine import (
     blend_aligned,
     build_projections,
@@ -1181,3 +1182,123 @@ class TestTheOmissionShareIsNotThePointsWeight:
         """The app and its own fallback disagreeing is worse than either value."""
         import config
         assert projection_engine.DEFAULT_WEIGHTS == config.PROJECTION_SOURCE_WEIGHTS
+
+
+class TestDeputyStartWeeks:
+    """A deputy starts only while the man ahead of him is out.
+
+    Reported from the app at GW10: Chelsea's deputy goalkeeper carried
+    `Proj` 3.63 and `Proj_Next3` 10.57 -- a forward rate 0.96 of his this-week
+    number, i.e. assuming he keeps the gloves all three weeks -- while the first
+    choice was out. No source can correct this: FFP publishes one `start_pct`
+    for all six forecast weeks and the projected XIs describe this week only.
+    """
+
+    def _slot(self, **kw):
+        """Two keepers at one club: a #1 with 6 starts and a deputy with 2."""
+        idx = [1, 2]
+        base = dict(
+            teams=pd.Series(["CHE", "CHE"], index=idx),
+            positions=pd.Series(["G", "G"], index=idx),
+            starts=pd.Series([6, 2], index=idx),
+            start_pct=pd.Series([0.0, 0.95], index=idx),
+            status=pd.Series(["i", "a"], index=idx),
+            news=pd.Series(["Head injury - Expected back 22 Nov", ""], index=idx),
+            index=idx, gameweek=10,
+        )
+        base.update(kw)
+        return base
+
+    def test_a_stated_return_caps_the_deputy(self):
+        got = pe._deputy_start_weeks(**self._slot())
+        assert pd.isna(got.iloc[0]), "the absent player is not his own deputy"
+        assert got.iloc[1] > 0
+
+    def test_an_unknown_return_date_does_not(self):
+        """The live case. "Unknown" means unknown, and a decay built on the
+        status default would invent the fact the text declines to give -- the
+        card carries the dependency instead."""
+        got = pe._deputy_start_weeks(**self._slot(
+            news=pd.Series(["Head injury - Unknown return date", ""], index=[1, 2])))
+        assert got.isna().all()
+
+    def test_a_regular_starter_is_not_a_deputy(self):
+        """Without this the rule is goalkeeper logic applied to positions where
+        five players start. Live it flagged an established Villa left-back with
+        6 starts in 9 gameweeks and clipped his horizon from 10.67 to 3.09."""
+        got = pe._deputy_start_weeks(**self._slot(
+            starts=pd.Series([7, 6], index=[1, 2])))     # 6/9 = 0.67 > the cap
+        assert got.isna().all()
+
+    def test_an_absent_backup_does_not_demote_the_first_choice(self):
+        """Backwards otherwise: the #1 keeps his place when his deputy is hurt."""
+        got = pe._deputy_start_weeks(**self._slot(
+            starts=pd.Series([2, 6], index=[1, 2]),      # the absent man is the backup
+            start_pct=pd.Series([0.0, 0.95], index=[1, 2])))
+        assert got.isna().all()
+
+    def test_a_third_choice_is_not_capped(self):
+        """He is not starting anyway, so the cap would be a no-op dressed as a
+        judgement."""
+        got = pe._deputy_start_weeks(**self._slot(
+            start_pct=pd.Series([0.0, 0.02], index=[1, 2])))
+        assert got.isna().all()
+
+    def test_a_different_position_is_not_a_blocker(self):
+        got = pe._deputy_start_weeks(**self._slot(
+            positions=pd.Series(["G", "D"], index=[1, 2])))
+        assert got.isna().all()
+
+    def test_a_different_club_is_not_a_blocker(self):
+        got = pe._deputy_start_weeks(**self._slot(
+            teams=pd.Series(["CHE", "ARS"], index=[1, 2])))
+        assert got.isna().all()
+
+    def test_no_starts_column_fails_open(self):
+        """No depth chart, no opinion -- the same fail-open as the omission
+        penalty's club-coverage test."""
+        got = pe._deputy_start_weeks(**self._slot(starts=None))
+        assert got.isna().all()
+
+    def test_the_soonest_return_ends_the_run(self):
+        """Two men ahead of him: he keeps starting only until the first is back."""
+        idx = [1, 2, 3]
+        got = pe._deputy_start_weeks(
+            teams=pd.Series(["CHE"] * 3, index=idx),
+            positions=pd.Series(["D"] * 3, index=idx),
+            starts=pd.Series([8, 7, 1], index=idx),
+            start_pct=pd.Series([0.0, 0.0, 0.9], index=idx),
+            status=pd.Series(["i", "i", "a"], index=idx),
+            news=pd.Series(["Out - Expected back 2 Jan",
+                            "Out - Expected back 21 Nov", ""], index=idx),
+            index=idx, gameweek=10)
+        a = pe._deputy_start_weeks(
+            teams=pd.Series(["CHE"] * 3, index=idx),
+            positions=pd.Series(["D"] * 3, index=idx),
+            starts=pd.Series([8, 7, 1], index=idx),
+            start_pct=pd.Series([0.0, 0.0, 0.9], index=idx),
+            status=pd.Series(["i", "a", "a"], index=idx),
+            news=pd.Series(["Out - Expected back 2 Jan", "", ""], index=idx),
+            index=idx, gameweek=10)
+        assert got.iloc[2] < a.iloc[2], (
+            "the nearer return must shorten the deputy's run, not the further one")
+
+
+class TestTheDeputyCapOnlyEverLowers:
+    def test_it_never_raises_a_horizon(self):
+        """A cap is a cap. Verified live too: 6 horizons lowered, none raised."""
+        idx = [1, 2]
+        out = pe.blend_aligned(
+            index=idx,
+            per_source_raw={"rotowire": pd.Series([5.0, 4.0], index=idx)},
+            per_source_basis={"rotowire": "conditional"},
+            per_source_next3={"rotowire": pd.Series([15.0, 12.0], index=idx)},
+            per_source_next3_basis={"rotowire": "conditional"},
+            positions=pd.Series(["G", "G"], index=idx),
+            teams=pd.Series(["CHE", "CHE"], index=idx),
+            starts=pd.Series([6, 2], index=idx),
+            status=pd.Series(["i", "a"], index=idx),
+            news=pd.Series(["Head injury - Expected back 22 Nov", ""], index=idx),
+            gameweek=10,
+        )
+        assert out.loc[2, "Proj_Next3"] <= 15.0

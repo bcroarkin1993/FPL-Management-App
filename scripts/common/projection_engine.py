@@ -40,7 +40,11 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from scripts.common.injury_helpers import games_to_miss_series
+from scripts.common.injury_helpers import (
+    OUT_OF_SQUAD_STATUSES,
+    games_to_miss_series,
+    news_stated_games_to_miss,
+)
 from scripts.common.name_matching import ReferenceMatcher
 from scripts.common.projection_sources import (
     BASIS_CONDITIONAL,
@@ -80,6 +84,23 @@ DEFAULT_WEIGHTS = {"rotowire": 0.2, "ffp": 0.8, "fpl_ep": 0.0, "odds": 0.0}
 #: must track it. The measurement behind each value lives at their definitions in
 #: ``config.py``; both were fitted by ``projection_accuracy.fit_start_constants()``
 #: replaying this module over the archive.
+#: A player who already starts this often is not deputising for anybody -- he
+#: is a regular, and an injured team-mate does not make his own place
+#: temporary. **Without this the rule generalised goalkeeper logic to positions
+#: where five players start**: measured live it flagged 12 players, among them
+#: Ian Maatsen (6 starts in 9 gameweeks, an established Villa left-back) purely
+#: because a defender with 7 starts was out, and clipped his horizon from 10.67
+#: to 3.09. Goalkeeper is the only position with exactly one starter, and the
+#: signature that generalises is not "someone ahead of me is hurt" but **"I do
+#: not usually start and this week I do"**.
+DEPUTY_MAX_START_RATE = 0.5
+
+#: A player below this resolved start probability is not deputising for anyone
+#: -- he is third choice, and capping his horizon would be a no-op dressed as a
+#: judgement. Deliberately permissive: the point is to exclude the clearly
+#: not-playing, not to second-guess the start model.
+DEPUTY_MIN_START_PCT = 0.5
+
 DEFAULT_START_FLOORS = {"G": 0.80, "D": 0.75, "M": 0.86, "F": 0.65}
 
 #: The other half of the same signal: what a starters-only source's *silence*
@@ -1241,7 +1262,142 @@ def blend_aligned(
             capped = np.minimum(current.fillna(cap), cap)
             out["Proj_Next3"] = current.where(~flagged, capped)
 
+    # --- A deputy starts only while the man ahead of him is out --------------
+    #
+    # The cap above is the absent player's own horizon. **Nothing asked who is
+    # playing instead**, and the answer is not recoverable from any source: FFP
+    # publishes one `start_pct` for all six forecast weeks, so its horizon is
+    # uniformly optimistic, and the projected XIs describe this gameweek only.
+    #
+    # Reported from the app. Chelsea's first-choice goalkeeper was out and his
+    # deputy carried `Proj` 3.63 with `Proj_Next3` 10.57 -- a forward rate of
+    # 3.47, i.e. 0.96 of his this-week number, assuming he keeps the gloves all
+    # three weeks. The Waiver Wire then offered him as a rest-of-season upgrade
+    # worth +0.26 points a gameweek, when an early return would have made the
+    # same move worth **-6.16** over the window.
+    #
+    # This is the exact mirror of the cap above and shares its arithmetic:
+    # `Proj_Start x weeks he is expected to start`.
+    #
+    # **Gated on a duration the news actually states**, via
+    # `news_stated_games_to_miss` rather than the `stated_games_to_miss` the cap
+    # above uses. That is the difference between a discount and an assertion: the
+    # looser gate accepts an out-of-squad status code, and "Head injury - Unknown
+    # return date" then yields a 4-or-5 gameweek absence that is a bucket default,
+    # not a read. Capping a deputy on that would invent the very fact the text
+    # declines to give. A player with no stated return keeps his full horizon and
+    # the *card* says what it rests on instead.
+    #
+    # The incumbent is identified by **season starts**, the only ranking signal
+    # the engine already holds: a club-and-position mate who is absent and has
+    # started strictly more often. Without `starts` there is no depth chart and
+    # the cap does not fire, which is the same fail-open as the omission
+    # penalty's club-coverage test.
+    if (HORIZON_GWS > 0 and teams is not None and positions is not None
+            and starts is not None and news is not None):
+        deputy_weeks = _deputy_start_weeks(
+            teams=teams, positions=positions, starts=starts, news=news,
+            status=status, start_pct=start_pct, index=index, deadlines=deadlines,
+            gameweek=gameweek)
+        is_deputy = deputy_weeks.notna()
+        if is_deputy.any():
+            dep_cap = (pd.to_numeric(out["Proj_Start"], errors="coerce")
+                       * deputy_weeks.clip(lower=0, upper=HORIZON_GWS))
+            current = pd.to_numeric(out["Proj_Next3"], errors="coerce")
+            out["Proj_Next3"] = current.where(
+                ~is_deputy, np.minimum(current.fillna(dep_cap), dep_cap))
+            out["Deputy_Weeks"] = deputy_weeks
+
     out["Proj_GW"] = gameweek
+    return out
+
+
+def _deputy_start_weeks(*, teams, positions, starts, news, status, start_pct,
+                        index, deadlines=None, gameweek=None):
+    """Weeks each deputy is expected to keep starting, NaN for everyone else.
+
+    A *deputy* here is a player who (a) is expected to start now, (b) does **not
+    usually** start, (c) has a club-and-position mate who is absent with a
+    **stated** return inside the horizon, and (d) has started strictly fewer
+    games this season than that absent player. All four are needed:
+
+    * Without (a) the cap would fire on third-choice players who are not
+      starting anyway, where it is a no-op at best.
+    * Without (b) the rule is goalkeeper logic applied to positions where five
+      players start. Measured live it flagged 12 players, Ian Maatsen among them
+      -- an established Villa left-back with 6 starts in 9 gameweeks -- purely
+      because a defender with more starts was out, and clipped his horizon from
+      10.67 to 3.09. **The signature that generalises is "I do not usually start
+      and this week I do", not "someone ahead of me is hurt".**
+    * Without (c) it would run on a guessed absence -- the thing it exists to
+      avoid. ``news_stated_games_to_miss`` returns None for "Unknown return
+      date", so those players keep their full horizon.
+    * Without (d) it would fire on the *established* starter whenever his backup
+      is injured, which is backwards: an absent deputy does not cost the first
+      choice his place. Season starts is the only depth signal the engine holds,
+      and it is the same column the omitted-prior history floor already reads.
+
+    The longest stated absence at the club and position wins, since the deputy
+    keeps starting until the **first** of them is back -- which is the shortest.
+    Hence ``min`` over the absentees he is behind.
+    """
+    idx = pd.Index(index)
+
+    def _col(val, dtype="object"):
+        """``val`` aligned to ``idx``; an all-null Series when it is absent."""
+        if val is None:
+            return pd.Series(pd.NA, index=idx, dtype="object")
+        if not isinstance(val, pd.Series):
+            val = pd.Series(val, index=idx)
+        return val.reindex(idx).astype(dtype)
+
+    teams = _col(teams)
+    positions = _col(positions)
+    starts_n = pd.to_numeric(_col(starts), errors="coerce")
+    news_s = _col(news)
+    status_s = _col(status)
+    sp = pd.to_numeric(_col(start_pct), errors="coerce")
+    elapsed = max(0, int(gameweek) - 1) if gameweek else 0
+
+    out = pd.Series(np.nan, index=idx, dtype="float64")
+
+    # Who is absent, and for how many gameweeks the *news* says so.
+    absent_weeks: Dict[Any, float] = {}
+    for i in idx:
+        st = status_s.get(i)
+        st = "" if st is None or (isinstance(st, float) and np.isnan(st)) else str(st).lower()
+        if st not in OUT_OF_SQUAD_STATUSES:
+            continue
+        weeks = news_stated_games_to_miss(news_s.get(i), deadlines)
+        if weeks is not None and weeks > 0:
+            absent_weeks[i] = float(weeks)
+    if not absent_weeks:
+        return out
+
+    # Group the absentees by club and position so the lookup is one pass.
+    by_slot: Dict[Any, list] = {}
+    for i, weeks in absent_weeks.items():
+        by_slot.setdefault((teams.get(i), positions.get(i)), []).append(
+            (weeks, starts_n.get(i)))
+
+    for i in idx:
+        if i in absent_weeks:
+            continue
+        if not (sp.get(i) is not None and float(sp.get(i) or 0) >= DEPUTY_MIN_START_PCT):
+            continue
+        mine_starts = starts_n.get(i)
+        if elapsed and not pd.isna(mine_starts):
+            if float(mine_starts) / elapsed > DEPUTY_MAX_START_RATE:
+                continue        # a regular, not a deputy
+        ahead = by_slot.get((teams.get(i), positions.get(i)))
+        if not ahead:
+            continue
+        mine = starts_n.get(i)
+        mine = -1.0 if pd.isna(mine) else float(mine)
+        # Only absentees who outrank him on season starts make him a deputy.
+        weeks = [w for w, s in ahead if not pd.isna(s) and float(s) > mine]
+        if weeks:
+            out.at[i] = min(weeks)
     return out
 
 

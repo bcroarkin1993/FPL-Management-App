@@ -10,7 +10,13 @@ from datetime import datetime
 
 import config
 from openai import OpenAI
-from scripts.common.injury_helpers import estimate_games_to_miss
+from scripts.common.injury_helpers import (
+    ABSENCE_FROM_NEWS,
+    OUT_OF_SQUAD_STATUSES,
+    absence_estimate,
+    estimate_games_to_miss,
+)
+from scripts.common.projection_engine import DEPUTY_MAX_START_RATE
 from scripts.common.error_helpers import get_logger
 
 _logger = get_logger("fpl_app.draft.waiver_wire")
@@ -40,6 +46,7 @@ from scripts.common.fpl_draft_api import (
 )
 from scripts.common.claim_value import (
     HORIZON_GWS,
+    MIN_FLOOR_POOL,
     LANE_HOLD,
     LANE_RENT,
     recommended_lane,
@@ -1295,6 +1302,95 @@ def _add_injury_data(df: pd.DataFrame, fpl_stats: pd.DataFrame) -> pd.DataFrame:
 # TRANSFER SUGGESTIONS
 # ---------------------------
 
+def _attach_minutes_dependency(df: pd.DataFrame, fpl_stats: pd.DataFrame,
+                               current_gw: int) -> pd.DataFrame:
+    """Whose absence is this player starting because of, and for how long.
+
+    **Reported from the app.** Chelsea's deputy goalkeeper was offered as a
+    rest-of-season upgrade worth +0.26 points a gameweek. He starts only because
+    the first choice is out with a "Head injury - Unknown return date", and the
+    same move is worth **-6.16** over the window if that man is back next week.
+    Nothing on the card said so: `add_injury` reports the *add's* own fitness,
+    and he is perfectly fit.
+
+    The engine caps a deputy's horizon where the incumbent has a **stated**
+    return (`projection_engine._deputy_start_weeks`). For an unstated one it
+    deliberately does not -- "unknown" means unknown, and a decay built on the
+    status default would invent the fact the text declines to give. That is
+    exactly the case where the card has to carry the dependency instead, so this
+    reports on **both**, with the provenance of the estimate attached: "est. 4
+    GW (status)" is a very different claim from "back 22 Nov".
+
+    Writes `Dep_Blocker` / `Dep_News` / `Dep_Weeks` / `Dep_Source`, all empty
+    where the player's minutes depend on nobody.
+    """
+    out = df.copy()
+    for col in ("Dep_Blocker", "Dep_News", "Dep_Source"):
+        out[col] = ""
+    out["Dep_Weeks"] = np.nan
+    if out.empty or fpl_stats is None or fpl_stats.empty:
+        return out
+    need = {"Team", "Position", "status", "starts"}
+    if need - set(fpl_stats.columns) or need - set(out.columns) - {"status", "starts"}:
+        return out
+
+    # The blocker's name is rendered on a card, so resolve it the way every
+    # other surface does. `fpl_stats` carries the legal name, which is what
+    # nobody says out loud ("Emiliano Martínez Romero").
+    ref = fpl_stats.copy()
+    if "Display_Name" not in ref.columns:
+        ref = _attach_display_names(ref)
+    ref["_starts"] = pd.to_numeric(ref.get("starts"), errors="coerce").fillna(0)
+    absent = ref[ref["status"].astype(str).str.lower().isin(OUT_OF_SQUAD_STATUSES)]
+    if absent.empty:
+        return out
+
+    # A loan or a permanent exit is not a return anyone is waiting on, so the
+    # deputy's place is not temporary -- `u` players are excluded by news rather
+    # than by status, since the status alone cannot tell the two apart.
+    absent = absent[~absent["news"].astype(str).str.contains(
+        "has joined|has left|loan", case=False, na=False)]
+    if absent.empty:
+        return out
+
+    deadlines = gameweek_deadlines()
+    by_slot: Dict[Any, List[Dict[str, Any]]] = {}
+    for _, r in absent.iterrows():
+        weeks, source = absence_estimate(r.get("news"),
+                                         r.get("chance_of_playing_next_round"),
+                                         r.get("status"), deadlines=deadlines)
+        by_slot.setdefault((r.get("Team"), r.get("Position")), []).append(
+            # `display_of` owns the Display_Name -> Player -> Web_Name order and
+            # the NaN handling; re-deriving it here is what the guard in
+            # tests/common/test_display_names.py forbids, and rightly.
+            {"name": _display_of(r),
+             "news": r.get("news") or "", "weeks": weeks, "source": source,
+             "starts": float(r["_starts"])})
+
+    own_starts = pd.to_numeric(out.get("starts"), errors="coerce").fillna(0)
+    elapsed = max(1, int(current_gw or 1) - 1)
+    for idx in out.index:
+        ahead = by_slot.get((out.at[idx, "Team"], out.at[idx, "Position"]))
+        if not ahead:
+            continue
+        mine = float(own_starts.get(idx, 0))
+        # Same depth rule as the engine's cap: only a *more established*
+        # club-mate at the position makes this player a stand-in, and a player
+        # who already starts most weeks is a regular rather than a deputy.
+        if mine / elapsed > DEPUTY_MAX_START_RATE:
+            continue
+        blockers = [b for b in ahead if b["starts"] > mine]
+        if not blockers:
+            continue
+        # The one back soonest is the one who ends the run.
+        first = min(blockers, key=lambda b: b["weeks"])
+        out.at[idx, "Dep_Blocker"] = str(first["name"])
+        out.at[idx, "Dep_News"] = str(first["news"])
+        out.at[idx, "Dep_Weeks"] = float(first["weeks"])
+        out.at[idx, "Dep_Source"] = str(first["source"])
+    return out
+
+
 def _build_rationale(drop: pd.Series, add: pd.Series) -> str:
     """Generate a concise human-readable explanation for a swap."""
     parts = []
@@ -1390,7 +1486,7 @@ def _claim_points_rate(row) -> float:
 
 def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef,
                       outlook=None, points_gain=0.0, lane=LANE_HOLD,
-                      release_cost=None, floor=None):
+                      release_cost=None, floor=None, thin_wire=False):
     """One suggestion card's payload.
 
     Extracted from the middle of the search loop so that loop can be read as
@@ -1443,6 +1539,15 @@ def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef,
         # is going back on the wire next week -- so the card carries the release
         # cost as its reason rather than a percentile gap.
         'lane': lane,
+        # Whose absence the add's minutes depend on. `add_injury` reports his
+        # *own* fitness and he is typically perfectly fit, which is exactly why
+        # the Penders card read as safe.
+        'add_blocker': str(best_avail.get('Dep_Blocker', '') or ''),
+        'add_blocker_news': str(best_avail.get('Dep_News', '') or ''),
+        'add_blocker_weeks': (None if pd.isna(best_avail.get('Dep_Weeks', np.nan))
+                              else float(best_avail.get('Dep_Weeks'))),
+        'add_blocker_source': str(best_avail.get('Dep_Source', '') or ''),
+        'thin_wire': thin_wire,
         'release_cost': (None if release_cost is None or pd.isna(release_cost)
                          else round(float(release_cost), 2)),
         'position_floor': (None if floor is None else round(float(floor), 2)),
@@ -1663,6 +1768,14 @@ def _compute_transfer_suggestions(
         _rel = _release_cost(roster_pos, floors, horizon=horizon)
         _drop_release = {idx: _rel.get(idx) for idx in roster_pos.index}
 
+        # **No floor means nothing to fall back on if the move reverses.** It is
+        # the same fact `waiver_floors` refused to quote a number for, seen from
+        # the manager's side: live there was exactly one available goalkeeper, so
+        # a GK claim that goes wrong cannot be undone. The hold lane has no floor
+        # gate of its own -- it recommended the deputy keeper anyway -- so the
+        # warning has to reach the card.
+        _thin_wire = floors.get(pos) is None and len(avail_pos) < MIN_FLOOR_POOL
+
         pos_debug_pairs = []
         roster_iter = (roster_sorted if roster_candidates is None
                        else roster_sorted.head(roster_candidates))
@@ -1783,7 +1896,7 @@ def _compute_transfer_suggestions(
                 cand['drop'], cand['add'], pos, cand['score'], depth_map, _ef,
                 outlook, points_gain=cand['points'], lane=LANE_HOLD,
                 release_cost=_drop_release.get(cand['drop_idx']),
-                floor=floors.get(pos),
+                floor=floors.get(pos), thin_wire=_thin_wire,
             ))
             used_drops.add(cand['drop_idx'])
             used_adds.add(cand['add_idx'])
@@ -1864,7 +1977,7 @@ def _compute_transfer_suggestions(
                     # that reason.
                     points_gain=cand['gain'], lane=LANE_RENT,
                     release_cost=_drop_release.get(cand['drop_idx']),
-                    floor=floors.get(pos),
+                    floor=floors.get(pos), thin_wire=_thin_wire,
                 ))
                 r_drops.add(cand['drop_idx'])
                 r_adds.add(cand['add_idx'])
@@ -2399,9 +2512,45 @@ def _render_suggestion_cards(suggestions, pos_labels, mgw_label):
         # the app has -- which *understates* the cost of releasing a genuinely
         # good player, so the number is shown rather than buried.
         #
-        # Renders to "" for a hold card, which is exactly the optional fragment
-        # `compact_html` exists for: a blank line ends the HTML block and Markdown
-        # then prints the closing </div> on screen as literal text.
+        # Whose absence this add's minutes rest on, and how well we know it.
+        #
+        # This and the two fragments below render to "" most of the time, which
+        # is exactly the optional-fragment case `compact_html` exists for: a
+        # blank line ends the HTML block and Markdown then prints the closing
+        # </div> on screen as literal text.
+        blocker_html = ""
+        if s.get('add_blocker'):
+            _w = s.get('add_blocker_weeks')
+            _src = s.get('add_blocker_source')
+            if _src == ABSENCE_FROM_NEWS and _w is not None:
+                _conf = "back in ~%d GW" % int(round(_w))
+                _tone = "#8ab4f8"
+                blocker_html = (
+                    f'<div style="color:{_tone};font-size:0.78em;margin-top:4px;">'
+                    f'Starts while {s["add_blocker"]} is out &mdash; {_conf}, '
+                    f'so his minutes are priced to end then.</div>')
+            else:
+                # The estimate came from a status code or a chance bucket, not
+                # from the text, so **nothing is capped** and the note must not
+                # assert a date. It is also the looser identification: a player
+                # with few starts who is suddenly in the XI may be deputising, or
+                # may simply be back from his own injury (live, Bruno Guimarães
+                # was flagged behind Bukayo Saka on exactly that signature). So
+                # this is a prompt to check, not a claim.
+                blocker_html = (
+                    f'<div style="color:#e0a33e;font-size:0.78em;margin-top:4px;">'
+                    f'May be starting while {s["add_blocker"]} is out '
+                    f'&mdash; no stated return date, so how long this lasts is '
+                    f'unknown and nothing here assumes it.</div>')
+
+        thin_html = ""
+        if s.get('thin_wire'):
+            _pl = pos_labels.get(s['drop_position'], s['drop_position'])
+            thin_html = (
+                f'<div style="color:#e0a33e;font-size:0.78em;margin-top:4px;">'
+                f'&#9888; Thin wire at {_pl} &mdash; too few available to price a '
+                f'replacement, so this is hard to undo.</div>')
+
         release_html = ""
         if _is_rent and s.get('release_cost') is not None:
             _rc = float(s['release_cost'])
@@ -2448,7 +2597,7 @@ def _render_suggestion_cards(suggestions, pos_labels, mgw_label):
                 </div>
             </div>
             <div style="color: #aaa; font-size: 0.82em; font-style: italic; border-top: 1px solid #333;
-                        padding-top: 6px;">{s['rationale']}</div>{release_html}{outlook_note}
+                        padding-top: 6px;">{s['rationale']}</div>{blocker_html}{thin_html}{release_html}{outlook_note}
         </div>
         """
         st.markdown(compact_html(card_html), unsafe_allow_html=True)
@@ -3210,6 +3359,11 @@ def show_waiver_wire_page():
     # Add FDR, Form, Injury data, and Season_Points to available players
     avail_all = _add_fdr_and_form(avail_all, fpl_stats, current_gw, lookahead, form_weeks=form_weeks)
     avail_all = _add_injury_data(avail_all, fpl_stats)
+    # Whose absence is each available player starting because of. Attached here
+    # rather than inside the suggestion search because it needs the **whole**
+    # pool: the man he is deputising for is injured, so he is absent from
+    # Rotowire's XI and therefore from `avail_all` by construction.
+    avail_all = _attach_minutes_dependency(avail_all, fpl_stats, current_gw)
 
     # Add Season_Points and starts to available players via Player_ID
     if 'Player_ID' in avail_all.columns and 'Season_Points' not in avail_all.columns:

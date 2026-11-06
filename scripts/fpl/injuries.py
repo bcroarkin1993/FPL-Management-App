@@ -1,14 +1,26 @@
 # injuries_official.py
+import re
+
 import pandas as pd
 import streamlit as st
 from scripts.common.error_helpers import get_logger
 from scripts.common.display_names import attach_display_names
 from scripts.common.utils import get_classic_bootstrap_static
 from scripts.common.styled_tables import render_styled_table
+from scripts.common.analytics import gameweek_deadlines
+from scripts.common.injury_helpers import (
+    ABSENCE_FROM_NEWS,
+    ABSENCE_NONE,
+    absence_estimate,
+)
 
 _logger = get_logger("fpl_app.injuries")
 
 # FPL element_type -> position letter
+#: News text meaning the player has gone, not that he is hurt. Matched on the
+#: prose because `status` cannot tell a departure from an injury: both are 'u'.
+_DEPARTED_RE = re.compile(r"has joined|has left|on loan", re.I)
+
 _POS_LETTER = {1:"G", 2:"D", 3:"M", 4:"F"}
 
 _AVAILABILITY_COLUMNS = [
@@ -200,11 +212,55 @@ def render_injuries_tab(key_prefix: str = "inj"):
     # both "Bruno Borges Fernandes" and "B.Fernandes", which are precisely the
     # two fields CLAUDE.md says are not presentable. `Player` stays on the
     # frame for matching.
-    cols = ["Display_Name","Team","Position","PlayPct","StatusBucket","News","News_Added"]
+    # **How long is he out, and how well do we know?** The parsed estimate drives
+    # the Power Rankings injury discount, the engine's horizon cap and the
+    # Waiver Wire's drop protection, and until now it was rendered nowhere -- so
+    # the one page about injuries showed FPL's prose and nothing else.
+    #
+    # Reported from the app: a Waiver Wire card recommended Chelsea's deputy
+    # goalkeeper, a move whose whole value depends on how long the first choice
+    # is out. The news said "Head injury - Unknown return date" and the app's own
+    # 4-5 gameweek figure came from a status/chance bucket, not from the text.
+    #
+    # **So the provenance is rendered beside the number, not just the number.**
+    # "2 GW (back 22 Nov)" and "~5 GW (no stated date)" are the same column and
+    # very different claims, and only the first says anything about *which*
+    # gameweeks -- which is exactly what a manager deciding on a deputy needs.
+    _deadlines = gameweek_deadlines()
+    _est, _src = [], []
+    for _, r in show.iterrows():
+        weeks, source = absence_estimate(r.get("News"), r.get("PlayPct"),
+                                         r.get("Status"), deadlines=_deadlines)
+        _news = str(r.get("News") or "")
+        # **A departure is not an absence.** `status` 'u' covers both a loan or
+        # permanent exit and an unavailable player, and the chance bucket then
+        # reports a transferred player as "~5 GW" -- which reads as a man due
+        # back next month. This is the same distinction `transfer_risk` draws:
+        # the line is Premier League membership, not a return date.
+        if _DEPARTED_RE.search(_news):
+            _est.append("season"); _src.append("left the club")
+            continue
+        if source == ABSENCE_NONE or not weeks:
+            _est.append(""); _src.append("")
+            continue
+        if source == ABSENCE_FROM_NEWS:
+            _est.append("%d GW" % weeks); _src.append("stated")
+        else:
+            # Hedged on purpose: a bucket default is a guess about *duration*
+            # and says nothing about which gameweeks. Printing it flat is how a
+            # guess comes to read as a read.
+            _est.append("~%d GW" % weeks)
+            _src.append("no stated date")
+    show = show.copy()
+    show["Out For"] = _est
+    show["Basis"] = _src
+
+    cols = ["Display_Name","Team","Position","PlayPct","StatusBucket",
+            "Out For","Basis","News","News_Added"]
     if "PL_Injury" in show.columns:
         show = show.rename(columns={"PL_Injury": "PL Injury"})
         show["PL Injury"] = show["PL Injury"].fillna("")
-        cols.insert(6, "PL Injury")
+        cols.insert(8, "PL Injury")
     show = show[[c for c in cols if c in show.columns]].copy()
     show = show.rename(columns={"Display_Name": "Player"})
     show["PlayPct"] = show["PlayPct"].round(0).astype("Int64")

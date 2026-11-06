@@ -3174,6 +3174,7 @@ Score = α × 1GW + (1-α) × ROS
 | Start likelihood | FFP Start % | FPL chance_of_playing → 100% | 1GW |
 | Multi-GW projection | FFP Next3GWs | single_gw × 3, start-discounted | ROS |
 | Season projection | Rotowire Season Rankings | Season points (actuals) | ROS (season_quality) |
+| How long is he out | A stated return date or suspension length in FPL `news` | `chance_of_playing` buckets, then the `status` code — **both guesses**, labelled as such | `Injury_Mult`, horizon caps, drop protection, Availability page |
 | Start consistency | Engine `Start_Pct` | FFP LongStart -> `starts / gameweeks elapsed` | ROS |
 | Waiver floor (what you could re-claim) | Available pool + the league's measured claim rates | *none* -- the rental lane switches off | Rent lane |
 | Form | HealthyForm (element-summary) | FPL form → points_per_game | ROS |
@@ -3188,6 +3189,10 @@ Score = α × 1GW + (1-α) × ROS
 | `rental_gain()` / `keeper_value()` | `scripts/common/claim_value.py` | A one-week claim's value (the drop is permanent, the add is not) and a rest-of-season claim's |
 | `_start_consistency()` | `scripts/common/analytics.py` | The long-run start rate as a 0-1 Series, on the best rung shared by frame **and** reference |
 | `_referenced_percentile()` | `scripts/common/analytics.py` | `positional_percentile` where a useless reference is a *declared* neutral rather than a silent within-frame min-max |
+| `_deputy_start_weeks()` | `scripts/common/projection_engine.py` | Weeks a stand-in keeps starting, so his horizon stops where the incumbent's stated return begins |
+| `absence_estimate()` | `scripts/common/injury_helpers.py` | `(gameweeks, source)` — the absence estimate *and* whether the news stated it or a bucket inferred it |
+| `news_stated_games_to_miss()` | `scripts/common/injury_helpers.py` | Gameweeks missed only where the text states a duration — the gate for asserting anything about future gameweeks |
+| `_attach_minutes_dependency()` | `scripts/draft/waiver_wire.py` | Whose absence each available player is starting because of, with the provenance of the estimate |
 | `_avg_fdr_by_short_name()` | `scripts/draft/waiver_wire.py` | Average FDR per club, mapped onto both the scored frames and the reference pool |
 | `compute_dynamic_alpha()` | `scripts/common/analytics.py` | Per-player alpha based on context |
 | `merge_ffp_single_gw_data()` | `scripts/common/analytics.py` | Merges FFP Predicted/Start/LongStart onto player DataFrames |
@@ -3588,6 +3593,106 @@ lane is unchanged (Ayari, Bobb, Bassey) and the rental lane adds three moves:
 over Hume at +0.61. It correctly refuses Tel (release cost 0.88, gain -0.41) and
 is near-indifferent on Dewsbury-Hall (+0.17) -- refusing the expensive drops is
 what makes the lane trustworthy.
+
+#### A deputy starts only while the man ahead of him is out
+
+`projection_engine._deputy_start_weeks()`, `injury_helpers.absence_estimate()` /
+`news_stated_games_to_miss()`, `waiver_wire._attach_minutes_dependency()`, the
+`Out For` / `Basis` columns on the Availability page.
+
+**Reported from the app: a deputy goalkeeper offered as a rest-of-season
+upgrade.** Chelsea's first choice was out, both other keepers were on loan, so
+Mike Penders started -- and the Waiver Wire proposed dropping an ever-present
+keeper for him at +0.26 points a gameweek. How good that move is depends
+entirely on how long the incumbent is out, and **nothing in the app asked.**
+
+The asymmetry in one line: **the engine knows a player is out and zeroes *his*
+horizon, and never asks who is playing instead.** `estimate_games_to_miss` had
+exactly three consumers -- the engine's horizon cap, `team_strength`'s
+`Injury_Mult`, and the Waiver Wire's drop protection -- and all three apply it
+to the injured player himself. No source can fill the gap either: FFP publishes
+**one** `start_pct` for all six forecast weeks, so its horizon cannot model a
+return, and both projected-XI pages describe this gameweek only.
+
+Measured at GW10, Penders carried `Proj` 3.63 and `Proj_Next3` 10.57 -- a forward
+rate of 3.47, i.e. **0.96 of his this-week number**, assuming he keeps the gloves
+all three weeks:
+
+| If the incumbent is back... | Penders over 3 GW | vs keeping Roefs |
+|---|---|---|
+| 3+ GW (what the model assumed) | 10.57 | **+0.78** |
+| for GW+2 | 7.10 | **-2.69** |
+| for GW+1 | 3.63 | **-6.16** |
+
+So +0.78 of upside against up to -6.16 of downside, and the card said nothing.
+Worse, **Penders was the only available goalkeeper in the entire pool** -- the
+rental lane's own `MIN_FLOOR_POOL` gate refused to price a GK move for exactly
+that reason, while the hold lane, which has no floor gate, recommended it anyway.
+
+**The fix is the mirror of the existing cap, and it is gated on a duration the
+news actually states.** `_deputy_start_weeks()` caps a deputy's horizon at
+`Proj_Start x weeks the incumbent is out`, which is the same arithmetic as the
+absent player's own cap. It reads `news_stated_games_to_miss()` -- stricter than
+the `stated_games_to_miss()` the existing cap uses, because that one accepts an
+out-of-squad status code and "Head injury - **Unknown return date**" then yields a
+4-or-5 gameweek absence that is a bucket default, not a read. Capping on that
+would invent the fact the text declines to give, so an unstated return leaves the
+horizon alone and the *card* carries the dependency instead.
+
+**Four conditions, and the second was bought the hard way.** A deputy is a player
+who (a) is expected to start now, (b) does **not usually** start, (c) has a
+club-and-position mate absent with a stated return inside the window, and (d) has
+started strictly fewer games than that man.
+
+Without (b) the rule is goalkeeper logic applied to positions where five players
+start. Measured live it flagged **12** players and clipped Ian Maatsen -- an
+established Villa left-back, 6 starts in 9 gameweeks -- from 10.67 to **3.09**,
+purely because a defender with more starts was out. Goalkeeper is the only
+position with exactly one starter, so the signature that generalises is not
+"someone ahead of me is hurt" but **"I do not usually start and this week I do"**
+(`DEPUTY_MAX_START_RATE`, 0.5). Without (d) it would fire on the *established*
+starter whenever his backup is injured, which is backwards. Without `starts`
+there is no depth chart and it does not fire at all -- the same fail-open as the
+omission penalty's club-coverage test.
+
+**Live effect: 6 horizons lowered, mean -1.52, largest -4.48, none raised**, and
+`Proj` / `Proj_Start` / `Start_Pct` are byte-identical -- this touches the horizon
+only. Penders is deliberately **unchanged**, because his incumbent's return date
+is unknown.
+
+**`absence_estimate()` reports provenance, and that is the point rather than a
+nicety.** `estimate_games_to_miss` resolves through four rungs -- a stated return
+date, a suspension length, `chance_of_playing` buckets, the `status` code -- and
+threw away which one answered. Only the first states a *duration*; the rest infer
+one from a code, and CLAUDE.md already records that those buckets are a guess.
+Two numbers that look identical are very different claims, and only one says
+anything about *which* gameweeks.
+
+So the Availability page now renders `Out For` beside `Basis`: "2 GW / stated"
+against "~5 GW / no stated date". Measured live, of 204 players carrying an
+estimate only **20 are stated** -- the hedge is the common case, not the edge
+case. A **departure is not an absence**: `status` 'u' covers a loan and a
+permanent exit as well as an unavailable player, and the chance bucket reported a
+transferred player as "~5 GW", which reads as a man due back next month. 102 live
+rows fell into that class and now read "season / left the club", matched on the
+news prose because the status alone cannot tell the two apart -- the same line
+`transfer_risk` draws, where membership of the league is what matters rather than
+a return date.
+
+**Two card lines on the Waiver Wire**, because for an unstated return no model can
+do better than say what the number rests on:
+
+- **Whose absence this add's minutes depend on.** `add_injury` reports the add's
+  *own* fitness and a deputy is typically perfectly fit, which is precisely why
+  the Penders card read as safe. Where the return is stated the note is firm
+  ("back in ~2 GW, so his minutes are priced to end then" -- the engine has
+  capped him). Where it is not, the note **hedges and asserts nothing**: the
+  identification is looser there too, since a player with few starts suddenly in
+  the XI may be deputising or may simply be back from his own injury. Live, Bruno
+  Guimarães was flagged behind Bukayo Saka on exactly that signature.
+- **A thin wire.** No measurable floor at a position means nothing to fall back on
+  if the move reverses. It is the same fact `waiver_floors()` declined to quote a
+  number for, seen from the manager's side.
 
 #### The two mis-wirings that shipped with it
 

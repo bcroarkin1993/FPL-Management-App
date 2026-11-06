@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 
 from scripts.common import claim_value as cv
+import scripts.draft.waiver_wire as ww
 from scripts.draft.waiver_wire import _compute_transfer_suggestions
 
 
@@ -161,3 +162,107 @@ class TestLaneSelection:
         sg = _run(top_n=1)
         assert len([s for s in sg if s["lane"] == cv.LANE_RENT]) == 1
         assert len([s for s in sg if s["lane"] == cv.LANE_HOLD]) <= 1
+
+
+class TestTheCardNamesWhoseAbsenceItDependsOn:
+    """The reported gap: `add_injury` reports the *add's* own fitness, and a
+    deputy is typically perfectly fit. Chelsea's deputy goalkeeper was offered
+    as a rest-of-season upgrade worth +0.26 pts/GW; the same move is worth
+    -6.16 over the window if the first choice returns next week.
+    """
+
+    def _pool(self):
+        """A full-pool frame of the kind `_attach_minutes_dependency` needs: the
+        incumbent is injured, so he is absent from Rotowire's XI and therefore
+        from the available pool by construction."""
+        return pd.DataFrame([
+            {"Player": "Emiliano Martínez Romero", "Display_Name": "Emiliano Martínez",
+             "Team": "CHE", "Position": "G", "status": "i", "starts": 6,
+             "chance_of_playing_next_round": 0,
+             "news": "Head injury - Unknown return date"},
+            {"Player": "Mike Penders", "Display_Name": "Mike Penders", "Team": "CHE",
+             "Position": "G", "status": "a", "starts": 2,
+             "chance_of_playing_next_round": None, "news": ""},
+            {"Player": "Robin Roefs", "Display_Name": "Robin Roefs", "Team": "SUN",
+             "Position": "G", "status": "a", "starts": 9,
+             "chance_of_playing_next_round": None, "news": ""},
+        ])
+
+    def _avail(self):
+        return pd.DataFrame([
+            {"Player": "Mike Penders", "Display_Name": "Mike Penders", "Team": "CHE",
+             "Position": "G", "starts": 2, "Proj": 3.63, "Proj_Next3": 10.57},
+        ])
+
+    def test_it_names_the_absent_incumbent(self):
+        got = ww._attach_minutes_dependency(self._avail(), self._pool(), current_gw=10)
+        assert got.loc[0, "Dep_Blocker"] == "Emiliano Martínez"
+        assert got.loc[0, "Dep_Weeks"] > 0
+
+    def test_it_reports_that_the_duration_was_not_stated(self):
+        """The distinction the card turns on: "~5 GW" from a bucket is not the
+        same claim as "2 GW, back 22 Nov"."""
+        got = ww._attach_minutes_dependency(self._avail(), self._pool(), current_gw=10)
+        assert got.loc[0, "Dep_Source"] != "news"
+
+    def test_a_stated_return_is_reported_as_stated(self):
+        pool = self._pool()
+        pool.loc[0, "news"] = "Head injury - Expected back 22 Nov"
+        got = ww._attach_minutes_dependency(self._avail(), pool, current_gw=10)
+        assert got.loc[0, "Dep_Source"] == "news"
+
+    def test_a_departure_is_not_an_absence(self):
+        """`status` 'u' covers a loan and a permanent exit as well as an injury,
+        and a transferred player is not a man his deputy is keeping warm for."""
+        pool = self._pool()
+        pool.loc[0, "status"] = "u"
+        pool.loc[0, "news"] = "Has joined Al Hilal permanently"
+        got = ww._attach_minutes_dependency(self._avail(), pool, current_gw=10)
+        assert got.loc[0, "Dep_Blocker"] == ""
+
+    def test_a_regular_starter_depends_on_nobody(self):
+        avail = self._avail()
+        avail.loc[0, "starts"] = 8          # 8/9 -- a regular, not a deputy
+        got = ww._attach_minutes_dependency(avail, self._pool(), current_gw=10)
+        assert got.loc[0, "Dep_Blocker"] == ""
+
+    def test_an_unrelated_club_is_not_a_blocker(self):
+        avail = self._avail()
+        avail.loc[0, "Team"] = "SUN"
+        got = ww._attach_minutes_dependency(avail, self._pool(), current_gw=10)
+        assert got.loc[0, "Dep_Blocker"] == ""
+
+    def test_it_degrades_rather_than_raising_on_a_bare_frame(self):
+        got = ww._attach_minutes_dependency(self._avail(), pd.DataFrame(), current_gw=10)
+        assert (got["Dep_Blocker"] == "").all()
+
+
+class TestTheThinWireWarning:
+    def test_a_position_with_no_floor_is_flagged(self):
+        """The same fact `waiver_floors` refused to quote a number for, from the
+        manager's side: live there was one available goalkeeper, so a GK claim
+        that goes wrong cannot be undone. The hold lane has no floor gate of its
+        own -- it recommended the deputy keeper anyway."""
+        avail = pd.DataFrame([
+            {"Player": "Mike Penders", "Display_Name": "Mike Penders", "Team": "CHE",
+             "Position": "G", "Proj": 3.63, "Proj_Next3": 10.57, "Points": 3.6,
+             "Transfer Score": 0.70, "Season_Points": 8, "status": "a",
+             "chance_of_playing_next_round": 100, "Draft_State": "a"},
+        ])
+        roster = pd.DataFrame([
+            {"Player": "Robin Roefs", "Display_Name": "Robin Roefs", "Team": "SUN",
+             "Position": "G", "Proj": 3.10, "Proj_Next3": 9.79,
+             "Projected_Points": 3.0, "Keep Score": 0.40, "Season_Points": 30,
+             "status": "a", "chance_of_playing_next_round": 100},
+            {"Player": "Caoimhín Kelleher", "Display_Name": "Caoimhín Kelleher",
+             "Team": "BRE", "Position": "G", "Proj": 3.01, "Proj_Next3": 10.06,
+             "Projected_Points": 3.2, "Keep Score": 0.64, "Season_Points": 28,
+             "status": "a", "chance_of_playing_next_round": 100},
+        ])
+        sg, _ = _compute_transfer_suggestions(
+            avail, roster, top_n=None, positions=["G"], roster_candidates=None,
+            avail_candidates=None, one_per_position=False, waiver_context={},
+            floor_context=FLOOR_CTX)
+        assert sg, "a GK upgrade should still be offered"
+        assert all(s["thin_wire"] for s in sg), (
+            "one available GK must be flagged as hard to undo")

@@ -174,6 +174,66 @@ def gameweeks_until(target, deadlines) -> int:
     return missed
 
 
+#: Where an absence estimate came from, loosest last. The distinction is the
+#: whole point of reporting it: "2 gameweeks, because the news says back on
+#: 22 Nov" and "4 gameweeks, because the status is 'i'" are the same number and
+#: very different claims, and only the first says anything about *which*
+#: gameweeks. Reported from the app: a Waiver Wire card recommended a deputy
+#: goalkeeper on the strength of a 4-gameweek absence that was the status
+#: default for "Head injury - Unknown return date".
+ABSENCE_FROM_NEWS = "news"          # a stated return date or suspension length
+ABSENCE_FROM_CHANCE = "chance"      # a chance_of_playing bucket -- a guess
+ABSENCE_FROM_STATUS = "status"      # the status code alone -- a coarser guess
+ABSENCE_NONE = "none"               # fit, or nothing to go on
+
+#: The sources that state a *duration* rather than infer one. Only these may be
+#: used to assert which future gameweeks a player misses -- see
+#: ``stated_games_to_miss`` and the deputy-minutes gate in ``projection_engine``.
+ABSENCE_STATED_SOURCES = (ABSENCE_FROM_NEWS,)
+
+
+def absence_estimate(news, chance, status, deadlines=None, now=None):
+    """``(gameweeks_missed, source)`` -- the estimate and where it came from.
+
+    ``estimate_games_to_miss`` answers with a number and discards which of its
+    four rungs produced it, and the rungs are not equally trustworthy: the first
+    reads a duration the news states, the other three infer one from a code.
+    CLAUDE.md records why that matters -- the buckets are a guess, so "25% chance"
+    becomes "misses 3 games" on no evidence -- and ``stated_games_to_miss``
+    already exists to keep those guesses out of claims about future gameweeks.
+
+    This returns the provenance instead of throwing it away, so a caller can
+    render it (the Injuries page) or gate on it (the deputy-minutes cap).
+    The resolution order is ``estimate_games_to_miss``'s, unchanged.
+    """
+    from_news = _news_duration(news, deadlines, now=now)
+    if from_news is not None:
+        return from_news, ABSENCE_FROM_NEWS
+
+    gws = estimate_games_to_miss(news, chance, status, deadlines=deadlines, now=now)
+    if gws == 0:
+        return 0, ABSENCE_NONE
+    if not pd.isna(chance):
+        try:
+            float(chance)
+            return gws, ABSENCE_FROM_CHANCE
+        except (ValueError, TypeError):
+            pass
+    return gws, ABSENCE_FROM_STATUS
+
+
+def news_stated_games_to_miss(news, deadlines=None, now=None):
+    """Gameweeks missed **only** where the news text states a duration.
+
+    Stricter than ``stated_games_to_miss``, which also accepts an out-of-squad
+    status code. That is right for a *discount*, and wrong for asserting that a
+    deputy stops starting in a particular week: "Unknown return date" means
+    unknown, and a decay built on the status default would invent the very fact
+    the text declines to give.
+    """
+    return _news_duration(news, deadlines, now=now)
+
+
 def estimate_games_to_miss(news, chance, status, deadlines=None, now=None) -> int:
     """Estimate how many gameweeks a player will miss.
 

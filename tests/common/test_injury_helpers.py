@@ -20,6 +20,10 @@ from scripts.common.injury_helpers import (
     estimate_games_to_miss,
     gameweeks_remaining,
     injury_multiplier,
+    ABSENCE_FROM_NEWS,
+    ABSENCE_NONE,
+    absence_estimate,
+    news_stated_games_to_miss,
 )
 
 
@@ -355,3 +359,63 @@ class TestAnElapsedReturnDateMeansHeIsBack:
         assert stated_games_to_miss(
             "Hamstring injury - Expected back 10 Oct", 0, "i",
             deadlines=self._deadlines(datetime(2026, 10, 12)), now=now) == 0
+
+
+class TestAbsenceProvenance:
+    """`absence_estimate` reports *where* the number came from.
+
+    Reported from the app: a Waiver Wire card recommended Chelsea's deputy
+    goalkeeper on the strength of a 4-5 gameweek absence for the first choice.
+    FPL's news said "Head injury - Unknown return date" -- the figure was a
+    chance/status bucket, not a read of the text -- and the card showed neither
+    the dependency nor the fact that the duration was guessed.
+    """
+
+    def test_a_stated_return_date_is_stated(self):
+        gws, source = absence_estimate("Knee injury - Expected back 22 Nov", 0, "i")
+        assert source == ABSENCE_FROM_NEWS
+        assert gws > 0
+
+    def test_a_suspension_length_is_stated(self):
+        _, source = absence_estimate("Suspended for 2 matches", 0, "s")
+        assert source == ABSENCE_FROM_NEWS
+
+    def test_an_unknown_return_date_is_not_stated(self):
+        """The live Martínez text. Every number here is a bucket default."""
+        gws, source = absence_estimate("Head injury - Unknown return date", 0, "i")
+        assert source != ABSENCE_FROM_NEWS
+        assert gws > 0, "it still estimates -- it just must not claim the text said so"
+
+    def test_a_fit_player_has_no_absence(self):
+        assert absence_estimate("", None, "a") == (0, ABSENCE_NONE)
+        assert absence_estimate("", 100, "a") == (0, ABSENCE_NONE)
+
+    def test_the_estimate_matches_the_plain_estimator(self):
+        """This must stay a *report* on `estimate_games_to_miss`, never a second
+        implementation of it -- the twin-drift failure this codebase keeps paying
+        for."""
+        for news, chance, status in [
+            ("Knee injury - Expected back 22 Nov", 0, "i"),
+            ("Head injury - Unknown return date", 0, "i"),
+            ("", 75, "d"), ("", 25, "d"), ("", None, "i"), ("", None, "a"),
+        ]:
+            assert (absence_estimate(news, chance, status)[0]
+                    == estimate_games_to_miss(news, chance, status))
+
+
+class TestNewsStatedGamesToMiss:
+    """The strict gate: only a duration the text actually states."""
+
+    def test_it_reads_a_date(self):
+        assert news_stated_games_to_miss("Expected back 22 Nov") is not None
+
+    def test_it_refuses_an_unknown_return_date(self):
+        """`stated_games_to_miss` accepts an out-of-squad status and so answers 4
+        or 5 here. That is right for a discount and wrong for asserting which
+        gameweeks a deputy stops starting in."""
+        assert news_stated_games_to_miss("Head injury - Unknown return date") is None
+        assert stated_games_to_miss("Head injury - Unknown return date", 0, "i") is not None
+
+    def test_it_refuses_an_empty_text(self):
+        assert news_stated_games_to_miss("") is None
+        assert news_stated_games_to_miss(None) is None
