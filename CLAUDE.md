@@ -4150,6 +4150,70 @@ exists because every fetch degrades to an empty frame on failure: without it, a
 broken season URL renders a page identical to a working one, just with every
 Season score silently at 0.50.
 
+## Price Changes — FPL publishes its own prediction
+
+`scripts/fpl/price_changes.py`.
+
+**The page reported only changes that had already happened**, which is history
+by the time a manager reads it, and the obvious fix looked like modelling price
+pressure from net transfers over ownership. It is not needed: **FPL publishes
+the forward view itself**, in five bootstrap fields nothing in the app read.
+
+| Field | Meaning |
+|---|---|
+| `price_change_percent` | progress to the next change, 100 = threshold |
+| `price_change_projections` | FPL's own forward view, per day `offset`, with a 1–5 `likelihood` |
+| `price_change_hourly_rate` | net transfers an hour |
+| `price_change_locked_until` | a player may change only once a day |
+| `price_change_calibrating` | FPL's own figure is not yet settled |
+
+All five are populated for all 670 players (2026-11-06). Gabriel sat at 105.5%
+with no change yet; Wissa at −139.5%. That removes the reason to invent a
+pressure metric whose precision could not be validated.
+
+**Two states must be rendered rather than averaged away**, because each makes a
+bare percentage misleading, and `_change_state` checks both *before* the
+threshold:
+
+- **Locked.** A player changes at most once a day, so one who has already moved
+  sits above 100% and is *not* about to move again — the one case where the
+  percentage reads as the opposite of the truth. 39 of 670 were in that state
+  live, 20 with an explicit `locked_until`.
+- **Calibrating.** FPL says when its own number is unusable, and a progress bar
+  that does not pass that on is a confident claim the source disclaims.
+
+**`bool(float("nan"))` is True**, so the null-unsafe truth test these started as
+read a *missing* timestamp as a lock. The live frame holds `None` and so happens
+to work; any float round-trip of the column would have marked every player
+locked, and locked is the state that suppresses the entire signal.
+
+**The hourly rate is deliberately not turned into a countdown.** Converting it
+needs the threshold expressed in transfers, and FPL publishes the progress as a
+percentage without saying what 100% is worth — so an ETA would rest on an
+assumption the page cannot check. The rate alone answers the question that *is*
+answerable: accelerating, or stalling short.
+
+**Ordered by what a manager can still act on**: your squad's exposure, your team
+value, the league-wide watchlist, then the three historical sections.
+
+**The squad list ranks by proximity, not by the threshold.** Filtering it to
+rise/fall printed "none of your squad is close to a price change" while
+Calvert-Lewin sat at **−95% and accelerating at −27k/h** — exactly the player to
+show. The two counts above it still mean "past the threshold"; the list means
+"closest". A player who has already moved this gameweek carries a `+£0.1m TODAY`
+flag, since a second change on a later day is legal but the row said nothing
+about it.
+
+**Team value is rendered as FPL's two fields, not a derived "team value".**
+`entry/{id}/history` publishes `value` and `bank` per gameweek; the two
+conventions in circulation disagree about whether `value` already includes the
+bank, and without an authenticated `my-team` read the page cannot check — so it
+shows both and sums nothing. Selling prices are likewise absent, for the reason
+recorded under "Pre-deadline Classic squad": only `my-team` publishes them.
+
+One pre-existing bug fixed on the way past: `_format_change` put the sign inside
+the currency symbol and rendered "£-0.3m", contradicting its own docstring.
+
 ## Transfer Risk Model — "will he still be here?"
 
 `scripts/common/transfer_risk.py` (pure), `transfer_feeds.py` (fetch),
