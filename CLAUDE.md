@@ -3028,6 +3028,8 @@ to import from GitHub Actions.
 | `check_ffp_horizon()` | A multi-gameweek grid whose **columns are mislabelled** — a gap in the gameweek run shifts every later column one week left of its heading, and no individual cell can reveal it. Also an all-null or all-zero week, a basis inversion in one gameweek of six, and two tables stacked under one label (detected as a duplicate player, never as a row count — the real `archive/ffp/GW03.json` carries 561 rows and is fine) |
 | `check_lineup_consensus()` | Two projected XIs that have drifted onto **different gameweeks**. Each one passes its own shape check while this happens — eleven names a club, every label resolved — because being well-formed says nothing about *which* week it describes, and only comparing the two can see it. A source describing another week does not add noise: the engine benches players who were never in this week's squad and promotes players who are not playing. A single source is **not** a finding, being the state the app shipped in for a year |
 | `check_rotowire_lineup_xi()` | Rotowire's projected XIs ceasing to be a lineup call — an unreadable page, a changed selector, a club label the matcher cannot resolve, or two gameweeks of lineups stacked under one label. **Every one of these is silent**, because the engine fails open to the weekly rankings article, which is the stale number the signal exists to replace |
+| `check_claim_lanes()` | A rent/hold waiver lane a manager could not act on. The dangerous input is the **waiver floor**: too low does not make the lane noisier, it *inverts* it -- every release reads as free, so the lane will cheerfully propose dropping your best player for a one-week punt. Catches a non-positive rental gain, an impossible negative release cost (the `Proj_Next3 / 3` basis confusion), a floor drawn from fewer than `MIN_FLOOR_POOL` players (live, one available goalkeeper), and a rental card carrying no floor at all -- the silent-gate failure this app has paid for four times |
+| `check_ros_terms()` | A weighted ROS term that has quietly stopped being a percentile. Both defects it was written for were invisible in any single value -- every number stayed inside [0,1] and looked right -- and showed up only as a term with **no spread**, which is the `check_team_strength` "every team scores exactly 50" signature one model over. Also catches a crossed scale: a raw `starts` count or a 0-100 `FFP_LongStart` reaching a 0-1 term |
 | `check_mini_league_ownership()` | A league ownership table computed over the wrong denominator. Ownership is a *share*, so resolving two of twelve rival squads still renders a full table of plausible percentages. Anchored on an exact invariant — `sum(Owners) == 15 x n_squads` — plus the un-normalised `my-team` signature (every multiplier 1, caught as a flat column since the *total* varies legitimately across chips and autosubs). Note EO's ceiling is **300**, not 100 |
 | `check_league_trade_config()` | The league's trade rules changing shape — `league.trades` vanishing or coming back null, `trades_time_for_approval` ceasing to be a bool. Both make the Trade Analyzer fall back to "assume approval is required", which is safe but is no longer a statement about *this* league and looks identical on screen. An **unrecognised** trades code is only a warning: three of the four codes are genuinely unknown, and a check that fires on expected ignorance gets muted |
 
@@ -3172,7 +3174,8 @@ Score = α × 1GW + (1-α) × ROS
 | Start likelihood | FFP Start % | FPL chance_of_playing → 100% | 1GW |
 | Multi-GW projection | FFP Next3GWs | single_gw × 3, start-discounted | ROS |
 | Season projection | Rotowire Season Rankings | Season points (actuals) | ROS (season_quality) |
-| Start consistency | FFP LongStart | FPL starts count | ROS |
+| Start consistency | Engine `Start_Pct` | FFP LongStart -> `starts / gameweeks elapsed` | ROS |
+| Waiver floor (what you could re-claim) | Available pool + the league's measured claim rates | *none* -- the rental lane switches off | Rent lane |
 | Form | HealthyForm (element-summary) | FPL form → points_per_game | ROS |
 | FDR | AvgFDRNextN / AvgFDR | Default 3.0 | ROS |
 
@@ -3181,6 +3184,11 @@ Score = α × 1GW + (1-α) × ROS
 | Function | File | Purpose |
 |----------|------|---------|
 | `compute_player_scores()` | `scripts/common/analytics.py` | Core scoring — computes all 4 columns + `_effective_proj` |
+| `waiver_floors()` / `release_cost()` | `scripts/common/claim_value.py` | What you could re-claim at each position next round, and what releasing a roster player therefore costs |
+| `rental_gain()` / `keeper_value()` | `scripts/common/claim_value.py` | A one-week claim's value (the drop is permanent, the add is not) and a rest-of-season claim's |
+| `_start_consistency()` | `scripts/common/analytics.py` | The long-run start rate as a 0-1 Series, on the best rung shared by frame **and** reference |
+| `_referenced_percentile()` | `scripts/common/analytics.py` | `positional_percentile` where a useless reference is a *declared* neutral rather than a silent within-frame min-max |
+| `_avg_fdr_by_short_name()` | `scripts/draft/waiver_wire.py` | Average FDR per club, mapped onto both the scored frames and the reference pool |
 | `compute_dynamic_alpha()` | `scripts/common/analytics.py` | Per-player alpha based on context |
 | `merge_ffp_single_gw_data()` | `scripts/common/analytics.py` | Merges FFP Predicted/Start/LongStart onto player DataFrames |
 | `blend_multi_gw_projections()` | `scripts/common/analytics.py` | Merges FFP Next3GWs (falls back to PPG×3 if unpublished) |
@@ -3433,6 +3441,240 @@ Three rules are load-bearing:
   counts the blind cases and logs a warning when *every* candidate was judged
   without a single signal — the state that otherwise looks identical to working.
 
+### Rent vs keep — two kinds of waiver claim, scored separately
+
+`scripts/common/claim_value.py` (pure), the two lanes in
+`_compute_transfer_suggestions()`, `_build_floor_context()`, the **Hold for**
+control, `check_claim_lanes()`.
+
+**Reported from the app: the highest-projected available player in the game was
+suggested nowhere.** Measured live at GW10, Noni Madueke was Rotowire's #10
+overall, the engine blended him to `Proj` **5.371** -- top of the entire
+available pool at any position -- and `1GW` **0.964**, also top. Nothing filtered
+him: `element-status` said `a`, FPL said `status 'a'` / `chance 100`, and the
+league had zero locked players.
+
+He was squeezed out twice. `Transfer Score` is `alpha * 1GW + (1 - alpha) * ROS`
+and Draft's alpha is ~0.40, so `0.40 x 0.964 + 0.60 x 0.546` = **0.713**, which
+is 4th at midfield behind Ayari 0.797, Bobb 0.779 and Guimaraes 0.770. Only one
+roster midfielder was weak enough to clear a threshold against him -- and Ayari
+cleared the *same* drop at a larger gap, so the one-add-one-drop greedy
+assignment took it off him. Against every other midfielder he missed the
+threshold (Tel +0.026 against 0.07, the rest negative). The list was Ayari,
+Bobb, Bassey in **every** view.
+
+**Four genuine defects in ROS's inputs were found and measured not to fix it.**
+Same data each side, five variants:
+
+| Variant | Madueke | Bobb |
+|---|---|---|
+| shipped | #4 (0.713) | #2 (0.779) |
+| + `Start_Pct` start-consistency | #4 (0.760) | #3 (0.781) |
+| + FDR reference pool | #4 (0.756) | #3 (0.777) |
+| + per-start season actuals | #5 (0.728) | #3 (0.760) |
+| + `PP/90 x Start_Pct` pedigree | #3 (0.759) | #2 (0.777) |
+
+He never passes Bobb. His 1GW edge is +0.127 and Bobb's ROS edge is +0.194, so
+passing him needs **alpha > 0.605** -- which would make Draft *more*
+single-gameweek-led than Classic (0.55) and contradict the sound reason Draft is
+ROS-led at all. **Alpha is the wrong lever and the inputs were not the cause.**
+
+**The cause is that a single blended score is a fixed, hidden choice of holding
+horizon applied to every claim**, and is therefore optimal for neither of the two
+transactions a manager makes. Ranking the same players on points over an explicit
+horizon reproduces both:
+
+| H | top three available midfielders |
+|---|---|
+| 1 | **Madueke**, Estevao, Guimaraes |
+| 2 | **Madueke**, Bobb, Estevao |
+| 3 | Bobb, **Madueke**, Ayari (12.74 v 12.72) |
+| 6 | **Ayari**, Bobb, Madueke |
+
+`Transfer Score` behaves like H~6. Two ideas make a short horizon expressible and
+neither existed:
+
+**A rental's future comes from the wire, not from the player.** You are going to
+drop him, so his own thin horizon must never bind. What binds instead is what you
+can expect to *re-claim*, and that is measurable from the league's own
+transaction log: `expected_taken_at_position()` says how many players go at a
+position before your pick, so the next-best available player after those is the
+floor. Live at pick 6 of 10, 2.38 midfielders go first and the midfield floor is
+**3.67 points a gameweek**.
+
+**Replacement cost belongs on the drop side.** `Keep Score` is a positional
+percentile against ~700 players and has no idea what is *available*. Measured on
+the live roster against that 3.67 floor:
+
+| roster MID | forward rate | release cost | Keep Score |
+|---|---|---|---|
+| Joao Gomes | 2.00 | **0.00** | 0.45 |
+| Alex Iwobi | 3.64 | **0.00** | **0.80** |
+| Enzo Le Fee | 3.65 | **0.00** | 0.74 |
+| Dewsbury-Hall | 3.81 | 0.13 | 0.88 |
+| Mathys Tel | 4.56 | 0.88 | 0.69 |
+
+Iwobi and Le Fee cost **nothing** to release -- the wire offers their equal --
+yet Iwobi's 0.80 sat behind the 0.12 "elite" drop threshold and made him
+effectively undroppable. **In one line: the model priced every claim as if you
+must hold the player forever, and every roster player as if he were
+irreplaceable.**
+
+So `rental_gain()` charges the *drop* for permanence and the *add* for one week:
+
+```
+rental_gain = (Proj(add) - Proj(drop)) - (H - 1) * release_cost(drop)
+release_cost = max(0, forward_rate - waiver_floor(pos))
+forward_rate = (Proj_Next3 - Proj) / (H - 1)
+```
+
+**`Proj_Next3` includes the current gameweek**, so the forward rate subtracts
+`Proj` rather than dividing by `H`. That is not a detail: the naive division
+gives Madueke 3.83 and Bobb 4.25, the correct form 3.06 and 4.07 -- enough to
+swap them. `keeper_value()` is the same arithmetic with the add's own horizon
+counted, floored at the wire (`Proj + (H - 1) * max(forward_rate, floor)`),
+because no player's value is bounded below by his own thin horizon when you can
+drop him and re-claim.
+
+**Three gates, each failing closed**, because a floor of zero does not degrade
+the lane but inverts it:
+
+- **No measurable floor at a position, no rental advice there.** Live, *all 220*
+  Rotowire forwards were owned, so F was genuinely unmeasurable.
+- **A floor from fewer than `MIN_FLOOR_POOL` (5) available players is not a
+  floor.** Live there was exactly **one** available goalkeeper -- an ad-hoc probe
+  happily quoted 3.47 from that single player before the gate existed.
+- **No claim history, no floor.** A league the app has never observed claiming
+  gets no rental lane rather than a fabricated market rate.
+
+**The floor is deliberately *not* read from `waiver_context`, and that is the one
+place this diverges from the obvious design.** `_build_waiver_context()` returns
+`{}` during free agency, correctly, because the reachability bands describe a
+queue you are not currently standing in. The floor asks a different question --
+what could I claim *next* round -- and next round is a waiver round either way;
+`waiver_pick` is published throughout. Folding them together would switch the
+rental lane off for half of every gameweek. Hence `_build_floor_context()`.
+
+**The rental lane is ranked on `Proj`, not `Transfer Score`**, which is why it is
+a separate pass rather than a reuse of `avail_iter`. That window is the top few
+by `Transfer Score`, i.e. ~60% ROS, and the player worth renting is by definition
+the one with a big this-week number and a thin future -- so the window excluded
+him by construction. The sanity veto still applies: it compares raw observables
+and is as able to catch a nonsense one-week swap as a season-long one.
+
+**Sorted within lane, never across it.** The hold lane's `points_gain` is points
+*per gameweek* and the rental lane's is *total points over the window* -- two
+numbers that look alike and are not comparable, which is the cross-position
+percentile mistake one level up. The display limit is applied per lane too: a
+flat `suggestions[:10]` lets the hold lane fill the quota and the rental lane
+vanish, re-creating the exact failure the feature fixes. `rank_claim_plan()` is
+likewise built per lane, since a rental and a season-long claim are not one
+priority order.
+
+**`RENTAL_MIN_GAIN` (0.5 points) is a display floor, not a significance claim.**
+The projections underneath carry an MAE around 2.5 points per player, so a
+0.6-point edge is not a fact; the card prints the gain and the release cost so
+the call stays the manager's. Release cost is also priced over three gameweeks --
+the only horizon the app has, and the one `score_horizon_lengths()` found orders
+best -- which **understates** the cost of releasing a genuinely good player. That
+is the unsafe direction, which is why the number is on the card rather than only
+inside the ranking.
+
+**Live effect, measured in one process so both sides see identical data.** The
+projection engine is untouched: `Proj`, `Proj_Start`, `Start_Pct` and
+`Proj_Next3` are **byte-identical**. On the reported gameweek's frames the hold
+lane is unchanged (Ayari, Bobb, Bassey) and the rental lane adds three moves:
+**Madueke over Joao Gomes at +3.53**, Estevao over Le Fee at +1.33, Affengruber
+over Hume at +0.61. It correctly refuses Tel (release cost 0.88, gain -0.41) and
+is near-indifferent on Dewsbury-Hall (+0.17) -- refusing the expensive drops is
+what makes the lane trustworthy.
+
+#### The two mis-wirings that shipped with it
+
+Both are a **cumulative count standing in for a rate**, and both were silent.
+
+**`start_consistency` (10% of ROS) was reading the raw season `starts` count.**
+`FFP_LongStart` is the documented primary source and FFP has stopped publishing
+it -- non-null for **0 of 670** reference rows, 0 of 98 pool, 0 of 15 roster --
+so every caller fell through to `result["_start_consistency"] = starts`. That is
+a *minutes-played* measure under a start model's name: three starts in nine
+elapsed gameweeks scored 0.220 while the engine rated the same player 0.86 to
+start and both scraped projected XIs named him. It is the defect `team_strength`
+already fixed one module over by using points **per start**.
+
+`_start_consistency()` is now one ladder -- `Start_Pct` -> `FFP_LongStart / 100`
+-> `starts / (gameweek - 1)` -- normalised to 0-1 **at the rung**, with
+`FFP_LongStart` kept rather than deleted so the term returns for free if FFP
+resumes. **The rung is the best one present on *both* frames**, and that is
+load-bearing rather than tidy: a percentile is a comparison, so ranking a frame's
+`Start_Pct` against a reference's `starts` is the very cross-scale comparison
+being removed. It cannot be assumed away either -- `_reference_horizon()` has
+three early returns that skip `_blend_frame()` (an empty pool, one that already
+carries `Proj_Next3`, one with neither `MultiGW_Proj` nor `points_per_game`) and
+only the blend writes `Start_Pct`. A reference arriving without it is an ordinary
+state, and the shared-rung rule degrades it to a weaker but still *comparable*
+signal. Note this makes the start term share an input with `1GW`
+(`Proj = Proj_Start x Start_Pct`), which is exactly what `team_strength` does with
+`Start_Security` beside `Proj_Start`, and is an argument for leaving `w_start` at
+0.10 rather than raising it.
+
+**`AvgFDRNextN` was absent from the Draft reference pool, so the fixture term
+silently degenerated.** It was written onto the scored frames and not onto
+`fpl_stats`, so `positional_percentile`'s fallback min-maxed over the **input**
+frame: the 15-row roster normalised against itself, the 94-row pool against
+itself, and the suggestion gap then *subtracts* one from the other. Two
+populations, min-max rather than percentile, no symptom. This is the
+reference-pool contamination trap recorded under Team Strength.
+
+`_avg_fdr_by_short_name()` computes it per club and `.map()`s it onto both frames
+-- FDR is a property of the club, so this also replaces a per-row `apply` that
+ran 700 fixture scans to produce twenty answers, the optimisation Classic already
+made. Verified identical to the per-row version on the live pool, and the
+reference now carries it for **670 of 670** rows. Classic needed nothing: its
+`_build_all_players_df` already sets `AvgFDR` on both sides.
+
+`_referenced_percentile()` is the general tripwire: a missing or signal-free
+reference column becomes a **declared** neutral 0.5 plus a warning naming the
+term, never a within-frame min-max. `positional_percentile` itself is
+deliberately unchanged, because `initial_squad` legitimately passes
+`(result, result, ...)` where a column missing on both sides genuinely should be
+neutral.
+
+**Live effect of the two together: 94 players' ROS move, mean -0.0034, max
+0.049**, and the engine columns are byte-identical. Small, because the two terms
+carry 10% and 3% of ROS -- which is the honest reason they are not the fix.
+
+#### Deliberately not done
+
+The other two ROS defects are the same shape and are **recorded rather than
+built**, because they reprice ~43% of ROS for every player in both formats and
+**nothing in the app scores ROS after the fact** -- `projection_accuracy` scores
+the projection engine's points and start model and stops there. Phase 4's
+discipline applies: no reweighting without a measurement.
+
+- **`season_pts_pctile` is cumulative.** Madueke 14 points / 3 starts = 4.67 per
+  start; Dewsbury-Hall 4.56; Ayari 5.38 -- comparable as rates, 0.357 against
+  0.940 as totals. `team_strength` already has the machinery
+  (`_points_per_start`, `_MIN_STARTS_FOR_ACTUALS`, `attach_reference_pps`).
+- **`SeasonProjection` is a pinned preseason total whose rate form is
+  discarded.** `ROTOWIRE_SEASON_RANKINGS_URL` is the preseason "Top 400"; its
+  `Points` is `PP/90 x expected 90s`, and implied nineties run **4.4 to 38.1**
+  across the 430 rows. Madueke's row is `58.66 = 5.28 x 11.1` -- a
+  Chelsea-squad-player minutes assumption, wrong by role once he moved to
+  Arsenal. **`PP/90` is published in that same table and
+  `merge_season_projections()` drops it**; it exists on no frame in the app. That
+  stale total is 20% of ROS at GW10.
+- **A third, deliberately left alone.** `dampen_form_by_starts` shrinks form
+  toward 0.5 at `clip(starts/5, 0.2, 1.0)`, so three starts pulls a player 40%
+  toward neutral. That is legitimate small-sample shrinkage on an already-rate
+  signal (`HealthyForm` filters 0-minute gameweeks), not a rate error -- but it
+  is the *third* place a missed gameweek costs the same player.
+
+Also noted for later: `team_strength.py` reads the same stale-total pedigree, and
+its `df.get(col).fillna()` calls are the latent crash recorded under
+"`DataFrame.get()` is not a safe accessor" -- safe today only because
+`_build_reference_pool` always constructs those columns.
+
 ### Suggestion breadth — Draft Waiver Wire
 
 `_compute_transfer_suggestions()` searches a *window*, not the board: by default
@@ -3556,6 +3798,15 @@ thin position simply has worse available players and therefore smaller gains;
 adding VORP would count it twice. It earns its keep in a *draft*, where every
 pick is a cross-position choice -- which is where the unmerged
 `feature/draft-helper-vorp` work lives.
+
+**That cancellation holds only while both players are *held*, which is the half
+this argument was missing.** It assumes the add's future and the drop's future
+are measured against the same replacement baseline at the same time. A *rental*
+breaks the assumption: the player you claim goes back on the wire next week, so
+his future is the wire's rather than his own, and the replacement term no longer
+appears on both sides of the subtraction. See "Rent vs keep" below -- the
+conclusion for a same-position *hold* is unchanged, and a replacement-level
+quantity now has real work to do on the rental side.
 
 Classic (`_build_transfer_suggestions`) has the same rule but keeps its own
 ordering: `drop_candidates` is already sorted by urgency -- unavailable players
@@ -4688,6 +4939,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Task | Status | Notes |
 |------|--------|-------|
 | Transfer Risk Tracking | Phases 1-3 complete | Outbound (Google News RSS + bootstrap ground truth + per-region windows), inbound (per-club feeds, arrivals watchlist, minutes competition, fee attribution, `Transfer_Status`) and bookmaker odds are wired into the Draft Helper board and the Availability page. Remaining: Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model" and "Transfer Odds Model". |
+| ROS season-quality on rates, not totals | Not started | The two remaining halves of the defect found under "Rent vs keep". `season_pts_pctile` percentiles **cumulative** season points (Madueke 14 pts / 3 starts = 4.67 per start against Dewsbury-Hall's 4.56 and Ayari's 5.38 -- comparable as rates, 0.357 against 0.940 as totals), and `season_proj_pctile` percentiles a **pinned preseason total** that bakes in a minutes assumption (`Points = PP/90 x expected 90s`, implied nineties 4.4-38.1 across the 430 rows; Madueke `58.66 = 5.28 x 11.1`, a squad-player forecast made before he moved club). **`PP/90` is published in the same table and `merge_season_projections()` drops it** -- it exists on no frame in the app. Together ~33% of ROS, and a third place the same missed gameweek is charged after `start` and form dampening. Blocked on evidence, not design: `team_strength` already has `_points_per_start` / `_MIN_STARTS_FOR_ACTUALS` / `attach_reference_pps`, but **nothing in the app scores ROS after the fact**, so this needs a retrospective scorer first (`projection_accuracy` has the archive and the machinery -- `_actual_window`, `_starts_before`, `spearman` -- but scores only the projection engine). Measured: fixing both moves Madueke 4th -> 3rd at MID and repriced the whole board, which is why it did not ship on one player's anecdote |
 | Mini-League Rival Tracker | Completed (Classic) | **🎯 Rival Tracker** tab on Classic League Analysis: differentials, the template you are missing, effective ownership across the league (captaincy-weighted, so it can exceed 100%), and every rival's projected gameweek total. Deliberately **not** built for Draft — ownership there is exclusive, so every owned player is a 100% differential and EO collapses to 0/1; roster comparison already lives in the Trade Analyzer's Explore Teams tab. No transfer advice (handled elsewhere). See "Mini-league ownership". |
 | Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2/3-for-3 trade discovery (position-matched — see "Draft Transaction Rules"; cross-position and 2-for-1 shapes were removed as FPL forbids them, while N-for-N was added because it never did), acceptance likelihood scoring with veto risk, Explore Teams comparison, Regression Watch (buy-low/sell-high). Reads the league's own trade rules: approval regime, the real trade deadline (24h earlier under approval), and `in_accepted_trade` exclusion |
 | Historical Data Analysis | Completed | Season History section on Classic Team Analysis (rank chart, points chart, data table); League Standing metrics on Draft Team Analysis |
@@ -4709,6 +4961,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Season Highlights for Team Analysis | Best XI (optimal formation from top scorers), Team MVP (with starts/goals/assists/captain stats), Best Clubs (top 3 contributing EPL clubs); shared `team_analysis_helpers.py` module for Draft and Classic |
 | Advanced Player Statistics Table | 40+ columns with 8 presets (Essential, Attacking, Defensive, Per 90, ICT Focus, Fixture Focus, GK Stats, Regression); green-white-red color gradients; regression metrics (G-xG, A-xA, GI-xGI) to identify over/under performers; switched to Classic FPL API for price/ownership data |
 | Waiver Wire Transfer Suggestions | Top-3 position-locked swap suggestions with unified Player Value scoring, injury-aware hold logic, raised score-gap thresholds (elite/above-avg/weak tiers), multi-signal sanity check (vetoes ADD clearly worse on proj/season/3GW), 4-level FFP name fallback, and inline GW+3GW+season stats on each suggestion card |
+| Rent vs keep on the Waiver Wire | Completed | Two labelled lanes instead of one compromise score: **Hold** (the existing rest-of-season ranking, unchanged) and **Rent** (this gameweek's projection, charged only for the player you release). A rental's future comes from the wire rather than the player, so `claim_value.waiver_floors()` prices what you could re-claim next round from the league's own measured claim rates, and `release_cost()` puts replacement cost on the drop side -- which `Keep Score`, a percentile against ~700 players, cannot express. Fixes the reported case: the highest-projected available player in the game was suggested nowhere, and no amount of input repair reached him (it needs alpha > 0.605, i.e. more 1GW-led than Classic). Ships with the two ROS mis-wirings it uncovered -- `start_consistency` reading a raw `starts` count, and `AvgFDRNextN` missing from the Draft reference pool. Engine columns byte-identical. See "Rent vs keep" |
 | Waiver claim reachability | Reads FPL's published `waiver_pick`, so the page knows where in the claim queue this manager sits and stops leading with targets six other managers see first. Banner card, queue expander, a `likely`/`contested`/`long_shot` band per suggestion, and a priority-ordered claim plan built on "a failed claim costs nothing". **The band is now measured per position from the league's own log rather than inferred from Power Rankings need**, over the recent rounds only — the inference over-called badly, flagging the top two goalkeepers every round in a league that accepts four GK claims a season and the top *four* forwards off a bottom-third rank. And it **switches off entirely in free agency**, where an available player is simply added and no claim is a long shot. See "The queue is published" |
 | Deadlines and rules read from FPL | `events[].waivers_time` / `trades_time` replace the hardcoded 25.5h/49.5h offsets (kept as fallback), and `check_draft_game_settings()` fires if FPL moves a rule the codebase compiles in. `draft_rank` joins onto the Draft Helper board as `FPL Rank` / `Δ` |
 | Error logging & better error messages | Added `error_helpers.py` module with structured logging and user-facing error display; added `timeout=30` to ~12 unprotected `requests.get()` calls; added `_logger.warning()` to ~15 silent `except` blocks; replaced ~13 generic error messages with actionable hints |

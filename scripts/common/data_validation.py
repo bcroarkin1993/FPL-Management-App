@@ -43,6 +43,8 @@ __all__ = [
     "check_waiver_order",
     "check_draft_game_settings",
     "check_transfer_risk",
+    "check_claim_lanes",
+    "check_ros_terms",
     "check_transfer_windows",
     "check_transfer_odds",
     "check_ffp_feed",
@@ -3460,5 +3462,185 @@ def check_lineup_consensus(xis: Optional[dict],
             "Every source must be asked for the same gameweek. A mismatch means "
             "one of them resolved its own, which is how a benching lands on a "
             "player who is not in this week's fixture list at all."))
+
+    return issues
+
+
+def check_claim_lanes(suggestions: Optional[Sequence[dict]],
+                      floors: Optional[Dict[str, float]] = None,
+                      available_by_position: Optional[Dict[str, int]] = None,
+                      free_agency: bool = False,
+                      min_floor_pool: int = 5) -> List[Issue]:
+    """Are these rent/hold waiver suggestions ones a manager could act on?
+
+    The rental lane prices a one-week claim as "this gameweek's gain, less what
+    releasing your player costs over the window". Its one genuinely dangerous
+    input is the **waiver floor** -- what you could re-claim at that position
+    next round. A floor that is too low does not make the lane noisier, it
+    *inverts* it: every release reads as free, so the lane will happily propose
+    dropping your best player for a one-week punt.
+
+    So the checks here are mostly about the floor being real rather than about
+    the gains being large:
+
+    * A **rental recommended at a non-positive gain** is an error. The lane's
+      whole output is "this is worth more than it costs", and a zero or negative
+      figure is the shape `check_transfer_plan` already errors on for the Classic
+      planner.
+    * A **negative release cost** is impossible by construction
+      (`max(0, rate - floor)`), so it means the floor and the rate were computed
+      on different bases -- the per-gameweek-rate confusion this codebase keeps
+      paying for.
+    * A **floor drawn from fewer than `min_floor_pool` available players** is one
+      player's projection presented as a market rate. Measured live there was
+      exactly one available goalkeeper, so a GK "floor" would have been his own
+      number.
+    * A **rental card carrying no floor** means the gain was priced without one,
+      which cannot happen if the lane is gated correctly -- it is the "a gate
+      keyed on a column some frames do not carry" failure this app has paid for
+      four times.
+
+    Free agency is **not** a finding. The floor describes *next* round's queue,
+    which exists whether or not adds currently process immediately -- see
+    `waiver_wire._build_floor_context`. It is accepted as a parameter only so a
+    caller can record the window it was checked in.
+    """
+    check = "claim_lanes"
+    issues: List[Issue] = []
+
+    if suggestions is None:
+        return [Issue(check, "warning", "No suggestions to check.",
+                      "An empty board is a normal state for a strong roster.")]
+
+    floors = floors or {}
+    pools = available_by_position or {}
+
+    for pos, n in pools.items():
+        if pos in floors and n < int(min_floor_pool):
+            issues.append(Issue(
+                check, "error",
+                "%s has a waiver floor (%.2f pts/GW) drawn from only %d available "
+                "player(s)." % (pos, floors[pos], n),
+                "Below MIN_FLOOR_POOL a 'floor' is one player's projection "
+                "presented as a market rate. claim_value.waiver_floors() must "
+                "omit the position so the rental lane switches off there."))
+
+    rentals = [s for s in suggestions if (s or {}).get("lane") == "rent"]
+    for s in rentals:
+        gain = s.get("points_gain")
+        if gain is None or float(gain) <= 0:
+            issues.append(Issue(
+                check, "error",
+                "Rental %s -> %s recommended at a gain of %s."
+                % (s.get("drop_player"), s.get("add_player"), gain),
+                "The lane exists to say a one-week claim is worth more than it "
+                "costs. A non-positive gain is not a recommendation."))
+
+        rc = s.get("release_cost")
+        if rc is not None and float(rc) < 0:
+            issues.append(Issue(
+                check, "error",
+                "Rental %s -> %s has a negative release cost (%.3f)."
+                % (s.get("drop_player"), s.get("add_player"), float(rc)),
+                "release_cost is max(0, forward_rate - floor) and cannot be "
+                "negative. A negative one means the rate and the floor were "
+                "computed on different bases -- check that Proj_Next3 is being "
+                "converted with (Proj_Next3 - Proj) / (horizon - 1) and not "
+                "divided by the horizon."))
+
+        if s.get("position_floor") is None:
+            issues.append(Issue(
+                check, "error",
+                "Rental %s -> %s carries no waiver floor."
+                % (s.get("drop_player"), s.get("add_player")),
+                "rental_gain() returns None without a floor, so a rental card "
+                "without one means the lane was priced some other way. That is "
+                "the silent-gate failure: the lane keeps rendering and every "
+                "release reads as free."))
+
+    return issues
+
+
+def check_ros_terms(terms: Optional[Dict[str, pd.Series]],
+                    ros: Optional[pd.Series] = None,
+                    weights: Optional[Dict[str, float]] = None,
+                    min_rows: int = 10,
+                    flat_weight_threshold: float = 0.05) -> List[Issue]:
+    """Is each weighted ROS term carrying information, and on the right scale?
+
+    Both of the defects this was written for were **silent**, and both were a
+    term that had quietly stopped being a percentile:
+
+    * `start consistency` fell through to the raw cumulative `starts` count --
+      FFP stopped publishing `LongStart`, so it was non-null for 0 of 670
+      reference rows. A count ranked against counts is a minutes-played measure
+      under a start model's name, and a player with three starts in nine
+      gameweeks scored 0.220 while the engine rated him 0.86 to start.
+    * `fixture ease` had no reference column at all (`AvgFDRNextN` was written
+      onto the scored frames and not the pool), so `positional_percentile` fell
+      back to a min-max over the **input** frame -- the 15-row roster normalised
+      against itself, the 94-row pool against itself, and the suggestion gap
+      then subtracts one from the other.
+
+    Neither shows up in a single value: every number stayed inside [0,1] and
+    looked like a percentile. What they do show up as is a term with **no
+    spread** -- the `check_team_strength` "every team scores exactly 50"
+    signature, one model over.
+
+    A term below `flat_weight_threshold` of the weight is a warning rather than
+    an error, and a frame under `min_rows` abstains: a 15-row roster legitimately
+    has little spread, and a check that cries wolf gets muted.
+    """
+    check = "ros_terms"
+    issues: List[Issue] = []
+
+    if not terms:
+        return [Issue(check, "warning", "No ROS terms to check.", "")]
+
+    weights = weights or {}
+    for name, series in terms.items():
+        if series is None:
+            issues.append(Issue(check, "error", "ROS term %r is missing." % name,
+                                "Every weighted term must produce a Series."))
+            continue
+        vals = pd.to_numeric(pd.Series(series), errors="coerce").dropna()
+        if vals.empty:
+            issues.append(Issue(check, "error", "ROS term %r is entirely null." % name,
+                                "A term with no values contributes its neutral "
+                                "default to every player, which is indistinguishable "
+                                "from the term being absent."))
+            continue
+
+        lo, hi = float(vals.min()), float(vals.max())
+        if lo < -1e-9 or hi > 1.0 + 1e-9:
+            issues.append(Issue(
+                check, "error",
+                "ROS term %r is outside [0,1] (%.3f..%.3f)." % (name, lo, hi),
+                "Every ROS term is a 0-1 percentile or rate. A value outside it "
+                "means two scales were crossed -- the 0-100 FFP_LongStart against "
+                "the 0-1 Start_Pct case, or a raw count reaching the term."))
+
+        w = float(weights.get(name, 0.0) or 0.0)
+        if len(vals) >= int(min_rows) and hi - lo < 1e-9:
+            sev = "error" if w > float(flat_weight_threshold) else "warning"
+            issues.append(Issue(
+                check, sev,
+                "ROS term %r is flat at %.3f across %d players (weight %.3f)."
+                % (name, lo, len(vals), w),
+                "A weighted term with no spread ranks nobody. This is the "
+                "'every team scores 50' signature: usually a reference pool "
+                "missing the column the term percentiles against, so it is "
+                "scoring a declared neutral for everyone."))
+
+    if ros is not None:
+        rv = pd.to_numeric(pd.Series(ros), errors="coerce").dropna()
+        if not rv.empty:
+            lo, hi = float(rv.min()), float(rv.max())
+            if lo < -1e-9 or hi > 1.0 + 1e-9:
+                issues.append(Issue(
+                    check, "error",
+                    "ROS is outside [0,1] (%.3f..%.3f)." % (lo, hi),
+                    "ROS is a weighted mean of 0-1 terms whose weights sum to 1, "
+                    "so it cannot leave the unit interval."))
 
     return issues

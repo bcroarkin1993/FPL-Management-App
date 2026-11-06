@@ -322,6 +322,150 @@ def compute_dynamic_alpha(
     return max(0.15, min(0.75, alpha))
 
 
+#: Rungs for the long-run start-rate term, loosest last. Each is normalised to
+#: 0-1 *at the rung*, which is the whole point: the three sources are on three
+#: different scales (a probability, a percentage, a count) and the code this
+#: replaced fed all three into one percentile.
+START_CONSISTENCY_RUNGS = ("Start_Pct", "FFP_LongStart", "starts")
+
+
+def _start_rate_on_rung(df: pd.DataFrame, rung: str, current_gw: int) -> Optional[pd.Series]:
+    """One rung of the start-rate ladder as a 0-1 Series, or None if unavailable.
+
+    Each rung is normalised **at the rung**, which is the whole point: the three
+    sources are a probability, a percentage and a cumulative count, and the code
+    this replaced fed all three into one percentile.
+    """
+    if rung == "Start_Pct":
+        if "Start_Pct" not in df.columns:
+            return None
+        vals = pd.to_numeric(df["Start_Pct"], errors="coerce")
+        return vals.clip(0.0, 1.0) if vals.notna().any() else None
+
+    if rung == "FFP_LongStart":
+        if "FFP_LongStart" not in df.columns:
+            return None
+        vals = pd.to_numeric(df["FFP_LongStart"], errors="coerce") / 100.0
+        return vals.clip(0.0, 1.0) if vals.notna().any() else None
+
+    if rung == "starts":
+        if "starts" not in df.columns:
+            return None
+        elapsed = max(1, int(current_gw or 1) - 1)
+        vals = pd.to_numeric(df["starts"], errors="coerce") / float(elapsed)
+        return vals.clip(0.0, 1.0) if vals.notna().any() else None
+
+    return None
+
+
+def _start_consistency(df: pd.DataFrame, reference_df, current_gw: int):
+    """The long-run start rate for frame and reference, on **one shared rung**.
+
+    **The term is meant to reward nailed-on starters, and it was reading a
+    cumulative count.** ``FFP_LongStart`` is the documented primary source and
+    FFP has stopped publishing it -- measured live, non-null for **0 of 670**
+    reference rows, 0 of 98 pool rows and 0 of 15 roster rows -- so every caller
+    fell through to ``result["_start_consistency"] = starts``, the raw season
+    starts count, percentiled against the pool's counts.
+
+    That is a *minutes-played* measure wearing a start model's name. A player
+    with three starts in nine elapsed gameweeks scored 0.220 while the projection
+    engine rated him 0.86 to start and both scraped projected XIs named him in
+    their eleven. It is the same defect ``team_strength`` already fixed one
+    module over by using points **per start**: "a star returning from six weeks
+    out has fewer total points than an ever-present squad player but is plainly
+    the better asset."
+
+    The ladder, loosest last:
+
+    1. ``Start_Pct`` -- the engine's own resolved start model, already 0-1, and
+       the only continuous forward-looking one anybody publishes.
+    2. ``FFP_LongStart / 100`` -- kept, not deleted, so the term returns for free
+       the day FFP resumes publishing it.
+    3. ``starts / (current_gw - 1)`` -- the honest last resort, and a **rate**
+       rather than the count. ``team_strength`` already computes exactly this for
+       ``Start_Security_Raw``.
+
+    **The rung is chosen as the best one present on *both* frames**, and that is
+    load-bearing rather than tidy. A percentile is a comparison, so ranking a
+    frame's ``Start_Pct`` against a reference's ``starts`` is the very
+    cross-scale comparison being removed. It cannot be assumed away either:
+    ``_reference_horizon`` has three early returns that skip ``_blend_frame``
+    -- an empty pool, a pool that already carries ``Proj_Next3``, and one with
+    neither ``MultiGW_Proj`` nor ``points_per_game`` -- and only the blend writes
+    ``Start_Pct``. So a reference arriving without it is an ordinary state, not
+    an edge case, and the shared-rung rule degrades it to a *weaker but still
+    comparable* signal rather than to an incomparable one.
+
+    Note this makes the start term share an input with ``1GW``, which is
+    ``positional_percentile(Proj)`` and ``Proj = Proj_Start * Start_Pct``. The
+    overlap is deliberate and is precisely what ``team_strength`` does with
+    ``Start_Security`` beside ``Proj_Start`` -- and it is an argument for leaving
+    ``w_start`` at 0.10 rather than raising it, not for dropping the rung.
+
+    Returns ``(frame_series, reference_series_or_None, rung)``. A ``None``
+    reference means no rung was shared and the caller must use the rate directly.
+    """
+    for rung in START_CONSISTENCY_RUNGS:
+        mine = _start_rate_on_rung(df, rung, current_gw)
+        if mine is None:
+            continue
+        theirs = (None if reference_df is None
+                  else _start_rate_on_rung(reference_df, rung, current_gw))
+        if theirs is not None:
+            return mine, theirs, rung
+
+    # No shared rung. Use the loosest rung this frame does have, as a rate --
+    # it is already 0-1 and interpretable, and unlike a within-frame min-max it
+    # means the same thing on a 15-row roster and a 700-row pool, which matters
+    # because the suggestion gap subtracts one from the other.
+    for rung in START_CONSISTENCY_RUNGS:
+        mine = _start_rate_on_rung(df, rung, current_gw)
+        if mine is not None:
+            return mine, None, rung
+
+    return pd.Series(0.5, index=df.index, dtype="float64"), None, "none"
+
+
+def _referenced_percentile(df, reference_df, value_col, *, ref_value_col=None,
+                           min_minutes=0, term="", neutral=0.5):
+    """``positional_percentile``, but a useless reference is *declared*.
+
+    ``positional_percentile`` silently falls back to a min-max over the **input**
+    frame when the reference lacks the value column -- which turns an absolute
+    percentile into a within-frame one with no error, the "reference-pool
+    contamination" trap CLAUDE.md records under Team Strength.
+
+    On the Draft Waiver Wire that was live. ``AvgFDRNextN`` is written onto the
+    scored frames and was **absent from the reference pool**, so the FDR term
+    normalised a 15-row roster against itself and a 98-row available pool
+    against itself -- and the suggestion gap then *subtracts* one from the other.
+    Two populations, min-max rather than percentile, and no symptom.
+
+    So: a missing or signal-free reference column returns a flat ``neutral``
+    plus a warning naming the term. A declared neutral is honest; a within-frame
+    min-max is a different quantity presented as the same one.
+
+    ``positional_percentile`` itself is deliberately unchanged -- ``initial_squad``
+    legitimately passes ``(result, result, ...)``, where a column missing on both
+    sides genuinely should be neutral.
+    """
+    ref_col = ref_value_col or value_col
+    usable = (reference_df is not None
+              and ref_col in getattr(reference_df, "columns", [])
+              and pd.to_numeric(reference_df[ref_col], errors="coerce").notna().any())
+    if not usable:
+        _logger.warning(
+            "ROS term %r has no usable reference column %r -- scoring it neutral "
+            "(%.2f) rather than min-maxing within the frame. Enrich the reference "
+            "pool with %s.", term or value_col, ref_col, neutral, ref_col)
+        return pd.Series(neutral, index=df.index, dtype="float64")
+    return positional_percentile(
+        df, reference_df, value_col, ref_value_col=ref_value_col,
+        min_minutes=min_minutes,
+    ).fillna(neutral)
+
+
 def compute_player_scores(
     df: pd.DataFrame,
     all_players_df: Optional[pd.DataFrame],
@@ -522,39 +666,41 @@ def compute_player_scores(
     starts = pd.to_numeric(starts_col, errors="coerce").fillna(0)
     form_dampened_pctile = dampen_form_by_starts(form_pctile, starts)
 
-    # Start consistency percentile (FFP LongStart — rewards nailed-on starters)
-    # Prefer FFP_LongStart in reference (same scale as candidate). Fall back to "starts".
-    if (all_players_df is not None
-            and "FFP_LongStart" in all_players_df.columns
-            and all_players_df["FFP_LongStart"].notna().any()):
-        ref_starts_col = "FFP_LongStart"
-    elif all_players_df is not None and "starts" in all_players_df.columns:
-        ref_starts_col = "starts"
-    else:
-        ref_starts_col = None
+    # Start consistency -- the long-run start rate, 0-1, via one ladder applied
+    # to *both* frames. See `_start_consistency`: this read a cumulative starts
+    # count for as long as FFP has not published `LongStart`, which is a
+    # minutes-played measure under a start model's name.
+    #
+    # The reference is `ref_horizon`, not `all_players_df`: only the former
+    # carries `Start_Pct`, because `_reference_horizon` runs `_blend_frame` over
+    # the pool and `blend_aligned` always writes it.
+    _sc, _ref_sc_vals, _sc_rung = _start_consistency(result, ref_horizon, current_gw)
+    result["_start_consistency"] = _sc
 
-    if "FFP_LongStart" in result.columns and result["FFP_LongStart"].notna().any():
-        result["_start_consistency"] = pd.to_numeric(result["FFP_LongStart"], errors="coerce").fillna(50)
+    if _ref_sc_vals is not None:
+        _ref_sc = ref_horizon.copy()
+        _ref_sc["_start_consistency"] = _ref_sc_vals
+        start_consistency_pctile = _referenced_percentile(
+            result, _ref_sc, "_start_consistency", ref_value_col="_start_consistency",
+            min_minutes=90, term="start consistency",
+        )
     else:
-        result["_start_consistency"] = starts
-
-    if ref_starts_col:
-        start_consistency_pctile = positional_percentile(
-            result, all_players_df, "_start_consistency", ref_value_col=ref_starts_col, min_minutes=90
-        ).fillna(0.5)
-    else:
-        start_consistency_pctile = _min_max_norm_series(result["_start_consistency"]).fillna(0.5)
+        _logger.warning(
+            "start consistency: no rung shared with the reference pool (frame is "
+            "on %r) -- using the rate directly rather than percentiling across "
+            "scales.", _sc_rung)
+        start_consistency_pctile = result["_start_consistency"].fillna(0.5)
 
     # FDR ease percentile (6 - AvgFDR → higher = easier fixtures)
     result["_FDREase"] = 6 - result[fdr_col]
+    ref_fdr = None
     if all_players_df is not None and fdr_col in all_players_df.columns:
         ref_fdr = all_players_df.copy()
         ref_fdr["_FDREase"] = 6 - pd.to_numeric(ref_fdr[fdr_col], errors="coerce").fillna(3)
-        fdr_ease_pctile = positional_percentile(
-            result, ref_fdr, "_FDREase", ref_value_col="_FDREase", min_minutes=90
-        ).fillna(0.5)
-    else:
-        fdr_ease_pctile = _min_max_norm_series(result["_FDREase"]).fillna(0.5)
+    fdr_ease_pctile = _referenced_percentile(
+        result, ref_fdr, "_FDREase", ref_value_col="_FDREase",
+        min_minutes=90, term="fixture ease",
+    )
 
     # Dynamic ROS weights (sum = 1.0 at all gameweeks), from
     # `config.ROS_WEIGHTS` as `base + slope * season_progress`.

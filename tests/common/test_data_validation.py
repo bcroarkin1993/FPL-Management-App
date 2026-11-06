@@ -14,6 +14,8 @@ from scripts.common.data_validation import (
     check_start_calibration,
     check_ffp_feed,
     check_transfer_risk,
+    check_claim_lanes,
+    check_ros_terms,
     check_transfer_windows,
     Issue,
     check_projected_team_total,
@@ -1957,3 +1959,104 @@ class TestCheckElementIdNames:
         df = pd.DataFrame({"Display_Name": ["Remi Matthews"], "Player_ID": [566]})
         issues = check_element_id_names(df, self.REF, name_col="Display_Name")
         assert len(issues) == 1 and issues[0].severity == "error"
+
+
+# =============================================================================
+# Rent/hold claim lanes, and the ROS terms that feed the hold lane.
+#
+# Every "bad data" fixture below is a real number this app produced.
+# =============================================================================
+
+class TestCheckClaimLanes:
+    def _rental(self, **kw):
+        base = {"lane": "rent", "drop_player": "Alex Iwobi",
+                "add_player": "Noni Madueke", "points_gain": 1.02,
+                "release_cost": 0.0, "position_floor": 3.67}
+        base.update(kw)
+        return base
+
+    def test_a_good_rental_is_clean(self):
+        assert check_claim_lanes([self._rental()]) == []
+
+    def test_a_non_positive_gain_is_an_error(self):
+        issues = check_claim_lanes([self._rental(points_gain=-0.41)])
+        assert [i.severity for i in issues] == ["error"]
+        assert "gain" in issues[0].message
+
+    def test_a_negative_release_cost_is_impossible(self):
+        """release_cost is max(0, rate - floor). A negative one means the rate and
+        the floor were computed on different bases -- the Proj_Next3/3 confusion."""
+        issues = check_claim_lanes([self._rental(release_cost=-0.2)])
+        assert any(i.severity == "error" and "negative release cost" in i.message
+                   for i in issues)
+
+    def test_a_rental_without_a_floor_is_the_silent_gate_failure(self):
+        issues = check_claim_lanes([self._rental(position_floor=None)])
+        assert any("no waiver floor" in i.message for i in issues)
+
+    def test_a_floor_from_one_player_is_not_a_floor(self):
+        """Live there was exactly one available goalkeeper."""
+        issues = check_claim_lanes([], floors={"G": 3.47},
+                                   available_by_position={"G": 1})
+        assert [i.severity for i in issues] == ["error"]
+        assert "only 1 available" in issues[0].message
+
+    def test_a_healthy_pool_is_clean(self):
+        assert check_claim_lanes([], floors={"M": 3.67},
+                                 available_by_position={"M": 54}) == []
+
+    def test_hold_cards_are_not_judged_as_rentals(self):
+        """The hold lane qualifies on a percentile gap and orders on points, so a
+        non-positive points figure there is pre-existing behaviour, not a lane
+        defect. Only rentals claim 'this is worth more than it costs'."""
+        assert check_claim_lanes([{"lane": "hold", "points_gain": -0.13}]) == []
+
+    def test_free_agency_is_not_a_finding(self):
+        """The floor describes *next* round's queue, which exists either way."""
+        assert check_claim_lanes([self._rental()], free_agency=True) == []
+
+
+class TestCheckRosTerms:
+    def test_healthy_terms_are_clean(self):
+        terms = {"mgw": pd.Series(np.linspace(0, 1, 50)),
+                 "start": pd.Series(np.linspace(0.1, 0.9, 50))}
+        assert check_ros_terms(terms, weights={"mgw": 0.41, "start": 0.10}) == []
+
+    def test_a_raw_starts_count_reaching_the_term_is_caught(self):
+        """The shipped `_start_consistency = starts` defect: a cumulative count
+        where a 0-1 rate belongs."""
+        issues = check_ros_terms({"start": pd.Series([0.0, 3.0, 9.0] * 5)},
+                                 weights={"start": 0.10})
+        assert any(i.severity == "error" and "outside [0,1]" in i.message
+                   for i in issues)
+
+    def test_the_0_to_100_ffp_scale_is_caught(self):
+        issues = check_ros_terms({"start": pd.Series([50.0, 70.0, 90.0] * 5)},
+                                 weights={"start": 0.10})
+        assert any("outside [0,1]" in i.message for i in issues)
+
+    def test_a_flat_weighted_term_is_the_every_team_scores_50_signature(self):
+        """What a reference pool missing its column actually looks like: the term
+        scores a declared neutral for everybody and ranks nobody."""
+        issues = check_ros_terms({"fdr": pd.Series([0.5] * 40)},
+                                 weights={"fdr": 0.03})
+        assert [i.severity for i in issues] == ["warning"]   # 0.03 <= threshold
+        issues = check_ros_terms({"sq": pd.Series([0.5] * 40)},
+                                 weights={"sq": 0.33})
+        assert [i.severity for i in issues] == ["error"]
+
+    def test_a_small_frame_abstains(self):
+        """A 15-row roster legitimately has little spread, and a check that cries
+        wolf gets muted."""
+        assert check_ros_terms({"sq": pd.Series([0.5] * 5)},
+                               weights={"sq": 0.33}) == []
+
+    def test_an_all_null_term_is_an_error(self):
+        issues = check_ros_terms({"sq": pd.Series([np.nan] * 20)},
+                                 weights={"sq": 0.33})
+        assert any("entirely null" in i.message for i in issues)
+
+    def test_ros_itself_must_stay_in_the_unit_interval(self):
+        issues = check_ros_terms({"sq": pd.Series(np.linspace(0, 1, 20))},
+                                 ros=pd.Series([1.4] * 20), weights={"sq": 1.0})
+        assert any("ROS is outside" in i.message for i in issues)

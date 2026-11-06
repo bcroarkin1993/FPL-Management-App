@@ -38,6 +38,15 @@ from scripts.common.fpl_draft_api import (
     ELEMENT_STATE_OWNED,
     TRANSACTION_MODE_FREE_AGENCY,
 )
+from scripts.common.claim_value import (
+    HORIZON_GWS,
+    LANE_HOLD,
+    LANE_RENT,
+    recommended_lane,
+    release_cost as _release_cost,
+    rental_gain,
+    waiver_floors,
+)
 from scripts.common.waiver_priority import (
     BAND_CONTESTED,
     BAND_LIKELY,
@@ -132,6 +141,29 @@ SUGGESTION_VIEW_OPTIONS = [
     "All improvements",
 ]
 SUGGESTION_VIEW_LIMITS = {"Top 5": 5, "Top 10": 10}
+
+# How long you intend to hold the player you claim. **This is the control the
+# page never had, and its absence was the bug.** `Transfer Score` is
+# `alpha * 1GW + (1 - alpha) * ROS`, which is a fixed, hidden choice of horizon
+# applied to every move -- and therefore optimal for neither of the two
+# transactions a manager actually makes.
+#
+# Measured live at GW10, ranking the same available midfielders on points over
+# an explicit horizon: 1GW gives Madueke, Estevao, Guimaraes; 6GW gives Ayari,
+# Bobb, Madueke. `Transfer Score` behaved like the 6GW end, which is why the
+# highest-projected available player in the game was suggested nowhere.
+HOLD_RENT = "Just this week"
+HOLD_BOTH = "Both"
+HOLD_KEEP = "Rest of season"
+HOLD_OPTIONS = [HOLD_BOTH, HOLD_RENT, HOLD_KEEP]
+HOLD_DEFAULT = HOLD_BOTH
+
+#: Smallest rental gain worth listing, in points over the window. A **display**
+#: floor, not a significance claim: the projections this is built from carry an
+#: MAE around 2.5 points per player, so a 0.6-point edge is not a fact. The card
+#: prints the number and the release cost so the call stays the manager's -- but
+#: without some floor the lane lists every marginal swap on the board.
+RENTAL_MIN_GAIN = 0.5
 
 # ---------------------------
 # FPL API READS
@@ -373,6 +405,61 @@ def _avg_fdr_for_team(short_name: str, current_gw: int, n_weeks: int) -> Optiona
     future_slice["team_fdr"] = future_slice.apply(_row_team_fdr, axis=1)
     d = pd.to_numeric(future_slice["team_fdr"], errors="coerce").dropna()
     return float(d.mean()) if not d.empty else None
+
+def _avg_fdr_by_short_name(current_gw: int, n_weeks: int) -> pd.Series:
+    """Average FDR over the next ``n_weeks``, one value per club, by short code.
+
+    **FDR is a property of the club.** ``_avg_fdr_for_team`` was applied per row
+    -- each call a dropna, an astype, a filter and a per-row apply over the whole
+    fixture table -- to produce twenty distinct answers for ~700 players. This is
+    the same optimisation Classic already made (``transfers._avg_fdr_by_team``:
+    "Twenty clubs, not seven hundred players").
+
+    The reason it exists rather than being a tidy-up, though, is that the
+    **reference pool needs this column and never had it**. ``AvgFDRNextN`` was
+    written onto the scored frames and not onto ``fpl_stats``, so the ROS fixture
+    term silently min-maxed each frame against itself -- see
+    ``analytics._referenced_percentile``. One cheap club-indexed Series can be
+    mapped onto both, which is what makes the fix a ``.map()`` at two callsites
+    rather than 700 more fixture scans.
+
+    Built on the same ``_load_future_fixtures()`` window as before, so the values
+    are identical to what the scored frame already received. ``None``/missing
+    stays NaN so ``numeric_col(..., 3)`` downstream still defaults correctly.
+    """
+    out: Dict[str, float] = {}
+    try:
+        fixtures = _load_future_fixtures()
+    except Exception:
+        _logger.warning("Unable to load fixtures for club FDR", exc_info=True)
+        return pd.Series(dtype="float64")
+    if fixtures is None or fixtures.empty or "event" not in fixtures.columns:
+        return pd.Series(dtype="float64")
+
+    fixtures = fixtures.dropna(subset=["event"]).copy()
+    fixtures["event"] = fixtures["event"].astype(int)
+    window = fixtures[(fixtures["event"] >= current_gw) &
+                      (fixtures["event"] < current_gw + n_weeks)]
+    if window.empty:
+        return pd.Series(dtype="float64")
+
+    teams = _bootstrap_teams_df()
+    if teams is None or teams.empty:
+        return pd.Series(dtype="float64")
+
+    for _, trow in teams.iterrows():
+        tid = trow.get("id")
+        short = trow.get("short_name")
+        if tid is None or not short:
+            continue
+        home = window.loc[window["team_h"] == tid, "team_h_difficulty"]
+        away = window.loc[window["team_a"] == tid, "team_a_difficulty"]
+        vals = pd.to_numeric(pd.concat([home, away]), errors="coerce").dropna()
+        if not vals.empty:
+            out[str(short)] = float(vals.mean())
+
+    return pd.Series(out, dtype="float64")
+
 
 def _avg_form_last_n(player_id: int, last_n: int = config.FORM_LOOKBACK_WEEKS) -> Optional[float]:
     """Average of last N GWs' points for a player using element-summary history."""
@@ -1024,8 +1111,11 @@ def _add_fdr_and_form(
                     "name joins missed.", _before - _after, _before)
 
     # Compute Avg FDR next N GWs
-    base["AvgFDRNextN"] = base["Team"].apply(lambda t: _avg_fdr_for_team(str(t), current_gw, weeks))
-    base["AvgFDRNextN"] = pd.to_numeric(base["AvgFDRNextN"], errors="coerce")
+    # Twenty clubs, not seven hundred players -- and the same Series is mapped
+    # onto the reference pool below, which is the half that was missing.
+    _club_fdr = _avg_fdr_by_short_name(current_gw, weeks)
+    base["AvgFDRNextN"] = pd.to_numeric(
+        base["Team"].astype(str).map(_club_fdr), errors="coerce")
 
     # Robust Form calculation with fallbacks (uses healthy form — filters out 0-minute GWs)
     _form_n = form_weeks if form_weeks is not None else config.FORM_LOOKBACK_WEEKS
@@ -1299,7 +1389,8 @@ def _claim_points_rate(row) -> float:
 
 
 def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef,
-                      outlook=None, points_gain=0.0):
+                      outlook=None, points_gain=0.0, lane=LANE_HOLD,
+                      release_cost=None, floor=None):
     """One suggestion card's payload.
 
     Extracted from the middle of the search loop so that loop can be read as
@@ -1347,6 +1438,14 @@ def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef,
             best_avail.get('status'),
             best_avail.get('news')
         ),
+        # Which question this card answers. A rental is justified by the drop
+        # being *replaceable* rather than by the add having a future -- the add
+        # is going back on the wire next week -- so the card carries the release
+        # cost as its reason rather than a percentile gap.
+        'lane': lane,
+        'release_cost': (None if release_cost is None or pd.isna(release_cost)
+                         else round(float(release_cost), 2)),
+        'position_floor': (None if floor is None else round(float(floor), 2)),
         'transaction_score': round(float(txn_score), 3),
         # Expected points per gameweek this swap adds. The ranking currency --
         # `transaction_score` is a percentile gap and is not comparable across
@@ -1367,6 +1466,9 @@ def _compute_transfer_suggestions(
     avail_candidates: Optional[int] = 5,
     one_per_position: bool = True,
     waiver_context: Optional[Dict] = None,
+    floor_context: Optional[Dict] = None,
+    horizon: int = HORIZON_GWS,
+    lanes: Optional[Tuple[str, ...]] = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     """Core suggestion logic: position-locked swaps using pre-computed Transfer/Keep Scores.
 
@@ -1397,9 +1499,24 @@ def _compute_transfer_suggestions(
             unknown queue, or a league with no waiver history — leaves every
             band blank, which renders no badge at all.
 
+        floor_context: ``{n_ahead, claim_rates}`` — what the *next* waiver round
+            looks like, used to price what you could re-claim. Deliberately a
+            separate argument from ``waiver_context`` even though both read the
+            same two values: ``waiver_context`` is suppressed during free agency
+            because reachability bands describe a queue you are not in, whereas
+            the **floor describes next round's queue, which exists either way**.
+            Folding them together would switch the rental lane off for half of
+            every gameweek.
+        horizon: gameweeks the release cost is priced over. See
+            ``claim_value.HORIZON_GWS``.
+        lanes: which lanes to search, default both.
+
     Returns:
         (suggestions, debug_rows) — suggestions is the ranked list of transfers;
         debug_rows is a per-position breakdown for the transparency expander.
+        Each suggestion carries ``lane``: ``LANE_HOLD`` for a rest-of-season
+        upgrade and ``LANE_RENT`` for a one-week play funded by releasing a
+        player the wire can replace.
     """
     # Debug pairs are for eyeballing near-misses, not an audit log. An exhaustive
     # scan can pit 15 roster players against 150 available ones; capping keeps the
@@ -1449,6 +1566,22 @@ def _compute_transfer_suggestions(
         unavailable_excluded = int(_cannot_play.sum())
         if unavailable_excluded:
             avail_df = avail_df.loc[~_cannot_play].copy()
+
+    # What you could re-claim at each position next round. Computed **here**,
+    # after the locked and unavailable filters, for two reasons: a locked player
+    # is not claimable so he cannot be the floor, and -- as with those filters --
+    # computing it inside means no future caller can forget it and silently get
+    # a lane whose every release reads as free.
+    #
+    # `waiver_floors` returns nothing for a position it cannot measure (no claim
+    # history, or fewer than MIN_FLOOR_POOL available), and `rental_gain` returns
+    # None without a floor, so the rental lane switches itself off per position
+    # rather than falling back to zero. Live, that correctly refused a goalkeeper
+    # "floor" that rested on the single available keeper.
+    _fc = floor_context or {}
+    floors = waiver_floors(avail_df, _fc.get("n_ahead"), _fc.get("claim_rates"),
+                           horizon=horizon)
+    _lanes = tuple(lanes) if lanes else (LANE_HOLD, LANE_RENT)
 
     # Board rank across the whole available pool, for the claim outlook. Computed
     # after the locked filter, because a locked player is not on the board anyone
@@ -1520,6 +1653,16 @@ def _compute_transfer_suggestions(
         _expected_at_pos = expected_taken_at_position(
             pos, ctx.get('n_ahead'), ctx.get('claim_rates')) if ctx else None
 
+        # Points per gameweek permanently given up by releasing each roster
+        # player, net of what the wire would hand back at his position. This is
+        # the quantity `Keep Score` cannot express: it is a percentile against
+        # ~700 players and has no idea what is *available*. Measured live, three
+        # of five roster midfielders sat at or below their position's floor --
+        # the wire offered their equal -- while one of them carried a Keep Score
+        # of 0.80 and so sat behind the 0.12 "elite" drop threshold.
+        _rel = _release_cost(roster_pos, floors, horizon=horizon)
+        _drop_release = {idx: _rel.get(idx) for idx in roster_pos.index}
+
         pos_debug_pairs = []
         roster_iter = (roster_sorted if roster_candidates is None
                        else roster_sorted.head(roster_candidates))
@@ -1533,7 +1676,8 @@ def _compute_transfer_suggestions(
         # to leave its runners-up behind for the drops that lose it, or those
         # drops vanish from the list entirely.
         candidates = []
-        for drop_idx, worst_roster in roster_iter.iterrows():
+        for drop_idx, worst_roster in (roster_iter.iterrows() if LANE_HOLD in _lanes
+                                       else iter(())):
             keep_val = float(worst_roster.get('Keep Score', 0.5) or 0.5)
             if keep_val > 0.7:
                 min_threshold = 0.12   # elite: 12%+ improvement required
@@ -1637,12 +1781,96 @@ def _compute_transfer_suggestions(
                 )
             suggestions.append(_build_suggestion(
                 cand['drop'], cand['add'], pos, cand['score'], depth_map, _ef,
-                outlook, points_gain=cand['points'],
+                outlook, points_gain=cand['points'], lane=LANE_HOLD,
+                release_cost=_drop_release.get(cand['drop_idx']),
+                floor=floors.get(pos),
             ))
             used_drops.add(cand['drop_idx'])
             used_adds.add(cand['add_idx'])
             if one_per_position:
                 break
+        # ------------------------------------------------------------------
+        # The rental lane -- "I only need him this week."
+        #
+        # **Ranked on `Proj`, not on `Transfer Score`.** That is the whole
+        # reason this pass exists separately rather than reusing `avail_iter`:
+        # `avail_iter` is the top few by `Transfer Score`, which is ~60% ROS in
+        # Draft, and the player who is worth renting is by definition the one
+        # with a big this-week projection and a thin future. Live at GW10 the
+        # highest-projected available player in the game ranked 4th at his
+        # position on `Transfer Score` and was suggested nowhere.
+        #
+        # The gain is priced by `claim_value.rental_gain`: this week's points
+        # difference, less the drop's release cost over the rest of the window.
+        # The add's own horizon never enters -- he goes back on the wire -- so
+        # what makes a rental cheap is a *replaceable drop*, not a good add.
+        if LANE_RENT in _lanes and floors.get(pos) is not None:
+            rent_avail = avail_pos.sort_values('Proj', ascending=False)
+            if avail_candidates is not None:
+                rent_avail = rent_avail.head(avail_candidates)
+
+            rent_cands = []
+            for drop_idx, drop_row in roster_pos.iterrows():
+                for add_idx, add_row in rent_avail.iterrows():
+                    gain = rental_gain(drop_row, add_row, floors, horizon=horizon)
+                    if gain is None or gain <= RENTAL_MIN_GAIN:
+                        continue
+                    # The sanity veto applies here too: it compares raw
+                    # observables and is just as able to catch a nonsense
+                    # one-week swap as a season-long one.
+                    sane, why = _sanity_check_suggestion(drop_row, add_row)
+                    if not sane:
+                        continue
+                    rent_cands.append({
+                        'gain': float(gain), 'drop_idx': drop_idx, 'add_idx': add_idx,
+                        'drop': drop_row, 'add': add_row,
+                    })
+
+            r_drops, r_adds = set(), set()
+            for cand in sorted(rent_cands, key=lambda c: c['gain'], reverse=True):
+                if cand['drop_idx'] in r_drops or cand['add_idx'] in r_adds:
+                    continue
+                r_outlook = None
+                if ctx:
+                    # `_pos_rank` is the **Transfer Score** order, while this lane
+                    # is ordered by rental gain -- deliberately, and not the
+                    # desync the hold lane's comment warns about. Contention is a
+                    # statement about how desirable this player is to *other*
+                    # managers, whose ordering is their own; the available board
+                    # is the app's best proxy for it and is what the Available
+                    # Players table below renders. Nothing here keys a threshold
+                    # or a short-circuit on the rank, which is what made the
+                    # coupling load-bearing in the hold pass.
+                    r_outlook = claim_outlook(
+                        position=pos,
+                        pos_rank=_pos_rank.get(cand['add_idx']),
+                        n_ahead=ctx.get('n_ahead'),
+                        expected_at_position=_expected_at_pos,
+                        rivals_needing=len((ctx.get('rival_needs') or {}).get(pos, [])),
+                        expected_gone=ctx.get('expected_gone'),
+                        overall_rank=_overall_rank.get(cand['add_idx']),
+                    )
+                suggestions.append(_build_suggestion(
+                    cand['drop'], cand['add'], pos,
+                    # The percentile gap is still carried so the card can show it
+                    # and so the cross-lane tie-break has something to fall back
+                    # on, but it is not what ranked this pair.
+                    float(cand['add'].get('Transfer Score', 0) or 0)
+                    - float(cand['drop'].get('Keep Score', 0) or 0),
+                    depth_map, _ef, r_outlook,
+                    # `points_gain` is the lane's own currency: total points over
+                    # the window, not a per-gameweek rate like the hold lane's.
+                    # `_render_transfer_suggestions` labels them differently for
+                    # that reason.
+                    points_gain=cand['gain'], lane=LANE_RENT,
+                    release_cost=_drop_release.get(cand['drop_idx']),
+                    floor=floors.get(pos),
+                ))
+                r_drops.add(cand['drop_idx'])
+                r_adds.add(cand['add_idx'])
+                if one_per_position:
+                    break
+
         debug_rows.append({
             'pos': pos,
             'skipped': False,
@@ -1650,6 +1878,7 @@ def _compute_transfer_suggestions(
             'pairs': pos_debug_pairs,
             'locked_excluded': locked_excluded,
             'unavailable_excluded': unavailable_excluded,
+            'floor': floors.get(pos),
         })
 
     # **Ordered by expected points, not by the percentile gap.** This is the
@@ -1661,9 +1890,19 @@ def _compute_transfer_suggestions(
     # The percentile gap is the tie-break, so a gameweek with no projections
     # published degrades to exactly the old ordering rather than to an arbitrary
     # one.
-    suggestions.sort(key=lambda x: (x['points_gain'], x['transaction_score']),
-                     reverse=True)
-    return (suggestions if top_n is None else suggestions[:top_n]), debug_rows
+    # Sorted **within** lane, not across it. The two lanes' `points_gain` are
+    # different quantities -- the hold lane's is points per gameweek, the rental
+    # lane's is total points over the window -- so one sort over both would be
+    # the cross-position percentile mistake again, one level up. The renderer
+    # draws them as separate sections for the same reason.
+    suggestions.sort(key=lambda x: (x['lane'] != LANE_HOLD,
+                                    -x['points_gain'], -x['transaction_score']))
+    if top_n is not None:
+        kept = []
+        for lane in (LANE_HOLD, LANE_RENT):
+            kept.extend([x for x in suggestions if x['lane'] == lane][:top_n])
+        suggestions = kept
+    return suggestions, debug_rows
 
 
 def _render_depth_card(depth_map: Dict):
@@ -1841,7 +2080,8 @@ def _render_waiver_queue(order: List[Dict], my_entry_id, stats: Optional[Dict] =
             st.caption(line)
 
 
-def _render_claim_plan(suggestions: List[Dict], free_agency: bool = False):
+def _render_claim_plan(suggestions: List[Dict], free_agency: bool = False,
+                       lane: str = LANE_HOLD, lane_label: str = ""):
     """The priority-ordered list of claims to submit to FPL.
 
     FPL asks you to rank your waiver requests, and the instinct is to lead with
@@ -1856,12 +2096,19 @@ def _render_claim_plan(suggestions: List[Dict], free_agency: bool = False):
     the league acts, but presenting it as a ranked *request* list would describe
     a mechanic that is not running.
     """
-    plan = rank_claim_plan(suggestions)
+    # **One plan per lane.** A rental and a rest-of-season claim are not
+    # comparable in a single priority order -- they are ranked in different
+    # currencies and answer different questions -- so merging them would stamp a
+    # submission order on a list that has no single meaning. The caller renders
+    # one expander per lane and names which it is.
+    plan = rank_claim_plan([x for x in suggestions
+                            if x.get('lane', LANE_HOLD) == lane])
     if len(plan) < 2:
         return
 
-    title = (f"Suggested pickup order ({len(plan)} moves)" if free_agency
-             else f"Suggested claim order ({len(plan)} requests)")
+    _suffix = f" — {lane_label}" if lane_label else ""
+    title = (f"Suggested pickup order ({len(plan)} moves){_suffix}" if free_agency
+             else f"Suggested claim order ({len(plan)} requests){_suffix}")
     with st.expander(title, expanded=False):
         st.caption(
             "Free agency is open, so each of these processes the moment you make "
@@ -1963,6 +2210,32 @@ def _build_waiver_context(
     }
 
 
+def _build_floor_context(waiver_order: List[Dict], my_entry_id, league_id) -> Dict:
+    """What the *next* waiver round looks like, for pricing a re-claim.
+
+    Deliberately **not** `_build_waiver_context`, even though it reads the same
+    two values. That function returns `{}` during free agency, correctly, because
+    the reachability bands describe a queue you are not currently standing in.
+    The floor is a different question: it asks what you could claim *next* round,
+    and next round is a waiver round whether or not free agency is open now.
+    `waiver_pick` is published for the next round throughout, so folding the two
+    together would switch the rental lane off for half of every gameweek.
+
+    Returns `{}` when the order or the league's claim history is unreadable, which
+    `waiver_floors()` reads as "no floor" and so disables the rental lane rather
+    than pricing every release as free.
+    """
+    if not waiver_order or my_entry_id is None:
+        return {}
+    pick = my_waiver_pick(waiver_order, my_entry_id)
+    if pick is None:
+        return {}
+    n_ahead = len(managers_ahead(waiver_order, my_entry_id))
+    stats = _waiver_claim_stats(league_id, len(waiver_order)) or {}
+    return {"n_ahead": n_ahead,
+            "claim_rates": stats.get("position_claim_rates") or {}}
+
+
 def _render_transfer_suggestions(
     suggestions: List[Dict],
     current_gw: int = 0,
@@ -2027,6 +2300,43 @@ def _render_transfer_suggestions(
     mgw_window = min(3, max(1, 38 - current_gw)) if current_gw > 0 else 3
     mgw_label = "Next GW" if mgw_window == 1 else f"Next {mgw_window} GW"
 
+    # **Two lanes, drawn as two sections.** They answer different questions and
+    # their gain figures are different quantities -- the hold lane's is points
+    # per gameweek, the rental lane's is total points over the window -- so a
+    # single merged list would be the cross-position percentile mistake one level
+    # up: two numbers that look alike and are not comparable.
+    _hold = [x for x in suggestions if x.get('lane', LANE_HOLD) == LANE_HOLD]
+    _rent = [x for x in suggestions if x.get('lane') == LANE_RENT]
+
+    for _lane_items, _lane in ((_hold, LANE_HOLD), (_rent, LANE_RENT)):
+        if not _lane_items:
+            continue
+        if _hold and _rent:
+            if _lane == LANE_HOLD:
+                st.markdown("##### 📌 Hold — rest-of-season upgrades")
+                st.caption(
+                    "Ranked on durable value, so a player with a thin season "
+                    "behind him ranks low here even when he is this week's best "
+                    "play. That is what the rental lane below is for.")
+            else:
+                st.markdown("##### ⚡ Rent — just this week")
+                st.caption(
+                    "Ranked on **this gameweek's** projection, and charged only "
+                    "for the player you release: the one you claim goes back on "
+                    "the wire next week, so his own future never enters. "
+                    "**Release cost** is what dropping your player actually costs "
+                    "once the wire's replacement is counted — at or near zero "
+                    "means someone of his standard is claimable at that position, "
+                    "so the rental is close to free. The two lanes can want the "
+                    "same roster slot, so treat them as alternatives rather than "
+                    "a combined plan.")
+        _render_suggestion_cards(_lane_items, pos_labels, mgw_label)
+
+
+def _render_suggestion_cards(suggestions, pos_labels, mgw_label):
+    """The cards for one lane. Split out of `_render_transfer_suggestions` so the
+    two lanes can carry their own heading and caption without duplicating 120
+    lines of card HTML."""
     for s in suggestions:
         pos_label = pos_labels.get(s['drop_position'], s['drop_position'])
         score = s['transaction_score']
@@ -2038,7 +2348,16 @@ def _render_transfer_suggestions(
         # thing. The percentile gap is still what qualifies a swap, and stays on
         # the card as a hover.
         points_gain = float(s.get('points_gain', 0) or 0)
-        if points_gain > 0:
+        _is_rent = s.get('lane') == LANE_RENT
+        if points_gain > 0 and _is_rent:
+            # Total points over the window, not a per-gameweek rate: the add is
+            # held for one gameweek and the drop's cost runs for the rest of it.
+            badge = f"+{points_gain:.2f} pts"
+            _rc = s.get('release_cost')
+            badge_title = ("This gameweek's gain, less what releasing your player "
+                           "costs over the window"
+                           + (f" ({_rc:.2f} pts/GW)" if _rc is not None else ""))
+        elif points_gain > 0:
             badge = f"+{points_gain:.2f} pts/GW"
             badge_title = f"Score gap +{score:.3f} (positional percentile)"
         else:
@@ -2075,6 +2394,26 @@ def _render_transfer_suggestions(
             f"{s['add_proj_pts']:.1f} pts" if s.get('add_has_data')
             else '<span style="color:#e67e22;">No proj</span>'
         )
+        # Why a rental is cheap, on the card rather than only inside the ranking.
+        # Release cost is measured over a 3-gameweek window -- the only horizon
+        # the app has -- which *understates* the cost of releasing a genuinely
+        # good player, so the number is shown rather than buried.
+        #
+        # Renders to "" for a hold card, which is exactly the optional fragment
+        # `compact_html` exists for: a blank line ends the HTML block and Markdown
+        # then prints the closing </div> on screen as literal text.
+        release_html = ""
+        if _is_rent and s.get('release_cost') is not None:
+            _rc = float(s['release_cost'])
+            _fl = s.get('position_floor')
+            _verdict = ("the wire can replace him" if _rc <= 0.05
+                        else f"costs {_rc:.2f} pts/GW to lose")
+            _fl_txt = (f" &bull; {pos_labels.get(s['drop_position'], s['drop_position'])} "
+                       f"wire floor {_fl:.2f} pts/GW" if _fl is not None else "")
+            release_html = (
+                f'<div style="color:#8ab4f8;font-size:0.78em;margin-top:4px;">'
+                f'Release cost {_rc:.2f} pts/GW &mdash; {_verdict}{_fl_txt}</div>')
+
         drop_mgw_str = f" &bull; {mgw_label}: {s['drop_3gw_proj']:.1f}" if s.get('drop_3gw_proj', 0) > 0 else ""
         add_mgw_str = f" &bull; {mgw_label}: {s['add_3gw_proj']:.1f}" if s.get('add_3gw_proj', 0) > 0 else ""
 
@@ -2109,7 +2448,7 @@ def _render_transfer_suggestions(
                 </div>
             </div>
             <div style="color: #aaa; font-size: 0.82em; font-style: italic; border-top: 1px solid #333;
-                        padding-top: 6px;">{s['rationale']}</div>{outlook_note}
+                        padding-top: 6px;">{s['rationale']}</div>{release_html}{outlook_note}
         </div>
         """
         st.markdown(compact_html(card_html), unsafe_allow_html=True)
@@ -2704,7 +3043,20 @@ def show_waiver_wire_page():
     # because they are what the search is parameterised on.
     with suggestion_container:
         st.subheader("Transfer Suggestions")
-        _ctl_view, _ctl_pos = st.columns([1, 2])
+        _ctl_view, _ctl_hold, _ctl_pos = st.columns([1, 1, 2])
+        with _ctl_hold:
+            sugg_hold = st.selectbox(
+                "Hold for",
+                options=HOLD_OPTIONS,
+                index=HOLD_OPTIONS.index(HOLD_DEFAULT),
+                help="A waiver claim is two different decisions and they rank "
+                     "players differently. 'Rest of season' is the durable "
+                     "upgrade. 'Just this week' is a rental: it ranks on this "
+                     "gameweek's projection and charges you only for the player "
+                     "you release, since the one you claim goes back on the wire "
+                     "next week. A rental is cheap when the player you drop is "
+                     "one the wire can replace.",
+            )
         with _ctl_view:
             sugg_view = st.selectbox(
                 "Show",
@@ -2729,6 +3081,10 @@ def show_waiver_wire_page():
         POSITION_LABEL_TO_CODE[lbl] for lbl in (sugg_pos_labels or [])
         if lbl in POSITION_LABEL_TO_CODE
     ]
+    sugg_lanes = {
+        HOLD_RENT: (LANE_RENT,),
+        HOLD_KEEP: (LANE_HOLD,),
+    }.get(sugg_hold, (LANE_HOLD, LANE_RENT))
 
     team_options = []
     for tid, blob in ownership.items():
@@ -3007,6 +3363,18 @@ def show_waiver_wire_page():
     fpl_stats = merge_season_projections(fpl_stats, season_rankings_df)
     fpl_stats = merge_ffp_single_gw_data(fpl_stats, ffp_df)
     fpl_stats = enrich_reference_with_projections(fpl_stats, proj)
+    # **The fixture term's reference column, which never existed.** `AvgFDRNextN`
+    # was written onto the scored frames (available pool and roster) and not onto
+    # the reference pool, so `compute_player_scores` took its min-max fallback:
+    # the 15-row roster normalised against itself, the 98-row pool against
+    # itself, and the suggestion gap then subtracts one from the other. Two
+    # populations, min-max rather than percentile, and no visible symptom.
+    #
+    # `fpl_stats["Team"]` is a short code after `_enforce_rw_schema_fpl`, so the
+    # key space matches the club-indexed Series exactly.
+    fpl_stats["AvgFDRNextN"] = pd.to_numeric(
+        fpl_stats["Team"].astype(str).map(_avg_fdr_by_short_name(current_gw, lookahead)),
+        errors="coerce")
 
     render_ffp_status(ffp_feed_result, current_gw)
 
@@ -3038,11 +3406,21 @@ def show_waiver_wire_page():
                 avail_candidates=5 if _compact else None,
                 one_per_position=_compact,
                 waiver_context=waiver_context,
+                floor_context=_build_floor_context(
+                    waiver_order, my_entry_id, config.FPL_DRAFT_LEAGUE_ID),
+                lanes=sugg_lanes,
             )
             total_found = len(suggestions)
             _limit = SUGGESTION_VIEW_LIMITS.get(sugg_view)
             if _limit is not None:
-                suggestions = suggestions[:_limit]
+                # **Per lane, not across both.** A flat slice lets the hold lane
+                # fill the whole quota and the rental lane vanish -- which is the
+                # exact failure this feature exists to fix, re-created by the
+                # display limit. `total_found` still reports the real count.
+                _kept = []
+                for _lane in (LANE_HOLD, LANE_RENT):
+                    _kept.extend([x for x in suggestions if x['lane'] == _lane][:_limit])
+                suggestions = _kept
         except Exception as e:
             st.warning(f"Could not compute transfer suggestions: {e}")
 
@@ -3055,7 +3433,10 @@ def show_waiver_wire_page():
                 suggestions, current_gw=current_gw, total_found=total_found,
                 free_agency=_free_agency, waiver_gw=_waiver_gw,
             )
-            _render_claim_plan(suggestions, free_agency=_free_agency)
+            _render_claim_plan(suggestions, free_agency=_free_agency,
+                               lane=LANE_HOLD, lane_label="rest of season")
+            _render_claim_plan(suggestions, free_agency=_free_agency,
+                               lane=LANE_RENT, lane_label="just this week")
         _render_transfer_debug(debug_rows)
 
     st.markdown("---")

@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from unittest.mock import MagicMock
 
+import scripts.common.analytics as an
 from scripts.common.analytics import (
     compute_healthy_form,
     compute_player_scores,
@@ -1722,3 +1723,91 @@ class TestRosHorizonBasis:
         ref = pd.DataFrame({"Player": ["x"], "Position": ["M"]})
         assert _reference_horizon(ref) is ref
         assert _reference_horizon(None) is None
+
+
+class TestStartConsistencyLadder:
+    """The ROS start term, which spent a season reading a cumulative count.
+
+    `FFP_LongStart` is the documented primary source and FFP has stopped
+    publishing it -- non-null for 0 of 670 live reference rows -- so every caller
+    fell through to the raw season `starts` count. A player with 3 starts in 9
+    gameweeks scored 0.220 while the engine rated him 0.86 to start.
+    """
+
+    def test_it_prefers_the_engines_own_start_model(self):
+        df = pd.DataFrame({"Start_Pct": [0.86, 0.90], "FFP_LongStart": [70.0, 80.0],
+                           "starts": [3, 9]})
+        mine, theirs, rung = an._start_consistency(df, df, current_gw=10)
+        assert rung == "Start_Pct"
+        assert list(mine) == [0.86, 0.90]
+
+    def test_it_falls_to_ffp_then_to_a_starts_rate(self):
+        no_engine = pd.DataFrame({"FFP_LongStart": [70.0], "starts": [3]})
+        _, _, rung = an._start_consistency(no_engine, no_engine, current_gw=10)
+        assert rung == "FFP_LongStart"
+
+        only_counts = pd.DataFrame({"starts": [3]})
+        mine, _, rung = an._start_consistency(only_counts, only_counts, current_gw=10)
+        assert rung == "starts"
+        # A **rate**, never the count: 3 starts in 9 elapsed gameweeks.
+        assert mine.iloc[0] == pytest.approx(3 / 9)
+
+    def test_the_raw_count_never_reaches_the_term(self):
+        """The defect itself. Every rung is 0-1; a count is not."""
+        df = pd.DataFrame({"starts": [0, 3, 9]})
+        mine, _, _ = an._start_consistency(df, df, current_gw=10)
+        assert mine.max() <= 1.0
+        assert 9 not in set(mine)
+
+    def test_an_empty_ffp_column_does_not_win_the_rung(self):
+        """0-of-670 is the live state, and an all-NaN column must not be chosen."""
+        df = pd.DataFrame({"FFP_LongStart": [np.nan, np.nan], "starts": [3, 9]})
+        _, _, rung = an._start_consistency(df, df, current_gw=10)
+        assert rung == "starts"
+
+    def test_the_rung_is_shared_with_the_reference(self):
+        """A percentile is a comparison, so ranking a frame's `Start_Pct` against
+        a reference's `starts` is the cross-scale comparison being removed.
+
+        `_reference_horizon` has three early returns that skip `_blend_frame`, and
+        only the blend writes `Start_Pct`, so a reference without it is ordinary.
+        """
+        frame = pd.DataFrame({"Start_Pct": [0.86], "starts": [3]})
+        ref = pd.DataFrame({"starts": [3, 9, 9]})          # no Start_Pct
+        mine, theirs, rung = an._start_consistency(frame, ref, current_gw=10)
+        assert rung == "starts", "must drop to the rung both frames share"
+        assert theirs is not None
+        assert mine.iloc[0] == pytest.approx(3 / 9)
+
+    def test_no_shared_rung_returns_no_reference(self):
+        """Then the caller uses the rate directly rather than percentiling across
+        scales -- and unlike a within-frame min-max, a rate means the same thing
+        on a 15-row roster and a 700-row pool."""
+        frame = pd.DataFrame({"Start_Pct": [0.86]})
+        ref = pd.DataFrame({"nothing": [1]})
+        mine, theirs, _ = an._start_consistency(frame, ref, current_gw=10)
+        assert theirs is None
+        assert mine.iloc[0] == 0.86
+
+
+class TestReferencedPercentile:
+    """A missing reference column must be *declared*, never min-maxed in silence."""
+
+    def test_a_useless_reference_scores_a_flat_neutral(self):
+        df = pd.DataFrame({"_x": [1.0, 5.0, 9.0], "Position": ["M"] * 3})
+        got = an._referenced_percentile(df, pd.DataFrame({"Position": ["M"]}), "_x",
+                                        term="fixture ease")
+        assert list(got) == [0.5, 0.5, 0.5], (
+            "the shipped fallback min-maxed within the frame, which turns an "
+            "absolute percentile into a within-frame one with no error")
+
+    def test_an_all_null_reference_column_is_also_useless(self):
+        df = pd.DataFrame({"_x": [1.0, 9.0], "Position": ["M", "M"]})
+        ref = pd.DataFrame({"_x": [np.nan, np.nan], "Position": ["M", "M"]})
+        assert list(an._referenced_percentile(df, ref, "_x")) == [0.5, 0.5]
+
+    def test_a_real_reference_is_percentiled(self):
+        df = pd.DataFrame({"_x": [9.0], "Position": ["M"], "minutes": [900]})
+        ref = pd.DataFrame({"_x": [1.0, 2.0, 3.0], "Position": ["M"] * 3,
+                            "minutes": [900] * 3})
+        assert an._referenced_percentile(df, ref, "_x").iloc[0] > 0.5
