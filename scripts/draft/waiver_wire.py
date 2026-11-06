@@ -1330,8 +1330,12 @@ def _attach_minutes_dependency(df: pd.DataFrame, fpl_stats: pd.DataFrame,
     out["Dep_Weeks"] = np.nan
     if out.empty or fpl_stats is None or fpl_stats.empty:
         return out
-    need = {"Team", "Position", "status", "starts"}
-    if need - set(fpl_stats.columns) or need - set(out.columns) - {"status", "starts"}:
+    # `news` is read as well as the four below -- a stated return date is the
+    # whole gate -- so it is required rather than assumed. The available frame
+    # needs only Team and Position: `starts`, `status` and `news` are what the
+    # *reference* supplies.
+    need_ref = {"Team", "Position", "status", "starts", "news"}
+    if need_ref - set(fpl_stats.columns) or {"Team", "Position"} - set(out.columns):
         return out
 
     # The blocker's name is rendered on a card, so resolve it the way every
@@ -1340,7 +1344,7 @@ def _attach_minutes_dependency(df: pd.DataFrame, fpl_stats: pd.DataFrame,
     ref = fpl_stats.copy()
     if "Display_Name" not in ref.columns:
         ref = _attach_display_names(ref)
-    ref["_starts"] = pd.to_numeric(ref.get("starts"), errors="coerce").fillna(0)
+    ref["_starts"] = numeric_col(ref, "starts", 0.0)
     absent = ref[ref["status"].astype(str).str.lower().isin(OUT_OF_SQUAD_STATUSES)]
     if absent.empty:
         return out
@@ -1367,7 +1371,12 @@ def _attach_minutes_dependency(df: pd.DataFrame, fpl_stats: pd.DataFrame,
              "news": r.get("news") or "", "weeks": weeks, "source": source,
              "starts": float(r["_starts"])})
 
-    own_starts = pd.to_numeric(out.get("starts"), errors="coerce").fillna(0)
+    # `numeric_col`, not `pd.to_numeric(out.get(...)).fillna(...)`. A missing
+    # column makes `DataFrame.get` return **None**, so the `.fillna` raises
+    # `AttributeError: 'numpy.float64' object has no attribute 'fillna'` -- the
+    # latent crash CLAUDE.md documents under "`DataFrame.get()` is not a safe
+    # accessor", and it took this page down the moment the column was absent.
+    own_starts = numeric_col(out, "starts", 0.0)
     elapsed = max(1, int(current_gw or 1) - 1)
     for idx in out.index:
         ahead = by_slot.get((out.at[idx, "Team"], out.at[idx, "Position"]))
@@ -3359,11 +3368,6 @@ def show_waiver_wire_page():
     # Add FDR, Form, Injury data, and Season_Points to available players
     avail_all = _add_fdr_and_form(avail_all, fpl_stats, current_gw, lookahead, form_weeks=form_weeks)
     avail_all = _add_injury_data(avail_all, fpl_stats)
-    # Whose absence is each available player starting because of. Attached here
-    # rather than inside the suggestion search because it needs the **whole**
-    # pool: the man he is deputising for is injured, so he is absent from
-    # Rotowire's XI and therefore from `avail_all` by construction.
-    avail_all = _attach_minutes_dependency(avail_all, fpl_stats, current_gw)
 
     # Add Season_Points and starts to available players via Player_ID
     if 'Player_ID' in avail_all.columns and 'Season_Points' not in avail_all.columns:
@@ -3377,6 +3381,18 @@ def show_waiver_wire_page():
         avail_all = avail_all.merge(starts_data, on='Player_ID', how='left')
     avail_all['Season_Points'] = numeric_col(avail_all, 'Season_Points', 0)
     avail_all['starts'] = numeric_col(avail_all, 'starts', 0)
+
+    # Whose absence is each available player starting because of. Needs the
+    # **whole** pool, because the man he is deputising for is injured and so is
+    # absent from Rotowire's XI -- and therefore from `avail_all` -- by
+    # construction.
+    #
+    # **After the `starts` merge above, not before it.** The depth rule reads
+    # season starts to tell a deputy from a regular, and this ran four lines
+    # earlier where the column does not exist yet: it silently treated every
+    # available player as having zero starts, and took the page down on the
+    # unsafe accessor into the bargain.
+    avail_all = _attach_minutes_dependency(avail_all, fpl_stats, current_gw)
 
     # Resolve the name to render once, here, so the cards and the tables below all
     # show the same thing. Player_ID is set by _add_fdr_and_form() above.

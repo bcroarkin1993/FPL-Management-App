@@ -266,3 +266,69 @@ class TestTheThinWireWarning:
         assert sg, "a GK upgrade should still be offered"
         assert all(s["thin_wire"] for s in sg), (
             "one available GK must be flagged as hard to undo")
+
+
+class TestItSurvivesTheFramesThePageActuallyBuilds:
+    """Regression: this took the Waiver Wire down with
+    ``AttributeError: 'numpy.float64' object has no attribute 'fillna'``.
+
+    Two faults compounding. ``pd.to_numeric(df.get("starts"), ...).fillna(0)``
+    is the idiom CLAUDE.md documents as a latent crash -- ``DataFrame.get``
+    returns **None** for a missing column, so the ``.fillna`` is called on a
+    scalar. And the callsite sat four lines *before* the page merges ``starts``
+    onto the available pool, so the column really was absent.
+
+    The tests above all passed because they fed the function an already-enriched
+    frame. **A frame the page never produces at that point is not a fixture** --
+    these assert on the shapes it does.
+    """
+
+    def _pool(self):
+        return pd.DataFrame([
+            {"Player": "Emiliano Martínez Romero", "Display_Name": "Emiliano Martínez",
+             "Team": "CHE", "Position": "G", "status": "i", "starts": 6,
+             "chance_of_playing_next_round": 0,
+             "news": "Head injury - Expected back 22 Nov"},
+            {"Player": "Mike Penders", "Display_Name": "Mike Penders", "Team": "CHE",
+             "Position": "G", "status": "a", "starts": 2,
+             "chance_of_playing_next_round": None, "news": ""},
+        ])
+
+    def test_an_available_frame_with_no_starts_column(self):
+        """Exactly the pre-merge shape, which is what crashed."""
+        avail = pd.DataFrame([
+            {"Player": "Mike Penders", "Display_Name": "Mike Penders",
+             "Team": "CHE", "Position": "G", "Proj": 3.63, "Proj_Next3": 10.57},
+        ])
+        assert "starts" not in avail.columns
+        got = ww._attach_minutes_dependency(avail, self._pool(), current_gw=10)
+        assert len(got) == 1                      # no raise is the assertion
+
+    def test_a_reference_pool_with_no_starts_column(self):
+        pool = self._pool().drop(columns=["starts"])
+        avail = pd.DataFrame([
+            {"Player": "Mike Penders", "Display_Name": "Mike Penders", "Team": "CHE",
+             "Position": "G", "starts": 2, "Proj": 3.63, "Proj_Next3": 10.57},
+        ])
+        got = ww._attach_minutes_dependency(avail, pool, current_gw=10)
+        assert (got["Dep_Blocker"] == "").all(), "no depth chart, no opinion"
+
+    def test_no_status_or_news_column(self):
+        avail = pd.DataFrame([
+            {"Player": "x", "Display_Name": "x", "Team": "CHE", "Position": "G",
+             "starts": 2, "Proj": 1.0, "Proj_Next3": 3.0},
+        ])
+        got = ww._attach_minutes_dependency(
+            avail, self._pool().drop(columns=["news"]), current_gw=10)
+        assert len(got) == 1
+
+    def test_the_page_attaches_it_after_the_starts_merge(self):
+        """The ordering fault, pinned in the source. The depth rule reads season
+        starts to tell a deputy from a regular, so attaching before the merge
+        treats every available player as having none."""
+        import inspect
+        src = inspect.getsource(ww.show_waiver_wire_page)
+        i_starts = src.index("avail_all['starts'] = numeric_col")
+        i_dep = src.index("_attach_minutes_dependency(avail_all")
+        assert i_starts < i_dep, (
+            "_attach_minutes_dependency must run after the starts merge")
