@@ -22,6 +22,10 @@ from scripts.common.luck_analysis import (
     render_standings_table,
 )
 from scripts.common.error_helpers import show_api_error
+from scripts.common.season_odds import (
+    render_classic_h2h_season_odds,
+    render_classic_points_season_odds,
+)
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.utils import (
     get_league_standings,
@@ -454,6 +458,8 @@ def show_classic_home_page():
     # STANDINGS TABLE
     # ---------------------------
     standings = data["standings"]
+    # Both season-odds paths need it, and `get_current_gameweek` is cached.
+    current_gw = get_current_gameweek() or 1
 
     if scoring_type == "H2H":
         st.subheader("League Standings")
@@ -467,9 +473,16 @@ def show_classic_home_page():
         if df.empty:
             st.info("No standings data available yet.")
         else:
-            show_luck = st.checkbox(
+            _c_luck, _c_odds = st.columns(2)
+            show_luck = _c_luck.checkbox(
                 "Show Luck Adjusted Standings",
                 key=f"luck_{league_id}",
+            )
+            show_odds = _c_odds.checkbox(
+                "Show Season Odds",
+                key=f"odds_{league_id}",
+                help="Plays the remaining fixtures out a few thousand times "
+                     "and counts how often each manager finishes where.",
             )
 
             if show_luck:
@@ -493,6 +506,12 @@ def show_classic_home_page():
                     cols.insert(l_idx + 1, cols.pop(cols.index("Streak")))
                     display_df = display_df[cols]
                 render_standings_table(display_df, is_h2h=True)
+
+            if show_odds:
+                st.markdown("##### 🔮 Season Odds")
+                render_classic_h2h_season_odds(
+                    league_id, current_gw,
+                    standings.get("results") or [], h2h_matches or [])
     else:
         st.subheader("League Standings")
         df = format_classic_standings(standings)
@@ -500,9 +519,34 @@ def show_classic_home_page():
         if df.empty:
             st.info("No standings data available yet.")
         else:
+            show_odds_pts = st.checkbox(
+                "Show Season Odds",
+                key=f"odds_pts_{league_id}",
+                help="A total-points league has no fixtures, so this draws a "
+                     "score for every manager in each remaining gameweek and "
+                     "counts how often each one finishes where.",
+            )
             # Don't show entry_id in display
             display_df = df.drop(columns=["entry_id"], errors="ignore")
             render_standings_table(display_df, is_h2h=False)
+
+            if show_odds_pts:
+                st.markdown("##### 🔮 Season Odds")
+                # Sigma is measured from the histories the progression charts
+                # below already fetch, so this is a cache hit rather than N more
+                # requests. It is a league-level noise parameter, so a sample of
+                # managers is a sound basis for it -- unlike the means, which
+                # come from every manager's own total.
+                _sample_ids = df["entry_id"].head(10).tolist()
+                _sample_names = dict(zip(df["entry_id"], df["Team"]))
+                try:
+                    _sample = fetch_team_histories(_sample_ids, _sample_names)
+                except Exception:
+                    _sample = None
+                _odds_df = df.copy()
+                _odds_df.attrs["truncated"] = bool(standings.get("has_next"))
+                render_classic_points_season_odds(
+                    league_id, current_gw, _odds_df, sigma_sample=_sample)
 
     # Show pagination info
     has_next = standings.get("has_next", False)

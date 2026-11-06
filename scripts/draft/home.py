@@ -4,6 +4,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 from scripts.common.error_helpers import get_logger, show_api_error
+from scripts.common.season_odds import render_draft_season_odds
 from scripts.common.luck_analysis import (
     extract_draft_gw_scores,
     calculate_all_play_standings,
@@ -681,8 +682,16 @@ def show_home_page():
         )
 
     st.subheader("FPL Draft League Table")
-    # Toggle to show luck adjusted standing
-    show_luck_adjusted_stats = st.checkbox("Show Luck Adjusted Standings")
+    # Two views of the same table, both opt-in: one looks backwards at the
+    # schedule you were handed, the other forwards at the one you have left.
+    _col_luck, _col_odds = st.columns(2)
+    show_luck_adjusted_stats = _col_luck.checkbox("Show Luck Adjusted Standings")
+    show_season_odds = _col_odds.checkbox(
+        "Show Season Odds",
+        help="Plays the remaining fixtures out a few thousand times and counts "
+             "how often each manager finishes where — title, playoff and "
+             "last-place odds, using the same win-probability model as Fixture "
+             "Projections.")
     if show_luck_adjusted_stats:
         st.caption("**All-Play Record**: simulates every team playing every other team each gameweek. "
                    "Luck +/- shows how much the actual schedule helped or hurt (positive = lucky).")
@@ -704,6 +713,11 @@ def show_home_page():
             cols.insert(l_idx + 1, cols.pop(cols.index("Streak")))
             standings_df = standings_df[cols].set_index("Rank")
         render_standings_table(standings_df, is_h2h=True)
+
+    if show_season_odds:
+        st.markdown("##### 🔮 Season Odds")
+        render_draft_season_odds(config.FPL_DRAFT_LEAGUE_ID,
+                                 get_current_gameweek() or 1)
 
     st.divider()
 

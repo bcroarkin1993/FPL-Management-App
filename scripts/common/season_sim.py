@@ -68,10 +68,29 @@ MIN_MATCHES_FOR_OWN_MEAN = 3
 
 
 def _finished(match: Dict[str, Any]) -> bool:
-    """FPL leaves `finished` False for hours after full time while bonus is
-    confirmed, so `started` is consulted too -- the same rule
-    `get_gw_team_fixture_status` applies."""
-    return bool(match.get("finished"))
+    """Has this match been played?
+
+    **`finished` cannot be trusted on its own.** Draft sets it to a real bool,
+    but Classic's H2H payload leaves it ``None`` on every match -- played or
+    not -- so a truth test alone marks the entire season unplayed. Recorded
+    points are the reliable signal: a fixture nobody has scored in has not
+    happened, and one with a score has.
+
+    Without this the only thing standing between a Classic league and replaying
+    its played fixtures is the caller remembering ``from_gw`` -- and the damage
+    would be invisible, since double-counting inflates every total without
+    disturbing the rank permutation `check_season_odds` tests.
+    """
+    if match.get("finished"):
+        return True
+    for key in ("league_entry_1_points", "league_entry_2_points",
+                "entry_1_points", "entry_2_points"):
+        try:
+            if float(match.get(key) or 0) != 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def team_scoring_rates(standings: Sequence[Dict[str, Any]],
@@ -268,3 +287,146 @@ def summarise(sim: pd.DataFrame, entry_names: Dict[Any, str],
     cols = ["Team", "Title", "Top %d" % playoff_places, "Last",
             "Proj Pts", "Avg Finish", "PPG"]
     return out[cols]
+
+
+# =============================================================================
+# TOTAL-POINTS LEAGUES
+# =============================================================================
+#
+# A Classic league with no head-to-head fixtures is a different simulation, not
+# the same one with an empty schedule: nobody plays anybody, and the table is
+# ordered on accumulated points. So the question is how each manager's *total*
+# finishes, and the fixtures drop out entirely.
+
+#: Weekly points spread for a single Classic manager, when a league has no
+#: history to measure one from. Deliberately wider than the Draft prior: a
+#: Classic squad takes captaincy and chips, so its week-to-week range is larger.
+DEFAULT_CLASSIC_SIGMA = 20.0
+
+
+def weekly_score_sigma(weekly: pd.DataFrame, score_col: str = "GW_Points",
+                       team_col: str = "Team") -> tuple:
+    """``(sigma, n)`` -- the **within-manager** weekly spread, pooled.
+
+    Pooled within-team rather than the spread of all scores together, because
+    those are two different quantities and only one of them is noise. The spread
+    *between* managers is squad quality -- exactly the thing the simulation is
+    trying to carry forward -- so folding it into sigma would make every
+    manager look equally likely to score anything and flatten the table towards
+    a coin toss.
+
+    Returns ``(None, 0)`` when there is too little history to measure, so a
+    caller can fall back to the documented prior and say that it did.
+    """
+    if weekly is None or weekly.empty or score_col not in weekly.columns:
+        return None, 0
+    if team_col not in weekly.columns:
+        return None, 0
+    vals = weekly[[team_col, score_col]].copy()
+    vals[score_col] = pd.to_numeric(vals[score_col], errors="coerce")
+    vals = vals.dropna()
+    # Each team's deviations from its own mean; two observations is the minimum
+    # that says anything about a spread.
+    devs, n = [], 0
+    for _, grp in vals.groupby(team_col):
+        if len(grp) < 2:
+            continue
+        devs.append(grp[score_col] - grp[score_col].mean())
+        n += len(grp)
+    if not devs:
+        return None, 0
+    pooled = pd.concat(devs)
+    # The pooled estimate loses one degree of freedom per team, not one overall.
+    k = int(vals[team_col].nunique())
+    denom = max(1, len(pooled) - k)
+    sigma = float(np.sqrt(float((pooled ** 2).sum()) / denom))
+    if not math.isfinite(sigma) or sigma <= 0:
+        return None, 0
+    return sigma, n
+
+
+def simulate_points_league(
+    entries: Sequence[Dict[str, Any]],
+    *,
+    gameweeks_left: int,
+    sigma: float = DEFAULT_CLASSIC_SIGMA,
+    n_sims: int = DEFAULT_SIMS,
+    league_id: Optional[int] = None,
+    gameweek: Optional[int] = None,
+    seed: Optional[int] = None,
+    propagate_estimation_error: bool = True,
+    playoff_places: int = 3,
+) -> pd.DataFrame:
+    """Where a **total-points** league finishes.
+
+    ``entries`` is ``[{entry, total, mean_score, n_played}]``. Each remaining
+    gameweek draws a score per manager and adds it to the running total; the
+    table is then ordered on that total alone, because that is how a Classic
+    league is ranked.
+
+    Same two commitments as the head-to-head version. The manager's underlying
+    mean is re-drawn from its own sampling distribution each simulation, since it
+    rests on the gameweeks played so far -- and the result is seeded, so a
+    Streamlit rerun cannot change the odds.
+
+    With no gameweeks left this reports the table as it stands, which is correct
+    rather than a degenerate case.
+    """
+    rows = [e for e in (entries or []) if e.get("entry") is not None]
+    if not rows:
+        return pd.DataFrame()
+
+    sigma = float(sigma) if sigma and math.isfinite(sigma) and sigma > 0 else DEFAULT_CLASSIC_SIGMA
+    gws = max(0, int(gameweeks_left or 0))
+
+    ids = [e["entry"] for e in rows]
+    totals = np.array([float(e.get("total") or 0) for e in rows], dtype=float)
+    played = np.array([float(e.get("n_played") or 0) for e in rows], dtype=float)
+    means = np.array([float(e.get("mean_score") or float("nan")) for e in rows], dtype=float)
+
+    known = means[np.isfinite(means) & (played >= MIN_MATCHES_FOR_OWN_MEAN)]
+    league_mean = float(np.mean(known)) if known.size else 50.0
+    thin = ~(np.isfinite(means) & (played >= MIN_MATCHES_FOR_OWN_MEAN))
+    means = np.where(thin, league_mean, means)
+
+    se = sigma / np.sqrt(np.maximum(1.0, played))
+    n_teams = len(ids)
+
+    rng = np.random.default_rng(
+        seed if seed is not None else _seed_from(league_id, gameweek, n_sims))
+
+    titles = np.zeros(n_teams)
+    top_n = np.zeros(n_teams)
+    bottoms = np.zeros(n_teams)
+    rank_sum = np.zeros(n_teams)
+    points_sum = np.zeros(n_teams)
+
+    for _ in range(int(n_sims)):
+        mu_sim = rng.normal(means, se) if propagate_estimation_error else means
+        final = totals.copy()
+        if gws:
+            # One draw per manager per remaining gameweek, summed.
+            final = final + rng.normal(
+                mu_sim[:, None] * np.ones((1, gws)), sigma).sum(axis=1)
+        order = np.argsort(-final, kind="stable")
+        ranks = np.empty(n_teams, dtype=int)
+        ranks[order] = np.arange(1, n_teams + 1)
+
+        titles += (ranks == 1)
+        top_n += (ranks <= int(playoff_places))
+        bottoms += (ranks == n_teams)
+        rank_sum += ranks
+        points_sum += final
+
+    return pd.DataFrame({
+        "league_entry": ids,
+        "title": titles / n_sims,
+        "top_n": top_n / n_sims,
+        "bottom": bottoms / n_sims,
+        "mean_rank": rank_sum / n_sims,
+        "mean_points": points_sum / n_sims,
+        "mean_score": means,
+        "n_played": played,
+        "points": totals,
+        "points_for": totals,
+    }).sort_values("mean_rank").reset_index(drop=True)

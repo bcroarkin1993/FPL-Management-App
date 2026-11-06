@@ -4573,8 +4573,25 @@ three times with backoff, matching `ffp_feed._get` and `pl_content._get`.
 
 ## Season Odds — a Monte Carlo over what is left
 
-`scripts/common/season_sim.py` (pure), the **🔮 Season Odds** tab on Draft
-League Analysis, `check_season_odds()`.
+`scripts/common/season_sim.py` (pure), `season_odds.py` (the shared renderer),
+a **Show Season Odds** toggle under the league table on **both** Home pages,
+`check_season_odds()`.
+
+**It is not a tab, and that was a mistake worth recording.** It shipped as a
+ninth tab on Draft League Analysis, where Streamlit's tab strip overflows
+horizontally and pushed it off-screen — reported as "I'm not seeing the Season
+Odds tab". The odds re-order the standings, so they belong *under* the standings
+behind a toggle, beside "Show Luck Adjusted Standings": one looks backwards at
+the schedule you were handed, the other forwards at the one you have left. The
+tab and its page-local renderer are deleted rather than kept alongside, because
+two copies of this would drift — the same reason `luck_analysis` holds one
+standings renderer for both formats.
+
+**Three leagues, two simulations.** Draft and Classic H2H play fixtures, so
+`simulate_season` plays the remaining ones out. A Classic **total-points** league
+is not that simulation with an empty schedule — nobody plays anybody and the
+table is ordered on accumulated points — so `simulate_points_league` draws a
+score per manager per remaining gameweek and ranks on the total.
 
 The app could tell you the odds of winning *this week's* match and nothing about
 the season. `P(A>B) = Phi((muA - muB) / sqrt(2 sigma^2))` has backed Fixture
@@ -4618,6 +4635,35 @@ because the fixtures are vectorised per simulation rather than looped.
 **Behind a button**, like the Classic Rival Tracker, because `st.tabs` renders
 every body on every rerun and nobody opening the page for Head-to-Head should
 pay for a league-details fetch.
+
+**`finished` cannot be trusted on its own, and Classic is why.** Draft sets a
+real bool; **Classic's H2H payload leaves it `None` on every match**, played or
+not, so a truth test alone marks the whole season unplayed. Recorded points are
+the reliable signal. Without that, the only thing stopping a Classic league
+replaying its 90 played fixtures is the caller remembering `from_gw` — and the
+damage would be invisible, since double-counting inflates every total without
+disturbing the rank permutation `check_season_odds` tests.
+
+**Sigma is measured per league rather than defaulted, and the estimator is
+pooled *within* manager.** The spread *between* managers is squad quality — the
+thing being projected — so folding it into sigma would flatten the table towards
+a coin toss. Draft reads `_estimate_score_std` (σ≈11.8 from 380 scores live);
+Classic H2H measures it from the match payload, which carries every manager's
+score for every played fixture (σ≈17.3 from 180 live, where this first shipped
+defaulting to 17.0); a total-points league measures it from the per-manager
+histories the progression charts already fetch, so it is a cache hit rather
+than N more requests.
+
+**In a total-points league the means come from the totals and sigma from a
+sample, and that split is deliberate.** `Total Pts / gameweeks played` is on the
+standings for every manager — no extra requests, one basis for everybody —
+whereas sigma is a league-level noise parameter and a sample of managers is a
+sound basis for it. Mixing them, measured means for the ten with history and
+derived means for the rest, would rank two populations on different bases: the
+error the projection engine exists to prevent, one model over. A large league
+returns one page of standings, so the odds are a finish *within that group*, and
+the page says so — the disclosure the Rival Tracker already carries for its
+truncated EO.
 
 `check_season_odds()` asserts **exact identities** rather than ranges, because
 every failure mode here yields a table of plausible-looking percentages: exactly
@@ -5176,7 +5222,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Notes |
 |------|-------|
-| Season Odds (Draft) | Completed | **🔮 Season Odds** tab on Draft League Analysis: title, playoff and last-place probabilities from a Monte Carlo of the remaining fixtures, using the same `Phi((muA-muB)/sqrt(2 sigma^2))` model as the per-match win probability. The feature betterdraft.co.uk has that this app had no equivalent of. Each simulation re-draws every manager's underlying mean from its own sampling distribution, because that mean rests on nine matches — live that is the difference between a 25.4% and a 31.4% title probability for the leader, and holding it fixed overstates how decided the league is. Seeded on `(league, gameweek, n_sims)` so a Streamlit rerun cannot change the answer. `check_season_odds()` guards it on exact identities. See "Season Odds" |
+| Season Odds | Completed | A **Show Season Odds** toggle under the league table on both Home pages: title, playoff and last-place probabilities from a Monte Carlo of the remaining fixtures, using the same `Phi((muA-muB)/sqrt(2 sigma^2))` model as the per-match win probability. The feature betterdraft.co.uk has that this app had no equivalent of. Each simulation re-draws every manager's underlying mean from its own sampling distribution, because that mean rests on nine matches — live that is the difference between a 25.4% and a 31.4% title probability for the leader, and holding it fixed overstates how decided the league is. Covers Draft, Classic H2H and Classic total-points — the last is a different simulation, since nobody plays anybody and the table is ordered on accumulated points. Seeded on `(league, gameweek, n_sims)` so a Streamlit rerun cannot change the answer. `check_season_odds()` guards it on exact identities. First shipped as a ninth tab on League Analysis, which Streamlit's tab strip pushed off-screen. See "Season Odds" |
 | Draft Team Power Rankings | New "💪 Power Rankings" tab on Draft League Analysis. Team Score 0-100 plus GK/DEF/MID/FWD scores with league rank badges, all positional percentiles against the full ~700-player FPL pool. Player strength = 60% quality (preseason Rotowire pedigree blended into in-season actuals via `season_progress_weight()`) + 25% this-GW blended projection + 10% start security + 5% FDR, times a season-aware injury discount. Actuals use **points per start** (not total points) so a player returning from a long injury isn't penalised for missed games; below 4 starts the sample is too thin and pedigree is used alone. Rosters join to stats on integer element ID via new `get_league_rosters_with_ids()` — no name matching in this path. See "Team Strength Model" section below. |
 | League Setup Admin Page | In-app "🆔 League Setup" page (FPL App Home) to set/validate/lock Draft and Classic league & team IDs instead of hand-editing `.env`. Draft: enter league ID, look it up, pick your team from a resolved dropdown (no need to know your entry ID). Classic: add/remove multiple leagues, resolve team via entry ID lookup. Locked read-only view with two-step "Unlock to Edit" confirmation. Persisted to gitignored `league_settings.json` (repo is public — not committed, unlike `alert_settings.json`). `config.py`'s 4 ID attributes (`FPL_DRAFT_LEAGUE_ID`, `FPL_DRAFT_TEAM_ID`, `FPL_CLASSIC_TEAM_ID`, `FPL_CLASSIC_LEAGUE_IDS`) converted from eager to lazy PEP 562 resolution (same pattern as `CURRENT_GAMEWEEK`), prioritizing locked JSON settings over `.env`, so saved changes take effect immediately without an app restart. |
 | Gameweek Fixtures GW38 Cap | Auto-constrain FDR Horizon and "How many weeks?" sliders to never exceed GW38; defensive cap added inside `get_fixture_difficulty_grid()`; fetch range hard-capped at `end_gw = min(start_gw + weeks - 1, 38)` |

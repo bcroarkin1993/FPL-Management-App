@@ -177,3 +177,116 @@ class TestSummarise:
 def test_the_module_is_streamlit_free():
     import pathlib
     assert "import streamlit" not in pathlib.Path(ss.__file__).read_text()
+
+
+class TestFinishedDetection:
+    """`finished` cannot be trusted on its own.
+
+    Draft sets a real bool. **Classic's H2H payload leaves it `None` on every
+    match** -- played or not -- so a truth test alone marks the whole season
+    unplayed, and the only thing preventing a league from replaying its played
+    fixtures is the caller remembering `from_gw`. The damage would be invisible:
+    double-counting inflates every total without disturbing the rank permutation
+    `check_season_odds` tests.
+    """
+
+    def test_a_real_flag_is_honoured(self):
+        assert ss._finished({"finished": True})
+        assert not ss._finished({"finished": False})
+
+    def test_classic_none_with_scores_reads_as_played(self):
+        assert ss._finished({"finished": None, "entry_1_points": 61,
+                             "entry_2_points": 45})
+
+    def test_classic_none_without_scores_reads_as_unplayed(self):
+        assert not ss._finished({"finished": None, "entry_1_points": 0,
+                                 "entry_2_points": 0})
+
+    def test_draft_point_keys_are_read_too(self):
+        assert ss._finished({"finished": False, "league_entry_1_points": 48,
+                             "league_entry_2_points": 58})
+
+    def test_a_classic_season_is_not_replayed_without_from_gw(self):
+        """The regression this guards. 10 played + 4 future; the played ones
+        carry scores and `finished: None`."""
+        played = [{"event": g, "league_entry_1": 1, "league_entry_2": 2,
+                   "entry_1_points": 60, "entry_2_points": 50, "finished": None}
+                  for g in range(1, 11)]
+        future = [{"event": g, "league_entry_1": 1, "league_entry_2": 2,
+                   "entry_1_points": 0, "entry_2_points": 0, "finished": None}
+                  for g in range(11, 15)]
+        assert len(ss.remaining_matches(played + future)) == 4
+
+
+class TestWeeklyScoreSigma:
+    def test_it_pools_within_manager_and_excludes_the_gap_between_them(self):
+        """The spread *between* managers is squad quality -- the thing the
+        simulation carries forward -- so folding it into sigma would flatten the
+        table towards a coin toss."""
+        wide = pd.DataFrame({"Team": ["A"] * 6 + ["B"] * 6,
+                             "GW_Points": [50, 60, 70, 40, 55, 65,
+                                           45, 48, 52, 44, 50, 47]})
+        sigma, n = ss.weekly_score_sigma(wide)
+        assert n == 12
+        assert sigma < float(wide["GW_Points"].std()), (
+            "the naive all-scores std includes the between-manager gap")
+
+    def test_shifting_one_manager_does_not_change_it(self):
+        """The decisive property: adding a constant to one team changes the
+        between-manager spread and not the within-manager noise."""
+        base = pd.DataFrame({"Team": ["A"] * 4 + ["B"] * 4,
+                             "GW_Points": [50, 60, 55, 45, 50, 60, 55, 45]})
+        shifted = base.copy()
+        shifted.loc[shifted["Team"] == "B", "GW_Points"] += 40
+        assert ss.weekly_score_sigma(base)[0] == pytest.approx(
+            ss.weekly_score_sigma(shifted)[0])
+
+    def test_too_little_history_declines_to_guess(self):
+        assert ss.weekly_score_sigma(pd.DataFrame()) == (None, 0)
+        one = pd.DataFrame({"Team": ["A"], "GW_Points": [50]})
+        assert ss.weekly_score_sigma(one) == (None, 0)
+
+    def test_a_flat_history_is_not_a_sigma_of_zero(self):
+        """A degenerate spread makes a one-point edge a certainty -- the failure
+        `check_score_std` exists for -- so it declines instead."""
+        flat = pd.DataFrame({"Team": ["A"] * 4, "GW_Points": [50] * 4})
+        assert ss.weekly_score_sigma(flat) == (None, 0)
+
+
+class TestSimulatePointsLeague:
+    def _entries(self):
+        return [{"entry": 1, "total": 600, "mean_score": 60, "n_played": 10},
+                {"entry": 2, "total": 520, "mean_score": 52, "n_played": 10},
+                {"entry": 3, "total": 480, "mean_score": 48, "n_played": 10}]
+
+    def test_the_probabilities_are_a_distribution(self):
+        sim = ss.simulate_points_league(self._entries(), gameweeks_left=28,
+                                        n_sims=400, seed=1)
+        assert sim["title"].sum() == pytest.approx(1.0, abs=1e-9)
+        assert sim["bottom"].sum() == pytest.approx(1.0, abs=1e-9)
+        assert sim["mean_rank"].mean() == pytest.approx(2.0, abs=1e-9)
+
+    def test_no_gameweeks_left_is_the_table_as_it_stands(self):
+        sim = ss.simulate_points_league(self._entries(), gameweeks_left=0,
+                                        n_sims=50, seed=1).set_index("league_entry")
+        assert sim.loc[1, "title"] == 1.0
+        assert sim.loc[3, "bottom"] == 1.0
+
+    def test_a_long_run_can_overturn_a_lead(self):
+        """With 28 gameweeks left an 80-point gap is not safe; with one it is."""
+        far = ss.simulate_points_league(self._entries(), gameweeks_left=28,
+                                        sigma=25, n_sims=800, seed=2)
+        near = ss.simulate_points_league(self._entries(), gameweeks_left=1,
+                                         sigma=25, n_sims=800, seed=2)
+        assert far.set_index("league_entry").loc[1, "title"] < \
+               near.set_index("league_entry").loc[1, "title"]
+
+    def test_it_is_reproducible(self):
+        a = ss.simulate_points_league(self._entries(), gameweeks_left=10,
+                                      n_sims=200, league_id=5, gameweek=10)
+        b = ss.simulate_points_league(self._entries(), gameweeks_left=10,
+                                      n_sims=200, league_id=5, gameweek=10)
+        pd.testing.assert_frame_equal(a, b)
+
+    def test_empty_input_is_an_empty_frame(self):
+        assert ss.simulate_points_league([], gameweeks_left=10).empty
