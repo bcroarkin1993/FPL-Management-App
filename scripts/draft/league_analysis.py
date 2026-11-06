@@ -21,6 +21,10 @@ from scripts.common.error_helpers import get_logger, show_api_error
 from scripts.common.utils import get_current_gameweek, get_draft_points_by_position
 from scripts.common.luck_analysis import calculate_h2h_streaks
 from scripts.common.display_names import attach_display_names
+from scripts.common import season_sim
+from scripts.common.data_validation import check_season_odds
+from scripts.common.fpl_draft_api import get_draft_league_details
+from scripts.draft.fixture_projections import _estimate_score_std
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.team_strength import build_league_strength, describe_blend
 
@@ -679,6 +683,113 @@ injury-free score and its actual one.
         )
 
 
+def _render_season_odds(league_id, current_gw):
+    """Title, playoff and last-place odds from a Monte Carlo of what is left.
+
+    The app could tell you the odds of winning *this week* and nothing about the
+    season. This plays the remaining fixtures out with the same win-probability
+    model the Fixture Projections page uses, so the two cannot disagree about how
+    a single match resolves.
+
+    **Behind a button.** `st.tabs` renders every body on every rerun, and this
+    one costs a `league/{id}/details` read plus the simulation -- which nobody
+    opening the page for Head-to-Head should pay for. Same reasoning, and the
+    same precedent, as the Classic Rival Tracker's gate.
+    """
+    st.subheader("🔮 Season Odds")
+    st.caption(
+        "Plays the rest of the season out many times, drawing each manager's "
+        "weekly score from what they have actually scored so far. Uses the same "
+        "model as the per-match win probability on Fixture Projections."
+    )
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        n_sims = st.select_slider(
+            "Simulations", options=[500, 1000, 2000, 5000], value=season_sim.DEFAULT_SIMS,
+            help="More simulations is a finer answer, not a better model. At "
+                 "2,000 the sampling error on a probability is about 1 point, "
+                 "already below the model's own uncertainty.")
+    with col2:
+        places = st.number_input(
+            "Playoff places", min_value=1, max_value=8, value=3,
+            help="How many places count as making the cut in your league.")
+
+    if not st.button("Run the season out", key="season_sim_run"):
+        st.info("Press **Run the season out** to simulate from here to GW38.")
+        return
+
+    try:
+        details = get_draft_league_details(league_id)
+    except Exception as exc:
+        st.warning("Could not load the league schedule: %s" % exc)
+        return
+    standings = (details or {}).get("standings") or []
+    matches = (details or {}).get("matches") or []
+    if not standings or not matches:
+        st.warning("The league payload carried no standings or schedule.")
+        return
+
+    sigma, n_hist = _estimate_score_std(league_id)
+    remaining = season_sim.remaining_matches(matches, from_gw=current_gw)
+    if not remaining:
+        st.success("Every fixture is played — the table is final.")
+        return
+
+    sim = season_sim.simulate_season(
+        standings, matches, sigma=sigma, n_sims=int(n_sims),
+        from_gw=current_gw, league_id=league_id, gameweek=current_gw,
+        playoff_places=int(places),
+    )
+    if sim.empty:
+        st.warning("Not enough league history to simulate from.")
+        return
+
+    # The tripwire. Exact identities rather than ranges, because every failure
+    # mode here produces a table of plausible-looking percentages.
+    issues = check_season_odds(sim, playoff_places=int(places),
+                               remaining_fixtures=len(remaining))
+    for issue in issues:
+        if issue.severity == "error":
+            _logger.error("season odds: %s %s", issue.message, issue.hint)
+            st.warning("The simulation did not come out consistent, so it is not "
+                       "shown: %s" % issue.message)
+            return
+        _logger.warning("season odds: %s", issue.message)
+
+    names = {e["id"]: e.get("entry_name", "Entry %s" % e["id"])
+             for e in (details.get("league_entries") or [])}
+    table = season_sim.summarise(sim, names, playoff_places=int(places))
+
+    render_styled_table(
+        table,
+        col_formats={"Title": "{:.1f}%", "Top %d" % int(places): "{:.1f}%",
+                     "Last": "{:.1f}%", "Proj Pts": "{:.1f}",
+                     "Avg Finish": "{:.2f}", "PPG": "{:.1f}"},
+        positive_color_cols=["Title", "Top %d" % int(places)],
+        text_align={c: "center" for c in table.columns if c != "Team"},
+    )
+
+    # The two things that make this honest rather than impressive.
+    hist_note = ("sigma %.1f from %d historical scores" % (sigma, n_hist)
+                 if n_hist > 0 else "sigma %.1f (league-wide default)" % sigma)
+    played = int(sim["n_played"].max())
+    st.caption(
+        "%d fixtures left, %s. Each simulation also re-draws every manager's "
+        "underlying mean from its own sampling distribution, because that mean "
+        "rests on **%d matches** — with this sigma the standard error on it is "
+        "about %.1f points, comparable to the gap between first and fourth. "
+        "Holding it fixed instead would report this league as considerably more "
+        "decided than the evidence supports."
+        % (len(remaining), hist_note, played,
+           sigma / max(1.0, played ** 0.5))
+    )
+    st.caption(
+        "Results are seeded on the league and gameweek, so they do not shift "
+        "when you change a filter — only when the standings do."
+    )
+
+
 def show_draft_league_analysis_page():
     """Display the Draft League Analysis page."""
 
@@ -730,7 +841,7 @@ def show_draft_league_analysis_page():
     st.divider()
 
     # Create tabs for different analyses
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "Head-to-Head",
         "Scoring Analysis",
         "Weekly Trends",
@@ -738,8 +849,12 @@ def show_draft_league_analysis_page():
         "Records & Streaks",
         "Points by Position",
         "Bench Analysis",
-        "💪 Power Rankings"
+        "💪 Power Rankings",
+        "🔮 Season Odds",
     ])
+
+    with tab9:
+        _render_season_odds(league_id, current_gw)
 
     # ---------------------------
     # TAB 1: HEAD-TO-HEAD

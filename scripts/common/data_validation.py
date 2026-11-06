@@ -44,6 +44,7 @@ __all__ = [
     "check_draft_game_settings",
     "check_transfer_risk",
     "check_claim_lanes",
+    "check_season_odds",
     "check_ros_terms",
     "check_transfer_windows",
     "check_transfer_odds",
@@ -3642,5 +3643,83 @@ def check_ros_terms(terms: Optional[Dict[str, pd.Series]],
                     "ROS is outside [0,1] (%.3f..%.3f)." % (lo, hi),
                     "ROS is a weighted mean of 0-1 terms whose weights sum to 1, "
                     "so it cannot leave the unit interval."))
+
+    return issues
+
+
+def check_season_odds(sim: Optional[pd.DataFrame],
+                      n_teams: Optional[int] = None,
+                      playoff_places: int = 3,
+                      remaining_fixtures: Optional[int] = None) -> List[Issue]:
+    """Is this season simulation a probability distribution at all?
+
+    A Monte Carlo always *returns* something, and the failure modes are quiet:
+    a schedule read with the wrong id space silently simulates nobody, a
+    double-counted fixture inflates everyone's points, and a degenerate sigma
+    makes the current leader a certainty in October. None of those raises, and
+    each produces a table of plausible-looking percentages.
+
+    The checks are therefore exact identities rather than ranges:
+
+    * **Exactly one team wins**, so ``sum(title) == 1``. Anything else means the
+      ranking produced no unique first place or the tally lost rows.
+    * **Exactly N make the cut**, so ``sum(top_n) == playoff_places``.
+    * **Exactly one finishes last.**
+    * **Mean rank averages to (n+1)/2**, because ranks are a permutation every
+      simulation. This is the one that catches a double-counted or dropped
+      fixture, which leaves the probabilities intact.
+
+    A certainty with fixtures left is a *warning*, not an error: late in a season
+    it is simply true, and the caller knows how many fixtures remain.
+    """
+    check = "season_odds"
+    issues: List[Issue] = []
+
+    if sim is None or sim.empty:
+        return [Issue(check, "error", "The season simulation returned no rows.",
+                      "An empty result usually means the standings were read "
+                      "with the wrong id space -- `league_entry` keys the "
+                      "standings, `entry_id` keys element ownership.")]
+
+    n = int(n_teams or len(sim))
+    for col, expected, label in (("title", 1.0, "exactly one team wins"),
+                                 ("bottom", 1.0, "exactly one finishes last"),
+                                 ("top_n", float(playoff_places),
+                                  "exactly %d make the cut" % playoff_places)):
+        if col not in sim.columns:
+            issues.append(Issue(check, "error", "Missing column %r." % col, ""))
+            continue
+        total = float(pd.to_numeric(sim[col], errors="coerce").fillna(0).sum())
+        if abs(total - expected) > 0.02:
+            issues.append(Issue(
+                check, "error",
+                "%s, but %r sums to %.3f rather than %.0f."
+                % (label.capitalize(), col, total, expected),
+                "Every simulation ranks every team, so these are exact "
+                "identities. A shortfall means rows were lost between the "
+                "ranking and the tally."))
+
+    if "mean_rank" in sim.columns and n > 1:
+        got = float(pd.to_numeric(sim["mean_rank"], errors="coerce").mean())
+        want = (n + 1) / 2.0
+        if abs(got - want) > 0.05:
+            issues.append(Issue(
+                check, "error",
+                "Mean finishing position averages %.2f across %d teams, not %.2f."
+                % (got, n, want),
+                "Ranks are a permutation of 1..n in every simulation, so their "
+                "average is fixed. This is what catches a fixture counted twice "
+                "or dropped -- the probabilities stay plausible when it happens."))
+
+    if "title" in sim.columns and remaining_fixtures:
+        mx = float(pd.to_numeric(sim["title"], errors="coerce").max())
+        if mx >= 0.999 and int(remaining_fixtures) > 2:
+            issues.append(Issue(
+                check, "warning",
+                "A team is a certainty for the title with %d fixtures left."
+                % int(remaining_fixtures),
+                "Plausible late on. Early, it is the signature of a degenerate "
+                "sigma -- a spread of 0 turns a one-point edge into a certain "
+                "win, which is what `check_score_std` exists for."))
 
     return issues

@@ -4571,6 +4571,64 @@ single bad response emptied the odds board for a whole page load. It now retries
 three times with backoff, matching `ffp_feed._get` and `pl_content._get`.
 
 
+## Season Odds — a Monte Carlo over what is left
+
+`scripts/common/season_sim.py` (pure), the **🔮 Season Odds** tab on Draft
+League Analysis, `check_season_odds()`.
+
+The app could tell you the odds of winning *this week's* match and nothing about
+the season. `P(A>B) = Phi((muA - muB) / sqrt(2 sigma^2))` has backed Fixture
+Projections for a year; this plays the remaining fixtures out with the same
+model, so the two cannot disagree about how a single match resolves.
+
+**The points system is verified, not assumed.** `3 * matches_won +
+matches_drawn` reproduced `total` for all ten teams of league 11347, and ties
+break on `points_for`, which is how the published standings are ordered.
+
+**`matches_played` is not the number of matches played.** The live payload
+reports **38 for every team** -- the scheduled total -- so a mean taken over it
+understates every team by a factor of four. Wins plus draws plus losses is the
+honest denominator.
+
+**Estimation uncertainty is simulated rather than assumed away, and that is the
+methodological point.** A team's mean weekly score rests on the matches it has
+actually played -- nine, when this was written -- so with sigma near 12 the
+standard error on that mean is about 4 points, comparable to the gap between
+first and fourth. Each simulation therefore draws the team's mean from its own
+sampling distribution *before* drawing match scores around it. Measured live, the
+leader's title probability is **25.4% with that propagation and 31.4% without**:
+holding the mean fixed reports a league as considerably more decided than the
+evidence supports. The caption says so, with the standard error in it.
+
+A team below `MIN_MATCHES_FOR_OWN_MEAN` (3) takes the league mean instead of its
+own, because one or two results say almost nothing about a manager and letting
+them set a mean makes the simulation confident about noise.
+
+**It is seeded, on `(league_id, gameweek, n_sims)`.** Streamlit reruns the page
+function on every widget interaction, and an unseeded Monte Carlo returns
+different odds each time -- which reads as a broken page rather than as sampling
+error. The answer is stable until the standings move.
+
+`DEFAULT_SIMS` is 2,000, which puts the sampling error on a probability at about
+1.1 points (`sqrt(0.25/2000)`) -- finer than the model's own uncertainty and
+below the rounding shown. More simulations is a finer answer, not a better model,
+and the control says so. The whole 2,000 is **0.09s** on a ten-team league,
+because the fixtures are vectorised per simulation rather than looped.
+
+**Behind a button**, like the Classic Rival Tracker, because `st.tabs` renders
+every body on every rerun and nobody opening the page for Head-to-Head should
+pay for a league-details fetch.
+
+`check_season_odds()` asserts **exact identities** rather than ranges, because
+every failure mode here yields a table of plausible-looking percentages: exactly
+one team wins, exactly N make the cut, exactly one finishes last, and mean
+finishing position averages `(n+1)/2` since ranks are a permutation in every
+simulation. That last one is what catches a fixture counted twice or dropped --
+the probabilities stay intact when it happens. An empty result names the likely
+cause, which is the two-id-space trap: `league_entry` keys the standings where
+`entry_id` keys element ownership. A certainty with fixtures left is a *warning*,
+since late in a season it is simply true.
+
 ## Team Strength Model — Draft Power Rankings
 
 `scripts/common/team_strength.py`. Answers "how good is each roster in my league?"
@@ -5118,6 +5176,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Notes |
 |------|-------|
+| Season Odds (Draft) | Completed | **🔮 Season Odds** tab on Draft League Analysis: title, playoff and last-place probabilities from a Monte Carlo of the remaining fixtures, using the same `Phi((muA-muB)/sqrt(2 sigma^2))` model as the per-match win probability. The feature betterdraft.co.uk has that this app had no equivalent of. Each simulation re-draws every manager's underlying mean from its own sampling distribution, because that mean rests on nine matches — live that is the difference between a 25.4% and a 31.4% title probability for the leader, and holding it fixed overstates how decided the league is. Seeded on `(league, gameweek, n_sims)` so a Streamlit rerun cannot change the answer. `check_season_odds()` guards it on exact identities. See "Season Odds" |
 | Draft Team Power Rankings | New "💪 Power Rankings" tab on Draft League Analysis. Team Score 0-100 plus GK/DEF/MID/FWD scores with league rank badges, all positional percentiles against the full ~700-player FPL pool. Player strength = 60% quality (preseason Rotowire pedigree blended into in-season actuals via `season_progress_weight()`) + 25% this-GW blended projection + 10% start security + 5% FDR, times a season-aware injury discount. Actuals use **points per start** (not total points) so a player returning from a long injury isn't penalised for missed games; below 4 starts the sample is too thin and pedigree is used alone. Rosters join to stats on integer element ID via new `get_league_rosters_with_ids()` — no name matching in this path. See "Team Strength Model" section below. |
 | League Setup Admin Page | In-app "🆔 League Setup" page (FPL App Home) to set/validate/lock Draft and Classic league & team IDs instead of hand-editing `.env`. Draft: enter league ID, look it up, pick your team from a resolved dropdown (no need to know your entry ID). Classic: add/remove multiple leagues, resolve team via entry ID lookup. Locked read-only view with two-step "Unlock to Edit" confirmation. Persisted to gitignored `league_settings.json` (repo is public — not committed, unlike `alert_settings.json`). `config.py`'s 4 ID attributes (`FPL_DRAFT_LEAGUE_ID`, `FPL_DRAFT_TEAM_ID`, `FPL_CLASSIC_TEAM_ID`, `FPL_CLASSIC_LEAGUE_IDS`) converted from eager to lazy PEP 562 resolution (same pattern as `CURRENT_GAMEWEEK`), prioritizing locked JSON settings over `.env`, so saved changes take effect immediately without an app restart. |
 | Gameweek Fixtures GW38 Cap | Auto-constrain FDR Horizon and "How many weeks?" sliders to never exceed GW38; defensive cap added inside `get_fixture_difficulty_grid()`; fetch range hard-capped at `end_gw = min(start_gw + weeks - 1, 38)` |

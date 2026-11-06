@@ -15,6 +15,7 @@ from scripts.common.data_validation import (
     check_ffp_feed,
     check_transfer_risk,
     check_claim_lanes,
+    check_season_odds,
     check_ros_terms,
     check_transfer_windows,
     Issue,
@@ -2060,3 +2061,64 @@ class TestCheckRosTerms:
         issues = check_ros_terms({"sq": pd.Series(np.linspace(0, 1, 20))},
                                  ros=pd.Series([1.4] * 20), weights={"sq": 1.0})
         assert any("ROS is outside" in i.message for i in issues)
+
+
+class TestCheckSeasonOdds:
+    """A Monte Carlo always returns something, and its failure modes are quiet:
+    a schedule read with the wrong id space simulates nobody, a double-counted
+    fixture inflates everyone's points, a degenerate sigma makes the leader a
+    certainty in October. Each produces plausible-looking percentages."""
+
+    def _sim(self, n=4):
+        return pd.DataFrame({
+            "league_entry": range(1, n + 1),
+            "title": [0.5, 0.3, 0.15, 0.05][:n],
+            "top_n": [0.9, 0.8, 0.7, 0.6][:n],
+            "bottom": [0.02, 0.08, 0.3, 0.6][:n],
+            "mean_rank": [1.6, 2.2, 2.9, 3.3][:n],
+        })
+
+    def test_a_sound_simulation_is_clean(self):
+        sim = self._sim()
+        sim["top_n"] = [0.9, 0.8, 0.7, 0.6]
+        sim["top_n"] = sim["top_n"] / sim["top_n"].sum() * 3
+        sim["mean_rank"] = [1.6, 2.2, 2.9, 3.3]
+        sim["mean_rank"] = sim["mean_rank"] / sim["mean_rank"].mean() * 2.5
+        assert check_season_odds(sim, playoff_places=3) == []
+
+    def test_titles_must_sum_to_one(self):
+        sim = self._sim()
+        sim.loc[0, "title"] = 0.9
+        assert any("exactly one team wins" in i.message.lower()
+                   for i in check_season_odds(sim, playoff_places=3))
+
+    def test_mean_rank_must_average_to_the_middle(self):
+        """The one that catches a fixture counted twice or dropped -- the
+        probabilities stay plausible when that happens, because ranks are still
+        a permutation within each simulation."""
+        sim = self._sim()
+        sim["top_n"] = sim["top_n"] / sim["top_n"].sum() * 3
+        sim["mean_rank"] = sim["mean_rank"] * 1.4
+        assert any("Mean finishing position" in i.message
+                   for i in check_season_odds(sim, playoff_places=3))
+
+    def test_an_empty_result_names_the_likely_cause(self):
+        issues = check_season_odds(pd.DataFrame())
+        assert issues and issues[0].severity == "error"
+        assert "id space" in issues[0].hint
+
+    def test_a_certainty_early_is_a_warning_not_an_error(self):
+        """Plausible late on; early it is a degenerate sigma."""
+        sim = self._sim()
+        sim["title"] = [1.0, 0.0, 0.0, 0.0]
+        sim["top_n"] = sim["top_n"] / sim["top_n"].sum() * 3
+        sim["mean_rank"] = sim["mean_rank"] / sim["mean_rank"].mean() * 2.5
+        issues = check_season_odds(sim, playoff_places=3, remaining_fixtures=145)
+        assert [i.severity for i in issues] == ["warning"]
+
+    def test_a_certainty_with_the_season_over_is_silent(self):
+        sim = self._sim()
+        sim["title"] = [1.0, 0.0, 0.0, 0.0]
+        sim["top_n"] = sim["top_n"] / sim["top_n"].sum() * 3
+        sim["mean_rank"] = sim["mean_rank"] / sim["mean_rank"].mean() * 2.5
+        assert check_season_odds(sim, playoff_places=3, remaining_fixtures=0) == []
