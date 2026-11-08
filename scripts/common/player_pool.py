@@ -52,6 +52,10 @@ def build_pool(bootstrap) -> pd.DataFrame:
             "Team": teams.get(e.get("team"), ""),
             "Position": pos_map.get(e.get("element_type"), "M"),
             "ep_next": pd.to_numeric(e.get("ep_next"), errors="coerce"),
+            # Purely additive, and needed by anything that has to *buy* a
+            # squad rather than only rank one -- the chip page solves a Free
+            # Hit and a Wildcard against this pool, and both are budgeted.
+            "Price": pd.to_numeric(e.get("now_cost"), errors="coerce") / 10.0,
             "status": e.get("status"),
             "chance_of_playing_next_round": e.get("chance_of_playing_next_round"),
             # The player's own start count, which floors the omitted prior:

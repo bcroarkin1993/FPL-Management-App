@@ -20,7 +20,7 @@
 # No Streamlit, no requests — importable from anywhere, including GitHub Actions.
 
 import math
-from typing import Dict, List, NamedTuple, Optional, Sequence
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence
 
 import pandas as pd
 
@@ -55,6 +55,8 @@ __all__ = [
     "check_transfer_plan",
     "check_start_calibration",
     "check_mini_league_ownership",
+    "check_chip_timing",
+    "check_chip_definitions",
     "format_issues",
     "raise_on_error",
 ]
@@ -3721,5 +3723,243 @@ def check_season_odds(sim: Optional[pd.DataFrame],
                 "Plausible late on. Early, it is the signature of a degenerate "
                 "sigma -- a spread of 0 turns a one-point edge into a certain "
                 "win, which is what `check_score_std` exists for."))
+
+    return issues
+
+
+# --- Chips -------------------------------------------------------------------
+#
+# A chip valuation fails in a way nothing on screen can reveal: every number in
+# the grid is a plausible points total, and the only symptom of a wrong one is
+# that it names the wrong gameweek to spend an irreplaceable resource on. So the
+# checks here are **invariants rather than ranges** wherever one is available.
+#
+# The two load-bearing ones are both "this cannot be negative, by construction":
+# your own fifteen are inside the pool a Free Hit draws from, and fifteen free
+# changes include every subset of K of them. A negative value for either means
+# the two sides of the comparison saw different data -- the shape
+# `check_transfer_plan`'s `gain_net <= 0` already has.
+
+#: The most expected points a single chip can plausibly add in one gameweek.
+#: Bench Boost pays four players and Triple Captain one, so the ceiling is a
+#: four-player total: well above any real bench, and far below what a basis
+#: error or a double-counted multiplier produces.
+MAX_PLAUSIBLE_CHIP_GAIN = 60.0
+
+
+def check_chip_timing(values: Dict[str, Any],
+                      squad_df: Optional[pd.DataFrame] = None,
+                      matrix: Optional[pd.DataFrame] = None) -> List[Issue]:
+    """Per-gameweek chip valuations that cannot be right.
+
+    ``values`` is ``{chip: {gameweek: expected points}}`` as the Chip Strategy
+    page builds it, except ``wildcard``, which is a single per-gameweek rate.
+    """
+    check = "chip_timing"
+    issues: List[Issue] = []
+
+    if not values:
+        return [Issue(check, "error", "No chip could be valued at all.",
+                      "Every valuation returned empty: the squad frame, the "
+                      "projection matrix, or both are missing. See "
+                      "chips.squad_points_matrix().")]
+
+    squad_total = None
+    if matrix is not None and not matrix.empty:
+        squad_total = {int(gw): float(pd.to_numeric(matrix[gw], errors="coerce")
+                                     .fillna(0).sum())
+                       for gw in matrix.columns}
+
+    for chip, per_gw in values.items():
+        if per_gw is None:
+            continue
+
+        # The Wildcard is a single rate, not a per-gameweek mapping.
+        if not isinstance(per_gw, dict):
+            val = float(per_gw)
+            if math.isfinite(val) and val < 0:
+                issues.append(Issue(
+                    check, "error",
+                    "Wildcard is valued at %.2f points, which is negative." % val,
+                    "A wildcard is fifteen free transfers, so it cannot be worth "
+                    "less than the K you already have -- the two solves must have "
+                    "seen different pools. See chips.wildcard_value()."))
+            continue
+
+        for gw, val in per_gw.items():
+            if val is None or not math.isfinite(float(val)):
+                issues.append(Issue(
+                    check, "warning",
+                    "%s has no value for GW%s." % (chip, gw),
+                    "Expected where a source published nothing for that week."))
+                continue
+            val = float(val)
+            if val < 0:
+                hint = ("Your own fifteen are inside the pool, so the best XI "
+                        "from the pool cannot be worse than the best XI from "
+                        "your squad: the pool was over-filtered or the budget "
+                        "is wrong. See chips.free_hit_value()."
+                        if chip == "freehit" else
+                        "A chip can only add points, never remove them.")
+                issues.append(Issue(
+                    check, "error",
+                    "%s is valued at %.2f points in GW%s, which is negative."
+                    % (chip, val, gw), hint))
+            if val > MAX_PLAUSIBLE_CHIP_GAIN:
+                issues.append(Issue(
+                    check, "error",
+                    "%s is valued at %.1f points in GW%s, above the %.0f-point "
+                    "ceiling." % (chip, val, gw, MAX_PLAUSIBLE_CHIP_GAIN),
+                    "This is the signature of a double-counted multiplier or a "
+                    "conditional projection read as an expected one."))
+            # Bench Boost pays a subset of the fifteen, so it cannot exceed the
+            # whole squad's total. Triple Captain adds one copy of one player.
+            if (chip == "bboost" and squad_total is not None
+                    and int(gw) in squad_total
+                    and val > squad_total[int(gw)] + 1e-6):
+                issues.append(Issue(
+                    check, "error",
+                    "Bench Boost (%.2f) exceeds the squad's whole GW%s projection "
+                    "(%.2f)." % (val, gw, squad_total[int(gw)]),
+                    "It is sum(15) - best XI, a subset sum, so this is "
+                    "arithmetically impossible."))
+
+        # A valuation with no spread across the window is the "every team scores
+        # exactly 50" signature one model over: a gate silently doing nothing,
+        # not a season in which every week is identical.
+        finite = [float(v) for v in per_gw.values()
+                  if v is not None and math.isfinite(float(v))]
+        if len(finite) >= 3 and max(finite) - min(finite) < 1e-9 and max(finite) > 0:
+            issues.append(Issue(
+                check, "warning",
+                "%s is worth exactly %.2f in all %d gameweeks."
+                % (chip, finite[0], len(finite)),
+                "No spread across a window usually means every week is reading "
+                "the same column -- check the gameweek keys on the points "
+                "matrix, not the valuation."))
+
+    return issues
+
+
+def check_chip_definitions(bootstrap: Optional[dict],
+                           known_chips: Sequence[str] = (),
+                           last_gameweek: int = 38) -> List[Issue]:
+    """FPL's published chip rules, against what the app assumes.
+
+    Every chip window this app relies on is published in
+    ``bootstrap-static.chips``, and for a season it was compiled in instead --
+    which is how Free Hit and Triple Captain came to be modelled as single-use
+    after FPL made them double. A real rule change is otherwise invisible,
+    because the app keeps enforcing last season's and every number stays
+    plausible.
+
+    An **unreachable** bootstrap is a warning (unknown), never an error
+    (wrong) -- the same contract as :func:`check_draft_game_settings`.
+    """
+    check = "chip_definitions"
+    raw = (bootstrap or {}).get("chips")
+    if not isinstance(raw, list) or not raw:
+        return [Issue(check, "warning",
+                      "bootstrap-static published no chips list.",
+                      "Unknown, not wrong: chips.parse_chip_definitions() falls "
+                      "back to the last measured windows. If this persists, FPL "
+                      "has changed the payload shape.")]
+
+    issues: List[Issue] = []
+    by_name: Dict[str, List[tuple]] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            issues.append(Issue(check, "error",
+                                "A chips entry is not an object: %r" % (entry,),
+                                "The payload shape changed."))
+            continue
+        name = str(entry.get("name") or "").strip()
+        start, stop = entry.get("start_event"), entry.get("stop_event")
+        if not name:
+            issues.append(Issue(check, "error", "A chip has no name.",
+                                "The payload shape changed."))
+            continue
+        if start is None or stop is None:
+            issues.append(Issue(
+                check, "error",
+                "Chip %r publishes no start_event/stop_event." % name,
+                "The whole expiry clock is built on these; without them a chip "
+                "cannot be said to be playable or expired."))
+            continue
+        try:
+            start, stop = int(start), int(stop)
+        except (TypeError, ValueError):
+            issues.append(Issue(
+                check, "error",
+                "Chip %r has non-integer window (%r, %r)." % (name, start, stop),
+                "The payload shape changed."))
+            continue
+        if stop < start:
+            issues.append(Issue(
+                check, "error",
+                "Chip %r closes (GW%d) before it opens (GW%d)." % (name, stop, start),
+                "A window that cannot contain a gameweek makes the chip "
+                "permanently unplayable."))
+        by_name.setdefault(name, []).append((start, stop))
+
+    for name in sorted(by_name):
+        if known_chips and name not in known_chips:
+            issues.append(Issue(
+                check, "error",
+                "FPL publishes a chip this app does not know: %r." % name,
+                "Add it to chips.KNOWN_CHIPS and CHIP_LABELS, or it will be "
+                "listed with no valuation and no label."))
+
+    for name in (known_chips or ()):
+        if name not in by_name:
+            issues.append(Issue(
+                check, "error",
+                "The app knows a chip FPL no longer publishes: %r." % name,
+                "It will show as permanently unavailable. Remove it from "
+                "chips.KNOWN_CHIPS if FPL has retired it."))
+
+    # Windows per chip should not overlap: a gameweek in two windows makes
+    # "which slot does this use spend" ambiguous, and chip_states() resolves
+    # that by order rather than by rule.
+    for name, windows in by_name.items():
+        windows = sorted(windows)
+        for (a_start, a_stop), (b_start, b_stop) in zip(windows, windows[1:]):
+            if b_start <= a_stop:
+                issues.append(Issue(
+                    check, "error",
+                    "Chip %r has overlapping windows: %d-%d and %d-%d."
+                    % (name, a_start, a_stop, b_start, b_stop),
+                    "chip_states() spends the first matching window, so an "
+                    "overlap makes availability depend on ordering."))
+
+    counts = {name: len(w) for name, w in by_name.items()}
+    if counts and len(set(counts.values())) > 1:
+        issues.append(Issue(
+            check, "warning",
+            "Chips have differing numbers of windows: %s." % counts,
+            "Expected two each this season. Not wrong -- FPL may have given one "
+            "chip an extra use -- but worth knowing before trusting the clock."))
+
+    total = sum(counts.values())
+    if total and total != 2 * len(by_name):
+        issues.append(Issue(
+            check, "warning",
+            "%d chip windows across %d chips, not the two-per-chip this season "
+            "publishes." % (total, len(by_name)),
+            "The expiry clock still works per published window; this is a "
+            "prompt to re-read the rules, not a fault."))
+
+    covered = set()
+    for windows in by_name.values():
+        for start, stop in windows:
+            covered.update(range(max(1, start), min(last_gameweek, stop) + 1))
+    missing = sorted(set(range(2, last_gameweek + 1)) - covered)
+    if missing:
+        issues.append(Issue(
+            check, "warning",
+            "No chip is playable in %d gameweek(s), e.g. GW%s."
+            % (len(missing), missing[0]),
+            "Legitimate if FPL has left a gap, but a large gap usually means a "
+            "window failed to parse."))
 
     return issues

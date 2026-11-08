@@ -48,6 +48,87 @@ def check_valid_lineup(df):
     return (player_check & gk_check & def_check & mid_check & fwd_check)
 
 
+#: FPL's legal starting XI: exactly one goalkeeper, and the outfield windows
+#: that produce the eight permitted formations (3-4-3 through 5-2-3). The
+#: midfield minimum is **2**, not 3 -- 5-2-3 is legal, and a stricter minimum
+#: silently makes it unreachable.
+XI_SIZE = 11
+POS_MIN = {"G": 1, "D": 3, "M": 2, "F": 1}
+POS_MAX = {"G": 1, "D": 5, "M": 5, "F": 3}
+
+
+def best_xi_index(df, points_col="Points"):
+    """Index labels of the best legal XI in `df`, ranked by `points_col`.
+
+    The one implementation of "which eleven of these play". Extracted from
+    :func:`find_optimal_lineup` so that anything needing the *value* of an XI
+    rather than the rows -- the chip valuations in ``scripts/common/chips.py``,
+    which are differences of XI totals -- shares this arithmetic instead of
+    re-deriving it. A second copy of a formation solver is the twin-drift
+    failure this codebase has repeatedly paid for, and in a chip valuation it
+    would mislabel which gameweek to spend a chip on while every number in the
+    grid stayed plausible.
+
+    **Keyed on the frame's index, never on a name.** What this replaced
+    de-duplicated its base selection with ``set(selected['Player'])``, so two
+    players sharing a legal name collapsed into one and the XI came back ten
+    strong. Measured on the live bootstrap there are such collisions, and the
+    symptom is a team total quietly short by one player.
+
+    Greedy is optimal here, which is why there is no ILP: take each position's
+    minimum, then fill the four free slots with the best remaining players that
+    respect the maxima. The constraints are independent per position with a
+    single cardinality cap, so an exchange argument applies -- swapping any
+    chosen player for an unchosen one of the same position cannot improve the
+    total, and cross-position swaps are blocked only by maxima already binding.
+    """
+    if points_col not in df.columns:
+        # Deliberately loud. This used to fall back to 'Points' silently, which
+        # during the migration to the projection engine would let a page ask for
+        # 'Proj' and quietly get raw un-blended Rotowire instead -- the XI would
+        # look fine and be selected on the wrong number. A caller that genuinely
+        # wants Rotowire can say so.
+        raise KeyError(
+            f"best_xi_index: {points_col!r} is not on the frame "
+            f"(columns: {sorted(df.columns)}). Pass the column you actually "
+            f"want the XI ranked by -- silently substituting 'Points' selects "
+            f"the lineup on a different metric than the caller reports."
+        )
+
+    pts = pd.to_numeric(df[points_col], errors="coerce").fillna(0.0)
+    # Sort once, descending, with the index as a deterministic tie-break so two
+    # players on identical projections cannot swap places between reruns.
+    order = pts.sort_values(ascending=False, kind="mergesort").index
+
+    chosen = []
+    counts = {pos: 0 for pos in POS_MAX}
+    if "Position" not in df.columns:
+        raise KeyError("best_xi_index: frame has no 'Position' column")
+    positions = df["Position"]
+
+    # Pass 1 -- each position's required minimum, best first.
+    for label in order:
+        pos = positions.at[label]
+        if counts.get(pos, 0) < POS_MIN.get(pos, 0):
+            chosen.append(label)
+            counts[pos] += 1
+
+    # Pass 2 -- the remaining slots, best available that a maximum still admits.
+    taken = set(chosen)
+    for label in order:
+        if len(chosen) >= XI_SIZE:
+            break
+        if label in taken:
+            continue
+        pos = positions.at[label]
+        if counts.get(pos, 0) < POS_MAX.get(pos, 0):
+            chosen.append(label)
+            taken.add(label)
+            counts[pos] += 1
+
+    return chosen
+
+
 def find_optimal_lineup(df, points_col='Points'):
     """
     Function to find a team's optimal lineup given their player_projections_df.
@@ -64,70 +145,12 @@ def find_optimal_lineup(df, points_col='Points'):
         projections (e.g. 'Proj_Blended') must pass that column, otherwise the XI is
         selected on one metric while the team total is reported on another -- an
         FFP-only player (Points == 0, Proj_Blended > 0) could never be picked.
-    :return: optimal 11-player lineup DataFrame
+    :return: optimal 11-player lineup DataFrame, ordered by position then points
     """
-    if points_col not in df.columns:
-        # Deliberately loud. This used to fall back to 'Points' silently, which
-        # during the migration to the projection engine would let a page ask for
-        # 'Proj' and quietly get raw un-blended Rotowire instead -- the XI would
-        # look fine and be selected on the wrong number. A caller that genuinely
-        # wants Rotowire can say so.
-        raise KeyError(
-            f"find_optimal_lineup: {points_col!r} is not on the frame "
-            f"(columns: {sorted(df.columns)}). Pass the column you actually "
-            f"want the XI ranked by -- silently substituting 'Points' selects "
-            f"the lineup on a different metric than the caller reports."
-        )
-    # 1. Find the top scoring GK (exactly 1)
-    top_gk = df[df['Position'] == 'G'].sort_values(by=points_col, ascending=False).head(1)
+    chosen = best_xi_index(df, points_col=points_col)
+    final_selection = df.loc[chosen]
 
-    # 2. Find the top 3 scoring DEF (minimum required)
-    all_def = df[df['Position'] == 'D'].sort_values(by=points_col, ascending=False)
-    top_def = all_def.head(3)
-
-    # 3. Find the top 2 scoring MID (minimum required, need at least 2)
-    all_mid = df[df['Position'] == 'M'].sort_values(by=points_col, ascending=False)
-    top_mid = all_mid.head(2)
-
-    # 4. Find the top scoring FWD (minimum 1)
-    all_fwd = df[df['Position'] == 'F'].sort_values(by=points_col, ascending=False)
-    top_fwd = all_fwd.head(1)
-
-    # 5. Combine the base selected players (1 GK + 3 DEF + 2 MID + 1 FWD = 7 players)
-    selected_players = pd.concat([top_gk, top_def, top_mid, top_fwd])
-    selected_names = set(selected_players['Player'].tolist())
-
-    # 6. Need to add 4 more players from remaining (excluding GKs)
-    # Remaining pool: DEF (up to 2 more), MID (up to 3 more), FWD (up to 2 more)
-    remaining_def = all_def[~all_def['Player'].isin(selected_names)].head(2)  # Can add up to 2 more DEF
-    remaining_mid = all_mid[~all_mid['Player'].isin(selected_names)].head(3)  # Can add up to 3 more MID
-    remaining_fwd = all_fwd[~all_fwd['Player'].isin(selected_names)].head(2)  # Can add up to 2 more FWD
-
-    # Combine remaining candidates (no GKs allowed)
-    remaining_pool = pd.concat([remaining_def, remaining_mid, remaining_fwd])
-    remaining_pool = remaining_pool.sort_values(by=points_col, ascending=False)
-
-    # Track position counts as we add players
-    pos_counts = {'G': 1, 'D': 3, 'M': 2, 'F': 1}
-    max_counts = {'G': 1, 'D': 5, 'M': 5, 'F': 3}
-
-    players_to_add = []
-    for _, player in remaining_pool.iterrows():
-        if len(players_to_add) >= 4:
-            break
-        pos = player['Position']
-        if pos_counts.get(pos, 0) < max_counts.get(pos, 0):
-            players_to_add.append(player)
-            pos_counts[pos] = pos_counts.get(pos, 0) + 1
-
-    # 7. Combine all selected players
-    if players_to_add:
-        additional = pd.DataFrame(players_to_add)
-        final_selection = pd.concat([selected_players, additional])
-    else:
-        final_selection = selected_players
-
-    # 8. Organize the final selection by Position, then descending projected points.
+    # Organize the final selection by Position, then descending projected points.
     # The position key must only be applied to the Position column -- a shared `key=`
     # maps the points column to all-NaN and silently disables the secondary sort.
     final_selection = final_selection.assign(

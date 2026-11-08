@@ -1079,3 +1079,74 @@ class TestClassicSuggestionSanityVeto:
         out = _build_transfer_suggestions(squad, self._available(), bank=20,
                                           top_n=3, free_transfers=3)
         assert [s["add_player"] for s in out] == ["Flattered Punt"]
+
+
+class TestChipStrategyPage:
+    """Smoke test, plus the two things that would silently hollow the page out.
+
+    `mock_streamlit`'s buttons are unconditionally truthy, so the Free Hit /
+    Wildcard solve gate is *exercised* here rather than skipped -- which is the
+    point: a page whose expensive section is behind a button still has to render
+    when the button is pressed.
+    """
+
+    TARGETS = {
+        "get_classic_bootstrap_static": {
+            "elements": [], "teams": [], "events": [],
+            "chips": [{"name": "bboost", "start_event": 1, "stop_event": 19},
+                      {"name": "bboost", "start_event": 20, "stop_event": 38},
+                      {"name": "3xc", "start_event": 1, "stop_event": 19},
+                      {"name": "3xc", "start_event": 20, "stop_event": 38},
+                      {"name": "wildcard", "start_event": 2, "stop_event": 19},
+                      {"name": "wildcard", "start_event": 20, "stop_event": 38},
+                      {"name": "freehit", "start_event": 2, "stop_event": 19},
+                      {"name": "freehit", "start_event": 20, "stop_event": 38}],
+        },
+        "get_classic_team_history": {"chips": [], "current": []},
+        "blended_pool": pd.DataFrame(),
+        "club_fixture_counts": pd.DataFrame(),
+        "blank_and_double_clubs": {},
+        "get_squad_budget": (100.0, "test"),
+    }
+
+    def _run(self, resolution, horizon=None):
+        from scripts.common.scraping import FFPHorizon
+        horizon = horizon if horizon is not None else FFPHorizon(
+            None, None, None, None, "none", None, "offline")
+        with ExitStack() as stack:
+            mod = "scripts.classic.chip_strategy"
+            for name, value in self.TARGETS.items():
+                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
+            stack.enter_context(patch(f"{mod}.resolve_classic_squad",
+                                      return_value=resolution))
+            stack.enter_context(patch(f"{mod}.get_ffp_horizon",
+                                      return_value=horizon))
+            stack.enter_context(patch(f"{mod}._h2h_league", return_value=None))
+            stack.enter_context(patch(f"{mod}.config.FPL_CLASSIC_TEAM_ID", 1,
+                                      create=True))
+            stack.enter_context(patch(f"{mod}.config.CURRENT_GAMEWEEK", 10,
+                                      create=True))
+            from scripts.classic.chip_strategy import show_chip_strategy_page
+            show_chip_strategy_page()
+
+    def _squad(self):
+        pos = [1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4]
+        return SquadResolution(
+            picks=[{"element": i, "multiplier": 1 if i <= 11 else 0,
+                    "element_type": p}
+                   for i, p in zip(range(1, 16), pos)],
+            source_gw=10, target_gw=10,
+        )
+
+    def test_smoke(self, mock_all_utils):
+        self._run(self._squad())
+
+    def test_it_renders_without_a_squad(self):
+        """An unresolvable squad must say so, not traceback."""
+        self._run(SquadResolution())
+
+    def test_no_team_configured_is_a_message_not_a_crash(self):
+        with patch("scripts.classic.chip_strategy.config.FPL_CLASSIC_TEAM_ID",
+                   None, create=True):
+            from scripts.classic.chip_strategy import show_chip_strategy_page
+            show_chip_strategy_page()

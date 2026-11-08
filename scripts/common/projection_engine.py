@@ -469,6 +469,41 @@ def _pool_col(pool, col, index, default=None):
 START_MODEL_REVISION = 4
 
 
+#: Every surface spells the element id differently -- the Classic squad builders
+#: emit ``element_id``, the Draft merges carry ``Player_ID`` through
+#: ``carry_cols``, the optimizer pools build their own ``Player_ID`` -- so a
+#: lookup keyed on one name silently does nothing on the pages that use another.
+#:
+#: A bare ``id`` is deliberately absent: on these pages it is as likely to be a
+#: league or fixture id, and resolving a signal against the wrong id space is
+#: worse than not resolving it.
+PLAYER_ID_COLUMNS = ("Player_ID", "element_id", "element", "player_id")
+
+
+def player_id_column(df):
+    """The frame's element ids as a numeric Series, or None.
+
+    Keyed on four spellings because a gate reading only one is a gate that is
+    off wherever another is used. That is precisely how the Rotowire omission
+    penalty came to be a no-op on every per-squad page, and it repeated with
+    the projected-XI start override: keyed on ``Player_ID`` alone it was off on
+    Classic Fixture Projections, so Phil Foden kept rendering at 4.24 there
+    after the engine had him at 0.45 everywhere else.
+
+    Same reasoning as reading FPL's availability under either of its two names.
+    Lives here rather than in ``analytics`` so that Streamlit-free consumers --
+    ``chips.py``, and the Actions snapshot collector's path through this module
+    -- can share one reader instead of each re-deriving it.
+    """
+    import pandas as _pd
+    for col in PLAYER_ID_COLUMNS:
+        if col in df.columns:
+            ids = _pd.to_numeric(df[col], errors="coerce")
+            if ids.notna().any():
+                return ids
+    return None
+
+
 def start_model_constants() -> Dict[str, object]:
     """Every constant the start model resolves from config, plus the revision.
 

@@ -561,3 +561,103 @@ def render_key_differentials(
             "In Draft leagues all players are unique to one team. "
             "Showing top 5 differentials per side by projected points."
         )
+
+
+# =============================================================================
+# BLANK AND DOUBLE GAMEWEEKS
+# =============================================================================
+#
+# No helper for this existed. Blanks were detected for the *current* gameweek
+# only, inside the Classic Transfers page, and double gameweeks were handled
+# nowhere at all except as a display artefact -- the Horizon grid's "x2" -- so
+# nothing in the app could answer "which of the next six weeks is a double".
+#
+# Deliberately not derived from `get_fixture_difficulty_grid()`: that issues one
+# request per week and `np.nanmean`s a double's two difficulties into a single
+# cell, so the *count* survives only inside the rendered string
+# ("AVL (H) / BOU (a)"). Parsing a count back out of display text is the wrong
+# direction. One whole-season fetch is ~380 rows in a single request.
+
+#: Fixture counts that are not one. 0 is a blank gameweek, 2+ a double.
+BLANK = 0
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _all_fixtures_min() -> pd.DataFrame:
+    """Every fixture as ``event, team_h, team_a``. Empty frame on failure."""
+    try:
+        resp = requests.get("https://fantasy.premierleague.com/api/fixtures/",
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+        resp.raise_for_status()
+        df = pd.DataFrame(resp.json())
+    except Exception as exc:
+        _logger.warning("Could not load fixtures for blank/double detection: %s", exc)
+        return pd.DataFrame(columns=["event", "team_h", "team_a"])
+    keep = [c for c in ("event", "team_h", "team_a") if c in df.columns]
+    if len(keep) < 3:
+        _logger.warning("Fixture payload missing expected columns: %s", sorted(df.columns))
+        return pd.DataFrame(columns=["event", "team_h", "team_a"])
+    return df[keep].dropna(subset=["event"]).copy()
+
+
+def club_fixture_counts(gameweeks) -> pd.DataFrame:
+    """How many fixtures each club has in each of ``gameweeks``.
+
+    Returns a frame indexed by **team id** with one integer column per
+    gameweek: ``0`` is a blank gameweek, ``2`` or more a double. An empty frame
+    means the fixture list could not be read -- which must be reported as
+    "unknown" rather than rendered as a league-wide blank, since every club
+    showing 0 is exactly what an outage looks like.
+
+    Counts are taken from the fixture rows themselves rather than from a
+    difficulty grid, so a double is two rows and a blank is an absent pair.
+    Note the schedule only *becomes* interesting later in a season: measured
+    2026-11-06, every club had exactly one fixture in every remaining gameweek,
+    because blanks and doubles appear once cup and European ties are
+    rescheduled. A caller must therefore handle "none found" as the normal
+    state for the first half of a season, not as a failure.
+    """
+    gameweeks = [int(g) for g in (gameweeks or [])]
+    teams = _bootstrap_teams_df()
+    fixtures = _all_fixtures_min()
+    if teams.empty or fixtures.empty or not gameweeks:
+        return pd.DataFrame()
+
+    team_ids = sorted(int(t) for t in teams["id"].tolist())
+    out = pd.DataFrame(0, index=team_ids, columns=gameweeks, dtype=int)
+    out.index.name = "team_id"
+
+    events = pd.to_numeric(fixtures["event"], errors="coerce")
+    wanted = set(gameweeks)
+    for ev, home, away in zip(events, fixtures["team_h"], fixtures["team_a"]):
+        if pd.isna(ev) or int(ev) not in wanted:
+            continue
+        gw = int(ev)
+        for side in (home, away):
+            if pd.isna(side):
+                continue
+            tid = int(side)
+            if tid in out.index:
+                out.at[tid, gw] += 1
+    return out
+
+
+def blank_and_double_clubs(counts: pd.DataFrame, teams_df: pd.DataFrame = None) -> dict:
+    """``{gameweek: {"blank": [short names], "double": [short names]}}``.
+
+    Only gameweeks with something to report appear, so an empty result is the
+    honest "nothing scheduled" rather than a row of zeroes per week.
+    """
+    if counts is None or counts.empty:
+        return {}
+    teams = teams_df if teams_df is not None else _bootstrap_teams_df()
+    short = ({int(r.id): str(r.short_name) for _, r in teams.iterrows()}
+             if not teams.empty else {})
+    out = {}
+    for gw in counts.columns:
+        col = counts[gw]
+        blanks = [short.get(int(i), str(i)) for i in col.index[col == BLANK]]
+        doubles = [short.get(int(i), str(i)) for i in col.index[col >= 2]]
+        if blanks or doubles:
+            out[int(gw)] = {"blank": sorted(blanks), "double": sorted(doubles)}
+    return out

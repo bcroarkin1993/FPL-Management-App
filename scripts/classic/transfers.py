@@ -57,6 +57,13 @@ from scripts.common.analytics import (
 from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings, render_ffp_status
 from scripts.common.cache import purge_cache_prefix
 from scripts.common.fpl_auth import fetch_my_team
+from scripts.common.fixture_helpers import club_fixture_counts
+from scripts.common.chips import (
+    CHIP_COLORS,
+    CHIP_LABELS,
+    KNOWN_CHIPS,
+    chip_status_from_bootstrap,
+)
 from scripts.common.classic_squad import (
     PENDING_FILE as _PENDING_FILE,
     apply_pending_transfers as _apply_pending_transfers,
@@ -460,88 +467,42 @@ def _get_availability_indicator(chance: Optional[int], news: str) -> str:
 
 
 # First gameweek in which a double-use chip's second slot may be played.
+# Retained as the caption fallback only: the real windows are now read from
+# `bootstrap-static.chips` (see `scripts/common/chips.py`), which publishes a
+# `start_event`/`stop_event` per chip and is the thing that must be believed.
 CHIP_SLOT2_FIRST_GW = 20
 
+#: Gameweeks remaining in a chip window below which the expiry becomes a
+#: warning rather than a caption. Two weeks is the point at which "I will get
+#: to it" stops being true: a chip unplayed when its window shuts is forfeited,
+#: not carried into the next half.
+CHIP_EXPIRY_WARN_GWS = 3
 
-def _parse_chip_status(history: dict, current_gw: int) -> dict:
-    """Parse chip usage and availability from team history.
 
-    Both Wildcard and Bench Boost are double-use chips:
-      - Slot 1: used before GW20 (event < 20)
-      - Slot 2: used in GW20+ (event >= 20)
-    Free Hit and Triple Captain remain single-use.
+def _parse_chip_status(history: dict, current_gw: int, bootstrap: dict = None) -> dict:
+    """Chip usage and availability, from FPL's own published chip windows.
 
-    **"Available" means playable this gameweek, not owned somewhere in the
-    season.** The two are different for a double-use chip and conflating them
-    listed "Wildcard" under Chips Available at GW4 for a manager who had played
-    it in GW3 -- the second slot exists, but not until GW20. The Chip Strategy
-    advisor reads the same flag, so it was also capable of recommending a
-    wildcard rebuild that could not be actioned for sixteen weeks.
+    A thin adapter over :func:`scripts.common.chips.chip_status_from_bootstrap`,
+    kept so the five callsites on this page and their tests are unchanged.
 
-    Chips whose next slot opens later are reported separately in
-    ``available_later``, since "you have no wildcard" would be just as wrong.
+    **What it replaced hardcoded the rules, and two of them were wrong.** It
+    treated Wildcard and Bench Boost as double-use and Free Hit and Triple
+    Captain as single-use. Measured live on 2026-11-06, `bootstrap-static`
+    publishes **eight** chips -- all four, twice, 1/2-19 and 20-38 -- so a
+    manager who had played a Free Hit was told it was gone when a second one
+    opens at GW20. The windows are published; there is no reason to compile
+    them in. Same lesson as "Deadlines are published too -- stop deriving them".
+
+    **"Available" still means playable this gameweek**, not owned somewhere in
+    the season, and chips whose next window opens later are reported separately
+    in ``available_later`` -- "you have no wildcard" would be just as wrong.
+
+    ``bootstrap`` is optional so an existing caller without one still works; it
+    then falls back to the published windows as last measured, which is the
+    "unknown is not the same as wrong" rule that governs every other rulebook
+    check in this app.
     """
-    chips_used = history.get("chips", []) if history else []
-
-    # Wildcard and Bench Boost are tracked as lists (double-use)
-    used: Dict[str, Any] = {"wildcard": [], "bboost": [], "freehit": None, "3xc": None}
-    for chip in chips_used:
-        name = chip.get("name", "")
-        event = chip.get("event", 0)
-        if name in ("wildcard", "bboost"):
-            used[name].append(event)
-        elif name in used:
-            used[name] = event
-
-    def _playable_now(events: list) -> bool:
-        """Is this double-use chip's *current* slot still unused?"""
-        if current_gw < CHIP_SLOT2_FIRST_GW:
-            return not any(e < CHIP_SLOT2_FIRST_GW for e in events)
-        return not any(e >= CHIP_SLOT2_FIRST_GW for e in events)
-
-    def _playable_later(events: list) -> bool:
-        """Second slot still to come, but not before GW20."""
-        return (current_gw < CHIP_SLOT2_FIRST_GW
-                and not any(e >= CHIP_SLOT2_FIRST_GW for e in events))
-
-    wildcard_1_used = any(e < CHIP_SLOT2_FIRST_GW for e in used["wildcard"])
-    wildcard_2_used = any(e >= CHIP_SLOT2_FIRST_GW for e in used["wildcard"])
-    wildcard_available = _playable_now(used["wildcard"])
-
-    bboost_1_used = any(e < CHIP_SLOT2_FIRST_GW for e in used["bboost"])
-    bboost_2_used = any(e >= CHIP_SLOT2_FIRST_GW for e in used["bboost"])
-    bboost_available = _playable_now(used["bboost"])
-
-    available = []
-    if wildcard_available:
-        available.append("wildcard")
-    if bboost_available:
-        available.append("bboost")
-    if used["freehit"] is None:
-        available.append("freehit")
-    if used["3xc"] is None:
-        available.append("3xc")
-
-    # Owned, but not yet playable: the second slot of a double-use chip whose
-    # first slot is spent. Listing it as available is wrong; dropping it
-    # silently reads as "that chip is gone".
-    available_later = [
-        chip for chip, events in (("wildcard", used["wildcard"]), ("bboost", used["bboost"]))
-        if chip not in available and _playable_later(events)
-    ]
-
-    return {
-        "used": used,
-        "available": available,
-        "available_later": available_later,
-        "slot2_first_gw": CHIP_SLOT2_FIRST_GW,
-        "wildcard_1_used": wildcard_1_used,
-        "wildcard_2_used": wildcard_2_used,
-        "wildcard_available": wildcard_available,
-        "bboost_1_used": bboost_1_used,
-        "bboost_2_used": bboost_2_used,
-        "bboost_available": bboost_available,
-    }
+    return chip_status_from_bootstrap(bootstrap, history, current_gw)
 
 
 # FPL caps accumulated free transfers. A rules constant: update it if FPL does.
@@ -1148,67 +1109,90 @@ def _render_log_transfer_ui(team_id: int, current_gw: int,
 
 
 def _render_chip_advisor(chip_status: dict, squad_df: pd.DataFrame, current_gw: int):
-    """Render chip strategy advisor with rule-based advice."""
-    chip_names = {"wildcard": "Wildcard", "bboost": "Bench Boost",
-                  "freehit": "Free Hit", "3xc": "Triple Captain"}
-    chip_colors = {"wildcard": "#7c3aed", "bboost": "#166534",
-                   "freehit": "#0891b2", "3xc": "#d97706"}
-    chip_used_events = chip_status.get("used", {})
+    """Which chips are playable, and when each window shuts.
+
+    **The three rules this replaced were the app's only chip advice, and all
+    three were about the Wildcard.** They fired on the *mean of a positional
+    percentile* (`Keep Score` below 0.45, or six players below 0.50) and on bare
+    gameweek numbers -- "best deployed in GW30-35". Bench Boost, Triple Captain
+    and Free Hit had no advice at all.
+
+    A percentile cannot answer "is spending this resource worth it": it
+    saturates near the top and inverts across positions, which is why the
+    Initial Squad optimizer and the multi-transfer planner both had to be moved
+    off that currency. So the valuation moved to the **Chip Strategy** page,
+    which scores all four chips in expected points per gameweek, and what stays
+    here is the part a manager wants beside their transfers -- what is playable
+    now, and how long they have left to use it.
+    """
+    states = chip_status.get("states") or {}
 
     with st.expander("Chip Strategy", expanded=False):
-        # Chip status display
         avail = chip_status.get("available", [])
-        all_chips = ["wildcard", "bboost", "freehit", "3xc"]
+        later = chip_status.get("available_later", [])
+        used_events = chip_status.get("used", {})
 
-        avail_html = ""
-        for c in all_chips:
-            if c in avail:
-                avail_html += (
-                    f'<span style="background:{chip_colors.get(c, "#444")};color:#fff;'
-                    f'padding:3px 10px;border-radius:12px;font-size:0.8em;font-weight:bold;margin:3px;">'
-                    f'{chip_names.get(c, c)}</span>'
+        pills = ""
+        for chip in KNOWN_CHIPS:
+            label = CHIP_LABELS.get(chip, chip)
+            if chip in avail:
+                pills += (
+                    f'<span style="background:{CHIP_COLORS.get(chip, "#444")};color:#fff;'
+                    f'padding:3px 10px;border-radius:12px;font-size:0.8em;'
+                    f'font-weight:bold;margin:3px;">{label}</span>'
+                )
+            elif chip in later:
+                opens = (states[chip].next_window_opens if chip in states
+                         else chip_status.get("slot2_first_gw", 20))
+                pills += (
+                    f'<span style="background:#2d2d2d;color:#9ca3af;'
+                    f'border:1px dashed #4b5563;padding:3px 10px;border-radius:12px;'
+                    f'font-size:0.8em;margin:3px;">{label} &middot; GW{opens}</span>'
                 )
             else:
-                events = chip_used_events.get(c)
-                if isinstance(events, list):
-                    used_label = f'GW{events[0]}' if events else '?'
-                else:
-                    used_label = f'GW{events}' if events else 'Used'
-                avail_html += (
-                    f'<span style="background:#2d2d2d;color:#666;'
-                    f'padding:3px 10px;border-radius:12px;font-size:0.8em;margin:3px;">'
-                    f'{chip_names.get(c, c)} ({used_label})</span>'
+                # Every gameweek it was played in, not the first: a chip spent
+                # twice used to render its first use and read as still half-owned.
+                events = used_events.get(chip) or []
+                spent = ", ".join(f"GW{e}" for e in events) if events else "used"
+                pills += (
+                    f'<span style="background:#2d2d2d;color:#666;padding:3px 10px;'
+                    f'border-radius:12px;font-size:0.8em;margin:3px;">'
+                    f'{label} ({spent})</span>'
                 )
 
         st.markdown(
-            f'<div style="margin-bottom:10px;color:#e0e0e0;">{avail_html}</div>',
-            unsafe_allow_html=True
+            f'<div style="margin-bottom:10px;color:#e0e0e0;">{pills}</div>',
+            unsafe_allow_html=True,
         )
 
-        # Rule-based advice
-        if "Keep Score" in squad_df.columns and not squad_df.empty:
-            avg_keep = float(squad_df["Keep Score"].mean())
-            weak_count = int((squad_df["Keep Score"] < 0.50).sum())
-
-            if chip_status["wildcard_available"] and current_gw >= 25 and avg_keep < 0.45:
+        # The expiry clock, derived from the published window rather than typed.
+        # Counting inclusively: the gameweek you can still act on is one of them.
+        deadlines = sorted(
+            {(s.expires_after, s.gws_left) for s in states.values()
+             if s.playable_now and s.expires_after is not None},
+            key=lambda pair: pair[0],
+        )
+        if deadlines:
+            expires, left = deadlines[0]
+            if left is not None and left <= CHIP_EXPIRY_WARN_GWS:
                 st.warning(
-                    f"**Wildcard Alert:** Your squad's avg Keep Score is {avg_keep:.2f} (below 0.45). "
-                    "Consider using your Wildcard to rebuild with a stronger set of players."
+                    f"**{left} gameweek{'s' if left != 1 else ''} left** to play "
+                    f"your current-window chips — they expire after GW{expires}."
                 )
-            elif chip_status["wildcard_available"] and weak_count >= 6:
-                st.warning(
-                    f"**Wildcard Alert:** {weak_count} players have Keep Score below 0.50. "
-                    "A Wildcard rebuild could significantly improve your squad quality."
-                )
-
-            if not chip_status["wildcard_2_used"] and current_gw >= 30:
-                st.info(
-                    f"**WC2 available** — your second Wildcard has not been used yet. "
-                    "Best deployed in GW30–35 for the run-in."
+            else:
+                st.caption(
+                    f"Current-window chips expire after GW{expires} "
+                    f"({left} gameweeks left, GW{current_gw}–GW{expires})."
                 )
 
-        if not avail:
-            st.success("All chips used — focus on optimizing weekly transfers.")
+        if avail:
+            st.caption(
+                "See **🃏 Chip Strategy** for what each of these is worth in "
+                "expected points, gameweek by gameweek."
+            )
+        else:
+            st.success("No chip is playable this gameweek — "
+                       "focus on optimizing weekly transfers.")
 
 
 # =============================================================================
@@ -1807,19 +1791,25 @@ def _render_multi_transfer_plan(plan: List[Dict], free_transfers: int = 2):
 
 
 def _get_blanking_team_ids(current_gw: int, bootstrap: dict) -> set:
-    """Return team IDs with no fixture in the current GW (blank GW teams)."""
-    all_team_ids = {t["id"] for t in bootstrap.get("teams", [])}
-    fixtures = _load_future_fixtures()
-    if fixtures.empty:
+    """Team IDs with no fixture in ``current_gw`` -- a blank gameweek.
+
+    Delegates to :func:`fixture_helpers.club_fixture_counts`, which is the one
+    place that counts fixtures per club per gameweek. This used to walk the
+    fixture list here, for the current gameweek only, which is why nothing in
+    the app could answer the forward-looking half of the same question -- "is
+    any of the next six weeks a blank or a double" -- that the Chip Strategy
+    page needs.
+
+    An unreadable fixture list returns an empty set, i.e. "no blanks known".
+    That is deliberately the same answer as "no blanks exist": the alternative
+    is reporting all twenty clubs as blanking, which would zero every
+    projection on the page.
+    """
+    counts = club_fixture_counts([int(current_gw)])
+    if counts is None or counts.empty or int(current_gw) not in counts.columns:
         return set()
-    gw_fixtures = fixtures[fixtures["event"] == current_gw]
-    teams_with_fixture: set = set()
-    for _, row in gw_fixtures.iterrows():
-        if pd.notna(row.get("team_h")):
-            teams_with_fixture.add(int(row["team_h"]))
-        if pd.notna(row.get("team_a")):
-            teams_with_fixture.add(int(row["team_a"]))
-    return all_team_ids - teams_with_fixture
+    col = counts[int(current_gw)]
+    return {int(i) for i in col.index[col == 0]}
 
 
 def _render_blank_gw_alert(squad_df: pd.DataFrame, blanking_team_ids: set, current_gw: int):
@@ -2532,7 +2522,7 @@ def show_classic_transfers_page():
 
     # Compute chip status and free transfers (pass fh_gws so FH GWs are
     # excluded from the FT-banking calculation)
-    chip_status = _parse_chip_status(history, current_gw)
+    chip_status = _parse_chip_status(history, current_gw, bootstrap)
     ft_info = resolve_free_transfers(
         history, entry_history, current_gw, fh_gws=fh_gws,
         team_id=team_id, logged_pending=len(extra_local),

@@ -167,13 +167,12 @@ def _blend_live_with_squad(squad_df: pd.DataFrame, live_stats: dict) -> pd.DataF
     return result
 
 
-CHIP_LABELS = {
-    "wildcard": "Wildcard",
-    "freehit": "Free Hit",
-    "bboost": "Bench Boost",
-    "3xc": "Triple Captain",
-    "manager": "Assistant Manager",
-}
+# Re-exported from `scripts.common.chips` so the four copies of this map that
+# existed across the Classic pages are now one. "Assistant Manager" is gone with
+# it: `bootstrap-static.chips` publishes eight chips this season and none of
+# them is a manager chip, so the label could only ever have mislabelled
+# something else.
+from scripts.common.chips import CHIP_LABELS  # noqa: E402  (placed with the constants)
 
 
 def _render_squad_provenance(team_id: int, bootstrap: dict, current_gw: int) -> None:

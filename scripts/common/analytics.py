@@ -1663,34 +1663,12 @@ def _rotowire_club_coverage() -> dict:
 
 
 #: The FPL element id, under every name a frame in this app stores it as.
-#: Deliberately **not** a bare ``id``: on these pages that is as likely to be a
-#: league or fixture id, and resolving a start signal against the wrong id space
-#: is worse than not resolving it.
-_PLAYER_ID_COLS = ("Player_ID", "element_id", "element", "player_id")
+#: Defined in ``projection_engine`` so Streamlit-free consumers share one
+#: reader; re-exported here because this module's callsites and tests name it.
+_PLAYER_ID_COLS = projection_engine.PLAYER_ID_COLUMNS
 
-
-def _player_id_col(df: pd.DataFrame):
-    """The frame's element ids, or None.
-
-    Every page spells this differently -- the Classic squad builders emit
-    ``element_id``, the Draft merges carry ``Player_ID`` through
-    ``carry_cols``, the optimizer pools build their own ``Player_ID`` -- and a
-    lookup keyed on one name silently does nothing on the pages that use
-    another. That is precisely how the Rotowire omission penalty came to be a
-    no-op on every per-squad page, and it repeated here: keyed on ``Player_ID``
-    alone, the lineup override was off on Classic Fixture Projections, so Phil
-    Foden kept rendering at 4.24 there after the engine had him at 0.45
-    everywhere else.
-
-    Same reasoning as :func:`_chance_of_playing_col`, which reads FPL's
-    availability under either of its two names for the same reason.
-    """
-    for col in _PLAYER_ID_COLS:
-        if col in df.columns:
-            ids = pd.to_numeric(df[col], errors="coerce")
-            if ids.notna().any():
-                return ids
-    return None
+#: See :func:`projection_engine.player_id_column` for why four spellings.
+_player_id_col = projection_engine.player_id_column
 
 
 def _frame_starter_overrides(df: pd.DataFrame) -> dict:

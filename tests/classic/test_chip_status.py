@@ -57,17 +57,101 @@ class TestDoubleUseChips:
         assert status["available_later"] == ["bboost"]
 
 
-class TestSingleUseChips:
+class TestAllFourChipsAreDoubleUse:
+    """Free Hit and Triple Captain get a second slot too, and used not to.
+
+    `bootstrap-static.chips` publishes **eight** chips -- all four names, twice,
+    for GW1/2-19 and GW20-38 -- verified live on 2026-11-06. This page modelled
+    Free Hit and Triple Captain as single-use, so a manager who had played one
+    was told it was gone when a second opens at GW20. These two tests asserted
+    that bug; they now assert the published rule.
+    """
+
     @pytest.mark.parametrize("chip", ["freehit", "3xc"])
-    def test_used_once_is_used_forever(self, chip):
+    def test_a_spent_first_one_is_not_playable_now(self, chip):
         status = _parse_chip_status(_history((chip, 7)), current_gw=8)
         assert chip not in status["available"]
-        assert chip not in status["available_later"]
+
+    @pytest.mark.parametrize("chip", ["freehit", "3xc"])
+    def test_but_it_is_reported_as_coming_back_at_gw20(self, chip):
+        status = _parse_chip_status(_history((chip, 7)), current_gw=8)
+        assert status["available_later"] == [chip]
+        assert status["slot2_first_gw"] == CHIP_SLOT2_FIRST_GW
+
+    @pytest.mark.parametrize("chip", ["freehit", "3xc"])
+    def test_the_second_one_is_playable_from_gw20(self, chip):
+        at = _parse_chip_status(_history((chip, 7)), current_gw=20)
+        assert chip in at["available"]
+        assert at["available_later"] == []
+
+    @pytest.mark.parametrize("chip", ["freehit", "3xc"])
+    def test_both_spent_is_gone_for_good(self, chip):
+        status = _parse_chip_status(_history((chip, 7), (chip, 25)), current_gw=30)
+        assert chip not in status["available"]
+        assert status["available_later"] == []
 
     @pytest.mark.parametrize("chip", ["freehit", "3xc"])
     def test_unused_stays_available(self, chip):
         status = _parse_chip_status(_history(), current_gw=25)
         assert chip in status["available"]
+
+
+class TestEveryUseIsRecorded:
+    """The advisor rendered `events[0]`, so a chip spent twice showed the first.
+
+    `used` now holds a list for every chip rather than a list for the two that
+    used to be double-use and a bare int for the two that did not -- the
+    renderer already branched on `isinstance(..., list)`, so both shapes were
+    live and only one of them was right.
+    """
+
+    def test_both_wildcards_are_listed(self):
+        status = _parse_chip_status(_history(("wildcard", 3), ("wildcard", 22)),
+                                    current_gw=25)
+        assert status["used"]["wildcard"] == [3, 22]
+
+    @pytest.mark.parametrize("chip", ["freehit", "3xc", "bboost", "wildcard"])
+    def test_every_chip_reports_a_list(self, chip):
+        status = _parse_chip_status(_history((chip, 7)), current_gw=8)
+        assert status["used"][chip] == [7]
+
+    def test_an_unplayed_chip_is_an_empty_list_not_none(self):
+        status = _parse_chip_status(_history(), current_gw=8)
+        assert status["used"]["freehit"] == []
+
+
+class TestPublishedWindowsAreBelieved:
+    """The windows come from the bootstrap, not from a constant in this file."""
+
+    def _bootstrap(self, *windows):
+        return {"chips": [{"name": n, "start_event": a, "stop_event": b,
+                           "chip_type": "team"} for n, a, b in windows]}
+
+    def test_a_published_window_overrides_the_hardcoded_split(self):
+        """A chip whose second window opens at GW10 is playable at GW10."""
+        boot = self._bootstrap(("bboost", 1, 9), ("bboost", 10, 38))
+        status = _parse_chip_status(_history(("bboost", 5)), current_gw=10,
+                                    bootstrap=boot)
+        assert "bboost" in status["available"]
+
+    def test_a_single_published_window_means_genuinely_single_use(self):
+        boot = self._bootstrap(("bboost", 1, 38))
+        status = _parse_chip_status(_history(("bboost", 5)), current_gw=20,
+                                    bootstrap=boot)
+        assert "bboost" not in status["available"]
+        assert status["available_later"] == []
+
+    def test_a_chip_is_not_playable_before_its_window_opens(self):
+        """Wildcard and Free Hit are published as starting at GW2, not GW1."""
+        boot = self._bootstrap(("wildcard", 2, 19))
+        status = _parse_chip_status(_history(), current_gw=1, bootstrap=boot)
+        assert "wildcard" not in status["available"]
+        assert status["available_later"] == ["wildcard"]
+
+    def test_an_unreachable_bootstrap_falls_back_rather_than_reporting_none(self):
+        """Unknown must never render as "you have no chips"."""
+        status = _parse_chip_status(_history(), current_gw=4, bootstrap={})
+        assert set(status["available"]) == {"wildcard", "bboost", "freehit", "3xc"}
 
 
 class TestAdvisorFlags:

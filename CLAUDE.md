@@ -2971,6 +2971,173 @@ The horizon earns its place on the cards immediately: live, Maxim De Cuyper led
 the differentials on a 5.34 single-gameweek projection with the *worst* three-week
 total of the six (9.99), while Bryan Mbeumo at 4.61 carried 15.56.
 
+### Chips — the rules are published, and the timing is computable
+
+`scripts/common/chips.py` (pure), `scripts/classic/chip_strategy.py` (the
+page), `fixture_helpers.club_fixture_counts()`, `check_chip_timing()` /
+`check_chip_definitions()`.
+
+**The app's only chip advice was three rules about the Wildcard.**
+`_render_chip_advisor` fired on the mean of a positional percentile
+(`Keep Score` below 0.45, or six players below 0.50) and on bare gameweek
+numbers — "best deployed in GW30-35". Bench Boost, Triple Captain and Free Hit
+had **no recommendation logic anywhere in the codebase**, and nothing
+chip-related read a fixture, a projection, a bench strength, or a blank
+gameweek.
+
+A percentile also cannot answer "is spending this resource worth it": it
+saturates near the top and inverts across positions, which is why the Initial
+Squad optimizer and the multi-transfer planner both had to be moved off that
+currency. A chip is worth a number of points, so that is what the page reports.
+
+**And the chip rules were a season out of date.** `bootstrap-static.chips`
+publishes all eight chips with an explicit `start_event`/`stop_event`, and
+`grep` found no reader for it anywhere. Measured live 2026-11-06:
+
+| | first window | second |
+|---|---|---|
+| `wildcard` | 2–19 | 20–38 |
+| `freehit` | 2–19 | 20–38 |
+| `bboost` | 1–19 | 20–38 |
+| `3xc` | 1–19 | 20–38 |
+
+**All four are double-use.** `_parse_chip_status` modelled `freehit` and `3xc`
+as single-use — `tests/classic/test_chip_status.py::TestSingleUseChips`
+asserted it — so a manager who had played a Free Hit was told it was gone when
+a second opens at GW20. Verified on the live account: Wildcard (GW3) and Triple
+Captain (GW7) both now read "available GW20" rather than spent. Same lesson as
+"Deadlines are published too — stop deriving them", and `CHIP_SLOT2_FIRST_GW`
+survives only as a caption fallback.
+
+Three related defects went with it: `analyze_chip_usage()` assigned rather than
+appended, so a second Wildcard **overwrote** the first's gameweek (the total was
+always right, which is what kept it hidden); the advisor rendered `events[0]`
+for the same reason; and neither optimizer page ever checked whether you own the
+chip it optimizes. The dead `"manager": "Assistant Manager"` label is gone —
+there is no manager chip in this season's published list.
+
+**What each chip is worth.** All four are expected points, so start probability
+is already inside every number:
+
+| Chip | Value |
+|---|---|
+| Bench Boost | `sum(all 15) - best legal XI` — the four it leaves over, so it needs no view on who you would have started |
+| Triple Captain | the best starter's expected points. The armband already doubles, so tripling adds **one** more copy, not two |
+| Free Hit | best XI from the whole pool − best XI from your fifteen, that week |
+| Wildcard | the gain at fifteen free changes **minus** the gain at your actual free transfers — what the chip buys *beyond* what you can already do |
+
+The last one matters: charging the chip for value reachable without it is how a
+tool talks somebody into burning one. Both ILP valuations have a floor that is
+an invariant rather than a clamp — your own fifteen are *in* the pool, and
+fifteen free changes include every subset of K of them — so a negative value is
+impossible and `check_chip_timing()` errors on it, the shape
+`check_transfer_plan`'s `gain_net <= 0` already has.
+
+**`optimization.best_xi_index()` is the one formation solver.** Extracted from
+`find_optimal_lineup`, which it now backs, so the chip valuations (differences
+of XI totals) share that arithmetic instead of re-deriving it. It is keyed on
+the frame's **index**, not on `Player`: the old base selection de-duplicated
+with `set(selected['Player'])`, so two players sharing a legal name collapsed
+into one and the XI came back ten strong. Its midfield minimum is **2**, not 3 —
+5-2-3 is legal, and `bench_analysis.find_optimal_gw_lineup` still has the
+stricter version.
+
+`_calculate_projected_score()` (`classic/fixture_projections.py`) has applied
+Bench Boost and Triple Captain for a year and is gameweek-agnostic and
+Streamlit-bound, so `chips.py` needs its own implementation.
+`tests/classic/test_chip_arithmetic_agrees.py` pins the two together — a drift
+in a *chip* valuation names the wrong gameweek to spend an irreplaceable
+resource on while every number on screen stays plausible.
+
+#### Who you play — and the obvious rule is the wrong one
+
+Reported from the app: *"I debated using a bench boost this week, but the team I
+am playing did not have a strong projection and is lower in the standings, so I
+figured I could save it for a better week against a stronger opponent."*
+
+Right in direction, and the usual framing of it is not. In H2H a chip's value is
+the win probability it buys:
+
+```
+dP = Phi((d + g) / (sqrt(2) sigma)) - Phi(d / (sqrt(2) sigma))
+```
+
+the same `Phi((muA - muB) / sqrt(2 sigma^2))` behind Fixture Projections and
+`season_sim`. Differentiating, `dP` peaks where `|d + g| = |d|`, i.e. at
+**`d = -g/2`** — trailing by half the chip's gain. At the measured sigma of 17.3
+for a 12-point Bench Boost: +0.023 at a +45 margin, +0.188 level, **+0.194 at
+−6**, +0.056 at −45. So a weak opponent wastes it **eight times over** — but a
+much stronger one wastes it too, because you lose anyway.
+
+**Measured on the live league (668226, GW10, sigma 20.0 from 200 scores) the two
+lanes disagree, and that disagreement is the feature:**
+
+| | GW10 | GW11 | GW13 | GW14 | GW15 |
+|---|---|---|---|---|---|
+| margin | +4.6 | +1.3 | +2.7 | **+19.4** | −0.9 |
+| BB points | 7.4 | 10.2 | 10.6 | **11.3** | 10.3 |
+| BB win prob | +0.100 | **+0.140** | **+0.143** | +0.108 | **+0.143** |
+
+GW14 has the **largest points gain and nearly the smallest value**, because it
+is a week already 75% won. The page says so outright rather than leaving a
+reader of the points grid to infer it.
+
+Four honesty constraints, because this is the least certain thing on the page:
+
+- **H2H only.** A total-points league has no opponent, so `dP` is undefined and
+  only the points lane renders.
+- **Rival squads are last deadline's** (`resolve_classic_squad` → `picks`,
+  `is_stale`), so a later gameweek assumes they make no transfers.
+- **The opponent's lineup is the *optimal* XI, not their stored multipliers** —
+  for a future gameweek those are last deadline's choices, so reading them
+  projects every rival as benching their best player.
+- **`dP` and points are never sorted together**, the same rule as the Waiver
+  Wire's two claim lanes.
+
+In a total-points mini-league the analogue is effective ownership, which the
+Rival Tracker already computes — but Bench Boost and Triple Captain are nearly
+pure differential by construction (no rival has your bench counted, nobody else
+triples your captain), so no adjustment is added for a quantity that would be
+zero.
+
+#### Blanks and doubles exist, and right now there are none
+
+`club_fixture_counts(gameweeks)` is the first per-club per-gameweek fixture
+**count** in the app: 0 is a blank, 2+ a double. Blanks were detected for the
+*current* gameweek only, inside the Transfers page, and doubles only ever as the
+Horizon grid's `×2` display artefact. Deliberately not derived from
+`get_fixture_difficulty_grid()`, which issues one request per week and
+`np.nanmean`s a double's two FDRs into one cell — the count then survives only
+inside the rendered string. `_get_blanking_team_ids` delegates to it.
+
+**Measured 2026-11-06, no blank or double is scheduled in any remaining
+gameweek**: every club has exactly one fixture in all of GW10–38, because they
+appear once cup and European ties are rescheduled. Most published chip advice
+turns on them, so an advisor gated on a DGW/BGW would be **silent for the whole
+first half — exactly when the first chip set expires**. Hence the scoring leads
+with projections and the schedule panel says "none scheduled yet" rather than
+rendering nothing. An unreadable fixture list returns an empty frame, never
+twenty blanking clubs, which would zero every projection on the page.
+
+#### What it does not know, and says so
+
+The horizon is `MAX_HORIZON_WEEKS` = **6** and hard-capped, so at GW10 the grid
+reaches GW15 while the window runs to GW19 — four weeks unscored, which the
+verdict line states rather than presenting "best week in view" as "best week in
+the window". `best_week()` breaks ties toward the **earlier** gameweek, because
+`score_horizon_lengths()` measured that a forecast loses about a third of its
+ordering by the third week out, so two weeks projected equal are not equally
+trustworthy. FFP publishes one `start_pct` across all six weeks, so no column
+here can model a return.
+
+`parse_chip_definitions()` **fails open** to `DEFAULT_CHIP_WINDOWS` (the live
+rules as last measured) — an unreachable bootstrap is "we could not check", not
+"you have no chips", and `tests/live/test_chip_definitions.py` fails if that
+fallback drifts from what FPL publishes. `check_chip_definitions()` is the
+rulebook tripwire, warning on an unreachable payload and erroring on an unknown
+chip name, a missing window, an overlap, or a chip the app knows that FPL has
+retired.
+
 ### Caching
 
 Two-tier caching strategy for fast page navigation:
@@ -5222,6 +5389,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Notes |
 |------|-------|
+| Chip Strategy (Classic) | Completed | A **🎯 Chip Strategy** page scoring all four chips in expected points per gameweek, with an expiry clock read from `bootstrap-static.chips` — which nothing in the app had ever read, and which revealed that all four chips are double-use this season while `_parse_chip_status` modelled Free Hit and Triple Captain as single-use. Adds the H2H lane: a chip is worth the *win probability* it buys, which peaks when trailing by half its gain, so the biggest-points week is routinely not the most useful one. Also the app's first per-club fixture **count**, so blanks and doubles are detectable at all. See "Chips — the rules are published". |
 | Season Odds | Completed | A **Show Season Odds** toggle under the league table on both Home pages: title, playoff and last-place probabilities from a Monte Carlo of the remaining fixtures, using the same `Phi((muA-muB)/sqrt(2 sigma^2))` model as the per-match win probability. The feature betterdraft.co.uk has that this app had no equivalent of. Each simulation re-draws every manager's underlying mean from its own sampling distribution, because that mean rests on nine matches — live that is the difference between a 25.4% and a 31.4% title probability for the leader, and holding it fixed overstates how decided the league is. Covers Draft, Classic H2H and Classic total-points — the last is a different simulation, since nobody plays anybody and the table is ordered on accumulated points. Seeded on `(league, gameweek, n_sims)` so a Streamlit rerun cannot change the answer. `check_season_odds()` guards it on exact identities. First shipped as a ninth tab on League Analysis, which Streamlit's tab strip pushed off-screen. See "Season Odds" |
 | Draft Team Power Rankings | New "💪 Power Rankings" tab on Draft League Analysis. Team Score 0-100 plus GK/DEF/MID/FWD scores with league rank badges, all positional percentiles against the full ~700-player FPL pool. Player strength = 60% quality (preseason Rotowire pedigree blended into in-season actuals via `season_progress_weight()`) + 25% this-GW blended projection + 10% start security + 5% FDR, times a season-aware injury discount. Actuals use **points per start** (not total points) so a player returning from a long injury isn't penalised for missed games; below 4 starts the sample is too thin and pedigree is used alone. Rosters join to stats on integer element ID via new `get_league_rosters_with_ids()` — no name matching in this path. See "Team Strength Model" section below. |
 | League Setup Admin Page | In-app "🆔 League Setup" page (FPL App Home) to set/validate/lock Draft and Classic league & team IDs instead of hand-editing `.env`. Draft: enter league ID, look it up, pick your team from a resolved dropdown (no need to know your entry ID). Classic: add/remove multiple leagues, resolve team via entry ID lookup. Locked read-only view with two-step "Unlock to Edit" confirmation. Persisted to gitignored `league_settings.json` (repo is public — not committed, unlike `alert_settings.json`). `config.py`'s 4 ID attributes (`FPL_DRAFT_LEAGUE_ID`, `FPL_DRAFT_TEAM_ID`, `FPL_CLASSIC_TEAM_ID`, `FPL_CLASSIC_LEAGUE_IDS`) converted from eager to lazy PEP 562 resolution (same pattern as `CURRENT_GAMEWEEK`), prioritizing locked JSON settings over `.env`, so saved changes take effect immediately without an app restart. |

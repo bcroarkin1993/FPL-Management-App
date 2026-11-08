@@ -36,6 +36,7 @@ from scripts.common.mini_league import (
     template_gaps,
     template_score,
 )
+from scripts.common.chips import CHIP_LABELS
 from scripts.common.player_pool import blended_pool
 
 _logger = get_logger("fpl_app.classic_league_analysis")
@@ -111,40 +112,39 @@ def fetch_team_histories_for_league(team_ids: List[int]) -> Dict[int, dict]:
 # ---------------------------
 
 def analyze_chip_usage(team_histories: Dict[int, dict], team_names: Dict[int, str]) -> pd.DataFrame:
-    """Analyze chip usage across all teams in the league."""
-    chip_data = []
+    """Chip usage across the league, one row per manager.
 
-    chip_display_names = {
-        "wildcard": "Wildcard",
-        "freehit": "Free Hit",
-        "bboost": "Bench Boost",
-        "3xc": "Triple Captain"
-    }
+    **Every use is listed, because all four chips now have two.** This wrote
+    ``team_chips[display_name] = f"GW{chip_gw}"``, so a manager who had played
+    both Wildcards showed only the second one's gameweek -- the first silently
+    overwritten, and the row reading as though a chip were still half-owned.
+    ``Total Used`` was always right, which is what kept it hidden.
+
+    `bootstrap-static.chips` publishes eight chips for this season: all four
+    names, twice, for GW1/2-19 and GW20-38.
+    """
+    chip_data = []
 
     for team_id, history in team_histories.items():
         team_name = team_names.get(team_id, f"Team {team_id}")
-        chips_used = history.get("chips", [])
+        chips_used = (history or {}).get("chips", []) or []
 
-        # Track which chips this team has used
-        team_chips = {
-            "Team": team_name,
-            "Wildcard": "-",
-            "Free Hit": "-",
-            "Bench Boost": "-",
-            "Triple Captain": "-",
-            "Total Used": 0
-        }
-
+        # Accumulate per chip rather than assigning, so a second use appends.
+        played = {label: [] for label in CHIP_LABELS.values()}
+        total = 0
         for chip in chips_used:
-            chip_name = chip.get("name", "")
-            chip_gw = chip.get("event", "?")
-            display_name = chip_display_names.get(chip_name, chip_name)
+            label = CHIP_LABELS.get(chip.get("name", ""))
+            if label is None:
+                continue
+            played[label].append(chip.get("event", "?"))
+            total += 1
 
-            if display_name in team_chips:
-                team_chips[display_name] = f"GW{chip_gw}"
-                team_chips["Total Used"] += 1
-
-        chip_data.append(team_chips)
+        row = {"Team": team_name}
+        for label, events in played.items():
+            row[label] = ", ".join(f"GW{e}" for e in sorted(
+                events, key=lambda e: (e is None, e))) if events else "-"
+        row["Total Used"] = total
+        chip_data.append(row)
 
     df = pd.DataFrame(chip_data)
     return df.sort_values("Total Used", ascending=False)

@@ -32,6 +32,10 @@ from scripts.common.display_names import display_of
 from scripts.common.text_helpers import to_display_name
 from scripts.common.styled_tables import render_styled_table
 
+from scripts.common.error_helpers import get_logger
+
+_logger = get_logger("fpl_app.classic.wildcard")
+
 
 # ---------------------------
 # FDR MULTIPLIERS
@@ -386,6 +390,58 @@ def _render_fdr_heatmap(
 # MAIN PAGE
 # ---------------------------
 
+
+def _render_chip_availability_note(chip: str, team_id, current_gw: int) -> None:
+    """Say whether this chip can actually be played, and when it next can.
+
+    Reads FPL's published windows (`bootstrap-static.chips`) rather than
+    assuming, so a spent chip reports the gameweek its next window opens
+    instead of reading as gone -- all four chips have two windows this season.
+    Silent on any failure: this is context, and a page that cannot check
+    availability is still a working optimizer.
+    """
+    if not team_id:
+        return
+    try:
+        from scripts.common.chips import CHIP_LABELS, chip_status_from_bootstrap
+        from scripts.common.fpl_classic_api import (
+            get_classic_bootstrap_static, get_classic_team_history,
+        )
+        status = chip_status_from_bootstrap(
+            get_classic_bootstrap_static(),
+            get_classic_team_history(team_id),
+            current_gw,
+        )
+    except Exception as exc:
+        _logger.warning("Could not resolve chip availability: %s", exc)
+        return
+
+    label = CHIP_LABELS.get(chip, chip)
+    state = (status.get("states") or {}).get(chip)
+    if chip in status.get("available", []):
+        left = getattr(state, "gws_left", None)
+        expires = getattr(state, "expires_after", None)
+        if left and expires:
+            st.caption(
+                f"✅ Your {label} is available — {left} gameweek"
+                f"{'s' if left != 1 else ''} left to use it (through GW{expires})."
+            )
+        else:
+            st.caption(f"✅ Your {label} is available this gameweek.")
+    elif chip in status.get("available_later", []):
+        opens = getattr(state, "next_window_opens", None) or status.get("slot2_first_gw", 20)
+        played = ", ".join(f"GW{e}" for e in (getattr(state, "used_in", ()) or ()))
+        spent = f" (played {played})" if played else ""
+        st.caption(
+            f"ℹ️ Your {label} is spent for this half{spent} — the next one opens "
+            f"**GW{opens}**. Planning ahead is fine; it cannot be played yet."
+        )
+    else:
+        played = ", ".join(f"GW{e}" for e in (getattr(state, "used_in", ()) or ()))
+        spent = f" (played {played})" if played else ""
+        st.caption(f"⚠️ You have no {label} left this season{spent}.")
+
+
 def show_wildcard_page():
     """Display the Wildcard Optimizer page."""
 
@@ -399,6 +455,12 @@ def show_wildcard_page():
     team_id = getattr(config, "FPL_CLASSIC_TEAM_ID", None)
     default_budget, budget_source = _get_user_budget(team_id)
     current_gw = get_current_gameweek() or 1
+
+    # Whether the chip is actually playable is worth saying, and this page never
+    # said it. Deliberately a caption rather than a block: planning a Wildcard for a
+    # later gameweek -- or for the second window, which opens at GW20 -- is a
+    # perfectly good reason to be here, so this informs without obstructing.
+    _render_chip_availability_note("wildcard", team_id, current_gw)
 
     # Settings
     st.markdown("### Settings")

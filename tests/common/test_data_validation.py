@@ -35,6 +35,8 @@ from scripts.common.data_validation import (
     check_free_transfers,
     check_transfer_plan,
     check_ffp_horizon,
+    check_chip_timing,
+    check_chip_definitions,
 )
 
 
@@ -2122,3 +2124,134 @@ class TestCheckSeasonOdds:
         sim["top_n"] = sim["top_n"] / sim["top_n"].sum() * 3
         sim["mean_rank"] = sim["mean_rank"] / sim["mean_rank"].mean() * 2.5
         assert check_season_odds(sim, playoff_places=3, remaining_fixtures=0) == []
+
+
+# =============================================================================
+# CHIPS
+# =============================================================================
+#
+# Every "bad" value below is one the valuation could actually produce, and none
+# of them looks wrong on screen: a chip grid cannot read as suspicious, it can
+# only name the wrong gameweek to spend an irreplaceable resource on.
+
+
+class TestCheckChipTiming:
+    def _ok(self):
+        return {"bboost": {10: 11.0, 11: 14.0, 12: 9.0},
+                "3xc": {10: 7.0, 11: 9.0, 12: 6.0}}
+
+    def test_a_plausible_grid_passes(self):
+        assert _errors(check_chip_timing(self._ok())) == []
+
+    def test_nothing_valued_at_all_is_an_error(self):
+        issues = check_chip_timing({})
+        assert len(_errors(issues)) == 1
+
+    def test_a_negative_free_hit_is_an_error(self):
+        """Impossible by construction: your own fifteen are inside the pool the
+        Free Hit draws from, so the pool's best XI cannot be worse."""
+        issues = check_chip_timing({"freehit": {10: -2.5}})
+        assert _errors(issues)
+        assert "negative" in _errors(issues)[0].message
+
+    def test_a_negative_wildcard_rate_is_an_error(self):
+        """Fifteen free changes include every subset of K of them."""
+        issues = check_chip_timing({"wildcard": -1.5})
+        assert _errors(issues)
+
+    def test_a_positive_wildcard_rate_passes(self):
+        assert _errors(check_chip_timing({"wildcard": 3.4})) == []
+
+    def test_an_absurd_gain_is_an_error(self):
+        """The signature of a double-counted multiplier."""
+        issues = check_chip_timing({"bboost": {10: 140.0}})
+        assert _errors(issues)
+
+    def test_bench_boost_cannot_exceed_the_whole_squad(self):
+        """It is sum(15) - best XI, a subset sum."""
+        matrix = pd.DataFrame({10: [1.0] * 15})
+        issues = check_chip_timing({"bboost": {10: 20.0}}, matrix=matrix)
+        assert _errors(issues)
+        assert "exceeds" in _errors(issues)[0].message
+
+    def test_bench_boost_inside_the_squad_total_passes(self):
+        matrix = pd.DataFrame({10: [2.0] * 15})
+        assert _errors(check_chip_timing({"bboost": {10: 8.0}}, matrix=matrix)) == []
+
+    def test_no_spread_across_the_window_warns(self):
+        """The "every team scores exactly 50" signature, one model over: a gate
+        silently doing nothing, not a season where every week is identical."""
+        issues = check_chip_timing({"bboost": {10: 9.0, 11: 9.0, 12: 9.0}})
+        assert any(i.severity == "warning" and "all 3 gameweeks" in i.message
+                   for i in issues)
+
+    def test_a_missing_week_warns_rather_than_errors(self):
+        issues = check_chip_timing({"bboost": {10: 9.0, 11: None}})
+        assert _errors(issues) == []
+        assert any(i.severity == "warning" for i in issues)
+
+
+class TestCheckChipDefinitions:
+    def _payload(self, *specs):
+        return {"chips": [{"name": n, "start_event": a, "stop_event": b}
+                          for n, a, b in specs]}
+
+    def _this_season(self):
+        return self._payload(
+            ("wildcard", 2, 19), ("wildcard", 20, 38),
+            ("freehit", 2, 19), ("freehit", 20, 38),
+            ("bboost", 1, 19), ("bboost", 20, 38),
+            ("3xc", 1, 19), ("3xc", 20, 38),
+        )
+
+    KNOWN = ("wildcard", "bboost", "3xc", "freehit")
+
+    def test_the_live_shape_passes(self):
+        assert _errors(check_chip_definitions(self._this_season(),
+                                             known_chips=self.KNOWN)) == []
+
+    def test_an_unreachable_bootstrap_warns_rather_than_errors(self):
+        """Unknown is not the same as wrong -- the same contract as
+        check_draft_game_settings()."""
+        for payload in (None, {}, {"chips": []}):
+            issues = check_chip_definitions(payload, known_chips=self.KNOWN)
+            assert _errors(issues) == []
+            assert any(i.severity == "warning" for i in issues)
+
+    def test_a_chip_without_a_window_is_an_error(self):
+        issues = check_chip_definitions(
+            {"chips": [{"name": "bboost"}]}, known_chips=self.KNOWN)
+        assert _errors(issues)
+
+    def test_a_chip_the_app_does_not_know_is_an_error(self):
+        """FPL adding a chip must not render as an unlabelled, unvalued row."""
+        payload = self._this_season()
+        payload["chips"].append({"name": "manager", "start_event": 1,
+                                 "stop_event": 19})
+        issues = check_chip_definitions(payload, known_chips=self.KNOWN)
+        assert any("manager" in i.message for i in _errors(issues))
+
+    def test_a_chip_fpl_has_retired_is_an_error(self):
+        issues = check_chip_definitions(
+            self._payload(("bboost", 1, 19)), known_chips=self.KNOWN)
+        assert any("no longer publishes" in i.message for i in _errors(issues))
+
+    def test_overlapping_windows_are_an_error(self):
+        """chip_states() spends the first matching window, so an overlap makes
+        availability depend on ordering."""
+        issues = check_chip_definitions(
+            self._payload(("bboost", 1, 25), ("bboost", 20, 38)),
+            known_chips=("bboost",))
+        assert any("overlapping" in i.message for i in _errors(issues))
+
+    def test_a_backwards_window_is_an_error(self):
+        issues = check_chip_definitions(
+            self._payload(("bboost", 30, 10)), known_chips=("bboost",))
+        assert _errors(issues)
+
+    def test_an_uneven_number_of_windows_warns(self):
+        payload = self._this_season()
+        payload["chips"].append({"name": "bboost", "start_event": 30,
+                                 "stop_event": 38})
+        issues = check_chip_definitions(payload, known_chips=self.KNOWN)
+        assert any(i.severity == "warning" for i in issues)

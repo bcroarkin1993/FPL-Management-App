@@ -245,3 +245,79 @@ class TestAttachMatchups:
         df = pd.DataFrame({"Player": ["O'Reilly"], "Team": ["MCI"]})
         out = fixture_helpers.attach_matchups(df, 4)
         assert out.loc[0, "Matchup"] == "MCI at MUN"
+
+
+# =============================================================================
+# BLANK AND DOUBLE GAMEWEEKS
+# =============================================================================
+
+
+class TestClubFixtureCounts:
+    """Counts come from the fixture rows, so a double is two rows and a blank
+    is an absent pair. Derived from a difficulty grid instead, a double's two
+    FDRs are averaged into one cell and the count survives only inside the
+    rendered string."""
+
+    TEAMS = pd.DataFrame({"id": [1, 2, 3, 4], "short_name": ["AAA", "BBB", "CCC", "DDD"]})
+
+    #: GW10 is ordinary. GW11 gives team 1 a double and leaves 4 blank.
+    FIXTURES = pd.DataFrame([
+        {"event": 10, "team_h": 1, "team_a": 2},
+        {"event": 10, "team_h": 3, "team_a": 4},
+        {"event": 11, "team_h": 1, "team_a": 2},
+        {"event": 11, "team_h": 3, "team_a": 1},
+    ])
+
+    def _counts(self, gameweeks):
+        with patch("scripts.common.fixture_helpers._bootstrap_teams_df",
+                   return_value=self.TEAMS), \
+             patch("scripts.common.fixture_helpers._all_fixtures_min",
+                   return_value=self.FIXTURES):
+            return fixture_helpers.club_fixture_counts(gameweeks)
+
+    def test_an_ordinary_gameweek_is_one_each(self):
+        counts = self._counts([10])
+        assert list(counts[10]) == [1, 1, 1, 1]
+
+    def test_a_double_counts_twice(self):
+        counts = self._counts([11])
+        assert counts.at[1, 11] == 2
+
+    def test_a_blank_counts_zero(self):
+        counts = self._counts([11])
+        assert counts.at[4, 11] == 0
+
+    def test_every_club_appears_even_when_it_is_not_playing(self):
+        """A club absent from the frame cannot be reported as blanking."""
+        counts = self._counts([11])
+        assert set(counts.index) == {1, 2, 3, 4}
+
+    def test_an_unreadable_fixture_list_gives_nothing_not_twenty_blanks(self):
+        """All clubs showing 0 is what an outage looks like, and reporting it
+        as a league-wide blank would zero every projection on the page."""
+        with patch("scripts.common.fixture_helpers._bootstrap_teams_df",
+                   return_value=self.TEAMS), \
+             patch("scripts.common.fixture_helpers._all_fixtures_min",
+                   return_value=pd.DataFrame()):
+            assert fixture_helpers.club_fixture_counts([10]).empty
+
+    def test_no_gameweeks_asked_for_is_empty(self):
+        assert self._counts([]).empty
+
+
+class TestBlankAndDoubleClubs:
+    def test_it_names_only_the_interesting_gameweeks(self):
+        counts = pd.DataFrame({10: [1, 1], 11: [2, 0]}, index=[1, 2])
+        teams = pd.DataFrame({"id": [1, 2], "short_name": ["AAA", "BBB"]})
+        found = fixture_helpers.blank_and_double_clubs(counts, teams)
+        assert set(found) == {11}
+        assert found[11] == {"blank": ["BBB"], "double": ["AAA"]}
+
+    def test_an_all_ordinary_window_reports_nothing(self):
+        """Today's real state, and it must read as "none" rather than empty."""
+        counts = pd.DataFrame({10: [1, 1], 11: [1, 1]}, index=[1, 2])
+        teams = pd.DataFrame({"id": [1, 2], "short_name": ["AAA", "BBB"]})
+        assert fixture_helpers.blank_and_double_clubs(counts, teams) == {}
+
+    def test_an_empty_frame_is_not_a_crash(self):
+        assert fixture_helpers.blank_and_double_clubs(pd.DataFrame()) == {}
