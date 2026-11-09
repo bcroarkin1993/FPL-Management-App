@@ -231,22 +231,40 @@ def scrape_lineups(url: str, gameweek: Optional[int] = None) -> LineupScrape:
     measured with. Deriving a position from the ``.players-line`` index is
     formation-dependent guesswork for no gain.
     """
-    empty = LineupScrape(pd.DataFrame(columns=LINEUP_COLUMNS), [])
+    def _empty(note: str, source_fixtures: int = 0) -> LineupScrape:
+        """An empty scrape that says *why*.
+
+        The three ways this returns nothing mean opposite things, and returning
+        a bare empty frame for all of them threw that away: a validation check
+        then had to report an unreachable page, a changed selector and "this
+        gameweek is not published yet" identically. The last is the expected
+        state between gameweeks and for the whole of an international break.
+        """
+        return LineupScrape(pd.DataFrame(columns=LINEUP_COLUMNS), [], note,
+                            source_fixtures)
+
     root = _site_root(url)
     if not root:
-        return empty
+        return _empty("Sportsgambler URL could not be parsed: %r" % (url,))
 
     index_resp = _get(url)
     if index_resp is None:
-        return empty
+        return _empty("Sportsgambler's lineups index was unreachable.")
     index = parse_index(index_resp.text)
     if not index:
         _logger.warning("Sportsgambler: no fixtures parsed from the lineups index.")
-        return empty
+        return _empty("Sportsgambler's lineups index parsed no fixtures at all.")
 
     wanted = _fixtures_in_gameweek(index, _gameweek_fixture_pairs(gameweek))
     if not wanted:
-        return empty
+        # The page is healthy -- it listed fixtures and their labels resolved;
+        # none of them is the gameweek we asked about. Deliberately fail closed
+        # (see the module docstring): the union of several gameweeks is not a
+        # lineup call and would promote half the league.
+        return _empty(
+            "Sportsgambler lists %d fixture(s) but none in GW%s -- it has not "
+            "published this gameweek yet." % (len(index), gameweek),
+            source_fixtures=len(index))
 
     ajax = root + _AJAX_PATH
     with requests.Session() as session:
@@ -275,7 +293,8 @@ def scrape_lineups(url: str, gameweek: Optional[int] = None) -> LineupScrape:
         # pairs home and away by this index and a gap shows one side only.
         matchups.append((home, away))
 
-    return LineupScrape(pd.DataFrame(rows, columns=LINEUP_COLUMNS), matchups)
+    return LineupScrape(pd.DataFrame(rows, columns=LINEUP_COLUMNS), matchups,
+                        "", len(index))
 
 
 def fetch_lineup_xi(url=None, gameweek=None) -> LineupXI:
@@ -296,9 +315,16 @@ def fetch_lineup_xi(url=None, gameweek=None) -> LineupXI:
 
     def _build():
         try:
-            players = scrape_lineups(url, gameweek).players
-            return lineup_starters(players, _bootstrap_pool(), gameweek,
-                                   source=SOURCE_LABEL)
+            scrape = scrape_lineups(url, gameweek)
+            xi = lineup_starters(scrape.players, _bootstrap_pool(), gameweek,
+                                 source=SOURCE_LABEL)
+            # Carry the scrape's own reason through, so a check can tell a dead
+            # page from a gameweek the source has not reached yet. Only when
+            # nothing resolved: a successful scrape's note belongs to the
+            # resolver, which reports unmatched names.
+            if not xi.player_ids and scrape.note:
+                xi = xi._replace(note=scrape.note)
+            return xi._replace(source_fixtures=scrape.source_fixtures)
         except Exception as e:              # pragma: no cover - never break a blend
             _logger.warning("Sportsgambler lineups: could not resolve XIs: %s", e)
             return LineupXI(set(), set(), gameweek, str(e))

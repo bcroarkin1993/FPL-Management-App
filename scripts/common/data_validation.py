@@ -3292,12 +3292,37 @@ def check_rotowire_lineup_xi(xi, gameweek=None, expected_clubs=20,
     note = getattr(xi, "note", "") or ""
 
     if not starters:
+        # Three causes, and only two are defects. A page that listed fixtures
+        # whose labels resolved, none of them this gameweek, is working
+        # perfectly and simply has not published the week we asked about --
+        # which is the *expected* state between gameweeks and for the whole of
+        # an international break. Measured 2026-11-09: GW10 had finished, GW11's
+        # deadline was twelve days away, Sportsgambler still listed GW10's ten
+        # fixtures, every label resolved, and the gameweek filter correctly
+        # refused all of them. Reported as an error that failed the pre-push
+        # hook on a source behaving exactly as designed -- and a check that
+        # cries wolf gets muted, which would cost the real failures below.
+        #
+        # Keyed on `source_fixtures`, which the scrape reports, rather than on
+        # the note's wording: a check that string-matches a log message breaks
+        # the next time somebody rewords it.
+        if int(getattr(xi, "source_fixtures", 0) or 0) > 0:
+            return [Issue(check, "warning",
+                          "%s has not published GW%s yet (%s)"
+                          % (source, gameweek if gameweek is not None else "?",
+                             note or "no reason given"),
+                          "Not a fault: the page is readable and its fixtures "
+                          "resolve, they are just a different gameweek. The "
+                          "filter fails closed on purpose -- several gameweeks "
+                          "of XIs stacked together is not a lineup call. The "
+                          "engine reads the other XI source and the weekly "
+                          "rankings article meanwhile.")]
         return [Issue(check, "error",
                       "%s's lineups page resolved no starters (%s)"
                       % (source, note or "no reason given"),
-                      "Either the page is unreachable, its `lineup__main` / "
-                      "`lineup__player` selectors changed, or the gameweek filter "
-                      "dropped every matchup. Check scrape_lineups() against the "
+                      "The page listed no fixtures at all, so it is either "
+                      "unreachable or its `lineup__main` / `lineup__player` "
+                      "selectors changed. Check scrape_lineups() against the "
                       "live page.")]
 
     # Judged against the clubs this source actually published, not against 20.

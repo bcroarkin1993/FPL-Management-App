@@ -636,7 +636,11 @@ def show_projected_lineups():
 
     # One fetch for both, so the matchup list and the player frame cannot
     # disagree about which fixture an index refers to.
-    lineups_df, matchups = scrape_lineups(config.ROTOWIRE_LINEUPS_URL)
+    # Attribute access, not tuple unpacking: `LineupScrape` is a NamedTuple
+    # that has gained fields (a reason, and the page's own fixture count),
+    # and `a, b = scrape(...)` breaks the moment one is added.
+    _scrape = scrape_lineups(config.ROTOWIRE_LINEUPS_URL)
+    lineups_df, matchups = _scrape.players, _scrape.matchups
 
     if not matchups:
         st.warning("No matchups available. Rotowire may not have published lineups yet.")

@@ -269,10 +269,22 @@ class LineupScrape(NamedTuple):
 
     ``players`` and ``matchups`` share a single ``MatchupIndex`` space by
     construction, which is the whole point of returning them together.
+
+
+    ``source_fixtures`` is how many fixtures the page listed **before** the
+    gameweek filter, and ``note`` why the scrape came back empty. Both exist to
+    separate an outage from a timing gap: a page that lists ten fixtures, none
+    of them this gameweek, is working perfectly and simply has not published
+    the week we are asking about -- which between gameweeks, and for the whole
+    of an international break, is the *expected* state. A page that lists none
+    has changed shape or is unreachable. Those are opposite conclusions and an
+    empty result alone cannot tell them apart.
     """
 
     players: pd.DataFrame
     matchups: list
+    note: str = ""
+    source_fixtures: int = 0
 
 
 def scrape_lineups(url, gameweek=None) -> LineupScrape:
@@ -462,6 +474,11 @@ class LineupXI(NamedTuple):
     note: str = ""
     published_clubs: int = 0
     club_ids: Optional[Dict[str, Set[int]]] = None
+    #: Fixtures the source's page listed, before the gameweek filter. Zero
+    #: starters with a non-zero count here means the page is healthy and has
+    #: not published this gameweek yet -- a timing gap, not a defect. See
+    #: `LineupScrape`.
+    source_fixtures: int = 0
 
     @property
     def ok(self) -> bool:

@@ -290,6 +290,44 @@ class TestValidation:
         issues = check_rotowire_lineup_xi(xi)
         assert any(i.severity == "error" for i in issues)
 
+    def test_a_source_that_has_not_published_this_gameweek_is_a_warning(self):
+        """Zero starters has three causes and only two are defects.
+
+        Measured 2026-11-09: GW10 had finished, GW11's deadline was twelve days
+        away across an international break, and Sportsgambler still listed
+        GW10's ten fixtures. Every club label resolved; the gameweek filter
+        correctly refused all of them, because several gameweeks of XIs stacked
+        together is not a lineup call -- that is what
+        `test_two_gameweeks_stacked_is_an_error` above exists for.
+
+        It was reported as an ERROR and failed the pre-push hook on a source
+        behaving exactly as designed. A check that cries wolf gets muted, which
+        would cost every real failure in this class.
+        """
+        from scripts.common.data_validation import check_rotowire_lineup_xi
+        xi = rl.LineupXI(set(), set(), 11,
+                         "lists 40 fixture(s) but none in GW11",
+                         source_fixtures=40)
+        issues = check_rotowire_lineup_xi(xi, gameweek=11, source="Sportsgambler")
+        assert [i.severity for i in issues] == ["warning"]
+        assert "has not published GW11 yet" in issues[0].message
+
+    def test_a_page_listing_no_fixtures_at_all_is_still_an_error(self):
+        """Unreachable, or the selectors changed -- silent, because the engine
+        fails open to the weekly rankings article."""
+        from scripts.common.data_validation import check_rotowire_lineup_xi
+        xi = rl.LineupXI(set(), set(), 11, "unreachable", source_fixtures=0)
+        issues = check_rotowire_lineup_xi(xi, gameweek=11)
+        assert [i.severity for i in issues] == ["error"]
+
+    def test_no_fixture_count_defaults_to_treating_it_as_an_outage(self):
+        """The safe default. Rotowire's own gameweek filter fails *open*, so an
+        empty XI there really is a defect rather than a timing gap -- only a
+        source that reports a count can prove it was merely early."""
+        from scripts.common.data_validation import check_rotowire_lineup_xi
+        issues = check_rotowire_lineup_xi(rl.LineupXI(set(), set(), 11, "x"))
+        assert [i.severity for i in issues] == ["error"]
+
     def test_a_club_that_published_and_did_not_resolve_is_an_error(self):
         """The failure this check is for: a label or transliteration break.
         Twenty clubs on the page, four of them resolving."""
