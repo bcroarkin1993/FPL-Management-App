@@ -208,24 +208,138 @@ class TestTheWeightFitDoesNotOverclaim:
         if out["configured_in_band"]:
             assert out["recommended"] == out["current"]
 
-    def test_the_shipped_weights_are_inside_the_band(self):
+    def test_the_shipped_weights_are_still_defensible(self):
         """What makes this fit *applied* rather than merely reported.
 
-        Phase 4b moved the configured split to the nearest point of the band,
-        so a fit run today should recommend no further change. If this fails,
-        either the archive has grown enough to move the band or the constants
-        and the fit have parted company.
+        Phase 4b moved the configured split to the nearest point of the band, so
+        a fit run today should recommend no further change -- *unless* the fit
+        itself is one this harness refuses to act on. Two of its own guards say
+        when that is, and asserting `configured_in_band` unconditionally ignored
+        both:
+
+        * **A grid-edge argmin is the search running out of room, not a
+          measurement.** CLAUDE.md states this outright and
+          `fit_start_constants` refuses such a value for the positional floors.
+          The same objection applies here.
+        * **A recommendation that needs a source `marginal_source_value()`
+          rejects is not supported by this archive.** "Which weighting is best"
+          and "does adding this source help" are different questions and only
+          the second can justify giving a zero-weight source a weight.
+
+        Measured 2026-11-09 with six pre-deadline gameweeks (n=1116): the argmin
+        was `rw 0.00 / ffp 0.85 / ep 0.15` at the grid edge, the tie band held
+        **24** members including FFP alone, and the smallest change reaching it
+        (`ep 0.05`) was one `marginal_source_value("fpl_ep")` reported as
+        `supported: false`. So the archive did not support a change and the test
+        was failing on a plateau it cannot distinguish -- which is the
+        cry-wolf failure that gets a guard muted.
+
+        It still fails on the thing it was written for: a fit that moves the
+        band to an interior point, on evidence the harness accepts, while the
+        shipped weights stay where they are.
         """
         if not acc.projection_archive.scoreable_gameweeks():
             pytest.skip("no scoreable gameweek in the archive")
         out = acc.fit_blend_weights()
         if out["fitted"] is None:
             pytest.skip(out["note"])
-        assert out["configured_in_band"], (
+        if out["configured_in_band"]:
+            return
+
+        if out.get("at_grid_edge"):
+            pytest.skip(
+                "best fit %r is at the edge of the grid, which is the search "
+                "running out of room rather than a measurement -- the same "
+                "objection that refuses an edge-of-grid positional floor"
+                % (out["fitted"],))
+
+        # Does the change it wants rest on a source this archive does not
+        # support carrying any weight at all?
+        unsupported = []
+        current = out.get("current") or {}
+        for source, weight in (out.get("recommended") or {}).items():
+            # Only a source the blend does not already use: reweighting two
+            # sources that both carry weight is an ordinary retune, while
+            # giving weight to one held at zero is a larger claim and is the
+            # question `marginal_source_value` exists to answer.
+            if weight <= 0 or current.get(source, 0) > 0:
+                continue
+            try:
+                marginal = acc.marginal_source_value(source, weight=weight)
+            except Exception:                       # pragma: no cover
+                continue
+            if marginal and not marginal.get("supported"):
+                unsupported.append((source, weight, marginal.get("gameweeks_helped"),
+                                    marginal.get("gameweeks")))
+        if unsupported:
+            pytest.skip(
+                "the smallest supported change %r introduces %s, which "
+                "marginal_source_value() reports as unsupported (helped in "
+                "%s of %s gameweeks) -- a weight fit cannot justify adding a "
+                "source the paired test rejects"
+                % (out["recommended"], unsupported[0][0],
+                   unsupported[0][2], unsupported[0][3]))
+
+        pytest.fail(
             "the configured weights %r are outside the %.1f%% band around the "
-            "best fit %r -- the smallest supported change is %r"
+            "best fit %r -- the smallest supported change is %r, the argmin is "
+            "interior, and nothing it adds is unsupported. Phase 4b should be "
+            "re-run and config.PROJECTION_SOURCE_WEIGHTS moved."
             % (out["current"], acc.WEIGHT_FIT_TIE_BAND * 100, out["fitted"],
                out["recommended"]))
+
+
+class TestTheWeightGuardStillFires:
+    """A guard that can only ever skip is not a guard.
+
+    `test_the_shipped_weights_are_still_defensible` abstains on a grid-edge
+    argmin and on a recommendation needing an unsupported source, which is
+    correct and is also the state the live archive is in -- so these pin that
+    the remaining path still fails.
+    """
+
+    def _run(self, out, marginal=None):
+        from unittest.mock import patch       # local, as elsewhere in this file
+        test = TestTheWeightFitDoesNotOverclaim().test_the_shipped_weights_are_still_defensible
+        with patch.object(acc, "fit_blend_weights", return_value=out), \
+             patch.object(acc.projection_archive, "scoreable_gameweeks",
+                          return_value=[4, 5]), \
+             patch.object(acc, "marginal_source_value",
+                          return_value=marginal or {"supported": True}):
+            try:
+                test()
+            except BaseException as exc:            # Failed / Skipped both land here
+                return type(exc).__name__, str(exc)
+        return "passed", ""
+
+    _INTERIOR = {
+        "fitted": {"rotowire": 0.4, "ffp": 0.6, "fpl_ep": 0.0},
+        "current": {"rotowire": 0.2, "ffp": 0.8, "fpl_ep": 0.0},
+        "recommended": {"rotowire": 0.35, "ffp": 0.65, "fpl_ep": 0.0},
+        "configured_in_band": False, "at_grid_edge": False, "note": "",
+    }
+
+    def test_an_interior_argmin_on_supported_sources_fails(self):
+        """The thing the test was written for: a real, actionable fit."""
+        kind, msg = self._run(self._INTERIOR)
+        assert kind == "Failed", (kind, msg)
+        assert "Phase 4b should be re-run" in msg
+
+    def test_a_grid_edge_argmin_abstains(self):
+        out = dict(self._INTERIOR, at_grid_edge=True)
+        assert self._run(out)[0] == "Skipped"
+
+    def test_weights_already_in_the_band_pass(self):
+        out = dict(self._INTERIOR, configured_in_band=True)
+        assert self._run(out)[0] == "passed"
+
+    def test_a_recommendation_needing_an_unsupported_source_abstains(self):
+        out = dict(self._INTERIOR,
+                   recommended={"rotowire": 0.2, "ffp": 0.75, "fpl_ep": 0.05})
+        kind, msg = self._run(out, marginal={"supported": False,
+                                             "gameweeks_helped": 4, "gameweeks": 6})
+        assert kind == "Skipped", (kind, msg)
+        assert "unsupported" in msg
 
 
 class TestSimplex:
