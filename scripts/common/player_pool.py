@@ -50,13 +50,25 @@ def build_pool(bootstrap) -> pd.DataFrame:
             "Display_Name": to_display_name(first, second, e.get("web_name", "")),
             "Web_Name": e.get("web_name", ""),
             "Team": teams.get(e.get("team"), ""),
+            # The club *id*, because every fixture join is keyed on it:
+            # `club_fixture_counts` is indexed by team id, and a short
+            # name is a label rather than a key.
+            "Team_ID": e.get("team"),
             "Position": pos_map.get(e.get("element_type"), "M"),
             "ep_next": pd.to_numeric(e.get("ep_next"), errors="coerce"),
             # Purely additive, and needed by anything that has to *buy* a
             # squad rather than only rank one -- the chip page solves a Free
             # Hit and a Wildcard against this pool, and both are budgeted.
             "Price": pd.to_numeric(e.get("now_cost"), errors="coerce") / 10.0,
+            # Tenths, as FPL publishes it. `Price` above is the same
+            # number in millions; the solvers budget in millions and
+            # the transfer planner reads tenths, so both are carried
+            # rather than re-derived at a callsite.
+            "now_cost": pd.to_numeric(e.get("now_cost"), errors="coerce"),
             "status": e.get("status"),
+            # Buy-eligibility in the transfer planner: a player with no
+            # minutes all season is not a candidate.
+            "minutes": pd.to_numeric(e.get("minutes"), errors="coerce"),
             "chance_of_playing_next_round": e.get("chance_of_playing_next_round"),
             # The player's own start count, which floors the omitted prior:
             # a man every published XI leaves out who has nonetheless been
@@ -123,3 +135,51 @@ def blended_pool(current_gw: int, rotowire_url: str):
     pool = blend_multi_gw_projections(pool, feed.df, single_gw_col="Points",
                                       expected_gw=current_gw)
     return blend_projections_onto(pool, feed.df, expected_gw=current_gw)
+
+
+def squad_frame(picks, pool) -> pd.DataFrame:
+    """A manager's fifteen as a frame carrying position, projection and price.
+
+    Joined on the element id, which is sound here because both sides come from
+    the Classic API: the picks are a Classic endpoint's and the pool is built
+    from the Classic bootstrap. Carries **both** ``element_id`` and
+    ``Player_ID``, because Classic frames spell the id four different ways and a
+    gate keyed on the wrong spelling fails silently -- which is how a benched
+    player went on projecting 4.24 on one page and 0.45 everywhere else.
+
+    Lifted out of the Chip Strategy page when the My Week checklist became a
+    second reader; that page re-exports it under its old private name.
+    """
+    rows = []
+    by_id = {}
+    if pool is not None and not pool.empty and "Player_ID" in pool.columns:
+        ids = pd.to_numeric(pool["Player_ID"], errors="coerce")
+        by_id = {int(i): r for i, (_, r) in zip(ids, pool.iterrows())
+                 if pd.notna(i)}
+    for pick in picks or []:
+        element = pick.get("element")
+        if element is None:
+            continue
+        ref = by_id.get(int(element))
+        rows.append({
+            "element_id": int(element),
+            "Player_ID": int(element),
+            "Player_Code": (ref.get("Player_Code") if ref is not None else None),
+            "Display_Name": (ref.get("Display_Name") if ref is not None else ""),
+            "Team": (ref.get("Team") if ref is not None else ""),
+            "Team_ID": (ref.get("Team_ID") if ref is not None else None),
+            "Position": (ref.get("Position") if ref is not None else ""),
+            "Proj": (ref.get("Proj") if ref is not None else 0.0),
+            "Proj_Next3": (ref.get("Proj_Next3") if ref is not None else None),
+            "Price": (ref.get("Price") if ref is not None else 0.0),
+            "now_cost": (ref.get("now_cost") if ref is not None else None),
+            "status": (ref.get("status") if ref is not None else ""),
+            # FPL publishes a selling price only to an authenticated request, so
+            # on the public path this is absent and the planner falls back to
+            # `now_cost` -- which overstates funds. See CLAUDE.md,
+            # "Pre-deadline Classic squad".
+            "selling_price": pick.get("selling_price"),
+            "multiplier": pick.get("multiplier", 1),
+            "is_captain": bool(pick.get("is_captain")),
+        })
+    return pd.DataFrame(rows)

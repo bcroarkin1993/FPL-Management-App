@@ -1150,3 +1150,168 @@ class TestChipStrategyPage:
                    None, create=True):
             from scripts.classic.chip_strategy import show_chip_strategy_page
             show_chip_strategy_page()
+
+
+class TestMyWeekPage:
+    """Smoke tests, plus the properties that would hollow the checklist out.
+
+    `mock_streamlit`'s buttons are unconditionally truthy, so the plan button
+    fires on every run: the first test therefore exercises the latch being set,
+    and `test_the_plan_lane_runs_when_latched` exercises the solve itself, which
+    only happens on the rerun after the click.
+    """
+
+    BOOTSTRAP = {
+        "elements": [
+            {"id": i, "code": 1000 + i, "first_name": "P%d" % i,
+             "second_name": "Player", "web_name": "P%d" % i, "team": 1 + (i % 2),
+             "element_type": t, "now_cost": 50, "minutes": 900, "status": "a",
+             "chance_of_playing_next_round": 100, "starts": 10, "news": "",
+             "ep_next": "4.0", "price_change_percent": "10",
+             "price_change_hourly_rate": "100", "price_change_locked_until": None,
+             "price_change_calibrating": False, "price_change_projections": [],
+             "transfers_in_event": 1, "transfers_out_event": 1,
+             "transfers_in": 1, "transfers_out": 1, "selected_by_percent": "5",
+             "cost_change_event": 0, "cost_change_start": 0,
+             "cost_change_start_fall": 0}
+            for i, t in zip(range(1, 16), _SQUAD_SHAPE)
+        ],
+        "teams": [{"id": 1, "short_name": "ARS"}, {"id": 2, "short_name": "CHE"}],
+        "events": [{"id": 12, "deadline_time": "2099-01-01T11:00:00Z",
+                    "is_next": True, "finished": False}],
+        "chips": [{"name": "bboost", "start_event": 1, "stop_event": 19},
+                  {"name": "3xc", "start_event": 1, "stop_event": 19},
+                  {"name": "wildcard", "start_event": 2, "stop_event": 19},
+                  {"name": "freehit", "start_event": 2, "stop_event": 19}],
+    }
+
+    def _pool(self):
+        pos = {1: "G", 2: "D", 3: "M", 4: "F"}
+        return pd.DataFrame([{
+            "Player_ID": i, "Player_Code": 1000 + i, "Display_Name": "P%d" % i,
+            "Player": "P%d Player" % i, "Team": "ARS", "Team_ID": 1 + (i % 2),
+            "Position": pos[t], "Proj": 4.0 + i * 0.1, "Proj_Next3": 12.0,
+            "Price": 5.0, "now_cost": 50, "minutes": 900, "status": "a",
+            "chance_of_playing_next_round": 100,
+        } for i, t in zip(range(1, 16), _SQUAD_SHAPE)])
+
+    def _resolution(self, **kw):
+        picks = [{"element": i, "multiplier": 1 if i <= 11 else 0,
+                  "is_captain": i == 1, "selling_price": 50}
+                 for i in range(1, 16)]
+        return SquadResolution(picks=kw.pop("picks", picks),
+                               source_gw=kw.pop("source_gw", 12),
+                               target_gw=kw.pop("target_gw", 12),
+                               entry_history={"bank": 13}, **kw)
+
+    def _plan(self):
+        """`build_transfer_plan`'s real return shape.
+
+        Written out rather than approximated because a fixture that invents a
+        shape tests nothing: the frontier is a *list* of entries and leg prices
+        are already in millions, and a dict-shaped fixture let a renderer that
+        could not read either of those pass its own test.
+        """
+        rows = self._pool()
+        return {
+            "legs": [{"position": "M", "out_id": 1, "out_player": "P1 Player",
+                      "in_id": 2, "in_player": "P2 Player",
+                      "out_price": 5.0, "in_price": 7.5, "net_cost": 2.5,
+                      "delta": 1.2, "out_row": rows.iloc[0],
+                      "in_row": rows.iloc[1]}],
+            "n_changes": 2, "hits": 0, "free_transfers": 2, "max_changes": 2,
+            "bank_before": 1.3, "bank_after": 0.1, "released": 5.0,
+            "spent": 6.2, "gain_net": 6.9, "horizon_gws": 2.2,
+            "baseline": 50.0,
+            "frontier": [{"k": 1, "gain": 3.6, "n_changes": 1, "hits": 0},
+                         {"k": 2, "gain": 6.9, "n_changes": 2, "hits": 0},
+                         {"k": 3, "gain": 6.9, "n_changes": 2, "hits": 0}],
+        }
+
+    def _run(self, resolution=None, latched=False, plan=None):
+        import streamlit as st
+        mod = "scripts.classic.my_week"
+        targets = {
+            "get_classic_bootstrap_static": self.BOOTSTRAP,
+            "get_classic_team_history": {"chips": [], "current": []},
+            "blended_pool": self._pool(),
+            "gameweek_deadlines": None,
+            "club_fixture_counts": pd.DataFrame({12: [1, 1]}, index=[1, 2]),
+            "get_fpl_availability_df": pd.DataFrame(),
+            "_is_gameweek_started": False,
+        }
+        with ExitStack() as stack:
+            for name, value in targets.items():
+                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
+            stack.enter_context(patch(
+                f"{mod}.resolve_classic_squad",
+                return_value=resolution if resolution is not None
+                else self._resolution()))
+            stack.enter_context(patch(
+                "scripts.classic.transfers.resolve_free_transfers",
+                return_value={"count": 2, "source": "my_team"}))
+            pool_mock = stack.enter_context(patch(
+                "scripts.classic.transfers.build_plan_pool",
+                return_value=self._pool()))
+            plan_mock = stack.enter_context(patch(
+                "scripts.classic.transfers.build_transfer_plan",
+                return_value=plan))
+            stack.enter_context(patch(f"{mod}.config.FPL_CLASSIC_TEAM_ID", 1,
+                                      create=True))
+            stack.enter_context(patch(f"{mod}.config.CURRENT_GAMEWEEK", 12,
+                                      create=True))
+            if latched:
+                st.session_state["my_week_plan_1_12"] = True
+            from scripts.classic.my_week import show_my_week_page
+            show_my_week_page()
+            return pool_mock, plan_mock
+
+    def test_smoke(self, mock_all_utils):
+        self._run()
+
+    def test_the_solver_is_not_touched_until_it_is_asked_for(self, mock_all_utils):
+        """The laziness contract: opening the page costs no ILP solve."""
+        pool_mock, plan_mock = self._run()
+        assert not pool_mock.called and not plan_mock.called
+
+    def test_the_plan_lane_runs_when_latched(self, mock_all_utils):
+        pool_mock, plan_mock = self._run(latched=True, plan=self._plan())
+        assert pool_mock.called and plan_mock.called
+
+    def test_a_held_plan_renders(self, mock_all_utils):
+        """`build_transfer_plan`'s hold shape, which names `horizon`, not
+        `horizon_gws` -- the two differ and both have to render."""
+        self._run(latched=True,
+                  plan={"hold": True, "horizon": 2.2,
+                        "frontier": [{"k": 1, "gain": 0.0, "n_changes": 0,
+                                      "hits": 0}]})
+
+    def test_an_unsolvable_squad_says_so(self, mock_all_utils):
+        self._run(latched=True, plan={"error": "baseline"})
+
+    def test_it_renders_without_a_squad(self, mock_all_utils):
+        """An unresolvable squad must produce unknown rows, not a traceback."""
+        self._run(SquadResolution())
+
+    def test_a_live_gameweek_does_not_compare_the_captain(self, mock_all_utils):
+        """Mid-gameweek the stored armband is the real one and nothing can be
+        changed, so the row must not recommend a change."""
+        import scripts.classic.my_week as mw
+        mod = "scripts.classic.my_week"
+        captured = {}
+        real = mw.week_check.build_lineup_item
+
+        def spy(*a, **kw):
+            captured["comparable"] = kw.get("comparable")
+            return real(*a, **kw)
+
+        with patch(f"{mod}._is_gameweek_started", return_value=True), \
+                patch.object(mw.week_check, "build_lineup_item", side_effect=spy):
+            self._run()
+        assert captured["comparable"] is False
+
+    def test_no_team_configured_is_a_message_not_a_crash(self):
+        with patch("scripts.classic.my_week.config.FPL_CLASSIC_TEAM_ID",
+                   None, create=True):
+            from scripts.classic.my_week import show_my_week_page
+            show_my_week_page()

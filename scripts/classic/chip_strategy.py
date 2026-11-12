@@ -44,13 +44,17 @@ from scripts.common.fpl_classic_api import (
     get_classic_bootstrap_static,
     get_classic_team_history,
 )
-from scripts.common.player_pool import blended_pool
+from scripts.common.player_pool import blended_pool, squad_frame
 from scripts.common.scraping import get_ffp_horizon
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.text_helpers import _map_position_to_rw, compact_html
 from scripts.fpl.player_projections import _horizon_frames
 
 _logger = get_logger("fpl_app.classic.chip_strategy")
+
+#: The picks-to-frame adapter now lives beside the pool it joins
+#: against, so the My Week checklist reads the same fifteen.
+_squad_frame = squad_frame
 
 #: Rows of the grid, in the order a manager decides them: the two "free" chips
 #: that only need a good week first, then the two that rebuild a squad.
@@ -92,33 +96,6 @@ def _opponent_squad(entry_id, bootstrap, current_gw, pool):
     if not resolution.ok:
         return None
     return _squad_frame(resolution.picks, pool)
-
-
-def _squad_frame(picks, pool):
-    """The fifteen as a frame carrying position, projection and multiplier."""
-    rows = []
-    by_id = {}
-    if pool is not None and not pool.empty and "Player_ID" in pool.columns:
-        ids = pd.to_numeric(pool["Player_ID"], errors="coerce")
-        by_id = {int(i): r for i, (_, r) in zip(ids, pool.iterrows())
-                 if pd.notna(i)}
-    for pick in picks or []:
-        element = pick.get("element")
-        if element is None:
-            continue
-        ref = by_id.get(int(element))
-        rows.append({
-            "element_id": int(element),
-            "Player_ID": int(element),
-            "Display_Name": (ref.get("Display_Name") if ref is not None else ""),
-            "Team": (ref.get("Team") if ref is not None else ""),
-            "Position": (ref.get("Position") if ref is not None else ""),
-            "Proj": (ref.get("Proj") if ref is not None else 0.0),
-            "Price": (ref.get("Price") if ref is not None else 0.0),
-            "status": (ref.get("status") if ref is not None else ""),
-            "multiplier": pick.get("multiplier", 1),
-        })
-    return pd.DataFrame(rows)
 
 
 def _render_clock(status, current_gw):

@@ -10,6 +10,7 @@ import pytest
 
 from scripts.common.data_validation import (
     check_element_id_names,
+    check_week_plan,
     check_mini_league_ownership,
     check_start_calibration,
     check_ffp_feed,
@@ -2255,3 +2256,103 @@ class TestCheckChipDefinitions:
                                  "stop_event": 38})
         issues = check_chip_definitions(payload, known_chips=self.KNOWN)
         assert any(i.severity == "warning" for i in issues)
+
+
+class TestCheckWeekPlan:
+    """The My Week checklist.
+
+    Its unique failure is not a wrong number but a *right-looking absence* of
+    one: "nothing to do this week" and "we could not check" render identically.
+    """
+
+    def _item(self, key="deadline", status="ok", verdict="GW12 deadline in 4 days.",
+              evidence=None):
+        from scripts.common.week_check import WeekItem
+        return WeekItem(key=key, title=key.title(), status=status, verdict=verdict,
+                        evidence={} if evidence is None else evidence)
+
+    def _clean(self):
+        return [self._item("deadline", evidence={"hours_left": 96.0}),
+                self._item("squad", verdict="15 players.", evidence={"players": 15})]
+
+    def test_a_clean_checklist_is_silent(self):
+        assert check_week_plan(self._clean(), squad_size=15, xi_size=11) == []
+
+    def test_an_empty_checklist_is_an_error(self):
+        issues = check_week_plan([])
+        assert issues and issues[0].severity == "error"
+
+    def test_an_all_clear_with_no_evidence_behind_it_is_an_error(self):
+        """The whole reason the item model carries `evidence`."""
+        items = self._clean() + [self._item("prices", verdict="Nothing moving.")]
+        issues = check_week_plan(items)
+        assert any("no evidence" in i.message and i.severity == "error"
+                   for i in issues)
+
+    def test_an_unknown_row_needs_no_evidence(self):
+        items = self._clean() + [self._item("prices", status="unknown",
+                                            verdict="Could not read prices.")]
+        assert [i for i in check_week_plan(items) if i.severity == "error"] == []
+
+    def test_an_unrecognised_status_is_an_error(self):
+        items = self._clean() + [self._item("prices", status="fine",
+                                            verdict="x", evidence={"a": 1})]
+        assert any("unknown status" in i.message for i in check_week_plan(items))
+
+    def test_a_blank_verdict_is_an_error(self):
+        items = self._clean() + [self._item("prices", verdict="   ",
+                                            evidence={"a": 1})]
+        assert any("no verdict" in i.message for i in check_week_plan(items))
+
+    def test_a_past_deadline_presented_as_the_next_one_is_an_error(self):
+        items = [self._item("deadline", evidence={"hours_left": -3.0}),
+                 self._item("squad", verdict="15.", evidence={"players": 15})]
+        issues = check_week_plan(items)
+        assert any("hours away" in i.message and i.severity == "error"
+                   for i in issues)
+
+    def test_a_captain_change_against_a_stale_squad_is_an_error(self):
+        items = self._clean() + [
+            self._item("lineup", status="act", verdict="Captain Haaland.",
+                       evidence={"comparable": False, "captain": "Haaland"})]
+        issues = check_week_plan(items)
+        assert any("not current" in i.message and i.severity == "error"
+                   for i in issues)
+
+    def test_the_same_recommendation_on_a_live_squad_is_fine(self):
+        items = self._clean() + [
+            self._item("lineup", status="act", verdict="Captain Haaland.",
+                       evidence={"comparable": True, "captain": "Haaland"})]
+        assert [i for i in check_week_plan(items) if i.severity == "error"] == []
+
+    @pytest.mark.parametrize("count", [-1, 6])
+    def test_an_impossible_free_transfer_count_is_an_error(self, count):
+        items = self._clean() + [
+            self._item("transfers", verdict="%d FTs." % count,
+                       evidence={"free_transfers": count})]
+        assert any("Free transfers reported" in i.message
+                   for i in check_week_plan(items))
+
+    def test_green_ticks_over_a_short_squad_are_an_error(self):
+        """The signature of items built from a frame that had already lost rows."""
+        issues = check_week_plan(self._clean(), squad_size=13, xi_size=11)
+        assert any("squad of 13" in i.message and i.severity == "error"
+                   for i in issues)
+
+    def test_a_short_squad_with_something_flagged_is_not_double_reported(self):
+        items = [self._item("deadline", evidence={"hours_left": 96.0}),
+                 self._item("squad", status="warn", verdict="Stale.",
+                            evidence={"players": 13})]
+        issues = check_week_plan(items, squad_size=13)
+        assert not any("squad of 13" in i.message for i in issues)
+
+    def test_an_xi_that_is_not_eleven_is_an_error(self):
+        issues = check_week_plan(self._clean(), squad_size=15, xi_size=10)
+        assert any("XI holds 10" in i.message for i in issues)
+
+    def test_an_absent_deadline_row_is_only_a_warning(self):
+        items = [self._item("squad", verdict="15.", evidence={"players": 15})]
+        issues = check_week_plan(items)
+        assert any(i.severity == "warning" and "omits" in i.message
+                   for i in issues)
+        assert not any(i.severity == "error" for i in issues)

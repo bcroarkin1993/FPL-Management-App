@@ -57,6 +57,7 @@ __all__ = [
     "check_mini_league_ownership",
     "check_chip_timing",
     "check_chip_definitions",
+    "check_week_plan",
     "format_issues",
     "raise_on_error",
 ]
@@ -3986,5 +3987,145 @@ def check_chip_definitions(bootstrap: Optional[dict],
             % (len(missing), missing[0]),
             "Legitimate if FPL has left a gap, but a large gap usually means a "
             "window failed to parse."))
+
+    return issues
+
+
+# --------------------------------------------------------------------------
+# My Week — the pre-deadline checklist
+# --------------------------------------------------------------------------
+#: A checklist row is one of these. Mirrors `week_check.STATUS_*`; restated here
+#: because this module may not import a consumer of its own checks.
+_WEEK_STATUSES = ("ok", "unknown", "warn", "act")
+
+#: Free transfers cannot exceed the cap (one a week from GW2, banked to five).
+#: A light bound only -- `check_free_transfers` owns the real accrual rules and
+#: is the check to run when the history and chip list are to hand.
+_MAX_WEEK_FREE_TRANSFERS = 5
+
+
+def check_week_plan(items: Sequence[Any],
+                    squad_size: Optional[int] = None,
+                    xi_size: Optional[int] = None) -> List[Issue]:
+    """A pre-deadline checklist that cannot be right.
+
+    ``items`` is the list of :class:`scripts.common.week_check.WeekItem` the My
+    Week page renders.
+
+    **The check that earns its keep is an ``ok`` with no evidence behind it.**
+    Every other surface in this app fails by showing a wrong number; a checklist
+    fails by showing a *right-looking absence of numbers*, because "nothing to do
+    this week" and "we could not check" render identically and are opposite
+    claims. Each builder therefore records what its verdict was drawn from, and
+    an all-clear that recorded nothing was defaulted rather than derived.
+
+    The rest are the states that would make the page confidently wrong: a
+    deadline already past presented as the next one, a captain change
+    recommended against last deadline's armband, and a full row of green ticks
+    over a squad that is not a legal fifteen.
+    """
+    check = "week_plan"
+    issues: List[Issue] = []
+
+    if not items:
+        return [Issue(check, "error", "The checklist is empty.",
+                      "Every builder returned nothing, which means the page "
+                      "rendered no rows at all rather than a row of unknowns. "
+                      "See week_check.build_week_checklist().")]
+
+    statuses = {}
+    for item in items:
+        key = getattr(item, "key", "?")
+        status = getattr(item, "status", None)
+        statuses[key] = status
+
+        if status not in _WEEK_STATUSES:
+            issues.append(Issue(
+                check, "error",
+                "Item %r carries the unknown status %r." % (key, status),
+                "Statuses must be one of %s, since the page colours and sorts "
+                "on them." % (", ".join(_WEEK_STATUSES),)))
+            continue
+
+        if status == "ok" and not (getattr(item, "evidence", None) or {}):
+            issues.append(Issue(
+                check, "error",
+                "Item %r reports all-clear with no evidence behind it." % key,
+                "An all-clear must be derived, never defaulted: a builder that "
+                "could not reach its inputs must return STATUS_UNKNOWN. This is "
+                "the one failure mode unique to a checklist, because a defaulted "
+                "'nothing to do' is indistinguishable from a real one."))
+
+        if not str(getattr(item, "verdict", "") or "").strip():
+            issues.append(Issue(
+                check, "error",
+                "Item %r has no verdict line." % key,
+                "Every row has to say something; an empty one reads as a "
+                "rendering fault."))
+
+    # A deadline in the past is not the next deadline.
+    for item in items:
+        if getattr(item, "key", "") != "deadline":
+            continue
+        hours = (getattr(item, "evidence", None) or {}).get("hours_left")
+        if hours is not None and float(hours) <= 0:
+            issues.append(Issue(
+                check, "error",
+                "The next deadline is reported as %.1f hours away." % float(hours),
+                "A past deadline has been presented as the upcoming one. "
+                "gameweek_deadlines() returns only future deadlines, so this "
+                "means the list was filtered against the wrong clock."))
+
+    # A captain recommendation needs a squad whose armband is current.
+    for item in items:
+        if getattr(item, "key", "") != "lineup":
+            continue
+        ev = getattr(item, "evidence", None) or {}
+        if getattr(item, "status", "") == "act" and not ev.get("comparable"):
+            issues.append(Issue(
+                check, "error",
+                "A captain change is recommended against a squad that is not "
+                "current.",
+                "A `picks`-sourced squad carries last deadline's armband, so the "
+                "disagreement is with a choice the manager has already revised. "
+                "Gate the comparison on resolution.source == my_team."))
+
+    for item in items:
+        if getattr(item, "key", "") != "transfers":
+            continue
+        count = (getattr(item, "evidence", None) or {}).get("free_transfers")
+        if count is None:
+            continue
+        if count < 0 or count > _MAX_WEEK_FREE_TRANSFERS:
+            issues.append(Issue(
+                check, "error",
+                "Free transfers reported as %s." % count,
+                "The cap is %d (one a week from GW2, banked). Run "
+                "check_free_transfers() with the history and chip list for the "
+                "exact bound." % _MAX_WEEK_FREE_TRANSFERS))
+
+    # A page of green ticks over an illegal squad.
+    all_clear = all(s == "ok" for s in statuses.values())
+    if all_clear and squad_size is not None and int(squad_size) != 15:
+        issues.append(Issue(
+            check, "error",
+            "Every check passed against a squad of %d players." % squad_size,
+            "A Classic squad is fifteen. An all-clear over a short squad means "
+            "the items were built from a frame that had already lost rows."))
+    if xi_size is not None and int(xi_size) not in (0, 11):
+        issues.append(Issue(
+            check, "error",
+            "The projected XI holds %d players." % xi_size,
+            "best_xi_index() returns eleven or nothing; a different count means "
+            "the frame was keyed on something non-unique, which is how an XI "
+            "once came back ten strong."))
+
+    missing = [k for k in ("deadline", "squad") if k not in statuses]
+    if missing:
+        issues.append(Issue(
+            check, "warning",
+            "The checklist omits %s." % ", ".join(missing),
+            "Those two frame everything below them; an omitted row is less "
+            "honest than an unknown one."))
 
     return issues

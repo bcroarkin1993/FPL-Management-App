@@ -40,12 +40,14 @@ import config
 from scripts.common.classic_squad import resolve_classic_squad
 from scripts.common.display_names import display_of
 from scripts.common.fpl_classic_api import get_classic_team_history
+from scripts.common.price_signals import (
+    POS_LETTER as _POS_LETTER,
+    build_price_data,
+    change_state as _change_state,
+)
 from scripts.common.text_helpers import to_display_name
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.utils import get_classic_bootstrap_static
-
-# FPL element_type -> position letter
-_POS_LETTER = {1: "G", 2: "D", 3: "M", 4: "F"}
 
 _logger = logging.getLogger("fpl_app.price_changes")
 
@@ -76,72 +78,14 @@ def _format_change(tenths: int) -> str:
 # Data loading
 # ------------------------------------------------------------------
 def _build_price_data() -> pd.DataFrame:
-    """Build a DataFrame of all players with price/transfer data."""
-    bootstrap = get_classic_bootstrap_static()
-    if not bootstrap:
-        return pd.DataFrame()
+    """Fetch the bootstrap and hand it to the shared builder.
 
-    teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
-    rows = []
-    for p in bootstrap.get("elements", []):
-        rows.append({
-            "Player_Code": p.get("code"),
-            "Player": p.get("web_name", ""),
-            "Display_Name": to_display_name(
-                p.get("first_name"), p.get("second_name"), p.get("web_name")),
-            "Team": teams.get(p.get("team"), ""),
-            "Pos": _POS_LETTER.get(p.get("element_type"), "?"),
-            "now_cost": p.get("now_cost", 0),
-            "cost_change_event": p.get("cost_change_event", 0),
-            "cost_change_start": p.get("cost_change_start", 0),
-            "cost_change_start_fall": p.get("cost_change_start_fall", 0),
-            "transfers_in_event": p.get("transfers_in_event", 0),
-            "transfers_out_event": p.get("transfers_out_event", 0),
-            "transfers_in": p.get("transfers_in", 0),
-            "transfers_out": p.get("transfers_out", 0),
-            "selected_by_percent": p.get("selected_by_percent", "0"),
-            # FPL's own price-change prediction. Strings on the wire.
-            "Change_Pct": pd.to_numeric(p.get("price_change_percent"), errors="coerce"),
-            "Hourly": pd.to_numeric(p.get("price_change_hourly_rate"), errors="coerce"),
-            "Locked_Until": p.get("price_change_locked_until"),
-            "Calibrating": bool(p.get("price_change_calibrating")),
-            "Projections": p.get("price_change_projections") or [],
-        })
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    df["Net_Event"] = (pd.to_numeric(df["transfers_in_event"], errors="coerce").fillna(0)
-                       - pd.to_numeric(df["transfers_out_event"], errors="coerce").fillna(0))
-    return df
-
-
-def _change_state(row) -> str:
-    """``rise`` / ``fall`` / ``locked`` / ``calibrating`` / ``steady``.
-
-    Order matters. **Locked is checked before the threshold**, because a player
-    who has already changed today sits above 100% and is the one case where a
-    bare percentage reads as the opposite of the truth: FPL allows one change per
-    player per day. Calibrating comes next, since FPL is telling us its own
-    number is not yet usable.
+    The frame itself is built in `scripts/common/price_signals.py` so the
+    Classic My Week checklist can read the same states without importing a
+    page's private helper. `_change_state` is re-exported above for the same
+    reason, and because this module's tests import it by that name.
     """
-    pct = pd.to_numeric(row.get("Change_Pct"), errors="coerce")
-    # **`bool(float("nan"))` is True**, so a null-unsafe truth test reads a
-    # missing timestamp as a lock. The live frame holds `None` and so happens to
-    # work, but any float round-trip of the column would mark every player
-    # locked -- and "locked" is the state that suppresses the whole signal.
-    locked = row.get("Locked_Until")
-    if locked is not None and pd.notna(locked) and str(locked).strip():
-        return "locked"
-    calibrating = row.get("Calibrating")
-    if calibrating is not None and pd.notna(calibrating) and bool(calibrating):
-        return "calibrating"
-    if pd.isna(pct):
-        return "steady"
-    if pct >= 100:
-        return "rise"
-    if pct <= -100:
-        return "fall"
-    return "steady"
+    return build_price_data(get_classic_bootstrap_static())
 
 
 def _format_momentum(rate) -> str:
