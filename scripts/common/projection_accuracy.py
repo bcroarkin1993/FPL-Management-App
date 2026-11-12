@@ -1183,8 +1183,16 @@ def _start_replay_inputs(gameweeks: Optional[Sequence[int]] = None) -> List[dict
             "starts": starts,
             "chance_of_playing": chance,
             "status": status,
-            "availability_recorded": status is not None or (
-                chance is not None and chance.notna().any()),
+            # Recorded *values*, never the presence of a column. `start_frame`
+            # concatenates every gameweek, so the columns a revision-4 snapshot
+            # introduced exist (all-null) on every earlier one -- and the moment
+            # GW10's actuals landed, that made GW9 claim to record FPL's ceiling
+            # and be reported as 0.61 of *drift* rather than as the incomplete
+            # file it is. An incomplete snapshot and a changed engine produce the
+            # same symptom and only one of them is a defect.
+            "availability_recorded": bool(
+                (status is not None and status.notna().any())
+                or (chance is not None and chance.notna().any())),
             "starter_overrides": _frame_starter_overrides(one),
             "as_built_history_weight": recorded.get("omitted_history_weight"),
             "as_built_omission_share": recorded.get("omission_share"),
