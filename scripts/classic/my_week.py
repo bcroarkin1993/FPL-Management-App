@@ -36,7 +36,7 @@ import pandas as pd
 import streamlit as st
 
 import config
-from scripts.common import chips, h2h, lineup_confirm, week_check
+from scripts.common import cards, chips, h2h, lineup_confirm, week_check
 from scripts.common.analytics import gameweek_deadlines
 from scripts.common.classic_squad import SOURCE_MY_TEAM, resolve_classic_squad
 from scripts.common.data_validation import check_week_plan
@@ -87,10 +87,10 @@ STRIP_BUTTON_PX = 46       #: the button row under the list
 #: Status -> (icon, colour). Unknown is grey rather than green: a question we
 #: could not answer must not read as one answered "fine".
 _STATUS_STYLE = {
-    week_check.STATUS_OK: ("✅", "#00ff87"),
-    week_check.STATUS_UNKNOWN: ("❔", "#9ca3af"),
-    week_check.STATUS_WARN: ("⚠️", "#ffa502"),
-    week_check.STATUS_ACT: ("❗", "#ff4757"),
+    week_check.STATUS_OK: ("✅", cards.ACCENT),
+    week_check.STATUS_UNKNOWN: ("❔", cards.MUTED),
+    week_check.STATUS_WARN: ("⚠️", cards.WARN),
+    week_check.STATUS_ACT: ("❗", cards.BAD),
 }
 
 #: What each pill says. Deliberately shorter than the row's own verdict: the bar
@@ -596,22 +596,17 @@ def _render_strip(items, signature, team_id, target_gw, authed):
         and bool(signature))
     height = strip_height(len(flagged), bool(caveat), has_buttons)
 
-    st.markdown(compact_html(f'''
-        <div style="border:1px solid #333;border-radius:12px;padding:14px 16px;
-                    box-sizing:border-box;min-height:{height - (STRIP_BUTTON_PX if has_buttons else 0)}px;
-                    background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);
-                    color:#e0e0e0;">
-          <div style="display:flex;justify-content:space-between;
-                      align-items:baseline;margin-bottom:4px;">
-            <span style="color:#00ff87;font-size:0.8em;font-weight:700;
-                         text-transform:uppercase;letter-spacing:1px;">
-              Your week</span>
-            <span style="color:#9ca3af;font-size:0.78em;">{stamp}</span>
-          </div>
-          {rows}
-          {f'<div style="color:#6b7280;font-size:0.74em;margin-top:9px;">{caveat}</div>' if caveat else ""}
-        </div>
-    '''), unsafe_allow_html=True)
+    header = (
+        '<div style="display:flex;justify-content:space-between;'
+        'align-items:baseline;margin-bottom:4px;">'
+        '<span style="color:%s;font-size:0.8em;font-weight:700;'
+        'text-transform:uppercase;letter-spacing:1px;">Your week</span>'
+        '<span style="color:%s;font-size:0.78em;">%s</span></div>'
+        % (cards.ACCENT, cards.MUTED, stamp))
+    tail = cards.note(caveat) if caveat else ""
+    st.markdown(cards.card(header + rows + tail,
+                           min_height=height - (STRIP_BUTTON_PX if has_buttons else 0)),
+                unsafe_allow_html=True)
 
     _render_actions(flagged, items, signature, team_id, target_gw, authed)
     return height
@@ -669,27 +664,19 @@ def _render_actions(flagged, items, signature, team_id, target_gw, authed):
 def _item_card(item) -> str:
     """One checklist row, for the full-checklist tab.
 
-    Through `compact_html` because `detail` is optional on every row: a blank
-    line ends an HTML block in Markdown, so an empty fragment on its own line
-    puts the closing tag on screen as literal text.
+    The accent is the status colour, which `cards.card` draws as a left edge.
     """
-    icon, colour = _STATUS_STYLE.get(item.status, ("•", "#9ca3af"))
-    detail = (f'<div style="color:#9ca3af;font-size:0.84em;margin-top:5px;">'
-              f'{item.detail}</div>') if item.detail else ""
-    return compact_html(f'''
-        <div style="border:1px solid #333;border-left:4px solid {colour};
-                    border-radius:8px;padding:10px 13px;margin-bottom:7px;
-                    background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);
-                    color:#e0e0e0;">
-          <div style="display:flex;align-items:baseline;gap:9px;">
-            <span>{icon}</span>
-            <span style="color:#9ca3af;font-size:0.74em;text-transform:uppercase;
-                         letter-spacing:0.6px;min-width:104px;">{item.title}</span>
-            <span style="font-size:0.95em;">{item.verdict}</span>
-          </div>
-          {detail}
-        </div>
-    ''')
+    icon, colour = _STATUS_STYLE.get(item.status, ("•", cards.MUTED))
+    body = (
+        f'<div style="display:flex;align-items:baseline;gap:9px;">'
+        f'<span>{icon}</span>'
+        f'<span style="color:{cards.MUTED};font-size:0.74em;'
+        f'text-transform:uppercase;letter-spacing:0.6px;min-width:104px;">'
+        f'{item.title}</span>'
+        f'<span style="font-size:0.95em;">{item.verdict}</span></div>')
+    if item.detail:
+        body += cards.note(item.detail, cards.MUTED)
+    return cards.card(body, accent=colour, padding="10px 13px")
 
 
 def _render_plan(summary):
@@ -780,6 +767,7 @@ def render_my_week_section(league_id=None, scoring_type: str = "",
         with tab_all:
             for item in items:
                 st.markdown(_item_card(item), unsafe_allow_html=True)
+                st.write("")
         with tab_plan:
             _render_plan(plan)
 

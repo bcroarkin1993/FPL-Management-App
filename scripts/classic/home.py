@@ -13,8 +13,8 @@ import streamlit as st
 from typing import Optional, Dict, List
 
 from scripts.classic.my_week import render_my_week_section
+from scripts.common import cards
 from scripts.common.error_helpers import get_logger
-from scripts.common.text_helpers import compact_html
 from scripts.common.luck_analysis import (
     extract_classic_h2h_gw_scores,
     calculate_all_play_standings,
@@ -401,68 +401,112 @@ def plot_rank_progression(history_df: pd.DataFrame, use_overall_rank: bool = Fal
 # ---------------------------
 
 #: What the league selectbox above the card occupies, label included. The card
-#: is sized to the strip's height *less* this, so the two columns end level.
+#: is sized to the strip's height *less* this, so the three columns end level.
 #: Tuned by eye against Streamlit 1.38; wrong only costs alignment.
 _SELECTBOX_PX = 76
 
 
 def _card_height(strip_px) -> int:
-    """How tall to draw the league card so it ends level with the strip.
+    """How tall to draw a top-band card so it ends level with the strip.
 
     ``None`` means no strip rendered -- the team is unconfigured, or it failed --
-    and the card then sizes itself.
+    and the cards then size themselves, which is even anyway because the two
+    that remain are the same shape.
     """
     if not strip_px:
         return 0
-    return max(0, int(strip_px) - _SELECTBOX_PX)
+    return max(0, int(strip_px))
 
 
 def _league_card(league_name: str, scoring_type: str, standings: dict,
                  current_gw: int, min_height: int = 0) -> str:
-    """The selected league, as a card rather than a heading and a metric.
+    """The selected league: what it is, how big, and where you are in it.
 
-    Carries the three things that identify it -- name, format, size -- plus
-    where the configured team sits in it, which is the reason to look at a
-    league table at all and previously needed scrolling to find.
+    Was a bare `### heading` plus a `st.metric("Format")`, which said less and
+    did not line up with anything beside it.
     """
     results = (standings or {}).get("results") or []
     mine = None
     team_id = getattr(config, "FPL_CLASSIC_TEAM_ID", None)
     if team_id:
-        for row in results:
-            if str(row.get("entry")) == str(team_id):
-                mine = row
-                break
-    badge_colour = "#4ecca3" if scoring_type == "H2H" else "#00ff87"
-    standing = ""
+        mine = next((r for r in results
+                     if str(r.get("entry")) == str(team_id)), None)
+    body = (
+        cards.eyebrow("League")
+        + f'<div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;">'
+          f'{cards.headline(league_name)}'
+          f'{cards.badge(scoring_type, cards.ACCENT_ALT if scoring_type == "H2H" else cards.ACCENT)}'
+          f'</div>'
+        + cards.note("%d manager%s &middot; gameweek %d"
+                     % (len(results), "" if len(results) == 1 else "s", current_gw))
+    )
     if mine is not None:
-        standing = (
-            f'<div style="color:#9ca3af;font-size:0.78em;margin-top:auto;'
-            f'padding-top:9px;">'
-            f'You are <strong style="color:#e0e0e0;">'
-            f'{_ordinal(mine.get("rank"))}</strong> of {len(results)}'
-            f' &middot; <strong style="color:#e0e0e0;">'
-            f'{mine.get("total", 0)}</strong> pts</div>')
-    return compact_html(f'''
-        <div style="border:1px solid #333;border-radius:12px;padding:14px 16px;
-                    box-sizing:border-box;min-height:{min_height}px;
-                    display:flex;flex-direction:column;
-                    background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);
-                    color:#e0e0e0;">
-          <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;">
-            <span style="font-size:1.12em;font-weight:700;">{league_name}</span>
-            <span style="background:{badge_colour}22;color:{badge_colour};
-                         border:1px solid {badge_colour}66;padding:2px 9px;
-                         border-radius:10px;font-size:0.72em;font-weight:700;
-                         text-transform:uppercase;letter-spacing:0.5px;">
-              {scoring_type}</span>
-          </div>
-          <div style="color:#6b7280;font-size:0.76em;margin-top:5px;">
-            {len(results)} manager{"" if len(results) == 1 else "s"}
-            &middot; gameweek {current_gw}</div>
-          {standing}
-        </div>
-    ''')
+        body += cards.push(cards.stats([
+            cards.stat(_ordinal(mine.get("rank")), "your rank", cards.ACCENT),
+            cards.stat("%s" % mine.get("total", 0), "total pts"),
+        ]))
+    return cards.card(body, min_height=min_height)
+
+
+def _my_team_card(standings: dict, min_height: int = 0) -> str:
+    """Your own team, at the top of the page rather than the bottom of it.
+
+    This was four `st.metric`s inside a collapsed expander below three
+    dividers -- the most personal data on the page in the least reachable place,
+    in the one widget style the rest of the app replaced with cards. Returns ""
+    when no team is configured, so the band closes up rather than holding an
+    empty card.
+    """
+    team_id = getattr(config, "FPL_CLASSIC_TEAM_ID", None)
+    if not team_id:
+        return ""
+    entry = get_entry_details(team_id) or {}
+    history = get_classic_team_history(team_id) or {}
+    weeks = history.get("current") or []
+    latest = weeks[-1] if weeks else {}
+
+    manager = ("%s %s" % (entry.get("player_first_name", ""),
+                          entry.get("player_last_name", ""))).strip()
+    body = cards.eyebrow("My team") + cards.headline(
+        entry.get("name") or "Your team")
+    if manager:
+        body += cards.note(manager, cards.MUTED)
+
+    if latest:
+        overall = latest.get("overall_rank")
+        body += cards.stats([
+            cards.stat("%s" % latest.get("total_points", "—"), "total pts",
+                       cards.ACCENT),
+            cards.stat(("%s" % latest.get("points", "—")),
+                       "GW%s pts" % latest.get("event", "")),
+            cards.stat(("%s" % _compact_rank(overall)) if overall else "—",
+                       "overall rank"),
+        ])
+        chips = history.get("chips") or []
+        if chips:
+            names = {"wildcard": "WC", "freehit": "FH", "bboost": "BB",
+                     "3xc": "TC"}
+            body += cards.push(cards.note("Chips: " + ", ".join(
+                "%s GW%s" % (names.get(c.get("name"), c.get("name")),
+                             c.get("event", "?")) for c in chips)))
+        else:
+            body += cards.push(cards.note("No chips played yet."))
+    else:
+        body += cards.push(cards.note("Could not load your team history."))
+    return cards.card(body, min_height=min_height)
+
+
+def _compact_rank(value) -> str:
+    """412,345 -> 412k. An overall rank is read for its order of magnitude."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    if n >= 1_000_000:
+        return "%.1fm" % (n / 1_000_000)
+    if n >= 10_000:
+        return "%dk" % (n // 1_000)
+    return "{:,}".format(n)
 
 
 def _ordinal(value) -> str:
@@ -512,7 +556,15 @@ def show_classic_home_page():
     # strip has to run before the card, because the card is sized to the height
     # the strip reports; and the card still appears under the selector, because
     # that is the order the `with identity:` blocks are written in.
-    identity, week = st.columns([1, 2], gap="medium")
+    # Three cards where there were two: the league you are looking at, your own
+    # team (promoted from a collapsed expander at the foot of the page), and
+    # your week. Without a configured team there is no middle card and no
+    # strip, so the band is two columns rather than one with a hole in it.
+    if getattr(config, "FPL_CLASSIC_TEAM_ID", None):
+        identity, mine, week = st.columns([1, 1, 2], gap="medium")
+    else:
+        identity, week = st.columns([1, 2], gap="medium")
+        mine = None
 
     display_options = [opt["display"] for opt in league_options]
     with identity:
@@ -558,104 +610,145 @@ def show_classic_home_page():
             st.caption("Could not check your week just now — the league below "
                        "is unaffected.")
 
+    # The strip is the tallest thing in the band and the only one whose height
+    # is countable, so it is the measure the other cards are drawn to.
+    card_px = _card_height(strip_px)
     with identity:
         st.markdown(_league_card(league_info.get("name", "Unknown"),
                                  scoring_type, standings, current_gw,
-                                 min_height=_card_height(strip_px)),
+                                 min_height=max(0, card_px - _SELECTBOX_PX)),
                     unsafe_allow_html=True)
-
-    st.divider()
+    if mine is not None:
+        with mine:
+            st.markdown(_my_team_card(standings, min_height=card_px),
+                        unsafe_allow_html=True)
 
     # ---------------------------
-    # STANDINGS TABLE
+    # THE TABLE, AND WHAT IS BESIDE IT
     # ---------------------------
+    # The standings are six narrow columns; at full width most of the row was
+    # empty, and Season Odds rendered *underneath*, pushing everything down. So
+    # the band is the table and its companions side by side.
+    table_col, side_col = st.columns([3, 2], gap="medium")
 
     if scoring_type == "H2H":
-        st.subheader("League Standings")
         df = format_h2h_standings(standings)
 
-        # Compute streaks once for both the streak column and the Records section below
+        # Computed once for the table's streak column, the side panel and the
+        # records row below.
         h2h_matches = get_all_h2h_league_matches(league_id)
         h2h_weekly_scores = build_classic_h2h_weekly_scores(h2h_matches)
-        h2h_streaks_df = calculate_h2h_streaks(h2h_weekly_scores) if not h2h_weekly_scores.empty else None
+        h2h_streaks_df = (calculate_h2h_streaks(h2h_weekly_scores)
+                          if not h2h_weekly_scores.empty else None)
 
-        if df.empty:
-            st.info("No standings data available yet.")
-        else:
-            _c_luck, _c_odds = st.columns(2)
-            show_luck = _c_luck.checkbox(
-                "Show Luck Adjusted Standings",
-                key=f"luck_{league_id}",
-            )
-            show_odds = _c_odds.checkbox(
-                "Show Season Odds",
-                key=f"odds_{league_id}",
-                help="Plays the remaining fixtures out a few thousand times "
-                     "and counts how often each manager finishes where.",
-            )
-
-            if show_luck:
-                st.caption("**All-Play Record**: simulates every team playing every other team each gameweek. "
-                           "Luck +/- shows how much the actual schedule helped or hurt (positive = lucky).")
-                with st.spinner("Calculating all-play standings..."):
-                    luck_df = get_classic_h2h_luck_adjusted(league_id, standings)
-
-                render_luck_adjusted_table(luck_df)
+        with table_col:
+            st.subheader("League Standings")
+            if df.empty:
+                st.info("No standings data available yet.")
             else:
-                display_df = df.drop(columns=["entry_id"], errors="ignore")
-                # Merge current streak column
-                if h2h_streaks_df is not None and not h2h_streaks_df.empty:
-                    streak_map = dict(zip(h2h_streaks_df["Team"], h2h_streaks_df["Current_Streak"]))
-                    display_df = display_df.copy()
-                    display_df["Streak"] = display_df["Team"].map(streak_map).fillna("-")
-                    display_df["Streak"] = display_df["Streak"].apply(format_streak_html)
-                    # Insert Streak between L and PF
-                    cols = list(display_df.columns)
-                    l_idx = cols.index("L")
-                    cols.insert(l_idx + 1, cols.pop(cols.index("Streak")))
-                    display_df = display_df[cols]
-                render_standings_table(display_df, is_h2h=True)
+                # A radio rather than a checkbox: the two are alternative views
+                # of one table, not independent options, and only the chosen one
+                # is computed -- the all-play simulation is the expensive half.
+                view = st.radio(
+                    "Standings view", ["Table", "All-Play"],
+                    horizontal=True, label_visibility="collapsed",
+                    key=f"standings_view_{league_id}",
+                    help="All-Play replays every team against every other team "
+                         "each gameweek, so Luck +/- shows how much the actual "
+                         "schedule helped or hurt.",
+                )
+                if view == "All-Play":
+                    with st.spinner("Calculating all-play standings..."):
+                        luck_df = get_classic_h2h_luck_adjusted(league_id, standings)
+                    render_luck_adjusted_table(luck_df)
+                    st.caption("**Luck +/-** is the gap between your real record "
+                               "and your all-play one: positive means the "
+                               "schedule has helped.")
+                else:
+                    display_df = df.drop(columns=["entry_id"], errors="ignore")
+                    if h2h_streaks_df is not None and not h2h_streaks_df.empty:
+                        streak_map = dict(zip(h2h_streaks_df["Team"],
+                                              h2h_streaks_df["Current_Streak"]))
+                        display_df = display_df.copy()
+                        display_df["Streak"] = display_df["Team"].map(streak_map).fillna("-")
+                        display_df["Streak"] = display_df["Streak"].apply(format_streak_html)
+                        cols = list(display_df.columns)
+                        l_idx = cols.index("L")
+                        cols.insert(l_idx + 1, cols.pop(cols.index("Streak")))
+                        display_df = display_df[cols]
+                    render_standings_table(display_df, is_h2h=True)
 
-            if show_odds:
-                st.markdown("##### 🔮 Season Odds")
-                render_classic_h2h_season_odds(
-                    league_id, current_gw,
-                    standings.get("results") or [], h2h_matches or [])
+        with side_col:
+            if not df.empty:
+                st.subheader("Season Odds")
+                if st.checkbox(
+                        "Play the season out", key=f"odds_{league_id}",
+                        help="Plays the remaining fixtures out a few thousand "
+                             "times and counts how often each manager finishes "
+                             "where."):
+                    render_classic_h2h_season_odds(
+                        league_id, current_gw,
+                        standings.get("results") or [], h2h_matches or [])
+                else:
+                    st.caption("A few thousand simulations of the remaining "
+                               "fixtures, so it is computed on request.")
+            if h2h_streaks_df is not None and not h2h_streaks_df.empty:
+                # Beside the standings rather than two sections further down:
+                # both are league tables, and this one is narrow.
+                streaks_display = h2h_streaks_df.rename(columns={
+                    "Current_Streak": "Current",
+                    "Longest_Win_Streak": "Best Win Run",
+                    "Longest_Unbeaten_Streak": "Best Unbeaten Run",
+                    "Longest_Loss_Streak": "Worst Loss Run",
+                })
+                render_styled_table(
+                    streaks_display, title="Streaks",
+                    text_align={c: "center" for c in
+                                ("Current", "Best Win Run",
+                                 "Best Unbeaten Run", "Worst Loss Run")},
+                    positive_color_cols=["Best Win Run", "Best Unbeaten Run"],
+                    negative_color_cols=["Worst Loss Run"],
+                )
     else:
-        st.subheader("League Standings")
         df = format_classic_standings(standings)
+        h2h_matches, h2h_weekly_scores, h2h_streaks_df = [], pd.DataFrame(), None
 
-        if df.empty:
-            st.info("No standings data available yet.")
-        else:
-            show_odds_pts = st.checkbox(
-                "Show Season Odds",
-                key=f"odds_pts_{league_id}",
-                help="A total-points league has no fixtures, so this draws a "
-                     "score for every manager in each remaining gameweek and "
-                     "counts how often each one finishes where.",
-            )
-            # Don't show entry_id in display
-            display_df = df.drop(columns=["entry_id"], errors="ignore")
-            render_standings_table(display_df, is_h2h=False)
+        with table_col:
+            st.subheader("League Standings")
+            if df.empty:
+                st.info("No standings data available yet.")
+            else:
+                render_standings_table(
+                    df.drop(columns=["entry_id"], errors="ignore"),
+                    is_h2h=False)
 
-            if show_odds_pts:
-                st.markdown("##### 🔮 Season Odds")
-                # Sigma is measured from the histories the progression charts
-                # below already fetch, so this is a cache hit rather than N more
-                # requests. It is a league-level noise parameter, so a sample of
-                # managers is a sound basis for it -- unlike the means, which
-                # come from every manager's own total.
-                _sample_ids = df["entry_id"].head(10).tolist()
-                _sample_names = dict(zip(df["entry_id"], df["Team"]))
-                try:
-                    _sample = fetch_team_histories(_sample_ids, _sample_names)
-                except Exception:
-                    _sample = None
-                _odds_df = df.copy()
-                _odds_df.attrs["truncated"] = bool(standings.get("has_next"))
-                render_classic_points_season_odds(
-                    league_id, current_gw, _odds_df, sigma_sample=_sample)
+        with side_col:
+            if not df.empty:
+                st.subheader("Season Odds")
+                if st.checkbox(
+                        "Play the season out", key=f"odds_pts_{league_id}",
+                        help="A total-points league has no fixtures, so this "
+                             "draws a score for every manager in each remaining "
+                             "gameweek and counts how often each finishes where."):
+                    # Sigma is measured from the histories the progression
+                    # charts below already fetch, so this is a cache hit rather
+                    # than N more requests. It is a league-level noise
+                    # parameter, so a sample of managers is a sound basis for it
+                    # -- unlike the means, which come from every manager's own
+                    # total.
+                    _sample_ids = df["entry_id"].head(10).tolist()
+                    _sample_names = dict(zip(df["entry_id"], df["Team"]))
+                    try:
+                        _sample = fetch_team_histories(_sample_ids, _sample_names)
+                    except Exception:
+                        _sample = None
+                    _odds_df = df.copy()
+                    _odds_df.attrs["truncated"] = bool(standings.get("has_next"))
+                    render_classic_points_season_odds(
+                        league_id, current_gw, _odds_df, sigma_sample=_sample)
+                else:
+                    st.caption("A few thousand simulated seasons, so it is "
+                               "computed on request.")
 
     # Show pagination info
     has_next = standings.get("has_next", False)
@@ -755,134 +848,54 @@ def show_classic_home_page():
     st.divider()
 
     # ---------------------------
-    # H2H RECORDS & STREAKS
+    # SEASON SUPERLATIVES
     # ---------------------------
-    if scoring_type == "H2H" and h2h_streaks_df is not None and not h2h_streaks_df.empty:
-        st.subheader("Records & Streaks")
+    # One row of four, rather than a 2x2 block and then a second section for
+    # the streaks table -- which is now beside the standings, where the other
+    # league table is. The four cards are the same shape, so they line up
+    # without being measured.
+    if scoring_type == "H2H" and h2h_weekly_scores is not None \
+            and not h2h_weekly_scores.empty:
+        st.subheader("Season Records")
+        ws = h2h_weekly_scores.copy()
+        ws["Margin"] = ws["Points"] - ws["Opp_Points"]
+        wins = ws[ws["Margin"] > 0]
 
-        def _record_card(title: str, value: str, subtitle: str, detail: str, accent: str = "#00ff87") -> str:
-            return (
-                f'<div style="border:1px solid #333;border-radius:10px;padding:16px;'
-                f'background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);">'
-                f'<div style="color:#9ca3af;font-size:11px;text-transform:uppercase;'
-                f'letter-spacing:0.5px;margin-bottom:4px;">{title}</div>'
-                f'<div style="color:{accent};font-size:24px;font-weight:800;margin-bottom:4px;">{value}</div>'
-                f'<div style="color:#e0e0e0;font-size:13px;font-weight:600;">{subtitle}</div>'
-                f'<div style="color:#9ca3af;font-size:12px;margin-top:2px;">{detail}</div>'
-                f'</div>'
-            )
+        best = ws.loc[ws["Points"].idxmax()]
+        worst = ws.loc[ws["Points"].idxmin()]
+        records = [
+            ("Highest GW score", "%d pts" % int(best["Points"]),
+             "%s (GW%d)" % (best["Team"], int(best["Gameweek"])),
+             "against %d" % int(best["Opp_Points"]), cards.ACCENT),
+            ("Lowest GW score", "%d pts" % int(worst["Points"]),
+             "%s (GW%d)" % (worst["Team"], int(worst["Gameweek"])),
+             "against %d" % int(worst["Opp_Points"]), "#f87171"),
+        ]
+        if not wins.empty:
+            big = wins.loc[wins["Margin"].idxmax()]
+            close = wins.loc[wins["Margin"].idxmin()]
+            records.append(
+                ("Biggest win", "%d-%d" % (int(big["Points"]), int(big["Opp_Points"])),
+                 "%s (GW%d)" % (big["Team"], int(big["Gameweek"])),
+                 "+%d margin" % int(big["Margin"]), cards.ACCENT_ALT))
+            records.append(
+                ("Closest match", "%d-%d" % (int(close["Points"]), int(close["Opp_Points"])),
+                 "%s (GW%d)" % (close["Team"], int(close["Gameweek"])),
+                 "by %d pt%s" % (int(close["Margin"]),
+                                 "" if int(close["Margin"]) == 1 else "s"),
+                 "#facc15"))
 
-        # Records from weekly scores
-        if not h2h_weekly_scores.empty:
-            ws = h2h_weekly_scores.copy()
-            ws["Margin"] = ws["Points"] - ws["Opp_Points"]
+        bodies = [
+            cards.eyebrow(title)
+            + f'<div style="color:{accent};font-size:1.5em;font-weight:800;'
+              f'line-height:1.15;">{value}</div>'
+            + f'<div style="font-size:0.84em;font-weight:600;margin-top:3px;">'
+              f'{who}</div>'
+            + cards.push(cards.note(detail))
+            for title, value, who, detail, accent in records
+        ]
+        for column, html in zip(st.columns(len(bodies), gap="small"),
+                                cards.card_row(bodies)):
+            with column:
+                st.markdown(html, unsafe_allow_html=True)
 
-            # Highest score
-            max_idx = ws["Points"].idxmax()
-            max_row = ws.loc[max_idx]
-            # Lowest score
-            min_idx = ws["Points"].idxmin()
-            min_row = ws.loc[min_idx]
-            # Biggest win / closest match (winner perspective: Margin > 0)
-            wins = ws[ws["Margin"] > 0]
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(
-                    _record_card("Highest Single GW Score", f"{int(max_row['Points'])} pts",
-                                 f"{max_row['Team']} (GW{int(max_row['Gameweek'])})",
-                                 f"vs {max_row['Opp_Points']} pts"),
-                    unsafe_allow_html=True,
-                )
-                if not wins.empty:
-                    big_win_idx = wins["Margin"].idxmax()
-                    bw = wins.loc[big_win_idx]
-                    st.markdown(
-                        _record_card("Biggest Win", f"{int(bw['Points'])}-{int(bw['Opp_Points'])}",
-                                     f"{bw['Team']} (GW{int(bw['Gameweek'])})",
-                                     f"+{int(bw['Margin'])} margin"),
-                        unsafe_allow_html=True,
-                    )
-            with col2:
-                st.markdown(
-                    _record_card("Lowest Single GW Score", f"{int(min_row['Points'])} pts",
-                                 f"{min_row['Team']} (GW{int(min_row['Gameweek'])})",
-                                 f"vs {min_row['Opp_Points']} pts",
-                                 accent="#f87171"),
-                    unsafe_allow_html=True,
-                )
-                close_matches = ws[ws["Margin"] > 0].copy()
-                if not close_matches.empty:
-                    close_idx = close_matches["Margin"].idxmin()
-                    cm = close_matches.loc[close_idx]
-                    st.markdown(
-                        _record_card("Closest Match", f"{int(cm['Points'])}-{int(cm['Opp_Points'])}",
-                                     f"GW{int(cm['Gameweek'])}",
-                                     f"{cm['Team']} won by {int(cm['Margin'])} pt(s)",
-                                     accent="#facc15"),
-                        unsafe_allow_html=True,
-                    )
-
-        st.divider()
-
-        st.subheader("Streaks")
-        streaks_display = h2h_streaks_df.rename(columns={
-            "Current_Streak": "Current",
-            "Longest_Win_Streak": "Best Win Run",
-            "Longest_Unbeaten_Streak": "Best Unbeaten Run",
-            "Longest_Loss_Streak": "Worst Loss Run",
-        })
-        render_styled_table(
-            streaks_display,
-            text_align={"Current": "center", "Best Win Run": "center",
-                        "Best Unbeaten Run": "center", "Worst Loss Run": "center"},
-            positive_color_cols=["Best Win Run", "Best Unbeaten Run"],
-            negative_color_cols=["Worst Loss Run"],
-        )
-
-        st.divider()
-
-    # ---------------------------
-    # MY TEAM INFO
-    # ---------------------------
-    if config.FPL_CLASSIC_TEAM_ID:
-        with st.expander("My Team Summary"):
-            history = get_classic_team_history(config.FPL_CLASSIC_TEAM_ID)
-            entry = get_entry_details(config.FPL_CLASSIC_TEAM_ID)
-
-            if entry:
-                st.markdown(f"**{entry.get('name', 'Unknown Team')}**")
-                st.caption(f"Manager: {entry.get('player_first_name', '')} {entry.get('player_last_name', '')}")
-
-            if history and history.get("current"):
-                latest_gw = history["current"][-1] if history["current"] else {}
-
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    overall_rank = latest_gw.get('overall_rank')
-                    st.metric("Overall Rank", f"{overall_rank:,}" if overall_rank else "N/A")
-                with col2:
-                    gw_rank = latest_gw.get('rank')
-                    st.metric("GW Rank", f"{gw_rank:,}" if gw_rank else "N/A")
-                with col3:
-                    st.metric("GW Points", latest_gw.get("points", "N/A"))
-                with col4:
-                    st.metric("Total Points", latest_gw.get("total_points", "N/A"))
-
-                # Show chips used
-                chips = history.get("chips", [])
-                if chips:
-                    st.markdown("**Chips Used:**")
-                    chip_names = {
-                        "wildcard": "Wildcard",
-                        "freehit": "Free Hit",
-                        "bboost": "Bench Boost",
-                        "3xc": "Triple Captain"
-                    }
-                    chip_text = ", ".join([
-                        f"{chip_names.get(c.get('name', ''), c.get('name', ''))} (GW{c.get('event', '?')})"
-                        for c in chips
-                    ])
-                    st.caption(chip_text)
-            else:
-                st.info("Could not load team history.")

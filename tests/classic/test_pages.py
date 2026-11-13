@@ -163,22 +163,33 @@ class TestClassicHomeShowsTheWeek:
         assert section.call_args.kwargs["scoring_type"] == "H2H"
         assert section.call_args.kwargs["league_id"]
 
-    def test_the_league_card_is_sized_from_the_strip(self, mock_all_utils):
-        """They sit side by side, so the card is drawn to the height the strip
-        reports less the selector above it -- otherwise the column ends short."""
+    def _band_a(self, strip_px=221, team_id=1):
+        """Render Home and report what the top band was given.
+
+        Returns ``(league card min_height, my team card min_height)``.
+        """
         import scripts.classic.home as home
         seen = {}
-        real = home._league_card
+        real_league, real_team = home._league_card, home._my_team_card
 
-        def spy(*a, **kw):
-            seen["min_height"] = kw.get("min_height")
-            return real(*a, **kw)
+        def league_spy(*a, **kw):
+            seen["league"] = kw.get("min_height")
+            return real_league(*a, **kw)
+
+        def team_spy(*a, **kw):
+            seen["team"] = kw.get("min_height")
+            return real_team(*a, **kw)
 
         with ExitStack() as stack:
             mod = "scripts.classic.home"
             for name, value in {
-                "get_classic_team_history": None,
-                "get_entry_details": {"name": "Test", "id": 1},
+                "get_classic_team_history": {"current": [
+                    {"event": 11, "points": 60, "total_points": 742,
+                     "overall_rank": 412345, "rank": 90210}], "chips": [
+                    {"name": "wildcard", "event": 3}]},
+                "get_entry_details": {"name": "Test XI", "id": 1,
+                                      "player_first_name": "A",
+                                      "player_last_name": "Tester"},
                 "get_current_gameweek": 12,
                 "get_all_h2h_league_matches": [],
                 "extract_classic_h2h_gw_scores": pd.DataFrame(),
@@ -190,12 +201,92 @@ class TestClassicHomeShowsTheWeek:
             stack.enter_context(patch(f"{mod}.render_luck_adjusted_table"))
             stack.enter_context(patch(f"{mod}.render_standings_table"))
             stack.enter_context(patch(f"{mod}.render_my_week_section",
-                                      return_value=221))
+                                      return_value=strip_px))
+            stack.enter_context(patch(f"{mod}.config.FPL_CLASSIC_TEAM_ID",
+                                      team_id, create=True))
             stack.enter_context(patch.object(home, "_league_card",
-                                             side_effect=spy))
+                                             side_effect=league_spy))
+            stack.enter_context(patch.object(home, "_my_team_card",
+                                             side_effect=team_spy))
             from scripts.classic.home import show_classic_home_page
             show_classic_home_page()
-        assert seen["min_height"] == 221 - home._SELECTBOX_PX
+        return seen
+
+    def test_the_top_band_is_three_cards_at_one_height(self, mock_all_utils):
+        """They sit side by side, so they are drawn to the strip's height --
+        the league card less the selector stacked above it."""
+        import scripts.classic.home as home
+        seen = self._band_a(strip_px=221)
+        assert seen["team"] == 221
+        assert seen["league"] == 221 - home._SELECTBOX_PX
+
+    def test_my_team_is_in_the_top_band_not_an_expander(self, mock_all_utils):
+        """It was four `st.metric`s in a collapsed expander below three
+        dividers -- the most personal data on the page, hardest to reach."""
+        import scripts.classic.home as home
+        assert "team" in self._band_a()
+        card = home._my_team_card(self._standings("Classic")["standings"])
+        assert "Test XI" not in card or "742" in card   # built from history
+
+    def test_no_configured_team_drops_the_middle_card(self, mock_all_utils):
+        """Two columns rather than three with a hole in them."""
+        seen = self._band_a(team_id=None, strip_px=None)
+        assert "team" not in seen
+
+    def test_the_all_play_view_is_not_computed_until_it_is_chosen(self, mock_all_utils):
+        """The radio keeps the laziness the checkbox had: the all-play
+        simulation is the expensive half of the standings band."""
+        with ExitStack() as stack:
+            mod = "scripts.classic.home"
+            for name, value in {
+                "get_classic_team_history": None,
+                "get_entry_details": {"name": "T", "id": 1},
+                "get_current_gameweek": 12,
+                "get_all_h2h_league_matches": [],
+                "extract_classic_h2h_gw_scores": pd.DataFrame(),
+                "calculate_all_play_standings": pd.DataFrame(),
+            }.items():
+                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
+            stack.enter_context(patch(f"{mod}.get_league_standings",
+                                      return_value=self._standings("H2H")))
+            stack.enter_context(patch(f"{mod}.render_standings_table"))
+            stack.enter_context(patch(f"{mod}.render_luck_adjusted_table"))
+            stack.enter_context(patch(f"{mod}.render_my_week_section",
+                                      return_value=200))
+            luck = stack.enter_context(patch(
+                f"{mod}.get_classic_h2h_luck_adjusted",
+                return_value=pd.DataFrame()))
+            # The mocked radio hands back its first option, "Table".
+            from scripts.classic.home import show_classic_home_page
+            show_classic_home_page()
+        assert not luck.called
+
+    def test_choosing_all_play_computes_it(self, mock_all_utils):
+        with ExitStack() as stack:
+            mod = "scripts.classic.home"
+            for name, value in {
+                "get_classic_team_history": None,
+                "get_entry_details": {"name": "T", "id": 1},
+                "get_current_gameweek": 12,
+                "get_all_h2h_league_matches": [],
+                "extract_classic_h2h_gw_scores": pd.DataFrame(),
+                "calculate_all_play_standings": pd.DataFrame(),
+            }.items():
+                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
+            stack.enter_context(patch(f"{mod}.get_league_standings",
+                                      return_value=self._standings("H2H")))
+            stack.enter_context(patch(f"{mod}.render_standings_table"))
+            stack.enter_context(patch(f"{mod}.render_luck_adjusted_table"))
+            stack.enter_context(patch(f"{mod}.render_my_week_section",
+                                      return_value=200))
+            stack.enter_context(patch("streamlit.radio",
+                                      return_value="All-Play"))
+            luck = stack.enter_context(patch(
+                f"{mod}.get_classic_h2h_luck_adjusted",
+                return_value=pd.DataFrame()))
+            from scripts.classic.home import show_classic_home_page
+            show_classic_home_page()
+        assert luck.called
 
     def test_no_strip_lets_the_card_size_itself(self, mock_all_utils):
         """An unconfigured team renders no strip, and a card stretched to match
