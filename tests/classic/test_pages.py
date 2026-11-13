@@ -258,6 +258,59 @@ class TestClassicHomeShowsTheWeek:
         assert handles["table"].called
 
 
+class TestSeasonRecords:
+    """The four superlative cards under the charts.
+
+    Each title is a claim about which row it came from, which is why they are
+    worth testing: "Closest match" was wrong, because a draw is closer than any
+    win and the row is the smallest *positive* margin by construction.
+    """
+
+    def _ws(self):
+        return pd.DataFrame([
+            {"Team": "Drawer", "Gameweek": 1, "Points": 70, "Opp_Points": 70},
+            {"Team": "Narrow", "Gameweek": 2, "Points": 61, "Opp_Points": 60},
+            {"Team": "Crusher", "Gameweek": 3, "Points": 90, "Opp_Points": 40},
+            {"Team": "Blanker", "Gameweek": 4, "Points": 20, "Opp_Points": 55},
+        ])
+
+    def _by_title(self, ws=None):
+        from scripts.classic.home import _season_records
+        return {r[0]: r for r in _season_records(
+            self._ws() if ws is None else ws)}
+
+    def test_a_draw_is_not_the_closest_win(self):
+        """The 0-margin draw is closer than the 1-point win and must not take
+        the slot -- the reason the card is no longer called "closest match"."""
+        record = self._by_title()["Closest win"]
+        assert "Narrow" in record[2] and record[1] == "61-60"
+        assert "Drawer" not in record[2]
+
+    def test_the_extremes_are_the_extremes(self):
+        by_title = self._by_title()
+        assert by_title["Highest GW score"][1] == "90 pts"
+        assert by_title["Lowest GW score"][1] == "20 pts"
+        assert by_title["Biggest win"][1] == "90-40"
+
+    def test_a_season_of_draws_has_no_win_cards(self):
+        """Two cards rather than four, instead of naming a draw as a win."""
+        draws = pd.DataFrame([
+            {"Team": "A", "Gameweek": 1, "Points": 70, "Opp_Points": 70},
+            {"Team": "B", "Gameweek": 1, "Points": 70, "Opp_Points": 70},
+        ])
+        titles = self._by_title(draws)
+        assert "Closest win" not in titles and "Biggest win" not in titles
+        assert "Highest GW score" in titles
+
+    def test_no_matches_yet_is_no_records(self):
+        from scripts.classic.home import _season_records
+        assert _season_records(pd.DataFrame()) == []
+        assert _season_records(None) == []
+
+    def test_one_point_is_singular(self):
+        assert self._by_title()["Closest win"][3] == "by 1 pt"
+
+
 class TestClassicFixtureProjectionsPage:
     def test_smoke(self, mock_all_utils):
         # ExitStack rather than a chained `with`: CPython caps statically

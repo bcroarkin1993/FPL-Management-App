@@ -489,6 +489,49 @@ def _my_team_card(standings: dict) -> str:
     return cards.card(body)
 
 
+def _season_records(weekly_scores: pd.DataFrame) -> list:
+    """The season's superlatives, as ``(title, value, who, detail, accent)``.
+
+    **"Closest win", not "closest match".** The row is the smallest *positive*
+    margin, so a draw -- which is closer still, and this league has had some --
+    cannot win the slot by construction. The old title claimed more than the
+    data: it named a match when what it had found was a win.
+
+    Pure, so the titles can be tested against the rows they are drawn from.
+    """
+    if weekly_scores is None or weekly_scores.empty:
+        return []
+    ws = weekly_scores.copy()
+    ws["Margin"] = ws["Points"] - ws["Opp_Points"]
+
+    best = ws.loc[ws["Points"].idxmax()]
+    worst = ws.loc[ws["Points"].idxmin()]
+    records = [
+        ("Highest GW score", "%d pts" % int(best["Points"]),
+         "%s (GW%d)" % (best["Team"], int(best["Gameweek"])),
+         "against %d" % int(best["Opp_Points"]), cards.ACCENT),
+        ("Lowest GW score", "%d pts" % int(worst["Points"]),
+         "%s (GW%d)" % (worst["Team"], int(worst["Gameweek"])),
+         "against %d" % int(worst["Opp_Points"]), "#f87171"),
+    ]
+
+    wins = ws[ws["Margin"] > 0]
+    if not wins.empty:
+        big = wins.loc[wins["Margin"].idxmax()]
+        close = wins.loc[wins["Margin"].idxmin()]
+        records.append(
+            ("Biggest win", "%d-%d" % (int(big["Points"]), int(big["Opp_Points"])),
+             "%s (GW%d)" % (big["Team"], int(big["Gameweek"])),
+             "+%d margin" % int(big["Margin"]), cards.ACCENT_ALT))
+        records.append(
+            ("Closest win", "%d-%d" % (int(close["Points"]), int(close["Opp_Points"])),
+             "%s (GW%d)" % (close["Team"], int(close["Gameweek"])),
+             "by %d pt%s" % (int(close["Margin"]),
+                             "" if int(close["Margin"]) == 1 else "s"),
+             "#facc15"))
+    return records
+
+
 def _top_band(league_html: str, team_html: str, week_html: str) -> str:
     """The three top cards as one CSS grid.
 
@@ -878,33 +921,7 @@ def show_classic_home_page():
         if scoring_type == "H2H" and h2h_weekly_scores is not None \
                 and not h2h_weekly_scores.empty:
             st.subheader("Season Records")
-            ws = h2h_weekly_scores.copy()
-            ws["Margin"] = ws["Points"] - ws["Opp_Points"]
-            wins = ws[ws["Margin"] > 0]
-
-            best = ws.loc[ws["Points"].idxmax()]
-            worst = ws.loc[ws["Points"].idxmin()]
-            records = [
-                ("Highest GW score", "%d pts" % int(best["Points"]),
-                 "%s (GW%d)" % (best["Team"], int(best["Gameweek"])),
-                 "against %d" % int(best["Opp_Points"]), cards.ACCENT),
-                ("Lowest GW score", "%d pts" % int(worst["Points"]),
-                 "%s (GW%d)" % (worst["Team"], int(worst["Gameweek"])),
-                 "against %d" % int(worst["Opp_Points"]), "#f87171"),
-            ]
-            if not wins.empty:
-                big = wins.loc[wins["Margin"].idxmax()]
-                close = wins.loc[wins["Margin"].idxmin()]
-                records.append(
-                    ("Biggest win", "%d-%d" % (int(big["Points"]), int(big["Opp_Points"])),
-                     "%s (GW%d)" % (big["Team"], int(big["Gameweek"])),
-                     "+%d margin" % int(big["Margin"]), cards.ACCENT_ALT))
-                records.append(
-                    ("Closest match", "%d-%d" % (int(close["Points"]), int(close["Opp_Points"])),
-                     "%s (GW%d)" % (close["Team"], int(close["Gameweek"])),
-                     "by %d pt%s" % (int(close["Margin"]),
-                                     "" if int(close["Margin"]) == 1 else "s"),
-                     "#facc15"))
+            records = _season_records(h2h_weekly_scores)
 
             bodies = [
                 cards.eyebrow(title)
