@@ -3386,13 +3386,34 @@ recorded under "A blank line ends an HTML block".
 `min_height` rather than `height`, and clamped at zero: a card may always grow
 past the row's measure, which fails safe as a taller row instead of clipped text.
 
-**The standings view is a radio, not a checkbox.** Table and All-Play are
-alternative views of one table, not independent options — and the radio keeps
-the laziness, which matters because the all-play simulation is the expensive half
-of that band. `test_the_all_play_view_is_not_computed_until_it_is_chosen` pins
-it, and its twin pins that choosing All-Play does compute it; a mocked radio
-returns its first option, so without the second test the branch would simply
-never run.
+**The standings view is a radio, not a checkbox.** Table and **Luck Adjusted**
+are alternative views of one table, not independent options — and the radio keeps
+the laziness, which matters because replaying every fixture against every other
+is the expensive half of that band. The two tests pin both directions; a mocked
+radio returns its first option, so without the second the branch would never
+run. "All-play" is the *method* and stays in the caption and the function names;
+the view is named for what it tells you.
+
+**A name is not a join key, in the league tables either.** Reported from the
+app: the luck-adjusted standings showed **one** row for the two managers who
+have never renamed their squad, both of whom appear as "Change Name". Their
+all-play records were summed and they were counted *against each other*.
+`calculate_all_play_standings`, `build_classic_h2h_weekly_scores` and
+`calculate_h2h_streaks` all keyed on the name — so the streaks interleaved into
+one row too, and Classic Home then mapped that back onto the standings by name,
+giving both managers the same wrong streak.
+
+All three key on the **entry id where the frame carries one**, falling back to
+the name where it does not, which leaves the Draft callers' behaviour unchanged
+while `extract_draft_gw_scores` and Draft Home's weekly frame now carry ids
+against the same latent bug. `calculate_h2h_streaks` publishes the key it
+grouped on, so a caller can join on it. Measured on the live league (20
+managers): the table went from 19 rows to 20, the two separating into 109-10-71
+(60.0%, actual rank 5) and 96-0-94 (50.5%, actual rank 8).
+
+**The overall rank carries its denominator** — "2.1m / 11.3m". A rank reads as
+bad until you know the field it is out of, and `total_players` is on the
+bootstrap this page already caches.
 
 ### Caching
 
