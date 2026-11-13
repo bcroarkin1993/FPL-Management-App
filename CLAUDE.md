@@ -3355,13 +3355,35 @@ standings are six narrow columns and used about 40% of their row on a wide
 display, while Season Odds rendered *underneath* them and pushed the rest of the
 page down. It is now three bands:
 
-| Band | Columns | Holds |
+| Band | Shape | Holds |
 |---|---|---|
-| A | `[1, 1, 2]` | league card (selector above it) · **my team** · the My Week strip |
-| B | `[3, 2]` | standings, with a Table/All-Play radio · Season Odds, and the Streaks table in H2H |
-| C | full width | the progression tabs, then one row of four season records |
+| A | one CSS grid, `1fr 1fr 2fr` | league card · **my team** · the My Week strip, with their controls in a matching `st.columns` underneath |
+| B | `st.tabs(["🏆 League", "🗓️ My week in full"])` | the league tab holds the standings (full width), then Season Odds and Streaks side by side under them, the progression tabs, and one row of four season records |
 
 Dividers: five to two.
+
+**Band A is a grid, not three columns, and that is the whole alignment fix.**
+Heights were computed in Python first and the cards still did not line up,
+because whether a verdict wraps onto a second line is the browser's decision —
+an estimate is right until the text is one word longer. Grid items stretch to
+the tallest in the row by construction, so `strip_height`, `_card_height` and
+`_SELECTBOX_PX` are all gone.
+
+A Streamlit widget cannot live inside one block of markup, so the controls that
+belong to those cards render in a matching `st.columns` beneath them, and the
+grid goes into an **`st.empty()` slot reserved before that row** — which is what
+lets the league selector still run first, since the id it returns is what
+everything below fetches. A documented pattern rather than a DOM trick; the
+alternative was CSS against Streamlit's internals, which this file records
+breaking silently on an upgrade.
+
+**The week detail is a tab, not an expander.** An expander in the right-hand
+column is a wide control in a narrow space, and it hid a page of rows behind two
+clicks. `st.tabs` renders both bodies, which costs nothing because the week is
+already assembled, so the toggle is instant. That split `my_week` into
+`build_week_view` → `week_card_html` / `render_week_actions` /
+`render_week_detail`: the card, the buttons and the detail land in three
+different containers now, from one assembly.
 
 **Your own team was last and hidden** — four `st.metric`s in a collapsed
 expander below three dividers, which is the most personal data on the page in
