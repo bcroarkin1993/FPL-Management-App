@@ -400,8 +400,25 @@ def plot_rank_progression(history_df: pd.DataFrame, use_overall_rank: bool = Fal
 # MAIN PAGE
 # ---------------------------
 
+#: What the league selectbox above the card occupies, label included. The card
+#: is sized to the strip's height *less* this, so the two columns end level.
+#: Tuned by eye against Streamlit 1.38; wrong only costs alignment.
+_SELECTBOX_PX = 76
+
+
+def _card_height(strip_px) -> int:
+    """How tall to draw the league card so it ends level with the strip.
+
+    ``None`` means no strip rendered -- the team is unconfigured, or it failed --
+    and the card then sizes itself.
+    """
+    if not strip_px:
+        return 0
+    return max(0, int(strip_px) - _SELECTBOX_PX)
+
+
 def _league_card(league_name: str, scoring_type: str, standings: dict,
-                 current_gw: int) -> str:
+                 current_gw: int, min_height: int = 0) -> str:
     """The selected league, as a card rather than a heading and a metric.
 
     Carries the three things that identify it -- name, format, size -- plus
@@ -420,13 +437,16 @@ def _league_card(league_name: str, scoring_type: str, standings: dict,
     standing = ""
     if mine is not None:
         standing = (
-            f'<div style="color:#9ca3af;font-size:0.78em;margin-top:7px;">'
+            f'<div style="color:#9ca3af;font-size:0.78em;margin-top:auto;'
+            f'padding-top:9px;">'
             f'You are <strong style="color:#e0e0e0;">'
             f'{_ordinal(mine.get("rank"))}</strong> of {len(results)}'
             f' &middot; <strong style="color:#e0e0e0;">'
             f'{mine.get("total", 0)}</strong> pts</div>')
     return compact_html(f'''
         <div style="border:1px solid #333;border-radius:12px;padding:14px 16px;
+                    box-sizing:border-box;min-height:{min_height}px;
+                    display:flex;flex-direction:column;
                     background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);
                     color:#e0e0e0;">
           <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;">
@@ -477,25 +497,39 @@ def show_classic_home_page():
     if "classic_home_league_index" not in st.session_state:
         st.session_state.classic_home_league_index = 0
 
-    # League selector
-    display_options = [opt["display"] for opt in league_options]
-    selected_display = st.selectbox(
-        "Select League",
-        options=display_options,
-        index=st.session_state.classic_home_league_index,
-        key="classic_home_league_selector"
-    )
+    # ---------------------------
+    # THE TOP: which league, and your week in it
+    # ---------------------------
+    # Side by side because they answer the two questions a visit starts with --
+    # "which league am I looking at" and "is there anything I have to do before
+    # the deadline" -- and because a time-critical flag below the fold is one
+    # you find out about afterwards.
+    #
+    # The two columns are written to **out of order**, which Streamlit allows:
+    # output is routed to a column by the `with` block, while the code runs top
+    # to bottom. That matters three times here. The selector has to run first,
+    # because the league id it returns is what everything below fetches; the
+    # strip has to run before the card, because the card is sized to the height
+    # the strip reports; and the card still appears under the selector, because
+    # that is the order the `with identity:` blocks are written in.
+    identity, week = st.columns([1, 2], gap="medium")
 
-    # Update session state when user changes selection
+    display_options = [opt["display"] for opt in league_options]
+    with identity:
+        selected_display = st.selectbox(
+            "Select League",
+            options=display_options,
+            index=st.session_state.classic_home_league_index,
+            key="classic_home_league_selector",
+        )
+
     new_index = display_options.index(selected_display)
     if new_index != st.session_state.classic_home_league_index:
         st.session_state.classic_home_league_index = new_index
 
-    # Get selected league ID
     selected_league = league_options[st.session_state.classic_home_league_index]
     league_id = selected_league["id"]
 
-    # Fetch standings
     with st.spinner("Loading league data..."):
         data = fetch_standings_data(league_id)
 
@@ -510,30 +544,25 @@ def show_classic_home_page():
     # `get_current_gameweek` is cached.
     current_gw = get_current_gameweek() or 1
 
-    # ---------------------------
-    # THE TOP: which league, and your week in it
-    # ---------------------------
-    # Side by side because they answer the two questions a visit starts with --
-    # "which league am I looking at" and "is there anything I have to do before
-    # the deadline" -- and because a time-critical flag below the fold is one
-    # you find out about afterwards.
-    identity, week = st.columns([1, 2], gap="medium")
-    with identity:
-        st.markdown(_league_card(league_info.get("name", "Unknown"),
-                                 scoring_type, standings, current_gw),
-                    unsafe_allow_html=True)
+    strip_px = None
     with week:
         # Guarded as well as inside the section: `page_error_boundary` would
         # replace the whole page with an error, and the standings below are why
         # most visits happen, so a fault here must cost the strip alone.
         try:
-            render_my_week_section(league_id=league_id,
-                                   scoring_type=scoring_type,
-                                   current_gw=current_gw)
+            strip_px = render_my_week_section(league_id=league_id,
+                                              scoring_type=scoring_type,
+                                              current_gw=current_gw)
         except Exception:
             _logger.warning("Could not render the My Week strip", exc_info=True)
             st.caption("Could not check your week just now — the league below "
                        "is unaffected.")
+
+    with identity:
+        st.markdown(_league_card(league_info.get("name", "Unknown"),
+                                 scoring_type, standings, current_gw,
+                                 min_height=_card_height(strip_px)),
+                    unsafe_allow_html=True)
 
     st.divider()
 

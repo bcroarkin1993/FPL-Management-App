@@ -74,6 +74,16 @@ FIXTURE_HORIZON_WEEKS = 6
 #: `ffp_feed._memoised`.
 CACHE_TTL = 120
 
+#: The strip's height, in pixels, computed rather than left to the browser --
+#: the same approach as the Draft lineup cards, and for the same reason: the
+#: league card beside it has to be the same height, and only Python knows how
+#: many alert rows there are. Getting these wrong costs alignment and nothing
+#: else, so they are tuned by eye rather than derived.
+STRIP_CHROME_PX = 58       #: border, padding and the "Your week" header
+STRIP_ROW_PX = 31          #: one alert row
+STRIP_CAVEAT_PX = 24       #: the grey staleness line
+STRIP_BUTTON_PX = 46       #: the button row under the list
+
 #: Status -> (icon, colour). Unknown is grey rather than green: a question we
 #: could not answer must not read as one answered "fine".
 _STATUS_STYLE = {
@@ -512,6 +522,13 @@ def _assemble(team_id: int, current_gw: int, league_id, is_h2h: bool,
 # ------------------------------------------------------------------
 # Rendering
 # ------------------------------------------------------------------
+def strip_height(n_rows: int, caveat: bool, buttons: bool) -> int:
+    """How tall the strip will render, so the card beside it can match."""
+    return (STRIP_CHROME_PX + STRIP_ROW_PX * max(1, int(n_rows))
+            + (STRIP_CAVEAT_PX if caveat else 0)
+            + (STRIP_BUTTON_PX if buttons else 0))
+
+
 def _alert_row(item) -> str:
     """One line of the alert list: status, what it is, and the number.
 
@@ -536,7 +553,12 @@ def _alert_row(item) -> str:
 
 
 def _render_strip(items, signature, team_id, target_gw, authed):
-    """The strip: a header, the alert list, and the buttons that act on it."""
+    """The strip: a header, the alert list, and the buttons that act on it.
+
+    Returns the height it occupies, which Home uses to size the league card
+    beside it -- the two sitting at different heights is the thing this returns
+    for.
+    """
     deadline = next((i for i in items if i.key == "deadline"), None)
     stamp = ""
     when = (deadline.evidence or {}).get("deadline") if deadline else None
@@ -567,8 +589,16 @@ def _render_strip(items, signature, team_id, target_gw, authed):
         </div>
     ''')
 
+    buttons = [i for i in flagged if i.page]
+    lineup_row = next((i for i in items if i.key == "lineup"), None)
+    has_buttons = bool(buttons) or not authed or (
+        lineup_row is not None and lineup_row.status == week_check.STATUS_ACT
+        and bool(signature))
+    height = strip_height(len(flagged), bool(caveat), has_buttons)
+
     st.markdown(compact_html(f'''
         <div style="border:1px solid #333;border-radius:12px;padding:14px 16px;
+                    box-sizing:border-box;min-height:{height - (STRIP_BUTTON_PX if has_buttons else 0)}px;
                     background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);
                     color:#e0e0e0;">
           <div style="display:flex;justify-content:space-between;
@@ -584,6 +614,7 @@ def _render_strip(items, signature, team_id, target_gw, authed):
     '''), unsafe_allow_html=True)
 
     _render_actions(flagged, items, signature, team_id, target_gw, authed)
+    return height
 
 
 def _render_actions(flagged, items, signature, team_id, target_gw, authed):
@@ -693,7 +724,11 @@ def _render_plan(summary):
 
 def render_my_week_section(league_id=None, scoring_type: str = "",
                            current_gw=None):
-    """Render the strip. Called by Classic Home, beside the league selector.
+    """Render the strip, and return the height it took.
+
+    Called by Classic Home, in the column beside the league selector and card;
+    the height lets that card match it rather than ending short. ``None`` means
+    nothing was rendered, and the card should size itself.
 
     ``scoring_type`` is Home's own label for the selected league; the
     head-to-head row renders only for ``"H2H"``, since a total-points league has
@@ -708,7 +743,7 @@ def render_my_week_section(league_id=None, scoring_type: str = "",
             st.session_state["_pending_nav_section"] = week_check.SECTION_FPL
             st.session_state["_pending_nav_page"] = "🆔  League Setup"
             st.rerun()
-        return
+        return None
 
     gw = int(current_gw or config.CURRENT_GAMEWEEK or 1)
     is_h2h = str(scoring_type).upper() == "H2H"
@@ -734,10 +769,11 @@ def render_my_week_section(league_id=None, scoring_type: str = "",
                         exc_info=True)
         st.caption("Could not check your week just now. The league below is "
                    "unaffected.")
-        return
+        return None
 
     target_gw = (items[0].evidence or {}).get("gameweek") if items else gw
-    _render_strip(items, signature, team_id, int(target_gw or gw), authed)
+    height = _render_strip(items, signature, team_id, int(target_gw or gw),
+                           authed)
 
     with st.expander("Your week in full", expanded=False):
         tab_all, tab_plan = st.tabs(["All checks", "Transfer plan"])
@@ -753,6 +789,8 @@ def render_my_week_section(league_id=None, scoring_type: str = "",
     for issue in check_week_plan(items, squad_size=squad_size,
                                  xi_size=(11 if has_xi else 0)):
         _logger.log(40 if issue.severity == "error" else 20, "my week: %s", issue)
+
+    return height
 
 
 def _confirmed_signature(team_id, gameweek) -> str:

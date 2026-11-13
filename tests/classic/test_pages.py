@@ -163,6 +163,47 @@ class TestClassicHomeShowsTheWeek:
         assert section.call_args.kwargs["scoring_type"] == "H2H"
         assert section.call_args.kwargs["league_id"]
 
+    def test_the_league_card_is_sized_from_the_strip(self, mock_all_utils):
+        """They sit side by side, so the card is drawn to the height the strip
+        reports less the selector above it -- otherwise the column ends short."""
+        import scripts.classic.home as home
+        seen = {}
+        real = home._league_card
+
+        def spy(*a, **kw):
+            seen["min_height"] = kw.get("min_height")
+            return real(*a, **kw)
+
+        with ExitStack() as stack:
+            mod = "scripts.classic.home"
+            for name, value in {
+                "get_classic_team_history": None,
+                "get_entry_details": {"name": "Test", "id": 1},
+                "get_current_gameweek": 12,
+                "get_all_h2h_league_matches": [],
+                "extract_classic_h2h_gw_scores": pd.DataFrame(),
+                "calculate_all_play_standings": pd.DataFrame(),
+            }.items():
+                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
+            stack.enter_context(patch(f"{mod}.get_league_standings",
+                                      return_value=self._standings("Classic")))
+            stack.enter_context(patch(f"{mod}.render_luck_adjusted_table"))
+            stack.enter_context(patch(f"{mod}.render_standings_table"))
+            stack.enter_context(patch(f"{mod}.render_my_week_section",
+                                      return_value=221))
+            stack.enter_context(patch.object(home, "_league_card",
+                                             side_effect=spy))
+            from scripts.classic.home import show_classic_home_page
+            show_classic_home_page()
+        assert seen["min_height"] == 221 - home._SELECTBOX_PX
+
+    def test_no_strip_lets_the_card_size_itself(self, mock_all_utils):
+        """An unconfigured team renders no strip, and a card stretched to match
+        nothing would be a tall empty box."""
+        import scripts.classic.home as home
+        assert home._card_height(None) == 0
+        assert home._card_height(0) == 0
+
     def test_a_broken_strip_does_not_stop_the_standings(self, mock_all_utils):
         """It renders *above* the league, so it must not be able to hide it.
 
@@ -1553,6 +1594,34 @@ class TestMyWeekSection:
         row = next(i for i in items if i.key == "squad")
         assert row.status == "ok"
         assert row.page == "🔄  Transfer Suggestions"
+
+    def test_it_returns_the_height_it_rendered(self, mock_all_utils):
+        """Home needs it to size the league card beside it."""
+        import scripts.classic.my_week as mw
+        heights = {}
+        real = mw._render_strip
+
+        def spy(*a, **kw):
+            heights["px"] = real(*a, **kw)
+            return heights["px"]
+
+        with patch("scripts.classic.my_week._render_strip", side_effect=spy):
+            self._run()
+        assert isinstance(heights["px"], int) and heights["px"] > 0
+
+    def test_an_unconfigured_team_reports_no_height(self, mock_all_utils):
+        with patch("scripts.classic.my_week.config.FPL_CLASSIC_TEAM_ID", None,
+                   create=True):
+            from scripts.classic.my_week import render_my_week_section
+            assert render_my_week_section(league_id=1, scoring_type="Classic",
+                                          current_gw=12) is None
+
+    def test_more_alerts_make_a_taller_strip(self):
+        """The card matches it, so the height has to track the content."""
+        from scripts.classic.my_week import strip_height
+        assert strip_height(3, True, True) > strip_height(1, True, True)
+        assert strip_height(1, True, True) > strip_height(1, False, False)
+        assert strip_height(0, False, False) == strip_height(1, False, False)
 
     def test_a_failure_does_not_take_home_down(self, mock_all_utils):
         """The standings below it are why most visits happen."""
