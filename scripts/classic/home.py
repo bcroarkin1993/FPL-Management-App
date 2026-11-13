@@ -689,9 +689,6 @@ def show_classic_home_page():
                     render_classic_h2h_season_odds(
                         league_id, current_gw,
                         standings.get("results") or [], h2h_matches or [])
-                else:
-                    st.caption("A few thousand simulations of the remaining "
-                               "fixtures, so it is computed on request.")
             if h2h_streaks_df is not None and not h2h_streaks_df.empty:
                 # Beside the standings rather than two sections further down:
                 # both are league tables, and this one is narrow.
@@ -709,6 +706,12 @@ def show_classic_home_page():
                     positive_color_cols=["Best Win Run", "Best Unbeaten Run"],
                     negative_color_cols=["Worst Loss Run"],
                 )
+            # At the foot of the column rather than between the checkbox and
+            # the Streaks table, where it separated a control from the table
+            # under it.
+            if not df.empty and not st.session_state.get(f"odds_{league_id}"):
+                st.caption("Season odds are a few thousand simulations of the "
+                           "remaining fixtures, so they are computed on request.")
     else:
         df = format_classic_standings(standings)
         h2h_matches, h2h_weekly_scores, h2h_streaks_df = [], pd.DataFrame(), None
@@ -747,8 +750,8 @@ def show_classic_home_page():
                     render_classic_points_season_odds(
                         league_id, current_gw, _odds_df, sigma_sample=_sample)
                 else:
-                    st.caption("A few thousand simulated seasons, so it is "
-                               "computed on request.")
+                    st.caption("Season odds are a few thousand simulated "
+                               "seasons, so they are computed on request.")
 
     # Show pagination info
     has_next = standings.get("has_next", False)
