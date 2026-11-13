@@ -4104,6 +4104,25 @@ def check_week_plan(items: Sequence[Any],
                 "check_free_transfers() with the history and chip list for the "
                 "exact bound." % _MAX_WEEK_FREE_TRANSFERS))
 
+    # A win probability outside (0, 1) is what a sigma of 0 produces: every
+    # fixture resolves to a certainty off a spread the league has not yet
+    # earned. The same degenerate-sigma failure `check_score_std` exists for,
+    # arriving in the head-to-head row.
+    for item in items:
+        if getattr(item, "key", "") != "opponent":
+            continue
+        prob = (getattr(item, "evidence", None) or {}).get("win_prob")
+        if prob is None:
+            continue
+        if not (0.0 < float(prob) < 1.0):
+            issues.append(Issue(
+                check, "error",
+                "The head-to-head row reports a %.3f chance of winning." % float(prob),
+                "A projected margin is never a certainty. A sigma of 0 -- a "
+                "league with no played fixtures, or scores that are all equal -- "
+                "collapses every probability to 0 or 1. See h2h.h2h_sigma(), "
+                "which falls back to season_sim.DEFAULT_SIGMA for exactly this."))
+
     # A page of green ticks over an illegal squad.
     all_clear = all(s == "ok" for s in statuses.values())
     if all_clear and squad_size is not None and int(squad_size) != 15:

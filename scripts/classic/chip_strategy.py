@@ -23,13 +23,11 @@ The valuation itself is pure and lives in ``scripts/common/chips.py``; this
 module is fetching and rendering only.
 """
 
-import math
-
 import pandas as pd
 import streamlit as st
 
 import config
-from scripts.common import chips
+from scripts.common import chips, h2h
 from scripts.common.classic_squad import get_squad_budget, resolve_classic_squad
 from scripts.common.data_validation import (
     check_chip_definitions,
@@ -47,7 +45,7 @@ from scripts.common.fpl_classic_api import (
 from scripts.common.player_pool import blended_pool, squad_frame
 from scripts.common.scraping import get_ffp_horizon
 from scripts.common.styled_tables import render_styled_table
-from scripts.common.text_helpers import _map_position_to_rw, compact_html
+from scripts.common.text_helpers import _map_position_to_rw
 from scripts.fpl.player_projections import _horizon_frames
 
 _logger = get_logger("fpl_app.classic.chip_strategy")
@@ -55,6 +53,15 @@ _logger = get_logger("fpl_app.classic.chip_strategy")
 #: The picks-to-frame adapter now lives beside the pool it joins
 #: against, so the My Week checklist reads the same fifteen.
 _squad_frame = squad_frame
+
+#: The head-to-head helpers now live in `scripts/common/h2h.py`, the Classic
+#: Home alert strip having become a second reader. Re-exported under the names
+#: this module has always used, so nothing below changed.
+_h2h_scoring_league = h2h.is_h2h_league
+_h2h_schedule = h2h.h2h_schedule
+_h2h_sigma = h2h.h2h_sigma
+_opponent_squad = h2h.opponent_squad
+_lineup_projection = h2h.lineup_projection
 
 #: Rows of the grid, in the order a manager decides them: the two "free" chips
 #: that only need a good week first, then the two that rebuild a squad.
@@ -77,25 +84,6 @@ def _pos(value):
     failure that once had every Power Rankings team scoring exactly 50.
     """
     return _map_position_to_rw(value)
-
-
-def _opponent_squad(entry_id, bootstrap, current_gw, pool):
-    """A rival's fifteen, resolved through the one shared resolver.
-
-    ``allow_auth`` is left at its default, which resolves False for anybody but
-    the configured user -- so this can never reach for a credential on someone
-    else's behalf. The squad therefore comes back from `picks` / `picks_replay`
-    and is **last deadline's**, which the page says: projecting a rival several
-    gameweeks out assumes they make no transfers.
-    """
-    try:
-        resolution = resolve_classic_squad(entry_id, bootstrap, current_gw)
-    except Exception as exc:
-        _logger.warning("Could not resolve rival %s: %s", entry_id, exc)
-        return None
-    if not resolution.ok:
-        return None
-    return _squad_frame(resolution.picks, pool)
 
 
 def _render_clock(status, current_gw):
@@ -306,83 +294,6 @@ def _render_schedule(gameweeks, squad_df, bootstrap):
 # the chip's gain -- so a weak opponent wastes it (eight times over at a 45-point
 # margin) and so, nearly as much, does a much stronger one, because you lose
 # anyway. `chips.h2h_chip_value()` carries the arithmetic and the table.
-
-
-def _h2h_scoring_league(league_id):
-    """``True`` if this Classic league is scored head-to-head."""
-    from scripts.common.fpl_classic_api import get_classic_or_h2h_league_standings
-    data = get_classic_or_h2h_league_standings(league_id)
-    info = (data or {}).get("league", {}) or {}
-    return info.get("league_type") == "s" or info.get("scoring") == "h"
-
-
-def _h2h_schedule(league_id, team_id, gameweeks):
-    """``{gameweek: opponent entry id}`` for the window, from the real schedule.
-
-    Only *scheduled* gameweeks appear. A chip's win-probability value is
-    undefined where there is no fixture, and inventing an average opponent
-    would make the lane look informative precisely where it knows nothing.
-    """
-    from scripts.common.fpl_classic_api import get_all_h2h_league_matches
-    wanted = {int(g) for g in gameweeks}
-    out = {}
-    for match in get_all_h2h_league_matches(league_id) or []:
-        event = match.get("event")
-        if event is None or int(event) not in wanted:
-            continue
-        a, b = match.get("entry_1_entry"), match.get("entry_2_entry")
-        if a is None or b is None:
-            continue
-        if int(a) == int(team_id):
-            out[int(event)] = int(b)
-        elif int(b) == int(team_id):
-            out[int(event)] = int(a)
-    return out
-
-
-def _h2h_sigma(league_id):
-    """The league's own weekly scoring spread, or the documented prior.
-
-    Measured from the H2H match payload, which carries every manager's score
-    for every played fixture, so this is a cache hit rather than N requests.
-    Pooled *within* manager by `season_sim.weekly_score_sigma`: the spread
-    between managers is squad quality, which is the thing being projected, and
-    folding it in would flatten every fixture towards a coin toss.
-    """
-    from scripts.common.fpl_classic_api import get_all_h2h_league_matches
-    from scripts.common.season_sim import DEFAULT_SIGMA, weekly_score_sigma
-    rows = []
-    for match in get_all_h2h_league_matches(league_id) or []:
-        for side in ("1", "2"):
-            entry, pts = match.get(f"entry_{side}_entry"), match.get(f"entry_{side}_points")
-            if entry is None or not pts:
-                continue
-            rows.append({"Team": int(entry), "GW_Points": float(pts)})
-    if not rows:
-        return DEFAULT_SIGMA, 0
-    sigma, n = weekly_score_sigma(pd.DataFrame(rows))
-    return (sigma if sigma else DEFAULT_SIGMA), n
-
-
-def _lineup_projection(squad_df, matrix, gw):
-    """A squad's projected total for ``gw``: best legal XI, best captain doubled.
-
-    Deliberately the *optimal* lineup rather than the stored multipliers. For a
-    future gameweek the stored ones are last deadline's choices, so reading
-    them would project every rival as having left their best player on the
-    bench -- and it is the same thing the Fixture Projections page does when it
-    predicts a lineup.
-    """
-    from scripts.common.optimization import best_xi_index
-    if gw not in matrix.columns:
-        return None
-    points = pd.to_numeric(matrix[gw], errors="coerce").fillna(0.0)
-    frame = pd.DataFrame({"Position": squad_df["Position"].map(_pos), "_p": points})
-    chosen = best_xi_index(frame, "_p")
-    if not chosen:
-        return None
-    xi = points.loc[chosen]
-    return float(xi.sum() + xi.max())      # the captain scores twice
 
 
 def _h2h_deltas(values, squad_df, matrix, points, league_id, team_id,

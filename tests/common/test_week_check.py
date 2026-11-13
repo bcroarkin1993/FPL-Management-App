@@ -289,6 +289,7 @@ class TestTheChecklistItself:
     def _full(self):
         return wc.build_week_checklist(
             deadline=wc.build_deadline_item([NOW + timedelta(days=4)], 12, now=NOW),
+            opponent=wc.build_opponent_item("Rivals", 56.6, 52.1, 0.58),
             squad=wc.build_squad_item(_Resolution()),
             availability=wc.build_availability_item([]),
             fixtures=wc.build_fixtures_item(
@@ -303,8 +304,20 @@ class TestTheChecklistItself:
         )
 
     def test_it_renders_every_item_in_the_declared_order(self):
+        """A full checklist is every row of ITEM_ORDER, in that order."""
         items = self._full()
         assert [i.key for i in items] == list(wc.ITEM_ORDER)
+
+    def test_a_partial_checklist_keeps_the_order(self):
+        """The opponent row is absent in a total-points league; the rest must
+        not reshuffle around the gap."""
+        items = wc.build_week_checklist(
+            deadline=wc.build_deadline_item([NOW + timedelta(days=4)], 12, now=NOW),
+            squad=wc.build_squad_item(_Resolution()),
+            prices=wc.build_prices_item({"tracked": 15, "rising": 0,
+                                         "falling": 0, "priced": 15,
+                                         "nearest": []}))
+        assert [i.key for i in items] == ["deadline", "squad", "prices"]
 
     def test_every_builder_is_ordered(self):
         """A builder whose key is absent from ITEM_ORDER would be silently
@@ -337,3 +350,47 @@ class TestTheChecklistItself:
     def test_an_omitted_builder_does_not_fabricate_a_row(self):
         items = wc.build_week_checklist(squad=wc.build_squad_item(_Resolution()))
         assert [i.key for i in items] == ["squad"]
+
+
+class TestNavigationTargets:
+    """Every row's Open button has to land somewhere real.
+
+    The strip drives `main.py`'s `_pending_nav_section` / `_pending_nav_page`,
+    which are plain label lookups into `SECTIONS` -- so a renamed page does not
+    raise, it turns the button into a no-op. The labels carry two spaces after
+    the emoji, which is exactly the sort of thing a rename gets wrong.
+    """
+
+    def _items(self):
+        return [
+            wc.build_deadline_item([NOW + timedelta(days=4)], 12, now=NOW),
+            wc.build_squad_item(_Resolution()),
+            wc.build_availability_item([]),
+            wc.build_fixtures_item(pd.DataFrame({12: [1]}, index=[1]), [1], [12],
+                                   12, {1: "ARS"}),
+            wc.build_lineup_item(52.4, "Haaland", 9.1, "Haaland", True),
+            wc.build_transfers_item({"count": 1, "source": "my_team"}, 0.5),
+            wc.build_chips_item({"available": [], "available_later": [],
+                                 "states": {}}),
+            wc.build_prices_item({"tracked": 15, "rising": 0, "falling": 0,
+                                  "priced": 15, "nearest": []}),
+            wc.build_opponent_item("Rivals", 56.6, 52.1, 0.58),
+        ]
+
+    def test_every_item_points_at_a_real_page(self):
+        import main
+        for item in self._items():
+            if not item.page:
+                continue
+            assert item.section in main.SECTIONS, item.key
+            assert item.page in main.SECTIONS[item.section], (item.key, item.page)
+
+    def test_the_deadline_row_does_not_link_to_the_page_it_is_on(self):
+        """The strip lives on Classic Home, so "open Home" is a button to here."""
+        item = wc.build_deadline_item([NOW + timedelta(days=4)], 12, now=NOW)
+        assert item.page == ""
+
+    def test_every_row_in_the_order_is_covered_by_this_guard(self):
+        """So a new row cannot be added without a nav target being checked."""
+        covered = {i.key for i in self._items()}
+        assert covered == set(wc.ITEM_ORDER)

@@ -83,6 +83,13 @@ def _squad_elements(bootstrap: dict) -> list:
 
 
 class TestClassicHomePage:
+    """Smoke test, plus the strip that now sits above the standings.
+
+    The smoke test below returns no standings, so Home bails before the strip
+    ever renders -- which is why `TestClassicHomeShowsTheWeek` exists. A page
+    test that cannot reach a section is not covering it.
+    """
+
     def test_smoke(self, mock_all_utils):
         with patch("scripts.classic.home.get_league_standings", return_value=None), \
              patch("scripts.classic.home.get_classic_team_history", return_value=None), \
@@ -95,6 +102,92 @@ class TestClassicHomePage:
              patch("scripts.classic.home.render_standings_table"):
             from scripts.classic.home import show_classic_home_page
             show_classic_home_page()
+
+
+class TestClassicHomeShowsTheWeek:
+    """Home renders the alert strip, for either scoring type."""
+
+    def _standings(self, scoring):
+        """A league with a real row in it.
+
+        An empty `results` list makes Home render "No standings data available
+        yet" and never reach `render_standings_table`, so a test asserting the
+        standings survived would pass for the wrong reason.
+        """
+        return {
+            "league": {"name": "Test League",
+                       "league_type": "s" if scoring == "H2H" else "x",
+                       "scoring": "h" if scoring == "H2H" else "c"},
+            "standings": {"results": [
+                {"rank": 1, "entry_name": "Test XI", "player_name": "Tester",
+                 "event_total": 60, "total": 742, "entry": 1,
+                 "matches_won": 6, "matches_drawn": 1, "matches_lost": 3,
+                 "points_for": 600, "league_entry": 1, "total_points": 742},
+            ]},
+        }
+
+    def _run(self, scoring):
+        targets = {
+            "get_classic_team_history": None,
+            "get_entry_details": {"name": "Test", "id": 1},
+            "get_current_gameweek": 12,
+            "get_all_h2h_league_matches": [],
+            "extract_classic_h2h_gw_scores": pd.DataFrame(),
+            "calculate_all_play_standings": pd.DataFrame(),
+        }
+        with ExitStack() as stack:
+            mod = "scripts.classic.home"
+            for name, value in targets.items():
+                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
+            stack.enter_context(patch(f"{mod}.get_league_standings",
+                                      return_value=self._standings(scoring)))
+            stack.enter_context(patch(f"{mod}.render_luck_adjusted_table"))
+            stack.enter_context(patch(f"{mod}.render_standings_table"))
+            section = stack.enter_context(
+                patch(f"{mod}.render_my_week_section"))
+            from scripts.classic.home import show_classic_home_page
+            show_classic_home_page()
+            return section
+
+    def test_the_strip_renders_in_a_classic_league(self, mock_all_utils):
+        section = self._run("Classic")
+        assert section.called
+        assert section.call_args.kwargs["scoring_type"] == "Classic"
+
+    def test_the_strip_renders_in_an_h2h_league(self, mock_all_utils):
+        """The scoring type has to reach it: the opponent row keys off it."""
+        section = self._run("H2H")
+        assert section.call_args.kwargs["scoring_type"] == "H2H"
+        assert section.call_args.kwargs["league_id"]
+
+    def test_a_broken_strip_does_not_stop_the_standings(self, mock_all_utils):
+        """It renders *above* the league, so it must not be able to hide it.
+
+        Guarded in Home as well as inside the section, because
+        `page_error_boundary` would replace the whole page with an error — and
+        the standings are why most visits happen.
+        """
+        targets = {
+            "get_classic_team_history": None,
+            "get_entry_details": {"name": "Test", "id": 1},
+            "get_current_gameweek": 12,
+            "get_all_h2h_league_matches": [],
+            "extract_classic_h2h_gw_scores": pd.DataFrame(),
+            "calculate_all_play_standings": pd.DataFrame(),
+        }
+        with ExitStack() as stack:
+            mod = "scripts.classic.home"
+            for name, value in targets.items():
+                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
+            stack.enter_context(patch(f"{mod}.get_league_standings",
+                                      return_value=self._standings("Classic")))
+            stack.enter_context(patch(f"{mod}.render_luck_adjusted_table"))
+            table = stack.enter_context(patch(f"{mod}.render_standings_table"))
+            stack.enter_context(patch(f"{mod}.render_my_week_section",
+                                      side_effect=RuntimeError("strip exploded")))
+            from scripts.classic.home import show_classic_home_page
+            show_classic_home_page()
+        assert table.called
 
 
 class TestClassicFixtureProjectionsPage:
@@ -1152,13 +1245,13 @@ class TestChipStrategyPage:
             show_chip_strategy_page()
 
 
-class TestMyWeekPage:
-    """Smoke tests, plus the properties that would hollow the checklist out.
+class TestMyWeekSection:
+    """The pre-deadline strip on Classic Home.
 
-    `mock_streamlit`'s buttons are unconditionally truthy, so the plan button
-    fires on every run: the first test therefore exercises the latch being set,
-    and `test_the_plan_lane_runs_when_latched` exercises the solve itself, which
-    only happens on the rerun after the click.
+    The load-bearing test is `test_the_transfer_flag_needs_no_button`: the whole
+    point of this revision is that the alert is computed on load, and
+    `mock_streamlit`'s buttons are unconditionally truthy, so a test that left
+    them that way could not tell an eager flag from a prompted one.
     """
 
     BOOTSTRAP = {
@@ -1210,7 +1303,7 @@ class TestMyWeekPage:
         Written out rather than approximated because a fixture that invents a
         shape tests nothing: the frontier is a *list* of entries and leg prices
         are already in millions, and a dict-shaped fixture let a renderer that
-        could not read either of those pass its own test.
+        could read neither pass its own test.
         """
         rows = self._pool()
         return {
@@ -1228,8 +1321,13 @@ class TestMyWeekPage:
                          {"k": 3, "gain": 6.9, "n_changes": 2, "hits": 0}],
         }
 
-    def _run(self, resolution=None, latched=False, plan=None):
-        import streamlit as st
+    def _run(self, resolution=None, plan=None, scoring_type="Classic",
+             buttons=None, extra=(), capture=False):
+        """Render the section the way Home calls it.
+
+        Returns ``(build_transfer_plan mock, items or None)``.
+        """
+        import scripts.classic.my_week as mw
         mod = "scripts.classic.my_week"
         targets = {
             "get_classic_bootstrap_static": self.BOOTSTRAP,
@@ -1240,6 +1338,7 @@ class TestMyWeekPage:
             "get_fpl_availability_df": pd.DataFrame(),
             "_is_gameweek_started": False,
         }
+        seen = {}
         with ExitStack() as stack:
             for name, value in targets.items():
                 stack.enter_context(patch(f"{mod}.{name}", return_value=value))
@@ -1250,44 +1349,104 @@ class TestMyWeekPage:
             stack.enter_context(patch(
                 "scripts.classic.transfers.resolve_free_transfers",
                 return_value={"count": 2, "source": "my_team"}))
-            pool_mock = stack.enter_context(patch(
+            stack.enter_context(patch(
                 "scripts.classic.transfers.build_plan_pool",
                 return_value=self._pool()))
             plan_mock = stack.enter_context(patch(
                 "scripts.classic.transfers.build_transfer_plan",
-                return_value=plan))
+                return_value=plan if plan is not None else self._plan()))
             stack.enter_context(patch(f"{mod}.config.FPL_CLASSIC_TEAM_ID", 1,
                                       create=True))
             stack.enter_context(patch(f"{mod}.config.CURRENT_GAMEWEEK", 12,
                                       create=True))
-            if latched:
-                st.session_state["my_week_plan_1_12"] = True
-            from scripts.classic.my_week import show_my_week_page
-            show_my_week_page()
-            return pool_mock, plan_mock
+            if buttons is not None:
+                stack.enter_context(patch("streamlit.button", return_value=buttons))
+            if capture:
+                real = mw._render_alert_bar
+
+                def spy(items):
+                    seen["items"] = items
+                    return real(items)
+
+                stack.enter_context(patch(f"{mod}._render_alert_bar",
+                                          side_effect=spy))
+            for ctx in extra:
+                stack.enter_context(ctx)
+            mw.render_my_week_section(league_id=777, scoring_type=scoring_type,
+                                      current_gw=12)
+        return plan_mock, seen.get("items")
 
     def test_smoke(self, mock_all_utils):
         self._run()
 
-    def test_the_solver_is_not_touched_until_it_is_asked_for(self, mock_all_utils):
-        """The laziness contract: opening the page costs no ILP solve."""
-        pool_mock, plan_mock = self._run()
-        assert not pool_mock.called and not plan_mock.called
+    def test_the_transfer_flag_needs_no_button(self, mock_all_utils):
+        """The reason this moved onto Home: the gain *is* the alert.
 
-    def test_the_plan_lane_runs_when_latched(self, mock_all_utils):
-        pool_mock, plan_mock = self._run(latched=True, plan=self._plan())
-        assert pool_mock.called and plan_mock.called
+        Rendered with every button falsy -- nothing pressed, nothing latched --
+        the frontier must still be solved and the row must carry the number.
+        """
+        plan_mock, items = self._run(buttons=False, capture=True)
+        assert plan_mock.called
+        row = next(i for i in items if i.key == "transfers")
+        assert row.status == "act"
+        assert "+6.9" in row.verdict
+
+    def test_an_open_button_jumps_to_the_owning_page(self, mock_all_utils):
+        """The nav contract: the keys `main.py` applies before its radios."""
+        import streamlit as st
+        import main
+        self._run(buttons=True)
+        section = st.session_state.get("_pending_nav_section")
+        page = st.session_state.get("_pending_nav_page")
+        assert section in main.SECTIONS
+        assert page in main.SECTIONS[section]
+
+    def test_nothing_is_pending_when_no_button_is_pressed(self, mock_all_utils):
+        import streamlit as st
+        self._run(buttons=False)
+        assert "_pending_nav_section" not in st.session_state
+
+    def test_the_h2h_row_appears_only_in_an_h2h_league(self, mock_all_utils):
+        """A total-points league has no opponent, so the row is absent rather
+        than unknown -- the absence is a property of the league."""
+        h2h_patches = [
+            patch("scripts.common.h2h.h2h_schedule", return_value={12: 99}),
+            patch("scripts.common.h2h.h2h_entry_names", return_value={99: "Rivals"}),
+            patch("scripts.common.h2h.opponent_squad", return_value=self._pool()),
+            patch("scripts.common.h2h.h2h_sigma", return_value=(17.0, 120)),
+        ]
+        _, items = self._run(scoring_type="H2H", capture=True, extra=h2h_patches)
+        row = next(i for i in items if i.key == "opponent")
+        assert "Rivals" in row.verdict and "% to win" in row.verdict
+
+        _, items = self._run(scoring_type="Classic", capture=True)
+        assert not [i for i in items if i.key == "opponent"]
+
+    def test_an_unreadable_h2h_fixture_is_unknown_not_silence(self, mock_all_utils):
+        """A question we failed to answer gets a grey row, not an absent one."""
+        h2h_patches = [patch("scripts.common.h2h.h2h_schedule",
+                             side_effect=RuntimeError("league down"))]
+        _, items = self._run(scoring_type="H2H", capture=True, extra=h2h_patches)
+        row = next(i for i in items if i.key == "opponent")
+        assert row.status == "unknown"
+        assert not row.evidence
+
+    def test_an_h2h_blank_week_has_no_row_at_all(self, mock_all_utils):
+        """A gameweek with no pairing is a question that does not exist, which
+        is the other half of the distinction above."""
+        h2h_patches = [patch("scripts.common.h2h.h2h_schedule", return_value={})]
+        _, items = self._run(scoring_type="H2H", capture=True, extra=h2h_patches)
+        assert not [i for i in items if i.key == "opponent"]
 
     def test_a_held_plan_renders(self, mock_all_utils):
         """`build_transfer_plan`'s hold shape, which names `horizon`, not
         `horizon_gws` -- the two differ and both have to render."""
-        self._run(latched=True,
-                  plan={"hold": True, "horizon": 2.2,
+        self._run(plan={"hold": True, "horizon": 2.2,
                         "frontier": [{"k": 1, "gain": 0.0, "n_changes": 0,
                                       "hits": 0}]})
 
     def test_an_unsolvable_squad_says_so(self, mock_all_utils):
-        self._run(latched=True, plan={"error": "baseline"})
+        self._run(plan={"error": "baseline"})
 
     def test_it_renders_without_a_squad(self, mock_all_utils):
         """An unresolvable squad must produce unknown rows, not a traceback."""
@@ -1297,21 +1456,28 @@ class TestMyWeekPage:
         """Mid-gameweek the stored armband is the real one and nothing can be
         changed, so the row must not recommend a change."""
         import scripts.classic.my_week as mw
-        mod = "scripts.classic.my_week"
-        captured = {}
-        real = mw.week_check.build_lineup_item
+        with patch("scripts.classic.my_week._is_gameweek_started",
+                   return_value=True):
+            _, items = self._run(capture=True)
+        row = next(i for i in items if i.key == "lineup")
+        assert row.evidence["comparable"] is False
+        assert row.status == "ok"
 
-        def spy(*a, **kw):
-            captured["comparable"] = kw.get("comparable")
-            return real(*a, **kw)
+    def test_a_failure_does_not_take_home_down(self, mock_all_utils):
+        """The standings below it are why most visits happen."""
+        with patch("scripts.classic.my_week._assemble",
+                   side_effect=RuntimeError("everything is on fire")), \
+             patch("scripts.classic.my_week.config.FPL_CLASSIC_TEAM_ID", 1,
+                   create=True):
+            from scripts.classic.my_week import render_my_week_section
+            render_my_week_section(league_id=1, scoring_type="Classic",
+                                   current_gw=12)
 
-        with patch(f"{mod}._is_gameweek_started", return_value=True), \
-                patch.object(mw.week_check, "build_lineup_item", side_effect=spy):
-            self._run()
-        assert captured["comparable"] is False
-
-    def test_no_team_configured_is_a_message_not_a_crash(self):
-        with patch("scripts.classic.my_week.config.FPL_CLASSIC_TEAM_ID",
-                   None, create=True):
-            from scripts.classic.my_week import show_my_week_page
-            show_my_week_page()
+    def test_no_team_configured_offers_the_setup_page(self, mock_all_utils):
+        import streamlit as st
+        with patch("scripts.classic.my_week.config.FPL_CLASSIC_TEAM_ID", None,
+                   create=True):
+            from scripts.classic.my_week import render_my_week_section
+            render_my_week_section(league_id=1, scoring_type="Classic",
+                                   current_gw=12)
+        assert st.session_state.get("_pending_nav_page") == "🆔  League Setup"

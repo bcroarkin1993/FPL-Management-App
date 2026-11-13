@@ -64,6 +64,15 @@ MAX_BANKED_FREE_TRANSFERS = 5
 #: to carrying a doubt.
 _OUT_STATUSES = {"i", "s", "u", "n"}
 
+#: Navigation targets. A page label alone is ambiguous -- Availability lives
+#: under FPL App Home while Transfer Suggestions is Classic -- and the strip's
+#: "Open" buttons drive `main.py`'s `_pending_nav_section` / `_pending_nav_page`,
+#: which need both. The labels must match `main.SECTIONS` exactly, two spaces
+#: after the emoji included; `test_every_item_points_at_a_real_page` asserts it,
+#: because a renamed page would otherwise turn every button into a no-op.
+SECTION_FPL = "\u26bd  FPL App Home"
+SECTION_CLASSIC = "\U0001f3c6  Classic"
+
 
 @dataclass(frozen=True)
 class WeekItem:
@@ -79,6 +88,7 @@ class WeekItem:
     verdict: str
     detail: str = ""
     page: str = ""
+    section: str = SECTION_CLASSIC
     evidence: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -86,14 +96,15 @@ class WeekItem:
         return self.status in ATTENTION
 
 
-def _unknown(key: str, title: str, why: str, page: str = "") -> WeekItem:
+def _unknown(key: str, title: str, why: str, page: str = "",
+             section: str = SECTION_CLASSIC) -> WeekItem:
     """The honest answer when an input is missing.
 
     Carries no evidence by construction -- there was none -- which is exactly
     what stops it being mistaken for an ``ok``.
     """
     return WeekItem(key=key, title=title, status=STATUS_UNKNOWN,
-                    verdict=why, page=page)
+                    verdict=why, page=page, section=section)
 
 
 def worst_status(items: Sequence[WeekItem]) -> str:
@@ -125,7 +136,7 @@ def build_deadline_item(deadlines: Optional[Sequence[datetime]],
     season has international breaks and "Fri 6:00 AM" has already been read as
     *this* Friday when it meant thirteen days out.
     """
-    key, title, page = "deadline", "Deadline", "🏠  Home"
+    key, title, page = "deadline", "Deadline", ""
     if not deadlines:
         return _unknown(key, title,
                         "Could not read the gameweek calendar, so the deadline "
@@ -177,10 +188,11 @@ def build_squad_item(resolution: Any) -> WeekItem:
     worth reading, it just describes last deadline's team.
     """
     key, title, page = "squad", "Your squad", "🆔  League Setup"
+    section = SECTION_FPL
     if resolution is None or not getattr(resolution, "ok", False):
         return _unknown(key, title,
                         "Your squad could not be resolved, so nothing below it "
-                        "could be checked.", page)
+                        "could be checked.", page, section)
 
     picks = list(getattr(resolution, "picks", []) or [])
     source = getattr(resolution, "source", "")
@@ -197,11 +209,11 @@ def build_squad_item(resolution: Any) -> WeekItem:
                         "Showing your GW%s squad — transfers made since are not "
                         "reflected." % getattr(resolution, "source_gw", "?"),
                         detail=(getattr(resolution, "provenance", "") or ""),
-                        page=page, evidence=evidence)
+                        page=page, section=section, evidence=evidence)
 
     return WeekItem(key, title, STATUS_OK,
                     "%d players, live from your account." % len(picks),
-                    detail=detail, page=page, evidence=evidence)
+                    detail=detail, page=page, section=section, evidence=evidence)
 
 
 def squad_availability(squad_df: Optional[pd.DataFrame],
@@ -271,10 +283,11 @@ def squad_availability(squad_df: Optional[pd.DataFrame],
 def build_availability_item(flags: Optional[Sequence[dict]]) -> WeekItem:
     """Who in the fifteen is hurt, and for how long."""
     key, title, page = "availability", "Fitness", "🚦  Availability"
+    section = SECTION_FPL
     if flags is None:
         return _unknown(key, title,
                         "Could not read FPL's availability data, so injuries "
-                        "were not checked.", page)
+                        "were not checked.", page, section)
 
     out = [f for f in flags if f.get("unavailable")]
     doubt = [f for f in flags if not f.get("unavailable")]
@@ -284,7 +297,7 @@ def build_availability_item(flags: Optional[Sequence[dict]]) -> WeekItem:
     if not flags:
         return WeekItem(key, title, STATUS_OK,
                         "Every player is fully available.",
-                        page=page, evidence={"flagged": 0, "checked": True})
+                        page=page, section=section, evidence={"flagged": 0, "checked": True})
 
     bits = []
     if out:
@@ -297,7 +310,7 @@ def build_availability_item(flags: Optional[Sequence[dict]]) -> WeekItem:
     detail = "%s — %s" % (lead.get("name"), _absence_phrase(lead))
     return WeekItem(key, title, STATUS_ACT if out else STATUS_WARN,
                     " · ".join(bits) + " in your fifteen.",
-                    detail=detail, page=page, evidence=evidence)
+                    detail=detail, page=page, section=section, evidence=evidence)
 
 
 def _absence_phrase(flag: dict) -> str:
@@ -326,11 +339,12 @@ def build_fixtures_item(counts: Optional[pd.DataFrame],
     looked rather than implying the season is flat.
     """
     key, title, page = "fixtures", "Fixtures", "📅  Gameweek Fixtures"
+    section = SECTION_FPL
     ids = {int(t) for t in (squad_team_ids or []) if pd.notna(t)}
     if counts is None or counts.empty or not ids or not gameweeks:
         return _unknown(key, title,
                         "Could not read the fixture list, so blanks and doubles "
-                        "were not checked.", page)
+                        "were not checked.", page, section)
 
     names = team_names or {}
     blanks, doubles = {}, {}
@@ -357,7 +371,7 @@ def build_fixtures_item(counts: Optional[pd.DataFrame],
                         "No blank or double for your clubs through GW%d." % through,
                         detail="Normal for this stage of the season — they appear "
                                "once cup and European ties are rescheduled.",
-                        page=page, evidence=evidence)
+                        page=page, section=section, evidence=evidence)
 
     parts = []
     if blanks:
@@ -377,7 +391,7 @@ def build_fixtures_item(counts: Optional[pd.DataFrame],
     # weeks out is information.
     imminent = target_gw is not None and int(target_gw) in blanks
     return WeekItem(key, title, STATUS_ACT if imminent else STATUS_WARN,
-                    " · ".join(parts) + ".", page=page, evidence=evidence)
+                    " · ".join(parts) + ".", page=page, section=section, evidence=evidence)
 
 
 def build_transfers_item(free_transfers: Optional[dict],
@@ -518,10 +532,11 @@ def build_chips_item(status: Optional[dict],
 def build_prices_item(pressure: Optional[dict]) -> WeekItem:
     """What tonight's price moves do to your squad value."""
     key, title, page = "prices", "Prices", "💰  Price Changes"
+    section = SECTION_FPL
     if not pressure:
         return _unknown(key, title,
                         "Could not read FPL's price-change data for your squad.",
-                        page)
+                        page, section)
 
     falling, rising = int(pressure.get("falling", 0)), int(pressure.get("rising", 0))
     evidence = dict(pressure)
@@ -533,7 +548,7 @@ def build_prices_item(pressure: Optional[dict]) -> WeekItem:
         return WeekItem(key, title, STATUS_WARN,
                         "%d of your players %s due to fall tonight."
                         % (falling, "is" if falling == 1 else "are"),
-                        detail=detail, page=page, evidence=evidence)
+                        detail=detail, page=page, section=section, evidence=evidence)
 
     detail = ""
     if nearest:
@@ -544,17 +559,56 @@ def build_prices_item(pressure: Optional[dict]) -> WeekItem:
         verdict = "%d of your players %s due to rise — free money." % (
             rising, "is" if rising == 1 else "are")
     return WeekItem(key, title, STATUS_OK, verdict, detail=detail,
-                    page=page, evidence=evidence)
+                    page=page, section=section, evidence=evidence)
+
+
+def build_opponent_item(opponent_name: Optional[str] = None,
+                        mine: Optional[float] = None,
+                        theirs: Optional[float] = None,
+                        win_prob: Optional[float] = None,
+                        stale: bool = True) -> Optional[WeekItem]:
+    """Who you play this gameweek, and how the two squads project.
+
+    Returns **None** in a total-points league -- the caller simply does not call
+    it -- because "there is no opponent" is a property of the league rather than
+    a question we failed to answer, and an *unknown* row would claim otherwise.
+    Where the league is H2H but the fixture or a projection cannot be resolved,
+    that **is** an unknown and says so.
+
+    Status is always ``ok``: this is context for the rows above it, not a task.
+    Their squad is last deadline's -- `my-team` is the user's own credential --
+    so the row says so rather than implying a live view of a rival.
+    """
+    key, title = "opponent", "This week"
+    page, section = "\U0001f4c5  Fixture Projections", SECTION_CLASSIC
+    if not opponent_name or mine is None or theirs is None:
+        return _unknown(key, title,
+                        "Could not resolve this gameweek's head-to-head fixture.",
+                        page, section)
+
+    evidence = {"opponent": opponent_name, "mine": round(float(mine), 2),
+                "theirs": round(float(theirs), 2),
+                "win_prob": (None if win_prob is None else round(float(win_prob), 4)),
+                "stale": bool(stale)}
+    verdict = "You play %s — %.1f projected against %.1f" % (
+        opponent_name, float(mine), float(theirs))
+    if win_prob is not None:
+        verdict += ", %.0f%% to win" % (100.0 * float(win_prob))
+    detail = ("Their squad is last deadline's, so this assumes they make no "
+              "transfers." if stale else "")
+    return WeekItem(key, title, STATUS_OK, verdict + ".", detail=detail,
+                    page=page, section=section, evidence=evidence)
 
 
 #: The checklist's order, declared once so the page and its tests agree.
-ITEM_ORDER = ("deadline", "squad", "availability", "fixtures", "lineup",
-              "transfers", "chips", "prices")
+ITEM_ORDER = ("deadline", "opponent", "squad", "availability", "fixtures",
+              "lineup", "transfers", "chips", "prices")
 
 
-def build_week_checklist(*, deadline=None, squad=None, availability=None,
-                         fixtures=None, lineup=None, transfers=None,
-                         chips_item=None, prices=None) -> List[WeekItem]:
+def build_week_checklist(*, deadline=None, opponent=None, squad=None,
+                         availability=None, fixtures=None, lineup=None,
+                         transfers=None, chips_item=None,
+                         prices=None) -> List[WeekItem]:
     """Assemble the items in :data:`ITEM_ORDER`, dropping none.
 
     A builder that could not answer still contributes its ``unknown`` row --
@@ -562,8 +616,8 @@ def build_week_checklist(*, deadline=None, squad=None, availability=None,
     question went unasked.
     """
     by_key = {}
-    for item in (deadline, squad, availability, fixtures, lineup, transfers,
-                 chips_item, prices):
+    for item in (deadline, opponent, squad, availability, fixtures, lineup,
+                 transfers, chips_item, prices):
         if item is not None:
             by_key[item.key] = item
     return [by_key[k] for k in ITEM_ORDER if k in by_key]

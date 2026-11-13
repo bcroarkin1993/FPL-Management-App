@@ -45,7 +45,6 @@ from scripts.common.price_signals import (
     build_price_data,
     change_state as _change_state,
 )
-from scripts.common.text_helpers import to_display_name
 from scripts.common.styled_tables import render_styled_table
 from scripts.common.utils import get_classic_bootstrap_static
 

@@ -12,6 +12,8 @@ import random
 import streamlit as st
 from typing import Optional, Dict, List
 
+from scripts.classic.my_week import render_my_week_section
+from scripts.common.error_helpers import get_logger
 from scripts.common.luck_analysis import (
     extract_classic_h2h_gw_scores,
     calculate_all_play_standings,
@@ -39,6 +41,9 @@ from scripts.common.utils import (
 # ---------------------------
 # LEAGUE DATA FUNCTIONS
 # ---------------------------
+
+_logger = get_logger("fpl_app.classic.home")
+
 
 def get_league_display_options() -> list:
     """
@@ -454,12 +459,35 @@ def show_classic_home_page():
 
     st.divider()
 
-    # ---------------------------
-    # STANDINGS TABLE
-    # ---------------------------
     standings = data["standings"]
     # Both season-odds paths need it, and `get_current_gameweek` is cached.
     current_gw = get_current_gameweek() or 1
+
+    # ---------------------------
+    # YOUR WEEK — the pre-deadline alert strip
+    # ---------------------------
+    # Above the standings on purpose: it is the only thing on this page that is
+    # time-critical, and a flag below the fold is a flag you find out about
+    # afterwards. It is scoped to *your* squad rather than to the selected
+    # league (the head-to-head row excepted), owns its own cache, and cannot
+    # take the league below it down -- see `my_week.render_my_week_section`.
+    # Guarded here as well as inside the section: it renders *above* the
+    # standings, which are why most visits to this page happen, so a fault in
+    # the strip must cost the strip and nothing else. `page_error_boundary`
+    # would replace the whole page with an error instead.
+    try:
+        render_my_week_section(league_id=league_id, scoring_type=scoring_type,
+                               current_gw=current_gw)
+    except Exception:
+        _logger.warning("Could not render the My Week strip", exc_info=True)
+        st.caption("Could not check your week just now — the league below is "
+                   "unaffected.")
+
+    st.divider()
+
+    # ---------------------------
+    # STANDINGS TABLE
+    # ---------------------------
 
     if scoring_type == "H2H":
         st.subheader("League Standings")
