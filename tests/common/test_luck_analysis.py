@@ -7,6 +7,7 @@ from scripts.common.luck_analysis import (
     extract_draft_gw_scores,
     extract_classic_h2h_gw_scores,
     calculate_all_play_standings,
+    calculate_h2h_streaks,
 )
 
 
@@ -14,7 +15,9 @@ class TestExtractDraftGwScores:
     def test_basic_extraction(self, mock_league_response):
         df = extract_draft_gw_scores(mock_league_response)
         assert not df.empty
-        assert set(df.columns) == {"gameweek", "team", "score"}
+        # `team_id` is carried so the all-play aggregation can key on it rather
+        # than on the squad name -- two squads sharing a name were merged.
+        assert set(df.columns) == {"gameweek", "team", "team_id", "score"}
 
     def test_skips_both_zero(self, mock_league_response):
         """Matches where BOTH teams scored 0 should be skipped (unplayed)."""
@@ -140,3 +143,73 @@ class TestCalculateAllPlayStandings:
         result = calculate_all_play_standings(gw_scores, actual_standings=actual)
         assert "Luck +/-" in result.columns
         assert "Actual Rank" in result.columns
+
+
+class TestTwoTeamsWithTheSameName:
+    """Reported from the app: two managers who never renamed their squad both
+    show as "Change Name", and the luck-adjusted table merged them into one row
+    -- their all-play records summed, and each counted against the other.
+
+    A name is not a join key. These pin that the id is used wherever the frame
+    carries one, and that the name still works where it does not (the Draft
+    extractors published none until now).
+    """
+
+    def _scores(self, with_ids=True):
+        rows = []
+        for gw in (1, 2):
+            rows += [
+                {"gameweek": gw, "team": "Change Name", "team_id": 11, "score": 50},
+                {"gameweek": gw, "team": "Change Name", "team_id": 22, "score": 70},
+                {"gameweek": gw, "team": "Distinct", "team_id": 33, "score": 60},
+            ]
+        df = pd.DataFrame(rows)
+        return df if with_ids else df.drop(columns=["team_id"])
+
+    def test_they_are_two_rows_not_one(self):
+        out = calculate_all_play_standings(self._scores())
+        assert len(out) == 3
+        assert sorted(out["Team"].tolist()) == ["Change Name", "Change Name",
+                                                "Distinct"]
+
+    def test_their_records_are_their_own(self):
+        """Two opponents a gameweek over two gameweeks: the 70-point squad beats
+        both others every week, the 50-point squad loses to both.
+
+        Asserted on the averages because the rendered frame carries no id --
+        the table shows names, as the standings beside it do.
+        """
+        out = calculate_all_play_standings(self._scores()).reset_index()
+        dupes = out[out["Team"] == "Change Name"].sort_values("Avg Score")
+        assert dupes["Avg Score"].tolist() == [50.0, 70.0]   # not 60.0 twice
+        assert dupes.iloc[0]["AP W"] == 0 and dupes.iloc[0]["AP L"] == 4
+        assert dupes.iloc[1]["AP W"] == 4 and dupes.iloc[1]["AP L"] == 0
+
+    def test_without_ids_they_still_merge(self):
+        """The Draft shape before this change, preserved rather than endorsed:
+        with no id there is nothing else to group on."""
+        out = calculate_all_play_standings(self._scores(with_ids=False))
+        assert len(out) == 2
+
+    def test_streaks_are_not_interleaved(self):
+        weekly = pd.DataFrame([
+            {"Team": "Change Name", "Team_ID": 11, "Gameweek": 1,
+             "Points": 50, "Opp_Points": 70},
+            {"Team": "Change Name", "Team_ID": 11, "Gameweek": 2,
+             "Points": 40, "Opp_Points": 60},
+            {"Team": "Change Name", "Team_ID": 22, "Gameweek": 1,
+             "Points": 70, "Opp_Points": 50},
+            {"Team": "Change Name", "Team_ID": 22, "Gameweek": 2,
+             "Points": 60, "Opp_Points": 40},
+        ])
+        out = calculate_h2h_streaks(weekly)
+        assert len(out) == 2
+        assert sorted(out["Longest_Win_Streak"].tolist()) == [0, 2]
+
+    def test_streaks_without_ids_still_group_by_name(self):
+        weekly = pd.DataFrame([
+            {"Team": "Solo", "Gameweek": 1, "Points": 70, "Opp_Points": 50},
+            {"Team": "Solo", "Gameweek": 2, "Points": 60, "Opp_Points": 40},
+        ])
+        out = calculate_h2h_streaks(weekly)
+        assert len(out) == 1 and out.iloc[0]["Longest_Win_Streak"] == 2

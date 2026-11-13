@@ -235,7 +235,15 @@ def get_fpl_draft_league_standings(draft_league_id, show_luck_adjusted_stats=Fal
 
 @st.cache_data(ttl=300)
 def _compute_draft_current_streaks(league_id) -> dict:
-    """Return {team_name: streak_str} for current H2H streaks (e.g. {'FC Rockets': '3W'})."""
+    """Return {team_name: streak_str} for current H2H streaks (e.g. {'FC Rockets': '3W'}).
+
+    The streaks themselves are grouped on the entry id (see `Team_ID` below), so
+    two squads sharing a name no longer interleave their results. **This map is
+    still keyed by name**, so for duplicate names the later row wins the display
+    column; the fix, if a Draft league ever hits it, is to key on `Team_ID` and
+    join the consumer on the entry id. Classic hit exactly this with two squads
+    both called "Change Name".
+    """
     league_data = get_draft_league_details(league_id)
     if not league_data:
         return {}
@@ -249,9 +257,13 @@ def _compute_draft_current_streaks(league_id) -> dict:
         if p1 == 0 and p2 == 0:
             continue
         gw = m.get("event")
+        # `Team_ID` so the streaks group on the entry rather than its name:
+        # two squads sharing a name interleave into one row otherwise.
         rows.extend([
-            {"Team": team_names.get(t1, f"T{t1}"), "Gameweek": gw, "Points": p1, "Opp_Points": p2},
-            {"Team": team_names.get(t2, f"T{t2}"), "Gameweek": gw, "Points": p2, "Opp_Points": p1},
+            {"Team": team_names.get(t1, f"T{t1}"), "Team_ID": t1,
+             "Gameweek": gw, "Points": p1, "Opp_Points": p2},
+            {"Team": team_names.get(t2, f"T{t2}"), "Team_ID": t2,
+             "Gameweek": gw, "Points": p2, "Opp_Points": p1},
         ])
     if not rows:
         return {}

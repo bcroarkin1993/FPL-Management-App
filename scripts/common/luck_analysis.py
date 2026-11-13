@@ -25,7 +25,11 @@ def extract_draft_gw_scores(league_response: dict) -> pd.DataFrame:
     - league_response: Full league details dict with 'matches' and 'league_entries'.
 
     Returns:
-    - DataFrame with columns: gameweek, team, score
+    - DataFrame with columns: gameweek, team, team_id, score
+
+    The id is carried so `calculate_all_play_standings` can key on it: two
+    squads sharing a name would otherwise be merged into one row. See the
+    note there.
     """
     matches = league_response.get('matches', [])
     league_entries = league_response.get('league_entries', [])
@@ -47,7 +51,7 @@ def extract_draft_gw_scores(league_response: dict) -> pd.DataFrame:
         rows.append({'gameweek': gw, 'team': team1_name, 'score': team1_score})
         rows.append({'gameweek': gw, 'team': team2_name, 'score': team2_score})
 
-    return pd.DataFrame(rows, columns=['gameweek', 'team', 'score'])
+    return pd.DataFrame(rows, columns=['gameweek', 'team', 'team_id', 'score'])
 
 
 def extract_classic_h2h_gw_scores(matches: list) -> pd.DataFrame:
@@ -119,48 +123,62 @@ def calculate_all_play_standings(
     gameweeks = gw_scores['gameweek'].unique()
     has_team_id = 'team_id' in gw_scores.columns
 
+    # **Keyed on the team id where there is one, never on the name.** Two
+    # managers who have not renamed their squad both show as "Change Name", and
+    # keying on that merged them into one row: their all-play records were
+    # summed, they were counted against *each other*, and the id carried
+    # through was whichever appeared first. Reported from the app, and it is the
+    # same "a name is not a join key" failure recorded all over this codebase.
+    #
+    # The Draft extractors publish no id, so the name remains the fallback --
+    # which preserves their behaviour exactly, including that latent bug if two
+    # Draft squads ever share a name.
+    key_col = 'team_id' if has_team_id else 'team'
+    names = {}
+    for key, name in zip(gw_scores[key_col], gw_scores['team']):
+        names.setdefault(key, name)
+
     # Accumulate all-play results per team
-    ap_results = {}  # team -> {'w': 0, 'd': 0, 'l': 0}
+    ap_results = {}  # key -> {'w': 0, 'd': 0, 'l': 0}
 
     for gw in gameweeks:
         gw_data = gw_scores[gw_scores['gameweek'] == gw]
-        teams = gw_data['team'].tolist()
+        keys = gw_data[key_col].tolist()
         scores = gw_data['score'].tolist()
 
-        for i, (team_i, score_i) in enumerate(zip(teams, scores)):
-            if team_i not in ap_results:
-                ap_results[team_i] = {'w': 0, 'd': 0, 'l': 0}
+        for i, (key_i, score_i) in enumerate(zip(keys, scores)):
+            if key_i not in ap_results:
+                ap_results[key_i] = {'w': 0, 'd': 0, 'l': 0}
 
-            for j, (team_j, score_j) in enumerate(zip(teams, scores)):
+            for j, (key_j, score_j) in enumerate(zip(keys, scores)):
                 if i == j:
                     continue
                 if score_i > score_j:
-                    ap_results[team_i]['w'] += 1
+                    ap_results[key_i]['w'] += 1
                 elif score_i == score_j:
-                    ap_results[team_i]['d'] += 1
+                    ap_results[key_i]['d'] += 1
                 else:
-                    ap_results[team_i]['l'] += 1
+                    ap_results[key_i]['l'] += 1
 
     # Build per-team aggregates
     team_stats = []
-    for team, record in ap_results.items():
+    for key, record in ap_results.items():
         total_matches = record['w'] + record['d'] + record['l']
         win_pct = (record['w'] + 0.5 * record['d']) / total_matches * 100 if total_matches > 0 else 0.0
 
-        # Calculate avg score and avg GW rank
-        team_gw = gw_scores[gw_scores['team'] == team]
+        team_gw = gw_scores[gw_scores[key_col] == key]
         avg_score = team_gw['score'].mean()
 
         # Rank within each GW (lower = better)
         ranks = []
         for gw in team_gw['gameweek'].values:
             gw_data = gw_scores[gw_scores['gameweek'] == gw]
-            rank = (gw_data['score'] > team_gw[team_gw['gameweek'] == gw]['score'].values[0]).sum() + 1
-            ranks.append(rank)
+            own = team_gw[team_gw['gameweek'] == gw]['score'].values[0]
+            ranks.append(int((gw_data['score'] > own).sum()) + 1)
         avg_gw_rank = sum(ranks) / len(ranks) if ranks else 0
 
         row = {
-            'Team': team,
+            'Team': names.get(key, key),
             'AP W': record['w'],
             'AP D': record['d'],
             'AP L': record['l'],
@@ -168,12 +186,8 @@ def calculate_all_play_standings(
             'Avg Score': round(avg_score, 1),
             'Avg GW Rank': round(avg_gw_rank, 2),
         }
-
-        # Carry team_id if available
         if has_team_id:
-            team_ids = gw_scores[gw_scores['team'] == team]['team_id'].unique()
-            if len(team_ids) > 0:
-                row['team_id'] = team_ids[0]
+            row['team_id'] = key
 
         team_stats.append(row)
 
@@ -234,16 +248,28 @@ def calculate_h2h_streaks(weekly_scores: pd.DataFrame) -> pd.DataFrame:
     - weekly_scores: DataFrame with columns Team, Gameweek, Points, Opp_Points
 
     Returns:
-    - DataFrame with columns: Team, Current_Streak, Longest_Win_Streak,
-      Longest_Unbeaten_Streak, Longest_Loss_Streak. Sorted by Longest_Win_Streak desc.
+    - DataFrame with columns: Team, Team_ID, Current_Streak, Longest_Win_Streak,
+      Longest_Unbeaten_Streak, Longest_Loss_Streak. Sorted by Longest_Win_Streak
+      desc. ``Team_ID`` is the key the rows were grouped on, published so a
+      caller can join on it rather than on the name -- it is the name where the
+      input carried no id.
     """
     if weekly_scores.empty:
         return pd.DataFrame()
 
     streak_data = []
 
-    for team in weekly_scores["Team"].unique():
-        team_df = weekly_scores[weekly_scores["Team"] == team].sort_values("Gameweek")
+    # Grouped on the id where the frame carries one -- see
+    # `build_classic_h2h_weekly_scores`. The Draft callers pass names only, so
+    # the name remains the fallback.
+    key_col = "Team_ID" if "Team_ID" in weekly_scores.columns else "Team"
+    names = {}
+    for key, name in zip(weekly_scores[key_col], weekly_scores["Team"]):
+        names.setdefault(key, name)
+
+    for key in weekly_scores[key_col].unique():
+        team = names.get(key, key)
+        team_df = weekly_scores[weekly_scores[key_col] == key].sort_values("Gameweek")
 
         results = []
         for _, row in team_df.iterrows():
@@ -257,6 +283,7 @@ def calculate_h2h_streaks(weekly_scores: pd.DataFrame) -> pd.DataFrame:
         if not results:
             streak_data.append({
                 "Team": team,
+                "Team_ID": key,
                 "Current_Streak": "-",
                 "Longest_Win_Streak": 0,
                 "Longest_Unbeaten_Streak": 0,
@@ -303,6 +330,7 @@ def calculate_h2h_streaks(weekly_scores: pd.DataFrame) -> pd.DataFrame:
 
         streak_data.append({
             "Team": team,
+            "Team_ID": key,
             "Current_Streak": f"{current_streak}{current_type}",
             "Longest_Win_Streak": longest_win,
             "Longest_Unbeaten_Streak": longest_unbeaten,
@@ -320,7 +348,11 @@ def build_classic_h2h_weekly_scores(matches: list) -> pd.DataFrame:
     - matches: List of match dicts from get_all_h2h_league_matches()
 
     Returns:
-    - DataFrame with columns: Team, Gameweek, Points, Opp_Points
+    - DataFrame with columns: Team, Team_ID, Gameweek, Points, Opp_Points
+
+    ``Team_ID`` is what `calculate_h2h_streaks` groups on: two managers who have
+    not renamed their squad share the name "Change Name", and grouping on that
+    interleaved their results into a single streak row.
     """
     rows = []
     for m in matches:
@@ -331,11 +363,14 @@ def build_classic_h2h_weekly_scores(matches: list) -> pd.DataFrame:
         gw = m.get("event", 0)
         t1 = m.get("entry_1_name", "Unknown")
         t2 = m.get("entry_2_name", "Unknown")
-        rows.append({"Team": t1, "Gameweek": gw, "Points": p1, "Opp_Points": p2})
-        rows.append({"Team": t2, "Gameweek": gw, "Points": p2, "Opp_Points": p1})
+        rows.append({"Team": t1, "Team_ID": m.get("entry_1_entry"),
+                     "Gameweek": gw, "Points": p1, "Opp_Points": p2})
+        rows.append({"Team": t2, "Team_ID": m.get("entry_2_entry"),
+                     "Gameweek": gw, "Points": p2, "Opp_Points": p1})
 
     if not rows:
-        return pd.DataFrame(columns=["Team", "Gameweek", "Points", "Opp_Points"])
+        return pd.DataFrame(columns=["Team", "Team_ID", "Gameweek", "Points",
+                                     "Opp_Points"])
     return pd.DataFrame(rows).sort_values(["Team", "Gameweek"])
 
 

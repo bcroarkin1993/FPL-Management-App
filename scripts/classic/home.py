@@ -474,13 +474,19 @@ def _my_team_card(standings: dict, min_height: int = 0) -> str:
 
     if latest:
         overall = latest.get("overall_rank")
+        # A rank means little without the field it is out of -- "2.1m" reads as
+        # bad until you know it is 2.1m of 10.8m. FPL publishes the count on the
+        # bootstrap, which is already cached for this page.
+        total_players = _total_players()
+        rank_text = _compact_rank(overall) if overall else "—"
+        if overall and total_players:
+            rank_text += " / %s" % _compact_rank(total_players)
         body += cards.stats([
             cards.stat("%s" % latest.get("total_points", "—"), "total pts",
                        cards.ACCENT),
             cards.stat(("%s" % latest.get("points", "—")),
                        "GW%s pts" % latest.get("event", "")),
-            cards.stat(("%s" % _compact_rank(overall)) if overall else "—",
-                       "overall rank"),
+            cards.stat(rank_text, "overall rank"),
         ])
         chips = history.get("chips") or []
         if chips:
@@ -494,6 +500,20 @@ def _my_team_card(standings: dict, min_height: int = 0) -> str:
     else:
         body += cards.push(cards.note("Could not load your team history."))
     return cards.card(body, min_height=min_height)
+
+
+def _total_players() -> int:
+    """How many managers are playing, for the overall rank to be out of.
+
+    Returns 0 when the bootstrap cannot be read, which renders the rank alone
+    rather than a rank out of nothing.
+    """
+    try:
+        from scripts.common.fpl_classic_api import get_classic_bootstrap_static
+        return int((get_classic_bootstrap_static() or {}).get("total_players") or 0)
+    except Exception:
+        _logger.warning("Could not read the player count", exc_info=True)
+        return 0
 
 
 def _compact_rank(value) -> str:
@@ -650,15 +670,15 @@ def show_classic_home_page():
                 # of one table, not independent options, and only the chosen one
                 # is computed -- the all-play simulation is the expensive half.
                 view = st.radio(
-                    "Standings view", ["Table", "All-Play"],
+                    "Standings view", ["Table", "Luck Adjusted"],
                     horizontal=True, label_visibility="collapsed",
                     key=f"standings_view_{league_id}",
-                    help="All-Play replays every team against every other team "
-                         "each gameweek, so Luck +/- shows how much the actual "
-                         "schedule helped or hurt.",
+                    help="Replays every team against every other team each "
+                         "gameweek — an all-play record — so Luck +/- shows how "
+                         "much the actual schedule helped or hurt.",
                 )
-                if view == "All-Play":
-                    with st.spinner("Calculating all-play standings..."):
+                if view == "Luck Adjusted":
+                    with st.spinner("Replaying every fixture..."):
                         luck_df = get_classic_h2h_luck_adjusted(league_id, standings)
                     render_luck_adjusted_table(luck_df)
                     st.caption("**Luck +/-** is the gap between your real record "
@@ -667,10 +687,19 @@ def show_classic_home_page():
                 else:
                     display_df = df.drop(columns=["entry_id"], errors="ignore")
                     if h2h_streaks_df is not None and not h2h_streaks_df.empty:
-                        streak_map = dict(zip(h2h_streaks_df["Team"],
-                                              h2h_streaks_df["Current_Streak"]))
+                        # On the entry id: two managers who never renamed their
+                        # squad are both "Change Name", and a name join gave
+                        # them each other's streak.
                         display_df = display_df.copy()
-                        display_df["Streak"] = display_df["Team"].map(streak_map).fillna("-")
+                        if ("Team_ID" in h2h_streaks_df.columns
+                                and "entry_id" in df.columns):
+                            streak_map = dict(zip(h2h_streaks_df["Team_ID"],
+                                                  h2h_streaks_df["Current_Streak"]))
+                            display_df["Streak"] = df["entry_id"].map(streak_map).fillna("-")
+                        else:
+                            streak_map = dict(zip(h2h_streaks_df["Team"],
+                                                  h2h_streaks_df["Current_Streak"]))
+                            display_df["Streak"] = display_df["Team"].map(streak_map).fillna("-")
                         display_df["Streak"] = display_df["Streak"].apply(format_streak_html)
                         cols = list(display_df.columns)
                         l_idx = cols.index("L")

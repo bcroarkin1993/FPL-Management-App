@@ -233,9 +233,9 @@ class TestClassicHomeShowsTheWeek:
         seen = self._band_a(team_id=None, strip_px=None)
         assert "team" not in seen
 
-    def test_the_all_play_view_is_not_computed_until_it_is_chosen(self, mock_all_utils):
-        """The radio keeps the laziness the checkbox had: the all-play
-        simulation is the expensive half of the standings band."""
+    def test_the_luck_adjusted_view_is_not_computed_until_it_is_chosen(self, mock_all_utils):
+        """The radio keeps the laziness the checkbox had: replaying every
+        fixture against every other is the expensive half of this band."""
         with ExitStack() as stack:
             mod = "scripts.classic.home"
             for name, value in {
@@ -261,7 +261,7 @@ class TestClassicHomeShowsTheWeek:
             show_classic_home_page()
         assert not luck.called
 
-    def test_choosing_all_play_computes_it(self, mock_all_utils):
+    def test_choosing_luck_adjusted_computes_it(self, mock_all_utils):
         with ExitStack() as stack:
             mod = "scripts.classic.home"
             for name, value in {
@@ -280,7 +280,7 @@ class TestClassicHomeShowsTheWeek:
             stack.enter_context(patch(f"{mod}.render_my_week_section",
                                       return_value=200))
             stack.enter_context(patch("streamlit.radio",
-                                      return_value="All-Play"))
+                                      return_value="Luck Adjusted"))
             luck = stack.enter_context(patch(
                 f"{mod}.get_classic_h2h_luck_adjusted",
                 return_value=pd.DataFrame()))
