@@ -3141,7 +3141,8 @@ retired.
 ### My Week — the pre-deadline round, on Classic Home
 
 `scripts/common/week_check.py` (pure), `scripts/classic/my_week.py` (the strip),
-`scripts/common/h2h.py`, `check_week_plan()`, plus two earlier extractions:
+`scripts/common/h2h.py`, `scripts/common/lineup_confirm.py`,
+`check_week_plan()`, plus two earlier extractions:
 `scripts/common/price_signals.py` and `player_pool.squad_frame()`.
 
 **Every pre-deadline question was answered, and each one somewhere else.** The
@@ -3150,26 +3151,31 @@ Fixture Projections, free transfers on Transfer Suggestions, the chip call on
 Chip Strategy, prices on Price Changes. Six pages — and the only way to learn
 that five of them had nothing to say was to open all six.
 
-It renders as an alert strip at the top of **Classic Home**, above the
-standings: one pill per thing to look at, then a three-tab detail block (Needs
-action / Full checklist / Transfer plan), then the league exactly as it was. It
-shipped first as its own page and that was wrong twice over — a checklist
-belongs where you land, and **a flag you have to ask for is not a flag.** The
-transfers row read "3 free transfers" until a button was pressed, so the half
-that made it an alert (a +11.5 point move is available) was the half that needed
-prompting.
+It renders at the top of **Classic Home**, in the right-hand column beside a
+league identity card: those are the two questions a visit starts with ("which
+league am I looking at", "is there anything I have to do"). One alert list, each
+row carrying its own verdict, then a row of buttons, then a collapsed "Your week
+in full" with the nine checks and the transfer plan. Below that the standings,
+untouched.
 
-**The button was never justified by its cost**, which is the measurement that
-settled it: the ILP frontier over K=0..3 is **0.27s**, matching this file's own
-"under half a second" for `build_transfer_plan`. The real cost is
-`blended_pool`'s 3.7s, and that frame is shared with the Projections Hub, Chip
-Strategy and the Rival Tracker under its own 300s cache. So everything is eager
-and the assembled checklist is cached as one object (`_assemble`, 120s, keyed on
-primitives only so no frame enters the cache):
+Three revisions got it here, and each was a real lesson:
+
+1. **It shipped as its own page.** A checklist belongs where you land.
+2. **The transfer plan was behind a button**, so the half that made it an alert
+   — a +11.5 point move is available — was the half that needed prompting. The
+   measurement settled it: the ILP frontier over K=0..3 is **0.27s**, matching
+   this file's own "under half a second" for `build_transfer_plan`.
+3. **A pill strip above a "Needs action" tab said everything twice.** One list.
+
+**The cost bargain**, with everything eager and the assembly cached as one
+object (`_assemble`, 120s, keyed on primitives only so no frame enters the
+cache). The heavy input is `blended_pool`, which owns a 300s cache shared with
+the Projections Hub, Chip Strategy and the Rival Tracker, so its cold cost is
+paid once across the app:
 
 | | |
 |---|---|
-| first Classic Home visit in a cache window | 5.3s |
+| first Classic Home visit in a cache window | 5-7s |
 | re-assembled after the TTL, HTTP warm | **0.28s** |
 | a Home rerun | **0.00s** |
 
@@ -3179,64 +3185,130 @@ and on this week's chip values (Bench Boost 7.83, Triple Captain 7.118), because
 it calls `best_xi_index` / `bench_boost_value` / `triple_captain_value` rather
 than a second copy of them.
 
-**An all-clear must be derived, never defaulted**, which is the one way a
-checklist is uniquely able to be wrong. Every other surface here fails by
-showing a wrong number; this one fails by showing a right-looking *absence* of
-one, because "nothing to do this week" and "we could not check" render
-identically and are opposite claims. Hence `STATUS_UNKNOWN` as a first-class
-status, a builder that returns it rather than the reassuring value whenever its
-inputs are missing, an `evidence` dict per item recording what the verdict was
-drawn from, and `check_week_plan()` erroring on an `ok` that recorded none.
-`unknown` sorts **above** `ok` in the headline and gets its own grey pill, so an
-outage cannot hide under a row of green ticks — a bar that silently shortens is
-exactly the defaulted all-clear.
+#### An all-clear must be derived, never defaulted
+
+The one way a checklist is uniquely able to be wrong. Every other surface here
+fails by showing a wrong number; this one fails by showing a right-looking
+*absence* of one, because "nothing to do this week" and "we could not check"
+render identically and are opposite claims. Hence `STATUS_UNKNOWN` as a
+first-class status, a builder that returns it rather than the reassuring value
+whenever its inputs are missing, an `evidence` dict per item recording what the
+verdict was drawn from, and `check_week_plan()` erroring on an `ok` that
+recorded none. `unknown` sorts **above** `ok` and keeps its place in the alert
+list, so an outage cannot hide under a quiet strip.
 `test_a_clean_week_passes_its_own_validation` is the cross-check that the rule
 holds for every builder at once.
 
-**Three absences that are not the same absence**, and the distinction is the
-design decision this feature turns on. In a **total-points league** the
-head-to-head row is **absent** (the question does not exist); an **H2H gameweek
-with no pairing** is likewise absent; an **H2H fixture that could not be read**
-is a **grey row** (the question exists and we failed to answer it). `_opponent`
-therefore returns a *kind* — `"ok"` / `"no_fixture"` / `"unknown"` — rather than
-an optional tuple, because an optional tuple can only express two of the three.
+**Three absences that are not the same absence.** In a **total-points league**
+the head-to-head row is **absent** (the question does not exist); an **H2H
+gameweek with no pairing** is likewise absent; an **H2H fixture that could not be
+read** is a **grey row** (the question exists and we failed to answer it).
+`_opponent` therefore returns a *kind* — `"ok"` / `"no_fixture"` / `"unknown"` —
+rather than an optional tuple, which can only express two of the three.
 
-Four more rules inside the items, each a trap already paid for elsewhere:
+#### The rows that earn their place, and why the first two were rewritten
 
-- **A captain change is only recommended against a live squad.** A
-  `picks`-sourced squad carries *last* deadline's armband — the same fact that
-  makes `h2h.lineup_projection` use the optimal XI rather than stored
-  multipliers — so the comparison would tell every manager without a connected
-  account to change a captain they have already changed. The model's pick is
-  still rendered; only the disagreement is withheld, and `check_week_plan()`
-  errors if it is not.
-- **An unreadable fixture list is unknown, not twenty blanking clubs.** That is
-  `club_fixture_counts`'s own documented failure shape. And finding nothing is
-  the *normal* state for the first half of a season, so the all-clear says how
-  far ahead it looked rather than implying the season is flat.
-- **An absence reports whose authority it rests on.** `absence_estimate()`
-  distinguishes a stated return date from a chance bucket and only the first says
-  anything about *which* gameweeks; live, of ~200 players carrying an estimate
-  only ~20 are stated, so the hedge is the common case and reads as one ("out ~3
-  GW (return date stated)" against "(inferred, no stated date)").
-- **A win probability outside (0, 1) is an error**, not a confident call: it is
-  what a sigma of 0 produces, every fixture resolving to a certainty off a spread
-  the league has not earned. The `check_score_std` failure, one model over.
+**`lineup` asks whether the eleven you have *set* is the right one.** It used to
+report the best XI's total and compare captains, which is a statement about the
+squad rather than about anything the manager had done — and "your best XI is
+56.6" is not something you can act on. It now reads FPL's stored `position`
+(1-11 is the XI, carried by `squad_frame` as `pick_position`) and scores that
+arrangement as the gameweek will score it, armband included. Live: *"Your XI is
+not optimal — start Dominic Calvert-Lewin over Igor Thiago (+3.1)"*, Thiago
+being the player with a stated three-gameweek absence. **The named swap is
+checked for legality by re-running `best_xi_index` over the proposed eleven**
+rather than encoding the 1/3/2/1 quotas a second time.
 
-**Each row is one click from the page that fixes it.** `main.py` applies
+**`transfers` asks whether you acted, not whether a move exists.** Flagging the
+opportunity alone keeps the row lit after you have transferred, which is the
+same complaint that demoted the squad row. FPL's transfer log publishes per
+gameweek — verified live, 18 rows across five gameweeks, and GW9's single
+transfer reads back as 1 — so `_transfers_made` counts it, prefers an
+authenticated `event_transfers`, and adds anything logged locally. Where nothing
+is recorded anywhere the row is a **warning, not an action**: FPL may withhold
+an in-week move until the deadline (the same open question the replay carries),
+so "no rows" is weaker than "you have not transferred".
+
+**`squad` is informational and never warns.** Between deadlines without
+credentials the squad is *always* last deadline's, so flagging it made one row
+permanently yellow while saying nothing actionable. The caveat survives as one
+grey line under the alert list, and the row's Open button points at Transfer
+Suggestions rather than League Setup, which was simply the wrong destination.
+
+#### The XI alert can be told it is wrong
+
+`lineup_confirm.py`. The app cannot see a pre-deadline lineup without
+credentials, so "your XI is not optimal" is a claim it cannot retract on its
+own: the manager may have fixed it minutes ago in FPL's own UI. So the row can be
+confirmed away, and **the confirmation is tied to a signature of the fifteen** —
+membership, not arrangement — so a transfer re-arms it automatically and nothing
+has to clear the file. It records that a human looked, not that the XI is
+optimal, and the row says "you have set this gameweek's XI" rather than "your XI
+is optimal". Stored in its own gitignored file beside
+`.fpl_pending_transfers.json`, per-gameweek.
+
+`confirmed_signature` is in `_assemble`'s **cache key** rather than read inside
+it, or pressing the button would be swallowed by the cached entry it is meant to
+invalidate.
+
+**No FPL credentials are configured**, which is the root of most of the caveats
+above: `.fpl_auth.json` does not exist and `has_auth()` is False, so every squad
+resolves through `picks`. The strip offers a "Connect FPL account" button in that
+state — with credentials, `my-team` returns the live squad, the staleness line
+disappears, `event_transfers` answers the transfer question outright, and
+selling prices become available to the planner.
+
+#### Navigation, and the guard on it
+
+Each flagged row is one click from the page that fixes it: `main.py` applies
 `_pending_nav_section` / `_pending_nav_page` before its sidebar radios are
-instantiated (Home's own "Go to League Setup" link is the precedent), so every
-row carries an `Open →`. That is why `WeekItem` has a `section` as well as a
-`page`: the targets span two sections — Availability is under FPL App Home,
-Transfer Suggestions under Classic — and a label alone is ambiguous.
+instantiated (Home's own "Go to League Setup" link is the precedent). That is
+why `WeekItem` carries a `section` as well as a `page` — the targets span two
+sections, Availability being under FPL App Home and Transfer Suggestions under
+Classic, and a label alone is ambiguous.
 `test_every_item_points_at_a_real_page` asserts every pair exists in
-`main.SECTIONS`, because a renamed page does not raise there, it silently turns
+`main.SECTIONS`, because a renamed page does not raise there: it silently turns
 every button into a no-op.
 
-**Home guards the call as well as the section guarding itself.** The strip
-renders *above* the standings, which are why most visits happen, and
-`page_error_boundary` would replace the whole page with an error rather than
-cost the strip alone.
+**Home guards the call as well as the section guarding itself**, since the strip
+renders above the standings and `page_error_boundary` would replace the whole
+page with an error rather than cost the strip alone.
+
+#### Validation
+
+`check_week_plan()` errors on: an `ok` with no evidence behind it (the defaulted
+all-clear); an unrecognised status or an empty verdict; a "next deadline" already
+in the past; a free-transfer count outside the cap; a full row of green ticks
+over a squad that is not fifteen; a win probability outside (0, 1), which is what
+a sigma of 0 produces — `check_score_std`'s failure arriving in the H2H row; and
+three things about the lineup row — an action naming neither a gain nor a captain
+to move, a flagged row that has been confirmed, and a **set XI scoring above the
+optimal one**, which can only mean the two totals were computed on different
+bases (the `Proj > Proj_Start` shape).
+
+The *old* rule there — refusing a captain comparison against a non-current squad
+— is deliberately gone. The redesign compares a last-deadline lineup on purpose,
+because it is the only one FPL publishes, and the confirm button is the remedy.
+
+#### Three fixture lessons, all of which hid a real defect
+
+- `build_transfer_plan`'s `frontier` is a **list** of `{k, gain, n_changes,
+  hits}` entries, not a mapping, and its leg prices are already in millions; and
+  `leg["out_row"]` is a Series, so `row or {}` raises. A dict-shaped fixture let
+  a renderer that could read neither pass its own test.
+- The Home test's empty `standings.results` made Home render "No standings data
+  available yet", so an assertion that the standings survived a broken strip
+  passed for the wrong reason.
+- The section fixture's picks had no `position` key, so the XI check had nothing
+  to compare and silently fell back to reporting the best XI — the alert looked
+  quiet in tests while working live.
+
+And one harness hazard worth repeating: **`mock_streamlit`'s buttons are
+unconditionally truthy**, so the confirm button fires in every page test and
+*writes*. `CONFIRM_FILE` is redirected to a temp path for every run of the
+section tests; without that the suite silences the developer's own alert by
+confirming a squad nobody confirmed — the same lesson as `save_settings` and
+`purge_cache_prefix` elsewhere in that file.
 
 Two extractions, both because a second reader arrived and the alternative is a
 twin — the `rotowire_lineups.py`-out-of-`projected_lineups.py` precedent:
@@ -3248,22 +3320,6 @@ optimal-XI projection, all lifted out of Chip Strategy. `build_pool`
 additionally carries `Team_ID`, `now_cost` and `minutes` — every fixture join is
 keyed on the club id, and the transfer planner reads the other two, so the plan
 lane runs off the same cached blend instead of reassembling one.
-
-**Two bugs only a live run could find, and the fixture that hid them.**
-`build_transfer_plan`'s `frontier` is a **list** of `{k, gain, n_changes, hits}`
-entries, not a mapping, and its leg prices are already in millions; and
-`leg["out_row"]` is a Series, so `row or {}` raises `ValueError`. A dict-shaped
-test fixture let a renderer that could read neither pass its own test. The same
-shape of mistake appeared in the Home test, whose empty `results` list made Home
-render "No standings data available yet" so an assertion that the standings
-survived passed for the wrong reason. A fixture that invents a shape tests
-nothing.
-
-Live at GW11: three pills (fitness, transfers, squad not current); "1 out · 1
-doubtful" with Igor Thiago out ~3 GW stated; "3 free transfers · best plan at 3
-transfers is worth +11.5 pts" **with nothing pressed**; "You play Jalabeumo —
-56.6 projected against 53.9, 55% to win"; Bench Boost and Free Hit playable with
-9 gameweeks left. Validation clean.
 
 **Classic only, for now.** `ITEM_ORDER` is the extension point, but the Draft
 checklist is a different list — waiver deadline, claim order, locked players; no
@@ -5522,7 +5578,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Notes |
 |------|-------|
-| My Week (Classic) | Completed | The whole pre-deadline round as an alert strip at the top of **Classic Home**: deadline, head-to-head opponent, squad provenance, fitness, blanks and doubles, XI and captain, free transfers and the best plan, chips, price exposure — one pill per thing to look at, a three-tab detail block, and an `Open →` per row that jumps to the page which fixes it. Computes nothing itself: verified live to agree with Chip Strategy to the digit on both the lineup total and this week's chip values. **Nothing is behind a button** — the ILP frontier measured 0.27s, so a flag that needed prompting was never justified — and its one idea is that **an all-clear must be derived, never defaulted**, since a checklist's unique failure is a right-looking absence of numbers. See "My Week — the pre-deadline round, on Classic Home". |
+| My Week (Classic) | Completed | The whole pre-deadline round as an alert strip at the top of **Classic Home**, beside a league identity card: deadline, head-to-head opponent, squad provenance, fitness, blanks and doubles, **whether the XI you have set is the right one**, whether you have acted on the best transfer, chips, price exposure — one list, one button per flagged row jumping to the page that fixes it, and the detail in a collapsed expander. Computes nothing itself: verified live to agree with Chip Strategy to the digit. **Nothing is behind a button** (the ILP frontier measured 0.27s). Its one idea is that **an all-clear must be derived, never defaulted** — a checklist's unique failure is a right-looking absence of numbers — and its one concession to reality is that the XI alert can be *told* it is wrong, against a signature of the fifteen so a transfer re-arms it. See "My Week — the pre-deadline round, on Classic Home". |
 | Chip Strategy (Classic) | Completed | A **🎯 Chip Strategy** page scoring all four chips in expected points per gameweek, with an expiry clock read from `bootstrap-static.chips` — which nothing in the app had ever read, and which revealed that all four chips are double-use this season while `_parse_chip_status` modelled Free Hit and Triple Captain as single-use. Adds the H2H lane: a chip is worth the *win probability* it buys, which peaks when trailing by half its gain, so the biggest-points week is routinely not the most useful one. Also the app's first per-club fixture **count**, so blanks and doubles are detectable at all. See "Chips — the rules are published". |
 | Season Odds | Completed | A **Show Season Odds** toggle under the league table on both Home pages: title, playoff and last-place probabilities from a Monte Carlo of the remaining fixtures, using the same `Phi((muA-muB)/sqrt(2 sigma^2))` model as the per-match win probability. The feature betterdraft.co.uk has that this app had no equivalent of. Each simulation re-draws every manager's underlying mean from its own sampling distribution, because that mean rests on nine matches — live that is the difference between a 25.4% and a 31.4% title probability for the leader, and holding it fixed overstates how decided the league is. Covers Draft, Classic H2H and Classic total-points — the last is a different simulation, since nobody plays anybody and the table is ordered on accumulated points. Seeded on `(league, gameweek, n_sims)` so a Streamlit rerun cannot change the answer. `check_season_odds()` guards it on exact identities. First shipped as a ninth tab on League Analysis, which Streamlit's tab strip pushed off-screen. See "Season Odds" |
 | Draft Team Power Rankings | New "💪 Power Rankings" tab on Draft League Analysis. Team Score 0-100 plus GK/DEF/MID/FWD scores with league rank badges, all positional percentiles against the full ~700-player FPL pool. Player strength = 60% quality (preseason Rotowire pedigree blended into in-season actuals via `season_progress_weight()`) + 25% this-GW blended projection + 10% start security + 5% FDR, times a season-aware injury discount. Actuals use **points per start** (not total points) so a player returning from a long injury isn't penalised for missed games; below 4 starts the sample is too thin and pedigree is used alone. Rosters join to stats on integer element ID via new `get_league_rosters_with_ids()` — no name matching in this path. See "Team Strength Model" section below. |
