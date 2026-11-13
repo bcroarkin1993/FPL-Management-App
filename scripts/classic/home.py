@@ -14,6 +14,7 @@ from typing import Optional, Dict, List
 
 from scripts.classic.my_week import render_my_week_section
 from scripts.common.error_helpers import get_logger
+from scripts.common.text_helpers import compact_html
 from scripts.common.luck_analysis import (
     extract_classic_h2h_gw_scores,
     calculate_all_play_standings,
@@ -399,6 +400,62 @@ def plot_rank_progression(history_df: pd.DataFrame, use_overall_rank: bool = Fal
 # MAIN PAGE
 # ---------------------------
 
+def _league_card(league_name: str, scoring_type: str, standings: dict,
+                 current_gw: int) -> str:
+    """The selected league, as a card rather than a heading and a metric.
+
+    Carries the three things that identify it -- name, format, size -- plus
+    where the configured team sits in it, which is the reason to look at a
+    league table at all and previously needed scrolling to find.
+    """
+    results = (standings or {}).get("results") or []
+    mine = None
+    team_id = getattr(config, "FPL_CLASSIC_TEAM_ID", None)
+    if team_id:
+        for row in results:
+            if str(row.get("entry")) == str(team_id):
+                mine = row
+                break
+    badge_colour = "#4ecca3" if scoring_type == "H2H" else "#00ff87"
+    standing = ""
+    if mine is not None:
+        standing = (
+            f'<div style="color:#9ca3af;font-size:0.78em;margin-top:7px;">'
+            f'You are <strong style="color:#e0e0e0;">'
+            f'{_ordinal(mine.get("rank"))}</strong> of {len(results)}'
+            f' &middot; <strong style="color:#e0e0e0;">'
+            f'{mine.get("total", 0)}</strong> pts</div>')
+    return compact_html(f'''
+        <div style="border:1px solid #333;border-radius:12px;padding:14px 16px;
+                    background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);
+                    color:#e0e0e0;">
+          <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;">
+            <span style="font-size:1.12em;font-weight:700;">{league_name}</span>
+            <span style="background:{badge_colour}22;color:{badge_colour};
+                         border:1px solid {badge_colour}66;padding:2px 9px;
+                         border-radius:10px;font-size:0.72em;font-weight:700;
+                         text-transform:uppercase;letter-spacing:0.5px;">
+              {scoring_type}</span>
+          </div>
+          <div style="color:#6b7280;font-size:0.76em;margin-top:5px;">
+            {len(results)} manager{"" if len(results) == 1 else "s"}
+            &middot; gameweek {current_gw}</div>
+          {standing}
+        </div>
+    ''')
+
+
+def _ordinal(value) -> str:
+    """1 -> 1st. Rendered beside a league position, so the suffix matters."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    if 10 <= n % 100 <= 20:
+        return "%dth" % n
+    return "%d%s" % (n, {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
+
+
 def show_classic_home_page():
     """Display the Classic FPL Home page with standings and charts."""
 
@@ -446,42 +503,37 @@ def show_classic_home_page():
         show_api_error(f"loading standings for league {league_id}", hint_key="classic_league_stale")
         return
 
-    # Display league info header
     league_info = data["league_info"]
     scoring_type = data["scoring_type"]
-
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        league_name = league_info.get("name", "Unknown")
-        st.markdown(f"### {league_name}")
-    with col2:
-        st.metric("Format", scoring_type)
-
-    st.divider()
-
     standings = data["standings"]
-    # Both season-odds paths need it, and `get_current_gameweek` is cached.
+    # Both the league card and the season-odds paths need it, and
+    # `get_current_gameweek` is cached.
     current_gw = get_current_gameweek() or 1
 
     # ---------------------------
-    # YOUR WEEK — the pre-deadline alert strip
+    # THE TOP: which league, and your week in it
     # ---------------------------
-    # Above the standings on purpose: it is the only thing on this page that is
-    # time-critical, and a flag below the fold is a flag you find out about
-    # afterwards. It is scoped to *your* squad rather than to the selected
-    # league (the head-to-head row excepted), owns its own cache, and cannot
-    # take the league below it down -- see `my_week.render_my_week_section`.
-    # Guarded here as well as inside the section: it renders *above* the
-    # standings, which are why most visits to this page happen, so a fault in
-    # the strip must cost the strip and nothing else. `page_error_boundary`
-    # would replace the whole page with an error instead.
-    try:
-        render_my_week_section(league_id=league_id, scoring_type=scoring_type,
-                               current_gw=current_gw)
-    except Exception:
-        _logger.warning("Could not render the My Week strip", exc_info=True)
-        st.caption("Could not check your week just now — the league below is "
-                   "unaffected.")
+    # Side by side because they answer the two questions a visit starts with --
+    # "which league am I looking at" and "is there anything I have to do before
+    # the deadline" -- and because a time-critical flag below the fold is one
+    # you find out about afterwards.
+    identity, week = st.columns([1, 2], gap="medium")
+    with identity:
+        st.markdown(_league_card(league_info.get("name", "Unknown"),
+                                 scoring_type, standings, current_gw),
+                    unsafe_allow_html=True)
+    with week:
+        # Guarded as well as inside the section: `page_error_boundary` would
+        # replace the whole page with an error, and the standings below are why
+        # most visits happen, so a fault here must cost the strip alone.
+        try:
+            render_my_week_section(league_id=league_id,
+                                   scoring_type=scoring_type,
+                                   current_gw=current_gw)
+        except Exception:
+            _logger.warning("Could not render the My Week strip", exc_info=True)
+            st.caption("Could not check your week just now — the league below "
+                       "is unaffected.")
 
     st.divider()
 

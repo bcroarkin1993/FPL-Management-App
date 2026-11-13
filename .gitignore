@@ -45,6 +45,10 @@ Thumbs.db
 # Locally-logged pending FPL transfers (user-specific, pre-deadline)
 .fpl_pending_transfers.json
 
+# Per-gameweek acknowledgements that the lineup has been set, read by the
+# My Week strip (user-specific, and meaningless to anyone else).
+.fpl_lineup_confirmations.json
+
 # FPL session credential for the authenticated my-team endpoint (the only
 # source of a pre-deadline squad). A secret, and user-specific — never commit.
 .fpl_auth.json

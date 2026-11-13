@@ -36,13 +36,14 @@ import pandas as pd
 import streamlit as st
 
 import config
-from scripts.common import chips, h2h, week_check
+from scripts.common import chips, h2h, lineup_confirm, week_check
 from scripts.common.analytics import gameweek_deadlines
 from scripts.common.classic_squad import SOURCE_MY_TEAM, resolve_classic_squad
 from scripts.common.data_validation import check_week_plan
 from scripts.common.display_names import display_of
 from scripts.common.error_helpers import get_logger
 from scripts.common.fixture_helpers import club_fixture_counts
+from scripts.common.fpl_auth import has_auth
 from scripts.common.fpl_classic_api import (
     get_classic_bootstrap_static,
     get_classic_team_history,
@@ -88,7 +89,7 @@ _PILL_TEXT = {
     "squad": "Squad not current",
     "availability": "Fitness",
     "fixtures": "Fixtures",
-    "lineup": "Captain",
+    "lineup": "Your XI",
     "transfers": "Transfers",
     "chips": "Chips",
     "prices": "Prices",
@@ -156,11 +157,10 @@ def _gw_points(pool, target_gw):
 
 
 def _lineup(squad_df):
-    """``(captain-doubled XI total, captain name, his projection)``.
+    """``(optimal total, captain, his projection)`` for the best legal XI.
 
-    The *optimal* XI and the optimal armband, not the stored multipliers: for a
-    gameweek whose deadline has not passed those are last deadline's choices, so
-    reading them would project a manager as benching his best player.
+    The *optimal* arrangement of the fifteen -- what the squad is worth if it is
+    set correctly, which is the number the set lineup is measured against.
     """
     if squad_df is None or squad_df.empty or "Proj" not in squad_df.columns:
         return None, None, None
@@ -180,14 +180,104 @@ def _lineup(squad_df):
             float(xi.max()))
 
 
-def _stored_captain(squad_df):
-    """Whose armband FPL currently records, if the frame says."""
-    if squad_df is None or squad_df.empty or "is_captain" not in squad_df.columns:
-        return None
-    marked = squad_df[squad_df["is_captain"].astype(bool)]
-    if marked.empty:
-        return None
-    return display_of(marked.iloc[0]) or None
+def _set_lineup(squad_df):
+    """``(total, captain, best available swap)`` for the XI FPL has stored.
+
+    The lineup a manager has actually *set*, read from ``pick_position`` (1-11
+    is the XI). Scored the way the gameweek will score it: the eleven plus
+    another copy of whoever wears the armband -- not the optimal captain, since
+    the point is to measure the arrangement as it stands.
+
+    ``swap`` is the single most valuable legal change, which is what makes the
+    alert actionable rather than merely true. It is the best bench player
+    against the worst starter **whose positions leave the formation legal** --
+    checked by re-running `best_xi_index` over the proposed eleven rather than
+    by encoding the quotas a second time.
+    """
+    if (squad_df is None or squad_df.empty or "pick_position" not in squad_df.columns
+            or "Proj" not in squad_df.columns):
+        return None, None, None
+    picks = pd.to_numeric(squad_df["pick_position"], errors="coerce")
+    if not picks.notna().any():
+        return None, None, None
+
+    points = pd.to_numeric(squad_df["Proj"], errors="coerce").fillna(0.0)
+    starters = squad_df.index[picks <= 11]
+    bench = squad_df.index[picks > 11]
+    if len(starters) != 11:
+        return None, None, None
+
+    captain_idx = None
+    if "is_captain" in squad_df.columns:
+        marked = squad_df.index[squad_df["is_captain"].astype(bool)]
+        captain_idx = marked[0] if len(marked) else None
+    if captain_idx is None or captain_idx not in starters:
+        captain_idx = points.loc[starters].idxmax()
+
+    total = float(points.loc[starters].sum() + points.loc[captain_idx])
+    captain = display_of(squad_df.loc[captain_idx])
+
+    positions = squad_df["Position"].map(_map_position_to_rw)
+    best = None
+    for out_idx in starters:
+        for in_idx in bench:
+            delta = float(points.loc[in_idx] - points.loc[out_idx])
+            if delta <= 0 or (best is not None and delta <= best["delta"]):
+                continue
+            proposed = [i for i in starters if i != out_idx] + [in_idx]
+            frame = pd.DataFrame({"Position": positions.loc[proposed],
+                                  "_p": points.loc[proposed]})
+            try:
+                if len(best_xi_index(frame, "_p")) != 11:
+                    continue       # the swap would leave an illegal formation
+            except KeyError:
+                continue
+            best = {"delta": delta, "out_name": display_of(squad_df.loc[out_idx]),
+                    "in_name": display_of(squad_df.loc[in_idx])}
+    return total, captain, best
+
+
+def _transfers_made(team_id, target_gw, resolution):
+    """How many transfers are already in for this gameweek, or ``None``.
+
+    FPL's own transfer log is the source and it **does** publish per gameweek --
+    verified live, 18 rows across five gameweeks for one entry. Whether it
+    withholds an in-week move until the deadline is still unobserved (CLAUDE.md
+    records the same open question for the replay), so "no rows for this week"
+    is reported as *unknown* rather than as zero unless another source can
+    confirm it: an authenticated squad states the count outright, and a locally
+    logged transfer is proof of at least one.
+    """
+    logged = 0
+    try:
+        # A flat list of {team_id, event, element_out, element_in, ...}, which
+        # is what `transfers._add_pending_local` writes.
+        from scripts.common.classic_squad import load_pending_file
+        logged = sum(1 for e in load_pending_file() or []
+                     if int(e.get("team_id") or 0) == int(team_id)
+                     and int(e.get("event") or 0) == int(target_gw))
+    except Exception as exc:
+        _logger.warning("Could not read the pending transfer log: %s", exc)
+
+    # An authenticated squad knows the real count for the current gameweek.
+    if getattr(resolution, "source", "") == SOURCE_MY_TEAM:
+        made = (resolution.entry_history or {}).get("event_transfers")
+        if made is not None:
+            return int(made) + logged
+
+    try:
+        from scripts.common.fpl_classic_api import get_classic_transfers
+        rows = get_classic_transfers(team_id) or []
+        from_log = sum(1 for t in rows
+                       if int(t.get("event") or 0) == int(target_gw))
+    except Exception as exc:
+        _logger.warning("Could not read the transfer log: %s", exc)
+        return logged or None
+
+    if from_log or logged:
+        return from_log + logged
+    # Nothing recorded anywhere, and we cannot prove the absence.
+    return None
 
 
 def _chip_values(squad_df, pool, target_gw):
@@ -339,13 +429,17 @@ def _plan_summary(plan) -> dict:
 # Assembly, cached as one object so a Home rerun costs nothing
 # ------------------------------------------------------------------
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def _assemble(team_id: int, current_gw: int, league_id, is_h2h: bool):
-    """``(items, plan_summary, squad_size, xi_present)``.
+def _assemble(team_id: int, current_gw: int, league_id, is_h2h: bool,
+              confirmed_signature: str = ""):
+    """``(items, plan_summary, squad_size, xi_present, signature)``.
 
     Everything the strip renders, resolved once. Keyed on primitives only -- the
     heavy input is `blended_pool`, which owns its own 300s cache and is shared
-    with the Projections Hub, Chip Strategy and the Rival Tracker, so the 3.7s
-    cold cost is paid once across the app rather than once per page.
+    with the Projections Hub, Chip Strategy and the Rival Tracker, so the cold
+    cost is paid once across the app rather than once per page.
+
+    ``confirmed_signature`` is in the key rather than read inside, so pressing
+    "I have set my XI" invalidates this entry instead of being swallowed by it.
     """
     bootstrap = get_classic_bootstrap_static() or {}
     history = get_classic_team_history(team_id) or {}
@@ -371,7 +465,13 @@ def _assemble(team_id: int, current_gw: int, league_id, is_h2h: bool):
     plan = (None if squad_df.empty else
             _solve_plan(pool, squad_df, resolution, (ft_info or {}).get("count")))
 
-    xi_total, captain, captain_pts = _lineup(squad_df)
+    signature = ("" if squad_df.empty else
+                 lineup_confirm.squad_signature(squad_df["element_id"].tolist()))
+    confirmed = bool(signature) and signature == confirmed_signature
+
+    optimal_total, captain, _ = _lineup(squad_df)
+    set_total, set_captain, swap = _set_lineup(squad_df)
+    stale = bool(getattr(resolution, "is_stale", False))
 
     opponent_item = None
     if is_h2h and league_id and not squad_df.empty:
@@ -396,74 +496,147 @@ def _assemble(team_id: int, current_gw: int, league_id, is_h2h: bool):
              if "Team_ID" in squad_df.columns else []),
             window, target_gw, team_names),
         lineup=week_check.build_lineup_item(
-            xi_total, captain, captain_pts, _stored_captain(squad_df),
-            comparable=(getattr(resolution, "source", "") == SOURCE_MY_TEAM
-                        and not started)),
-        transfers=week_check.build_transfers_item(ft_info, bank, plan),
+            optimal_total, set_total, swap, captain, set_captain,
+            confirmed=confirmed, stale=stale),
+        transfers=week_check.build_transfers_item(
+            ft_info, bank, plan,
+            made_this_week=_transfers_made(team_id, target_gw, resolution)),
         chips_item=week_check.build_chips_item(
             status, _chip_values(squad_df, pool, target_gw), chips.CHIP_LABELS),
         prices=week_check.build_prices_item(_price_pressure(bootstrap, squad_df)),
     )
-    return items, _plan_summary(plan), len(squad_df), xi_total is not None
+    return (items, _plan_summary(plan), len(squad_df),
+            optimal_total is not None, signature)
 
 
 # ------------------------------------------------------------------
 # Rendering
 # ------------------------------------------------------------------
-def _pill(item) -> str:
+def _alert_row(item) -> str:
+    """One line of the alert list: status, what it is, and the number.
+
+    This replaces the pill strip *and* the "Needs action" tab, which said the
+    same thing twice -- the feedback that prompted the rewrite. One list, each
+    row carrying its own verdict, so nothing is repeated and nothing needs
+    opening to be read.
+    """
     icon, colour = _STATUS_STYLE.get(item.status, ("•", "#9ca3af"))
     label = _PILL_TEXT.get(item.key, item.title)
-    if item.status == week_check.STATUS_UNKNOWN:
-        label += " not checked"
-    return (f'<span style="background:{colour}22;color:{colour};'
-            f'border:1px solid {colour}66;padding:4px 11px;border-radius:12px;'
-            f'font-size:0.82em;font-weight:600;margin:3px 6px 3px 0;'
-            f'display:inline-block;">{icon} {label}</span>')
+    return compact_html(f'''
+        <div style="display:flex;align-items:baseline;gap:8px;padding:5px 0;
+                    border-top:1px solid #2a2a3e;">
+          <span style="font-size:0.9em;">{icon}</span>
+          <span style="color:{colour};font-size:0.72em;font-weight:700;
+                       text-transform:uppercase;letter-spacing:0.5px;
+                       min-width:78px;">{label}</span>
+          <span style="color:#e0e0e0;font-size:0.9em;line-height:1.35;">
+            {item.verdict}</span>
+        </div>
+    ''')
 
 
-def _render_alert_bar(items):
-    """The strip itself: the deadline, then one pill per thing to look at.
-
-    Flagged rows first, then anything we could not check -- which is a pill in
-    its own right, because a bar that silently shortens on an outage is the
-    defaulted all-clear this whole section exists to avoid.
-    """
+def _render_strip(items, signature, team_id, target_gw, authed):
+    """The strip: a header, the alert list, and the buttons that act on it."""
     deadline = next((i for i in items if i.key == "deadline"), None)
+    stamp = ""
     when = (deadline.evidence or {}).get("deadline") if deadline else None
-    head = "Your week"
     if when:
         try:
             moment = pd.Timestamp(when).to_pydatetime()
-            head = "Your week &middot; GW%s &middot; %s (%s)" % (
+            stamp = "GW%s &middot; %s &middot; %s" % (
                 (deadline.evidence or {}).get("gameweek", ""),
                 format_deadline_stamp(moment), format_time_until(moment))
         except (ValueError, TypeError):
-            head = "Your week"
+            stamp = ""
 
-    flagged = week_check.attention_items(items)
-    unknown = [i for i in items if i.status == week_check.STATUS_UNKNOWN]
-    pills = "".join(_pill(i) for i in flagged + unknown)
+    flagged = week_check.attention_items(items) + [
+        i for i in items if i.status == week_check.STATUS_UNKNOWN]
+    squad_row = next((i for i in items if i.key == "squad"), None)
+    caveat = ""
+    if squad_row is not None and (squad_row.evidence or {}).get("stale"):
+        # The staleness travels with the numbers, in one grey line, rather than
+        # as a row that is permanently yellow and cannot be acted on.
+        caveat = ("Reading your GW%s squad — FPL publishes no pending squad "
+                  "without a connected account."
+                  % (squad_row.evidence or {}).get("source_gw"))
 
-    if not pills:
-        body = ('<span style="color:#00ff87;font-weight:600;">✅ Nothing needs '
-                'doing</span> <span style="color:#9ca3af;">— all %d checks '
-                'passed.</span>' % len(items))
-    else:
-        body = pills
+    rows = "".join(_alert_row(i) for i in flagged) or compact_html('''
+        <div style="padding:8px 0 2px;border-top:1px solid #2a2a3e;
+                    color:#00ff87;font-size:0.92em;font-weight:600;">
+          ✅ Nothing needs doing before the deadline.
+        </div>
+    ''')
 
     st.markdown(compact_html(f'''
-        <div style="border:1px solid #333;border-radius:10px;padding:12px 14px;
-                    margin-bottom:10px;color:#e0e0e0;
-                    background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);">
-          <div style="color:#9ca3af;font-size:0.74em;text-transform:uppercase;
-                      letter-spacing:0.8px;margin-bottom:8px;">{head}</div>
-          <div>{body}</div>
+        <div style="border:1px solid #333;border-radius:12px;padding:14px 16px;
+                    background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);
+                    color:#e0e0e0;">
+          <div style="display:flex;justify-content:space-between;
+                      align-items:baseline;margin-bottom:4px;">
+            <span style="color:#00ff87;font-size:0.8em;font-weight:700;
+                         text-transform:uppercase;letter-spacing:1px;">
+              Your week</span>
+            <span style="color:#9ca3af;font-size:0.78em;">{stamp}</span>
+          </div>
+          {rows}
+          {f'<div style="color:#6b7280;font-size:0.74em;margin-top:9px;">{caveat}</div>' if caveat else ""}
         </div>
     '''), unsafe_allow_html=True)
 
+    _render_actions(flagged, items, signature, team_id, target_gw, authed)
+
+
+def _render_actions(flagged, items, signature, team_id, target_gw, authed):
+    """One button per flagged row, plus the two that only exist here.
+
+    `main.py` applies `_pending_nav_section` / `_pending_nav_page` before its
+    sidebar radios are instantiated, so a button here lands on the page that
+    owns the row -- Home's own "Go to League Setup" link is the precedent.
+    """
+    buttons = [i for i in flagged if i.page]
+    lineup_row = next((i for i in items if i.key == "lineup"), None)
+    can_confirm = (lineup_row is not None
+                   and lineup_row.status == week_check.STATUS_ACT
+                   and signature)
+
+    if not buttons and not can_confirm and authed:
+        return
+
+    cols = st.columns(max(1, len(buttons) + (1 if can_confirm else 0)
+                          + (0 if authed else 1)))
+    slot = 0
+    if can_confirm:
+        with cols[slot]:
+            if st.button("✓ I've set my XI", key="my_week_confirm_xi",
+                         use_container_width=True,
+                         help="Silences the lineup alert for this gameweek. It "
+                              "comes back if you transfer, since the eleven "
+                              "would need setting again."):
+                lineup_confirm.confirm_lineup(team_id, target_gw, signature)
+                st.rerun()
+        slot += 1
+    for item in buttons:
+        with cols[slot]:
+            if st.button(item.page.strip(), key="my_week_open_%s" % item.key,
+                         use_container_width=True,
+                         help="Go to %s" % item.page.strip()):
+                st.session_state["_pending_nav_section"] = item.section
+                st.session_state["_pending_nav_page"] = item.page
+                st.rerun()
+        slot += 1
+    if not authed:
+        with cols[slot]:
+            if st.button("Connect FPL account", key="my_week_connect",
+                         use_container_width=True,
+                         help="Without it, FPL publishes no pre-deadline squad, "
+                              "so every row above reads last deadline's team."):
+                st.session_state["_pending_nav_section"] = week_check.SECTION_FPL
+                st.session_state["_pending_nav_page"] = "\U0001f194  League Setup"
+                st.rerun()
+
 
 def _item_card(item) -> str:
-    """One checklist row.
+    """One checklist row, for the full-checklist tab.
 
     Through `compact_html` because `detail` is optional on every row: a blank
     line ends an HTML block in Markdown, so an empty fragment on its own line
@@ -474,7 +647,7 @@ def _item_card(item) -> str:
               f'{item.detail}</div>') if item.detail else ""
     return compact_html(f'''
         <div style="border:1px solid #333;border-left:4px solid {colour};
-                    border-radius:8px;padding:10px 13px;
+                    border-radius:8px;padding:10px 13px;margin-bottom:7px;
                     background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);
                     color:#e0e0e0;">
           <div style="display:flex;align-items:baseline;gap:9px;">
@@ -486,28 +659,6 @@ def _item_card(item) -> str:
           {detail}
         </div>
     ''')
-
-
-def _render_rows(items, key_prefix: str):
-    """The rows, each with a one-click jump to the page that owns it.
-
-    The button drives `main.py`'s `_pending_nav_section` / `_pending_nav_page`,
-    which are applied before the sidebar radios are instantiated -- the same
-    mechanism as Home's "Go to League Setup" link. The deadline row carries no
-    page, since the strip is already on Home.
-    """
-    for item in items:
-        card, nav = st.columns([5, 1])
-        with card:
-            st.markdown(_item_card(item), unsafe_allow_html=True)
-        with nav:
-            if not item.page:
-                continue
-            if st.button("Open →", key="%s_open_%s" % (key_prefix, item.key),
-                         help="Go to %s" % item.page.strip()):
-                st.session_state["_pending_nav_section"] = item.section
-                st.session_state["_pending_nav_page"] = item.page
-                st.rerun()
 
 
 def _render_plan(summary):
@@ -542,7 +693,7 @@ def _render_plan(summary):
 
 def render_my_week_section(league_id=None, scoring_type: str = "",
                            current_gw=None):
-    """Render the alert strip. Called by Classic Home under the league header.
+    """Render the strip. Called by Classic Home, beside the league selector.
 
     ``scoring_type`` is Home's own label for the selected league; the
     head-to-head row renders only for ``"H2H"``, since a total-points league has
@@ -561,10 +712,21 @@ def render_my_week_section(league_id=None, scoring_type: str = "",
 
     gw = int(current_gw or config.CURRENT_GAMEWEEK or 1)
     is_h2h = str(scoring_type).upper() == "H2H"
+    team_id = int(team_id)
+    try:
+        authed = has_auth()
+    except Exception:
+        authed = False
+
+    # Read the confirmation *before* assembling, and pass it into the cache key:
+    # pressing the button must invalidate the entry rather than be swallowed by
+    # it. The signature it is checked against comes back from the assembly, so
+    # the first pass looks the stored one up by gameweek alone.
+    stored = _confirmed_signature(team_id, gw)
     try:
         with st.spinner("Checking your week…"):
-            items, plan, squad_size, has_xi = _assemble(
-                int(team_id), gw, league_id, is_h2h)
+            items, plan, squad_size, has_xi, signature = _assemble(
+                team_id, gw, league_id, is_h2h, stored)
     except Exception as exc:
         # The strip must never take Home down: the standings below it are the
         # reason most visits happen.
@@ -574,24 +736,16 @@ def render_my_week_section(league_id=None, scoring_type: str = "",
                    "unaffected.")
         return
 
-    _render_alert_bar(items)
+    target_gw = (items[0].evidence or {}).get("gameweek") if items else gw
+    _render_strip(items, signature, team_id, int(target_gw or gw), authed)
 
-    flagged = week_check.attention_items(items) + [
-        i for i in items if i.status == week_check.STATUS_UNKNOWN]
-    tab_action, tab_all, tab_plan = st.tabs([
-        "Needs action (%d)" % len(flagged), "Full checklist",
-        "Transfer plan"])
-
-    with tab_action:
-        if flagged:
-            _render_rows(flagged, "my_week_action")
-        else:
-            st.caption("Nothing to action this week. The full checklist is in "
-                       "the next tab.")
-    with tab_all:
-        _render_rows(items, "my_week_all")
-    with tab_plan:
-        _render_plan(plan)
+    with st.expander("Your week in full", expanded=False):
+        tab_all, tab_plan = st.tabs(["All checks", "Transfer plan"])
+        with tab_all:
+            for item in items:
+                st.markdown(_item_card(item), unsafe_allow_html=True)
+        with tab_plan:
+            _render_plan(plan)
 
     # Logged rather than raised: a suspect row with a warning in the log beats a
     # Home page that will not render. The check that matters is an all-clear with
@@ -599,3 +753,19 @@ def render_my_week_section(league_id=None, scoring_type: str = "",
     for issue in check_week_plan(items, squad_size=squad_size,
                                  xi_size=(11 if has_xi else 0)):
         _logger.log(40 if issue.severity == "error" else 20, "my week: %s", issue)
+
+
+def _confirmed_signature(team_id, gameweek) -> str:
+    """The signature this manager has confirmed for this gameweek, if any.
+
+    Read by gameweek rather than compared to a known signature, because the
+    squad's own signature is not known until the assembly has run -- and the
+    assembly needs this value in its cache key. `is_confirmed` does the real
+    comparison inside the assembly.
+    """
+    try:
+        entry = lineup_confirm._load().get(
+            lineup_confirm._key(team_id, gameweek)) or {}
+        return str(entry.get("signature") or "")
+    except Exception:
+        return ""

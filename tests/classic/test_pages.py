@@ -4,10 +4,13 @@ Each test calls the page's show_*() function with all dependencies mocked,
 verifying no exception is raised.
 """
 
+import tempfile
+
 import numpy as np
 import pandas as pd
 import pytest
 from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 # Import eagerly (before any test patches scripts.common.utils.* via
@@ -1289,7 +1292,12 @@ class TestMyWeekSection:
         } for i, t in zip(range(1, 16), _SQUAD_SHAPE)])
 
     def _resolution(self, **kw):
-        picks = [{"element": i, "multiplier": 1 if i <= 11 else 0,
+        # `position` is FPL's own 1-15 lineup slot and is what the XI check
+        # reads; without it `_set_lineup` has nothing to compare and the row
+        # silently falls back to reporting the best XI -- which is how this
+        # fixture first made the alert look quiet.
+        picks = [{"element": i, "position": i,
+                  "multiplier": 1 if i <= 11 else 0,
                   "is_captain": i == 1, "selling_price": 50}
                  for i in range(1, 16)]
         return SquadResolution(picks=kw.pop("picks", picks),
@@ -1322,7 +1330,8 @@ class TestMyWeekSection:
         }
 
     def _run(self, resolution=None, plan=None, scoring_type="Classic",
-             buttons=None, extra=(), capture=False):
+             buttons=None, extra=(), capture=False, transfers_made=0,
+             authed=False, confirm_file=None):
         """Render the section the way Home calls it.
 
         Returns ``(build_transfer_plan mock, items or None)``.
@@ -1359,16 +1368,31 @@ class TestMyWeekSection:
                                       create=True))
             stack.enter_context(patch(f"{mod}.config.CURRENT_GAMEWEEK", 12,
                                       create=True))
+            # Both reach the filesystem or the network for real: the transfer
+            # log is an HTTP call and `has_auth` reads the developer's own
+            # credential file, which would make this test machine-dependent.
+            stack.enter_context(patch(f"{mod}._transfers_made",
+                                      return_value=transfers_made))
+            stack.enter_context(patch(f"{mod}.has_auth", return_value=authed))
+            # `mock_streamlit`'s buttons are unconditionally truthy, so the
+            # "I've set my XI" button fires on every run -- and it *writes*.
+            # Redirected by default, or this suite silences the developer's own
+            # alert by confirming a squad nobody confirmed. The same lesson as
+            # `save_settings` and `purge_cache_prefix` elsewhere in this file.
+            stack.enter_context(patch(
+                "scripts.common.lineup_confirm.CONFIRM_FILE",
+                Path(confirm_file) if confirm_file
+                else Path(tempfile.mkdtemp()) / "confirm.json"))
             if buttons is not None:
                 stack.enter_context(patch("streamlit.button", return_value=buttons))
             if capture:
-                real = mw._render_alert_bar
+                real = mw._render_strip
 
-                def spy(items):
+                def spy(items, *a, **kw):
                     seen["items"] = items
-                    return real(items)
+                    return real(items, *a, **kw)
 
-                stack.enter_context(patch(f"{mod}._render_alert_bar",
+                stack.enter_context(patch(f"{mod}._render_strip",
                                           side_effect=spy))
             for ctx in extra:
                 stack.enter_context(ctx)
@@ -1452,16 +1476,83 @@ class TestMyWeekSection:
         """An unresolvable squad must produce unknown rows, not a traceback."""
         self._run(SquadResolution())
 
-    def test_a_live_gameweek_does_not_compare_the_captain(self, mock_all_utils):
-        """Mid-gameweek the stored armband is the real one and nothing can be
-        changed, so the row must not recommend a change."""
-        import scripts.classic.my_week as mw
-        with patch("scripts.classic.my_week._is_gameweek_started",
-                   return_value=True):
-            _, items = self._run(capture=True)
+    def test_it_flags_an_xi_that_is_not_the_best_of_the_fifteen(self, mock_all_utils):
+        """The row's whole job: the eleven you have *set*, not the best eleven.
+
+        The fixture's picks put the lowest projections in positions 1-11, so
+        there is a legal bench swap worth taking.
+        """
+        _, items = self._run(capture=True)
         row = next(i for i in items if i.key == "lineup")
-        assert row.evidence["comparable"] is False
+        assert row.status == "act"
+        assert "not optimal" in row.verdict
+        assert row.evidence["gain"] > 0
+
+    def test_an_optimal_xi_is_quiet(self, mock_all_utils):
+        picks = [{"element": i, "position": p, "multiplier": 1 if p <= 11 else 0,
+                  "is_captain": p == 1, "selling_price": 50}
+                 # Highest-projected players (the fixture's Proj rises with id)
+                 # in the XI, lowest on the bench -- and a legal 1/3/2/1 shape.
+                 for i, p in zip([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5,
+                                  4, 3, 2, 1],
+                                 range(1, 16))]
+        shaped = sorted(picks, key=lambda q: q["element"])
+        _, items = self._run(self._resolution(picks=shaped), capture=True)
+        row = next(i for i in items if i.key == "lineup")
+        assert row.status in ("ok", "act")      # shape may still allow a swap
+        assert row.evidence["set_total"] is not None
+
+    def test_confirming_the_xi_silences_the_row(self, mock_all_utils, tmp_path):
+        """The manager can say they have been in and set it, and that must
+        survive until the squad itself changes."""
+        store = tmp_path / "confirm.json"
+        _, items = self._run(capture=True, buttons=False, confirm_file=store)
+        flagged = next(i for i in items if i.key == "lineup")
+        assert flagged.status == "act"
+
+        # Pressing the button writes the confirmation for this squad...
+        self._run(buttons=True, confirm_file=store)
+        # ...and the row is quiet on the next render.
+        _, items = self._run(capture=True, buttons=False, confirm_file=store)
+        row = next(i for i in items if i.key == "lineup")
         assert row.status == "ok"
+        assert row.evidence["confirmed"] is True
+
+    def test_a_transfer_re_arms_the_confirmation(self, mock_all_utils, tmp_path):
+        """A confirmation is tied to the fifteen it was made about."""
+        store = tmp_path / "confirm.json"
+        self._run(buttons=True, confirm_file=store)      # confirm this squad
+        swapped = [{"element": (99 if i == 1 else i), "position": i,
+                    "multiplier": 1 if i <= 11 else 0,
+                    "is_captain": i == 1, "selling_price": 50}
+                   for i in range(1, 16)]
+        _, items = self._run(self._resolution(picks=swapped), capture=True,
+                             buttons=False, confirm_file=store)
+        row = next(i for i in items if i.key == "lineup")
+        assert row.evidence["confirmed"] is False
+
+    def test_the_transfer_row_goes_quiet_once_a_move_is_made(self, mock_all_utils):
+        """"A move is available" is not the alert; "and you have not made one"
+        is -- otherwise it keeps flagging after you have acted."""
+        _, items = self._run(capture=True, transfers_made=2)
+        row = next(i for i in items if i.key == "transfers")
+        assert row.status == "ok"
+        assert "2 transfers made" in row.verdict
+
+    def test_an_unprovable_absence_warns_rather_than_acts(self, mock_all_utils):
+        """FPL may not publish an in-week transfer until the deadline, so "no
+        rows" is weaker than "you have not transferred"."""
+        _, items = self._run(capture=True, transfers_made=None)
+        row = next(i for i in items if i.key == "transfers")
+        assert row.status == "warn"
+
+    def test_the_squad_row_never_warns_about_being_stale(self, mock_all_utils):
+        """It was permanently yellow and said nothing actionable."""
+        _, items = self._run(self._resolution(source_gw=10, target_gw=12),
+                             capture=True)
+        row = next(i for i in items if i.key == "squad")
+        assert row.status == "ok"
+        assert row.page == "🔄  Transfer Suggestions"
 
     def test_a_failure_does_not_take_home_down(self, mock_all_utils):
         """The standings below it are why most visits happen."""

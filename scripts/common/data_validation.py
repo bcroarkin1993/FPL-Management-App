@@ -4076,19 +4076,43 @@ def check_week_plan(items: Sequence[Any],
                 "gameweek_deadlines() returns only future deadlines, so this "
                 "means the list was filtered against the wrong clock."))
 
-    # A captain recommendation needs a squad whose armband is current.
+    # The lineup row has to have a reason, and a confirmed one has to be quiet.
+    #
+    # It deliberately *does* compare a last-deadline lineup -- that is the only
+    # one FPL publishes without credentials, and the "I have set my XI" button
+    # is the remedy -- so the old rule here (which refused the comparison
+    # outright) is gone. What is left are the two ways the row can contradict
+    # itself.
     for item in items:
         if getattr(item, "key", "") != "lineup":
             continue
         ev = getattr(item, "evidence", None) or {}
-        if getattr(item, "status", "") == "act" and not ev.get("comparable"):
+        status = getattr(item, "status", "")
+        gain, set_total = ev.get("gain"), ev.get("set_total")
+        optimal = ev.get("optimal_total")
+
+        if status == "act" and not (gain or ev.get("captain_wrong")):
             issues.append(Issue(
                 check, "error",
-                "A captain change is recommended against a squad that is not "
-                "current.",
-                "A `picks`-sourced squad carries last deadline's armband, so the "
-                "disagreement is with a choice the manager has already revised. "
-                "Gate the comparison on resolution.source == my_team."))
+                "The lineup row asks for a change without naming a gain or a "
+                "captain to move.",
+                "An action with no reason is noise a manager cannot act on. "
+                "See week_check.build_lineup_item()."))
+        if status == "act" and ev.get("confirmed"):
+            issues.append(Issue(
+                check, "error",
+                "The lineup row is flagged despite having been confirmed.",
+                "A confirmation silences this row until the squad's membership "
+                "changes. See lineup_confirm.is_confirmed()."))
+        if (set_total is not None and optimal is not None
+                and float(set_total) > float(optimal) + 1e-6):
+            issues.append(Issue(
+                check, "error",
+                "The lineup you have set (%.2f) scores more than the best legal "
+                "XI (%.2f)." % (float(set_total), float(optimal)),
+                "The optimal XI is a maximum by construction, so this means the "
+                "two totals were computed on different bases -- the shape of "
+                "error `check_blended_projections` catches as Proj > Proj_Start."))
 
     for item in items:
         if getattr(item, "key", "") != "transfers":

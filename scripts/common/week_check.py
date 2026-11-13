@@ -53,6 +53,11 @@ ATTENTION = (STATUS_WARN, STATUS_ACT)
 #: `RENTAL_MIN_GAIN`, and for the same reason.
 MIN_INTERESTING_GAIN = 2.0
 
+#: Below this, a lineup change is not worth telling anybody about: the
+#: projections underneath carry an MAE around 2.5 points a player, so a
+#: half-point bench swap is noise. Same reasoning as `MIN_INTERESTING_GAIN`.
+LINEUP_MIN_GAIN = 1.0
+
 #: A deadline inside this many hours is today's problem, not next week's.
 DEADLINE_SOON_HOURS = 24.0
 
@@ -180,40 +185,41 @@ def _hours_phrase(hours: float) -> str:
 
 
 def build_squad_item(resolution: Any) -> WeekItem:
-    """Which fifteen this page is talking about, and how current they are.
+    """Which fifteen every row below is talking about.
 
-    The stale case is the normal one between gameweeks, and the whole reason
-    `classic_squad` exists is that it was once presented as current. So a stale
-    squad is a **warning** rather than a failure: everything below it is still
-    worth reading, it just describes last deadline's team.
+    **Informational, never a warning.** Between deadlines without credentials
+    the squad is *always* last deadline's -- FPL publishes no pending squad --
+    so flagging that made one row permanently yellow while saying nothing a
+    manager could act on. The caveat still travels with the numbers (it is in
+    this row's detail, and the strip repeats it in its header); what is
+    actionable lives in the lineup and transfer rows instead.
     """
-    key, title, page = "squad", "Your squad", "🆔  League Setup"
-    section = SECTION_FPL
+    key, title, page = "squad", "Your squad", "\U0001f504  Transfer Suggestions"
     if resolution is None or not getattr(resolution, "ok", False):
         return _unknown(key, title,
                         "Your squad could not be resolved, so nothing below it "
-                        "could be checked.", page, section)
+                        "could be checked.", page)
 
     picks = list(getattr(resolution, "picks", []) or [])
     source = getattr(resolution, "source", "")
     chip = getattr(resolution, "active_chip", None)
-    evidence = {"source": source, "players": len(picks),
-                "source_gw": getattr(resolution, "source_gw", None),
+    stale = bool(getattr(resolution, "is_stale", False))
+    source_gw = getattr(resolution, "source_gw", None)
+    evidence = {"source": source, "players": len(picks), "stale": stale,
+                "source_gw": source_gw,
                 "target_gw": getattr(resolution, "target_gw", None),
                 "active_chip": chip}
 
-    detail = ("**%s** is active for GW%s." % (chip, getattr(resolution, "target_gw", "?"))
-              if chip else "")
-    if getattr(resolution, "is_stale", False):
-        return WeekItem(key, title, STATUS_WARN,
-                        "Showing your GW%s squad — transfers made since are not "
-                        "reflected." % getattr(resolution, "source_gw", "?"),
-                        detail=(getattr(resolution, "provenance", "") or ""),
-                        page=page, section=section, evidence=evidence)
-
-    return WeekItem(key, title, STATUS_OK,
-                    "%d players, live from your account." % len(picks),
-                    detail=detail, page=page, section=section, evidence=evidence)
+    bits = []
+    if chip:
+        bits.append("**%s** is active." % chip)
+    if stale:
+        bits.append("As at the GW%s deadline — FPL does not publish a pending "
+                    "squad without a connected account." % source_gw)
+    verdict = ("%d players, as at the GW%s deadline." % (len(picks), source_gw)
+               if stale else "%d players, live from your account." % len(picks))
+    return WeekItem(key, title, STATUS_OK, verdict, detail=" ".join(bits),
+                    page=page, evidence=evidence)
 
 
 def squad_availability(squad_df: Optional[pd.DataFrame],
@@ -396,14 +402,24 @@ def build_fixtures_item(counts: Optional[pd.DataFrame],
 
 def build_transfers_item(free_transfers: Optional[dict],
                          bank: Optional[float] = None,
-                         plan: Optional[dict] = None) -> WeekItem:
-    """How many transfers are in hand, and what the best use of them is worth.
+                         plan: Optional[dict] = None,
+                         made_this_week: Optional[int] = None) -> WeekItem:
+    """What is in hand, what the best move is worth, and whether you made it.
+
+    **The alert is "a move is available and you have not made one"**, not "a
+    move is available" -- otherwise the row keeps flagging after you have acted,
+    which is the complaint that got the squad row demoted one line up.
+
+    ``made_this_week`` comes from FPL's own transfer log, which does publish per
+    gameweek (verified live: 18 rows across five gameweeks for one entry). A
+    ``None`` means we could not tell, which is a weaker claim and renders as a
+    warning rather than an action.
 
     ``free_transfers`` is `transfers.resolve_free_transfers`'s dict, which
     reports *which* of its three lanes answered -- a number reconstructed by
-    replay is not the same claim as one FPL stated, and the card says so.
+    replay is not the same claim as one FPL stated, and the row says so.
     """
-    key, title, page = "transfers", "Transfers", "🔄  Transfer Suggestions"
+    key, title, page = "transfers", "Transfers", "\U0001f504  Transfer Suggestions"
     if not free_transfers:
         return _unknown(key, title,
                         "Could not work out how many free transfers you have.",
@@ -411,75 +427,131 @@ def build_transfers_item(free_transfers: Optional[dict],
 
     count = int(free_transfers.get("count") or 0)
     source = free_transfers.get("source") or ""
-    evidence = {"free_transfers": count, "source": source, "bank": bank}
+    gain = None if not plan else plan.get("gain_net")
+    gain = None if gain is None else float(gain)
+    evidence = {"free_transfers": count, "source": source, "bank": bank,
+                "made_this_week": made_this_week,
+                "plan_gain": gain,
+                "plan_changes": (None if not plan else plan.get("n_changes"))}
 
-    verdict = "%d free transfer%s" % (count, "" if count == 1 else "s")
+    held = "%d free transfer%s" % (count, "" if count == 1 else "s")
     if bank is not None:
-        verdict += " · £%.1fm in the bank" % bank
+        held += " · £%.1fm in the bank" % bank
+
+    if made_this_week:
+        return WeekItem(key, title, STATUS_OK,
+                        "%d transfer%s made this gameweek · %s."
+                        % (made_this_week, "" if made_this_week == 1 else "s", held),
+                        detail=("A further move is worth +%.1f pts." % gain
+                                if gain and gain >= MIN_INTERESTING_GAIN else ""),
+                        page=page, evidence=evidence)
+
+    if gain is not None and gain >= MIN_INTERESTING_GAIN:
+        changes = int((plan or {}).get("n_changes") or 0)
+        unknown_whether = made_this_week is None
+        notes = ["%s." % held]
+        if unknown_whether:
+            notes.append("FPL has published no transfer for this gameweek; it "
+                         "may not until the deadline.")
+        elif source == "replay":
+            notes.append("Free transfers reconstructed from your history.")
+        return WeekItem(
+            key, title,
+            STATUS_WARN if unknown_whether else STATUS_ACT,
+            "No transfer made yet — the best use of %d is worth +%.1f pts."
+            % (changes, gain),
+            detail=" ".join(notes), page=page, evidence=evidence)
+
+    status = STATUS_OK
     detail = ("Reconstructed from your transfer history — FPL does not publish "
               "the count without a connected account."
               if source == "replay" else "")
-
-    status = STATUS_OK
+    verdict = held + "."
     if count >= MAX_BANKED_FREE_TRANSFERS:
         status = STATUS_WARN
         detail = ("You are at the %d-transfer cap, so this week's accrual is "
                   "lost if you make none." % MAX_BANKED_FREE_TRANSFERS)
-
-    if plan:
-        evidence["plan_gain"] = plan.get("gain_net")
-        evidence["plan_changes"] = plan.get("n_changes")
-        gain = plan.get("gain_net")
-        if gain is not None and float(gain) >= MIN_INTERESTING_GAIN:
-            status = STATUS_ACT
-            verdict += (" · best plan at %d transfer%s is worth +%.1f pts"
-                        % (int(plan.get("n_changes") or 0),
-                           "" if plan.get("n_changes") == 1 else "s", float(gain)))
-        elif gain is not None:
-            verdict += " · no transfer gains more than %.1f pts" % MIN_INTERESTING_GAIN
-
-    return WeekItem(key, title, status, verdict + ".", detail=detail,
-                    page=page, evidence=evidence)
+    elif gain is not None:
+        verdict = held + " · no transfer gains more than %.1f pts." % MIN_INTERESTING_GAIN
+    return WeekItem(key, title, status, verdict, detail=detail, page=page,
+                    evidence=evidence)
 
 
-def build_lineup_item(xi_total: Optional[float],
+def build_lineup_item(optimal_total: Optional[float] = None,
+                      set_total: Optional[float] = None,
+                      swap: Optional[dict] = None,
                       captain: Optional[str] = None,
-                      captain_points: Optional[float] = None,
-                      stored_captain: Optional[str] = None,
-                      comparable: bool = False) -> WeekItem:
-    """The projected XI and who the armband belongs on.
+                      set_captain: Optional[str] = None,
+                      confirmed: bool = False,
+                      stale: bool = True) -> WeekItem:
+    """Whether the eleven you have **set** is the eleven you should have.
 
-    ``comparable`` is the gate, and it is load-bearing: a squad resolved from
-    `picks` carries **last** deadline's captain, so comparing the model's pick
-    against it would tell every manager without a connected account to change a
-    captain they have already changed. The pick is still reported; only the
-    disagreement is withheld.
+    This used to report the best XI's total and compare captains, which was a
+    statement about the squad rather than about anything the manager had done.
+    The question that matters before a deadline is *"is my lineup right"* -- a
+    bench player projected above a starter, or the armband on the wrong man --
+    and that needs the lineup FPL has stored, which `pick_position` carries.
+
+    ``confirmed`` is the manager saying they have been in and set it. The app
+    cannot see a pre-deadline lineup without credentials, so it must be able to
+    be told; the confirmation is tied to the squad's membership, so a transfer
+    re-arms this row automatically. See `scripts/common/lineup_confirm.py`.
     """
-    key, title, page = "lineup", "XI and captain", "📅  Fixture Projections"
-    if xi_total is None:
+    key, title, page = "lineup", "Your XI", "\U0001f4c5  Fixture Projections"
+    if optimal_total is None:
         return _unknown(key, title,
                         "No projection was available for your squad, so the XI "
-                        "could not be picked.", page)
+                        "could not be checked.", page)
 
-    evidence = {"xi_total": round(float(xi_total), 2), "captain": captain,
-                "stored_captain": stored_captain, "comparable": bool(comparable)}
-    verdict = "Best XI projects %.1f pts" % float(xi_total)
-    if captain:
-        verdict += " · captain %s" % captain
-        if captain_points is not None:
-            verdict += " (%.1f)" % float(captain_points)
+    gain = (None if set_total is None
+            else max(0.0, float(optimal_total) - float(set_total)))
+    captain_wrong = bool(set_captain and captain and set_captain != captain)
+    evidence = {"optimal_total": round(float(optimal_total), 2),
+                "set_total": (None if set_total is None else round(float(set_total), 2)),
+                "gain": (None if gain is None else round(gain, 2)),
+                "captain": captain, "set_captain": set_captain,
+                "captain_wrong": captain_wrong, "confirmed": bool(confirmed),
+                "stale": bool(stale)}
 
-    if comparable and stored_captain and captain and stored_captain != captain:
-        return WeekItem(key, title, STATUS_ACT, verdict + ".",
-                        detail="Your armband is on %s — the model prefers %s."
-                               % (stored_captain, captain),
+    if confirmed:
+        return WeekItem(key, title, STATUS_OK,
+                        "You have set this gameweek's XI.",
+                        detail=("Projected %.1f pts. This row re-arms itself if "
+                                "you transfer." % float(optimal_total)),
+                        page=page, section=SECTION_CLASSIC, evidence=evidence)
+
+    # Nothing to compare against: report the best XI and say so, rather than
+    # implying the stored one has been checked.
+    if set_total is None:
+        return WeekItem(key, title, STATUS_OK,
+                        "Best XI projects %.1f pts · captain %s."
+                        % (float(optimal_total), captain or "—"),
+                        detail="Your saved lineup could not be read, so it is "
+                               "not compared.",
                         page=page, evidence=evidence)
 
-    detail = ("" if comparable else
-              "Captain shown is the model's pick; your stored armband is last "
-              "deadline's, so the two are not compared.")
-    return WeekItem(key, title, STATUS_OK, verdict + ".", detail=detail,
-                    page=page, evidence=evidence)
+    reasons = []
+    if gain and gain >= LINEUP_MIN_GAIN and swap:
+        reasons.append("start **%s** over **%s** (+%.1f)"
+                       % (swap.get("in_name"), swap.get("out_name"), gain))
+    elif gain and gain >= LINEUP_MIN_GAIN:
+        reasons.append("your bench projects %.1f pts more than your XI" % gain)
+    if captain_wrong:
+        reasons.append("the armband is on **%s**, the model prefers **%s**"
+                       % (set_captain, captain))
+
+    if not reasons:
+        return WeekItem(key, title, STATUS_OK,
+                        "Your XI is the best of your fifteen (%.1f pts)."
+                        % float(optimal_total),
+                        detail=("Captain %s." % captain) if captain else "",
+                        page=page, evidence=evidence)
+
+    detail = ("Based on your GW-deadline lineup, which is the latest FPL "
+              "publishes without a connected account." if stale else "")
+    return WeekItem(key, title, STATUS_ACT,
+                    "Your XI is not optimal — " + "; ".join(reasons) + ".",
+                    detail=detail, page=page, evidence=evidence)
 
 
 def build_chips_item(status: Optional[dict],

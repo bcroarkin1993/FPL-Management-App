@@ -88,12 +88,16 @@ class TestSquad:
         assert item.status == wc.STATUS_OK
         assert item.evidence["players"] == 15
 
-    def test_a_stale_squad_warns_rather_than_failing(self):
-        """The normal state between gameweeks — readable, but disclosed."""
+    def test_a_stale_squad_is_disclosed_but_not_an_alert(self):
+        """It is the normal state between deadlines without credentials, so
+        flagging it made one row permanently yellow and said nothing a manager
+        could act on. The caveat stays; the alert moved to the lineup and
+        transfer rows."""
         item = wc.build_squad_item(_Resolution(is_stale=True, source_gw=11,
                                                source="picks"))
-        assert item.status == wc.STATUS_WARN
+        assert item.status == wc.STATUS_OK
         assert "GW11" in item.verdict
+        assert item.evidence["stale"] is True
 
     def test_an_active_chip_is_surfaced(self):
         item = wc.build_squad_item(_Resolution(active_chip="wildcard"))
@@ -199,11 +203,31 @@ class TestTransfers:
         assert item.status == wc.STATUS_WARN
         assert "cap" in item.detail
 
-    def test_a_worthwhile_plan_promotes_the_row(self):
+    def test_a_worthwhile_plan_you_have_not_acted_on_is_an_action(self):
         item = wc.build_transfers_item({"count": 2, "source": "my_team"},
-                                       plan={"gain_net": 6.9, "n_changes": 2})
+                                       plan={"gain_net": 6.9, "n_changes": 2},
+                                       made_this_week=0)
         assert item.status == wc.STATUS_ACT
         assert "+6.9" in item.verdict
+
+    def test_the_same_plan_goes_quiet_once_a_transfer_is_made(self):
+        """"A move is available" is not the alert; "and you have not made one"
+        is -- otherwise it keeps flagging after you have acted."""
+        item = wc.build_transfers_item({"count": 1, "source": "my_team"},
+                                       plan={"gain_net": 6.9, "n_changes": 2},
+                                       made_this_week=1)
+        assert item.status == wc.STATUS_OK
+        assert "1 transfer made" in item.verdict
+        assert "+6.9" in item.detail
+
+    def test_an_unprovable_absence_warns_rather_than_acting(self):
+        """FPL may not publish an in-week transfer until the deadline, so "no
+        rows in the log" is a weaker claim than "you have not transferred"."""
+        item = wc.build_transfers_item({"count": 2, "source": "replay"},
+                                       plan={"gain_net": 6.9, "n_changes": 2},
+                                       made_this_week=None)
+        assert item.status == wc.STATUS_WARN
+        assert "may not until the deadline" in item.detail
 
     def test_a_trivial_plan_does_not(self):
         item = wc.build_transfers_item({"count": 2, "source": "my_team"},
@@ -212,24 +236,51 @@ class TestTransfers:
         assert "no transfer gains" in item.verdict
 
 
-class TestLineupAndCaptain:
-    def test_a_disagreement_on_a_live_squad_is_actionable(self):
-        item = wc.build_lineup_item(52.4, "Haaland", 9.1, "Saka", comparable=True)
-        assert item.status == wc.STATUS_ACT
-        assert "Saka" in item.detail and "Haaland" in item.detail
+class TestTheXiYouHaveSet:
+    """The row answers "is my lineup right", not "what is my squad worth"."""
 
-    def test_a_stale_squad_never_recommends_a_captain_change(self):
-        """Its armband is last deadline's, so the disagreement is with a choice
-        the manager may already have revised."""
-        item = wc.build_lineup_item(52.4, "Haaland", 9.1, "Saka", comparable=False)
+    def test_a_better_bench_player_is_an_action_with_the_swap_named(self):
+        item = wc.build_lineup_item(
+            56.6, 54.0, {"in_name": "Gakpo", "out_name": "Tarkowski"},
+            "Haaland", "Haaland")
+        assert item.status == wc.STATUS_ACT
+        assert "Gakpo" in item.verdict and "Tarkowski" in item.verdict
+        assert item.evidence["gain"] == 2.6
+
+    def test_the_wrong_armband_is_an_action_too(self):
+        item = wc.build_lineup_item(56.6, 56.6, None, "Haaland", "Saka")
+        assert item.status == wc.STATUS_ACT
+        assert "Saka" in item.verdict and "Haaland" in item.verdict
+
+    def test_an_optimal_xi_is_quiet(self):
+        item = wc.build_lineup_item(56.6, 56.6, None, "Haaland", "Haaland")
+        assert item.status == wc.STATUS_OK
+        assert "best of your fifteen" in item.verdict
+
+    def test_a_swap_below_the_floor_is_not_worth_saying(self):
+        """The projections carry an MAE around 2.5 points a player, so a
+        half-point bench swap is noise rather than advice."""
+        item = wc.build_lineup_item(56.6, 56.3,
+                                    {"in_name": "A", "out_name": "B"},
+                                    "Haaland", "Haaland")
+        assert item.status == wc.STATUS_OK
+
+    def test_a_confirmed_xi_is_quiet_whatever_the_numbers_say(self):
+        """The app cannot see a pre-deadline lineup, so it has to be tellable."""
+        item = wc.build_lineup_item(56.6, 50.0,
+                                    {"in_name": "A", "out_name": "B"},
+                                    "Haaland", "Saka", confirmed=True)
+        assert item.status == wc.STATUS_OK
+        assert "set this gameweek's XI" in item.verdict
+        assert "re-arms" in item.detail
+
+    def test_an_unreadable_saved_lineup_says_so_rather_than_comparing(self):
+        item = wc.build_lineup_item(56.6, None, None, "Haaland", None)
         assert item.status == wc.STATUS_OK
         assert "not compared" in item.detail
-        assert "Haaland" in item.verdict
 
-    def test_agreement_is_quiet(self):
-        item = wc.build_lineup_item(52.4, "Haaland", 9.1, "Haaland", comparable=True)
-        assert item.status == wc.STATUS_OK
-        assert not item.detail
+    def test_no_projection_at_all_is_unknown(self):
+        assert wc.build_lineup_item(None).status == wc.STATUS_UNKNOWN
 
 
 class TestChips:
@@ -294,8 +345,9 @@ class TestTheChecklistItself:
             availability=wc.build_availability_item([]),
             fixtures=wc.build_fixtures_item(
                 pd.DataFrame({12: [1]}, index=[1]), [1], [12], 12, {1: "ARS"}),
-            lineup=wc.build_lineup_item(52.4, "Haaland", 9.1, "Haaland", True),
-            transfers=wc.build_transfers_item({"count": 1, "source": "my_team"}, 0.5),
+            lineup=wc.build_lineup_item(52.4, 52.4, None, "Haaland", "Haaland"),
+            transfers=wc.build_transfers_item({"count": 1, "source": "my_team"},
+                                              0.5, made_this_week=1),
             chips_item=wc.build_chips_item(
                 {"available": [], "available_later": [], "states": {}}),
             prices=wc.build_prices_item({"tracked": 15, "rising": 0,
@@ -338,7 +390,7 @@ class TestTheChecklistItself:
 
     def test_attention_is_the_urgent_rows_first(self):
         items = [
-            wc.build_squad_item(_Resolution(is_stale=True)),          # warn
+            wc.build_transfers_item({"count": 5, "source": "replay"}),  # warn
             wc.build_availability_item([{"unavailable": True, "name": "X",
                                          "out_for": 3, "stated": True,
                                          "play_pct": 0, "news": ""}]),  # act
@@ -368,8 +420,9 @@ class TestNavigationTargets:
             wc.build_availability_item([]),
             wc.build_fixtures_item(pd.DataFrame({12: [1]}, index=[1]), [1], [12],
                                    12, {1: "ARS"}),
-            wc.build_lineup_item(52.4, "Haaland", 9.1, "Haaland", True),
-            wc.build_transfers_item({"count": 1, "source": "my_team"}, 0.5),
+            wc.build_lineup_item(52.4, 52.4, None, "Haaland", "Haaland"),
+            wc.build_transfers_item({"count": 1, "source": "my_team"}, 0.5,
+                                    made_this_week=1),
             wc.build_chips_item({"available": [], "available_later": [],
                                  "states": {}}),
             wc.build_prices_item({"tracked": 15, "rising": 0, "falling": 0,

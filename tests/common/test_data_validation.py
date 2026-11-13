@@ -2311,19 +2311,41 @@ class TestCheckWeekPlan:
         assert any("hours away" in i.message and i.severity == "error"
                    for i in issues)
 
-    def test_a_captain_change_against_a_stale_squad_is_an_error(self):
+    def test_a_lineup_action_with_no_reason_is_an_error(self):
+        """An action a manager cannot act on is noise."""
         items = self._clean() + [
-            self._item("lineup", status="act", verdict="Captain Haaland.",
-                       evidence={"comparable": False, "captain": "Haaland"})]
+            self._item("lineup", status="act", verdict="Fix your XI.",
+                       evidence={"optimal_total": 56.6, "set_total": 56.6,
+                                 "gain": 0.0, "captain_wrong": False})]
         issues = check_week_plan(items)
-        assert any("not current" in i.message and i.severity == "error"
+        assert any("without naming a gain" in i.message and i.severity == "error"
                    for i in issues)
 
-    def test_the_same_recommendation_on_a_live_squad_is_fine(self):
+    def test_a_named_swap_on_a_stale_squad_is_fine(self):
+        """The comparison deliberately runs against a last-deadline lineup --
+        it is the only one FPL publishes without credentials."""
         items = self._clean() + [
-            self._item("lineup", status="act", verdict="Captain Haaland.",
-                       evidence={"comparable": True, "captain": "Haaland"})]
+            self._item("lineup", status="act",
+                       verdict="Your XI is not optimal — start A over B (+3.1).",
+                       evidence={"optimal_total": 56.6, "set_total": 53.5,
+                                 "gain": 3.1, "captain_wrong": False,
+                                 "stale": True})]
         assert [i for i in check_week_plan(items) if i.severity == "error"] == []
+
+    def test_a_confirmed_lineup_may_not_still_be_flagged(self):
+        items = self._clean() + [
+            self._item("lineup", status="act", verdict="Fix your XI.",
+                       evidence={"gain": 3.1, "confirmed": True})]
+        assert any("despite having been confirmed" in i.message
+                   for i in check_week_plan(items))
+
+    def test_a_set_xi_beating_the_optimal_one_is_an_error(self):
+        """The optimal XI is a maximum, so this means two different bases."""
+        items = self._clean() + [
+            self._item("lineup", status="ok", verdict="Fine.",
+                       evidence={"optimal_total": 50.0, "set_total": 56.6})]
+        assert any("scores more than the best legal" in i.message
+                   for i in check_week_plan(items))
 
     @pytest.mark.parametrize("count", [-1, 6])
     def test_an_impossible_free_transfer_count_is_an_error(self, count):

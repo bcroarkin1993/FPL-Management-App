@@ -181,5 +181,10 @@ def squad_frame(picks, pool) -> pd.DataFrame:
             "selling_price": pick.get("selling_price"),
             "multiplier": pick.get("multiplier", 1),
             "is_captain": bool(pick.get("is_captain")),
+            # 1-11 is the starting XI, 12-15 the bench in order. Carried so a
+            # caller can check the lineup a manager has actually *set*, rather
+            # than only the best one available -- the multiplier cannot say,
+            # because `my-team` publishes none at all.
+            "pick_position": pick.get("position"),
         })
     return pd.DataFrame(rows)
