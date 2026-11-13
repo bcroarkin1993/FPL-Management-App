@@ -32,6 +32,8 @@ The checklist logic is pure and lives in ``scripts/common/week_check.py``; this
 module is fetching and rendering only.
 """
 
+from dataclasses import dataclass
+
 import pandas as pd
 import streamlit as st
 
@@ -73,16 +75,6 @@ FIXTURE_HORIZON_WEEKS = 6
 #: cache would have served anyway. The same two-layer arrangement as
 #: `ffp_feed._memoised`.
 CACHE_TTL = 120
-
-#: The strip's height, in pixels, computed rather than left to the browser --
-#: the same approach as the Draft lineup cards, and for the same reason: the
-#: league card beside it has to be the same height, and only Python knows how
-#: many alert rows there are. Getting these wrong costs alignment and nothing
-#: else, so they are tuned by eye rather than derived.
-STRIP_CHROME_PX = 58       #: border, padding and the "Your week" header
-STRIP_ROW_PX = 31          #: one alert row
-STRIP_CAVEAT_PX = 24       #: the grey staleness line
-STRIP_BUTTON_PX = 46       #: the button row under the list
 
 #: Status -> (icon, colour). Unknown is grey rather than green: a question we
 #: could not answer must not read as one answered "fine".
@@ -522,13 +514,6 @@ def _assemble(team_id: int, current_gw: int, league_id, is_h2h: bool,
 # ------------------------------------------------------------------
 # Rendering
 # ------------------------------------------------------------------
-def strip_height(n_rows: int, caveat: bool, buttons: bool) -> int:
-    """How tall the strip will render, so the card beside it can match."""
-    return (STRIP_CHROME_PX + STRIP_ROW_PX * max(1, int(n_rows))
-            + (STRIP_CAVEAT_PX if caveat else 0)
-            + (STRIP_BUTTON_PX if buttons else 0))
-
-
 def _alert_row(item) -> str:
     """One line of the alert list: status, what it is, and the number.
 
@@ -552,14 +537,40 @@ def _alert_row(item) -> str:
     ''')
 
 
-def _render_strip(items, signature, team_id, target_gw, authed):
-    """The strip: a header, the alert list, and the buttons that act on it.
+@dataclass(frozen=True)
+class WeekView:
+    """One assembly of the week, so Home can place its three parts.
 
-    Returns the height it occupies, which Home uses to size the league card
-    beside it -- the two sitting at different heights is the thing this returns
-    for.
+    The card, the buttons and the detail land in different containers -- a CSS
+    grid, a controls row and a tab -- and all three need the same items, so the
+    assembly happens once and is passed around rather than re-run.
     """
-    deadline = next((i for i in items if i.key == "deadline"), None)
+
+    items: list
+    plan: dict
+    signature: str
+    team_id: int
+    target_gw: int
+    authed: bool
+    squad_size: int
+    has_xi: bool
+
+    @property
+    def flagged(self) -> list:
+        return (week_check.attention_items(self.items)
+                + [i for i in self.items
+                   if i.status == week_check.STATUS_UNKNOWN])
+
+
+def week_card_html(view: WeekView) -> str:
+    """The strip as a card, for Home to drop into its top band.
+
+    Returns markup rather than rendering, because the band is one grid: grid
+    items stretch to the tallest row member by default, which is what makes the
+    three cards level however their text wraps. Estimating pixel heights could
+    not survive a verdict wrapping onto a second line.
+    """
+    deadline = next((i for i in view.items if i.key == "deadline"), None)
     stamp = ""
     when = (deadline.evidence or {}).get("deadline") if deadline else None
     if when:
@@ -571,9 +582,7 @@ def _render_strip(items, signature, team_id, target_gw, authed):
         except (ValueError, TypeError):
             stamp = ""
 
-    flagged = week_check.attention_items(items) + [
-        i for i in items if i.status == week_check.STATUS_UNKNOWN]
-    squad_row = next((i for i in items if i.key == "squad"), None)
+    squad_row = next((i for i in view.items if i.key == "squad"), None)
     caveat = ""
     if squad_row is not None and (squad_row.evidence or {}).get("stale"):
         # The staleness travels with the numbers, in one grey line, rather than
@@ -582,19 +591,10 @@ def _render_strip(items, signature, team_id, target_gw, authed):
                   "without a connected account."
                   % (squad_row.evidence or {}).get("source_gw"))
 
-    rows = "".join(_alert_row(i) for i in flagged) or compact_html('''
-        <div style="padding:8px 0 2px;border-top:1px solid #2a2a3e;
-                    color:#00ff87;font-size:0.92em;font-weight:600;">
-          ✅ Nothing needs doing before the deadline.
-        </div>
-    ''')
-
-    buttons = [i for i in flagged if i.page]
-    lineup_row = next((i for i in items if i.key == "lineup"), None)
-    has_buttons = bool(buttons) or not authed or (
-        lineup_row is not None and lineup_row.status == week_check.STATUS_ACT
-        and bool(signature))
-    height = strip_height(len(flagged), bool(caveat), has_buttons)
+    rows = "".join(_alert_row(i) for i in view.flagged) or (
+        '<div style="padding:8px 0 2px;border-top:1px solid %s;color:%s;'
+        'font-size:0.92em;font-weight:600;">✅ Nothing needs doing before the '
+        'deadline.</div>' % (cards.RULE, cards.ACCENT))
 
     header = (
         '<div style="display:flex;justify-content:space-between;'
@@ -603,23 +603,22 @@ def _render_strip(items, signature, team_id, target_gw, authed):
         'text-transform:uppercase;letter-spacing:1px;">Your week</span>'
         '<span style="color:%s;font-size:0.78em;">%s</span></div>'
         % (cards.ACCENT, cards.MUTED, stamp))
-    tail = cards.note(caveat) if caveat else ""
-    st.markdown(cards.card(header + rows + tail,
-                           min_height=height - (STRIP_BUTTON_PX if has_buttons else 0)),
-                unsafe_allow_html=True)
-
-    _render_actions(flagged, items, signature, team_id, target_gw, authed)
-    return height
+    return cards.card(header + rows + (cards.note(caveat) if caveat else ""))
 
 
-def _render_actions(flagged, items, signature, team_id, target_gw, authed):
+def render_week_actions(view: WeekView) -> None:
     """One button per flagged row, plus the two that only exist here.
+
+    Rendered under the band rather than inside the card, so the card can be a
+    grid item -- a Streamlit widget cannot live inside one block of markup.
 
     `main.py` applies `_pending_nav_section` / `_pending_nav_page` before its
     sidebar radios are instantiated, so a button here lands on the page that
     owns the row -- Home's own "Go to League Setup" link is the precedent.
     """
-    buttons = [i for i in flagged if i.page]
+    items, signature = view.items, view.signature
+    team_id, target_gw, authed = view.team_id, view.target_gw, view.authed
+    buttons = [i for i in view.flagged if i.page]
     lineup_row = next((i for i in items if i.key == "lineup"), None)
     can_confirm = (lineup_row is not None
                    and lineup_row.status == week_check.STATUS_ACT
@@ -709,13 +708,13 @@ def _render_plan(summary):
                    "price trends and ownership." % float(summary["horizon"]))
 
 
-def render_my_week_section(league_id=None, scoring_type: str = "",
-                           current_gw=None):
-    """Render the strip, and return the height it took.
+def build_week_view(league_id=None, scoring_type: str = "",
+                    current_gw=None):
+    """Assemble the week, or return ``None`` when there is nothing to show.
 
-    Called by Classic Home, in the column beside the league selector and card;
-    the height lets that card match it rather than ending short. ``None`` means
-    nothing was rendered, and the card should size itself.
+    Rendering is three separate calls -- `week_card_html`, `render_week_actions`
+    and `render_week_detail` -- because Home places them in three different
+    containers: a CSS grid, a controls row and a tab.
 
     ``scoring_type`` is Home's own label for the selected league; the
     head-to-head row renders only for ``"H2H"``, since a total-points league has
@@ -724,16 +723,9 @@ def render_my_week_section(league_id=None, scoring_type: str = "",
     """
     team_id = getattr(config, "FPL_CLASSIC_TEAM_ID", None)
     if not team_id:
-        st.caption("Set your own Classic team on the 🆔 League Setup page to see "
-                   "your week checked here — fitness, transfers, chips and prices.")
-        if st.button("🆔 Go to League Setup", key="my_week_setup_link"):
-            st.session_state["_pending_nav_section"] = week_check.SECTION_FPL
-            st.session_state["_pending_nav_page"] = "🆔  League Setup"
-            st.rerun()
         return None
 
     gw = int(current_gw or config.CURRENT_GAMEWEEK or 1)
-    is_h2h = str(scoring_type).upper() == "H2H"
     team_id = int(team_id)
     try:
         authed = has_auth()
@@ -748,28 +740,19 @@ def render_my_week_section(league_id=None, scoring_type: str = "",
     try:
         with st.spinner("Checking your week…"):
             items, plan, squad_size, has_xi, signature = _assemble(
-                team_id, gw, league_id, is_h2h, stored)
+                team_id, gw, league_id, str(scoring_type).upper() == "H2H",
+                stored)
     except Exception as exc:
         # The strip must never take Home down: the standings below it are the
         # reason most visits happen.
         _logger.warning("Could not assemble the week checklist: %s", exc,
                         exc_info=True)
-        st.caption("Could not check your week just now. The league below is "
-                   "unaffected.")
         return None
 
     target_gw = (items[0].evidence or {}).get("gameweek") if items else gw
-    height = _render_strip(items, signature, team_id, int(target_gw or gw),
-                           authed)
-
-    with st.expander("Your week in full", expanded=False):
-        tab_all, tab_plan = st.tabs(["All checks", "Transfer plan"])
-        with tab_all:
-            for item in items:
-                st.markdown(_item_card(item), unsafe_allow_html=True)
-                st.write("")
-        with tab_plan:
-            _render_plan(plan)
+    view = WeekView(items=items, plan=plan, signature=signature,
+                    team_id=team_id, target_gw=int(target_gw or gw),
+                    authed=authed, squad_size=squad_size, has_xi=has_xi)
 
     # Logged rather than raised: a suspect row with a warning in the log beats a
     # Home page that will not render. The check that matters is an all-clear with
@@ -777,8 +760,32 @@ def render_my_week_section(league_id=None, scoring_type: str = "",
     for issue in check_week_plan(items, squad_size=squad_size,
                                  xi_size=(11 if has_xi else 0)):
         _logger.log(40 if issue.severity == "error" else 20, "my week: %s", issue)
+    return view
 
-    return height
+
+def render_week_detail(view) -> None:
+    """Every check and the transfer plan, for the tab Home gives it.
+
+    Was an expander in the right-hand column, which is a wide control for a
+    narrow space and hid the detail behind two clicks.
+    """
+    if view is None:
+        st.caption("Set your own Classic team on the 🆔 League Setup page to "
+                   "see your week checked — fitness, transfers, chips and "
+                   "prices.")
+        if st.button("🆔 Go to League Setup", key="my_week_setup_link"):
+            st.session_state["_pending_nav_section"] = week_check.SECTION_FPL
+            st.session_state["_pending_nav_page"] = "🆔  League Setup"
+            st.rerun()
+        return
+
+    checks, plan = st.tabs(["All checks", "Transfer plan"])
+    with checks:
+        for item in view.items:
+            st.markdown(_item_card(item), unsafe_allow_html=True)
+            st.write("")
+    with plan:
+        _render_plan(view.plan)
 
 
 def _confirmed_signature(team_id, gameweek) -> str:

@@ -12,7 +12,12 @@ import random
 import streamlit as st
 from typing import Optional, Dict, List
 
-from scripts.classic.my_week import render_my_week_section
+from scripts.classic.my_week import (
+    build_week_view,
+    render_week_actions,
+    render_week_detail,
+    week_card_html,
+)
 from scripts.common import cards
 from scripts.common.error_helpers import get_logger
 from scripts.common.luck_analysis import (
@@ -400,26 +405,8 @@ def plot_rank_progression(history_df: pd.DataFrame, use_overall_rank: bool = Fal
 # MAIN PAGE
 # ---------------------------
 
-#: What the league selectbox above the card occupies, label included. The card
-#: is sized to the strip's height *less* this, so the three columns end level.
-#: Tuned by eye against Streamlit 1.38; wrong only costs alignment.
-_SELECTBOX_PX = 76
-
-
-def _card_height(strip_px) -> int:
-    """How tall to draw a top-band card so it ends level with the strip.
-
-    ``None`` means no strip rendered -- the team is unconfigured, or it failed --
-    and the cards then size themselves, which is even anyway because the two
-    that remain are the same shape.
-    """
-    if not strip_px:
-        return 0
-    return max(0, int(strip_px))
-
-
 def _league_card(league_name: str, scoring_type: str, standings: dict,
-                 current_gw: int, min_height: int = 0) -> str:
+                 current_gw: int) -> str:
     """The selected league: what it is, how big, and where you are in it.
 
     Was a bare `### heading` plus a `st.metric("Format")`, which said less and
@@ -445,10 +432,10 @@ def _league_card(league_name: str, scoring_type: str, standings: dict,
             cards.stat(_ordinal(mine.get("rank")), "your rank", cards.ACCENT),
             cards.stat("%s" % mine.get("total", 0), "total pts"),
         ]))
-    return cards.card(body, min_height=min_height)
+    return cards.card(body)
 
 
-def _my_team_card(standings: dict, min_height: int = 0) -> str:
+def _my_team_card(standings: dict) -> str:
     """Your own team, at the top of the page rather than the bottom of it.
 
     This was four `st.metric`s inside a collapsed expander below three
@@ -499,7 +486,37 @@ def _my_team_card(standings: dict, min_height: int = 0) -> str:
             body += cards.push(cards.note("No chips played yet."))
     else:
         body += cards.push(cards.note("Could not load your team history."))
-    return cards.card(body, min_height=min_height)
+    return cards.card(body)
+
+
+def _top_band(league_html: str, team_html: str, week_html: str) -> str:
+    """The three top cards as one CSS grid.
+
+    **Grid items stretch to the tallest in the row by default**, which is what
+    makes these level however their text wraps -- the thing estimating pixel
+    heights could not do, because whether a verdict wraps onto a second line is
+    a browser's decision and not Python's. One block of markup rather than three
+    Streamlit columns, for the same reason: columns are independent, a grid row
+    is not.
+
+    The controls that belong to these cards -- the league selector, the week's
+    buttons -- render underneath in a matching `st.columns`, since a Streamlit
+    widget cannot live inside one block of markup.
+    """
+    present = [html for html in (league_html, team_html, week_html) if html]
+    if len(present) == 3:
+        columns = "1fr 1fr 2fr"
+    elif len(present) == 2:
+        columns = "1fr 2fr"
+    else:
+        columns = "1fr"
+    return (
+        '<style>'
+        '.fpl-band{display:grid;gap:16px;align-items:stretch;'
+        'grid-template-columns:%s;margin-bottom:10px;}'
+        '@media (max-width:900px){.fpl-band{grid-template-columns:1fr;}}'
+        '</style>'
+        '<div class="fpl-band">%s</div>' % (columns, "".join(present)))
 
 
 def _total_players() -> int:
@@ -562,37 +579,25 @@ def show_classic_home_page():
         st.session_state.classic_home_league_index = 0
 
     # ---------------------------
-    # THE TOP: which league, and your week in it
+    # THE TOP: which league, your team, and your week in it
     # ---------------------------
-    # Side by side because they answer the two questions a visit starts with --
-    # "which league am I looking at" and "is there anything I have to do before
-    # the deadline" -- and because a time-critical flag below the fold is one
-    # you find out about afterwards.
-    #
-    # The two columns are written to **out of order**, which Streamlit allows:
-    # output is routed to a column by the `with` block, while the code runs top
-    # to bottom. That matters three times here. The selector has to run first,
-    # because the league id it returns is what everything below fetches; the
-    # strip has to run before the card, because the card is sized to the height
-    # the strip reports; and the card still appears under the selector, because
-    # that is the order the `with identity:` blocks are written in.
-    # Three cards where there were two: the league you are looking at, your own
-    # team (promoted from a collapsed expander at the foot of the page), and
-    # your week. Without a configured team there is no middle card and no
-    # strip, so the band is two columns rather than one with a hole in it.
-    if getattr(config, "FPL_CLASSIC_TEAM_ID", None):
-        identity, mine, week = st.columns([1, 1, 2], gap="medium")
-    else:
-        identity, week = st.columns([1, 2], gap="medium")
-        mine = None
+    # The three cards are one CSS grid so they stretch to each other; their
+    # controls sit in a matching column row underneath, because a widget cannot
+    # live inside a block of markup. The grid is written into a slot reserved
+    # *before* the controls, so the selector -- whose league id everything below
+    # fetches -- still runs first.
+    band_slot = st.empty()
+    has_team = bool(getattr(config, "FPL_CLASSIC_TEAM_ID", None))
+    control_cols = st.columns([1, 1, 2] if has_team else [1, 2], gap="medium")
 
     display_options = [opt["display"] for opt in league_options]
-    with identity:
+    with control_cols[0]:
         selected_display = st.selectbox(
             "Select League",
             options=display_options,
             index=st.session_state.classic_home_league_index,
             key="classic_home_league_selector",
+            label_visibility="collapsed",
         )
 
     new_index = display_options.index(selected_display)
@@ -612,63 +617,61 @@ def show_classic_home_page():
     league_info = data["league_info"]
     scoring_type = data["scoring_type"]
     standings = data["standings"]
-    # Both the league card and the season-odds paths need it, and
+    # The league card, the odds paths and the week all need it, and
     # `get_current_gameweek` is cached.
     current_gw = get_current_gameweek() or 1
 
-    strip_px = None
-    with week:
+    try:
+        week_view = build_week_view(league_id=league_id,
+                                    scoring_type=scoring_type,
+                                    current_gw=current_gw)
+    except Exception:
         # Guarded as well as inside the section: `page_error_boundary` would
         # replace the whole page with an error, and the standings below are why
-        # most visits happen, so a fault here must cost the strip alone.
-        try:
-            strip_px = render_my_week_section(league_id=league_id,
-                                              scoring_type=scoring_type,
-                                              current_gw=current_gw)
-        except Exception:
-            _logger.warning("Could not render the My Week strip", exc_info=True)
-            st.caption("Could not check your week just now — the league below "
-                       "is unaffected.")
+        # most visits happen, so a fault here must cost the week alone.
+        _logger.warning("Could not build the week view", exc_info=True)
+        week_view = None
 
-    # The strip is the tallest thing in the band and the only one whose height
-    # is countable, so it is the measure the other cards are drawn to.
-    card_px = _card_height(strip_px)
-    with identity:
-        st.markdown(_league_card(league_info.get("name", "Unknown"),
-                                 scoring_type, standings, current_gw,
-                                 min_height=max(0, card_px - _SELECTBOX_PX)),
-                    unsafe_allow_html=True)
-    if mine is not None:
-        with mine:
-            st.markdown(_my_team_card(standings, min_height=card_px),
-                        unsafe_allow_html=True)
+    band_slot.markdown(
+        _top_band(_league_card(league_info.get("name", "Unknown"),
+                               scoring_type, standings, current_gw),
+                  _my_team_card(standings) if has_team else "",
+                  week_card_html(week_view) if week_view else ""),
+        unsafe_allow_html=True)
+
+    if week_view is not None:
+        with control_cols[-1]:
+            render_week_actions(week_view)
 
     # ---------------------------
-    # THE TABLE, AND WHAT IS BESIDE IT
+    # THE LEAGUE, AND THE WEEK IN FULL
     # ---------------------------
-    # The standings are six narrow columns; at full width most of the row was
-    # empty, and Season Odds rendered *underneath*, pushing everything down. So
-    # the band is the table and its companions side by side.
-    table_col, side_col = st.columns([3, 2], gap="medium")
+    # A tab rather than an expander in the right-hand column: the detail is a
+    # page's worth of rows, and an expander there was a wide control in a narrow
+    # space that hid it behind two clicks.
+    league_tab, week_tab = st.tabs(["🏆  League", "🗓️  My week in full"])
 
-    if scoring_type == "H2H":
-        df = format_h2h_standings(standings)
+    with week_tab:
+        render_week_detail(week_view)
 
-        # Computed once for the table's streak column, the side panel and the
-        # records row below.
-        h2h_matches = get_all_h2h_league_matches(league_id)
-        h2h_weekly_scores = build_classic_h2h_weekly_scores(h2h_matches)
-        h2h_streaks_df = (calculate_h2h_streaks(h2h_weekly_scores)
-                          if not h2h_weekly_scores.empty else None)
+    with league_tab:
+        if scoring_type == "H2H":
+            df = format_h2h_standings(standings)
 
-        with table_col:
+            # Computed once for the table's streak column, the panels under it
+            # and the records row below.
+            h2h_matches = get_all_h2h_league_matches(league_id)
+            h2h_weekly_scores = build_classic_h2h_weekly_scores(h2h_matches)
+            h2h_streaks_df = (calculate_h2h_streaks(h2h_weekly_scores)
+                              if not h2h_weekly_scores.empty else None)
+
             st.subheader("League Standings")
             if df.empty:
                 st.info("No standings data available yet.")
             else:
                 # A radio rather than a checkbox: the two are alternative views
                 # of one table, not independent options, and only the chosen one
-                # is computed -- the all-play simulation is the expensive half.
+                # is computed -- replaying every fixture is the expensive half.
                 view = st.radio(
                     "Standings view", ["Table", "Luck Adjusted"],
                     horizontal=True, label_visibility="collapsed",
@@ -700,63 +703,58 @@ def show_classic_home_page():
                             streak_map = dict(zip(h2h_streaks_df["Team"],
                                                   h2h_streaks_df["Current_Streak"]))
                             display_df["Streak"] = display_df["Team"].map(streak_map).fillna("-")
-                        display_df["Streak"] = display_df["Streak"].apply(format_streak_html)
                         cols = list(display_df.columns)
                         l_idx = cols.index("L")
                         cols.insert(l_idx + 1, cols.pop(cols.index("Streak")))
                         display_df = display_df[cols]
                     render_standings_table(display_df, is_h2h=True)
 
-        with side_col:
-            if not df.empty:
-                st.subheader("Season Odds")
-                if st.checkbox(
-                        "Play the season out", key=f"odds_{league_id}",
-                        help="Plays the remaining fixtures out a few thousand "
-                             "times and counts how often each manager finishes "
-                             "where."):
-                    render_classic_h2h_season_odds(
-                        league_id, current_gw,
-                        standings.get("results") or [], h2h_matches or [])
-            if h2h_streaks_df is not None and not h2h_streaks_df.empty:
-                # Beside the standings rather than two sections further down:
-                # both are league tables, and this one is narrow.
-                streaks_display = h2h_streaks_df.rename(columns={
-                    "Current_Streak": "Current",
-                    "Longest_Win_Streak": "Best Win Run",
-                    "Longest_Unbeaten_Streak": "Best Unbeaten Run",
-                    "Longest_Loss_Streak": "Worst Loss Run",
-                })
-                render_styled_table(
-                    streaks_display, title="Streaks",
-                    text_align={c: "center" for c in
-                                ("Current", "Best Win Run",
-                                 "Best Unbeaten Run", "Worst Loss Run")},
-                    positive_color_cols=["Best Win Run", "Best Unbeaten Run"],
-                    negative_color_cols=["Worst Loss Run"],
-                )
-            # At the foot of the column rather than between the checkbox and
-            # the Streaks table, where it separated a control from the table
-            # under it.
-            if not df.empty and not st.session_state.get(f"odds_{league_id}"):
-                st.caption("Season odds are a few thousand simulations of the "
-                           "remaining fixtures, so they are computed on request.")
-    else:
-        df = format_classic_standings(standings)
-        h2h_matches, h2h_weekly_scores, h2h_streaks_df = [], pd.DataFrame(), None
+                # Under the table, side by side: both are narrow, and neither
+                # is worth the full width the standings earn.
+                odds_col, streak_col = st.columns(2, gap="medium")
+                with odds_col:
+                    st.markdown("##### 🔮 Season Odds")
+                    if st.checkbox(
+                            "Play the season out", key=f"odds_{league_id}",
+                            help="Plays the remaining fixtures out a few "
+                                 "thousand times and counts how often each "
+                                 "manager finishes where."):
+                        render_classic_h2h_season_odds(
+                            league_id, current_gw,
+                            standings.get("results") or [], h2h_matches or [])
+                    else:
+                        st.caption("A few thousand simulations of the remaining "
+                                   "fixtures, so they are computed on request.")
+                with streak_col:
+                    if h2h_streaks_df is not None and not h2h_streaks_df.empty:
+                        streaks_display = h2h_streaks_df.drop(
+                            columns=["Team_ID"], errors="ignore").rename(columns={
+                                "Current_Streak": "Current",
+                                "Longest_Win_Streak": "Best Win Run",
+                                "Longest_Unbeaten_Streak": "Best Unbeaten Run",
+                                "Longest_Loss_Streak": "Worst Loss Run",
+                            })
+                        render_styled_table(
+                            streaks_display, title="Streaks",
+                            text_align={c: "center" for c in
+                                        ("Current", "Best Win Run",
+                                         "Best Unbeaten Run", "Worst Loss Run")},
+                            positive_color_cols=["Best Win Run",
+                                                 "Best Unbeaten Run"],
+                            negative_color_cols=["Worst Loss Run"],
+                        )
+        else:
+            df = format_classic_standings(standings)
+            h2h_matches, h2h_weekly_scores, h2h_streaks_df = [], pd.DataFrame(), None
 
-        with table_col:
             st.subheader("League Standings")
             if df.empty:
                 st.info("No standings data available yet.")
             else:
                 render_standings_table(
-                    df.drop(columns=["entry_id"], errors="ignore"),
-                    is_h2h=False)
+                    df.drop(columns=["entry_id"], errors="ignore"), is_h2h=False)
 
-        with side_col:
-            if not df.empty:
-                st.subheader("Season Odds")
+                st.markdown("##### 🔮 Season Odds")
                 if st.checkbox(
                         "Play the season out", key=f"odds_pts_{league_id}",
                         help="A total-points league has no fixtures, so this "
@@ -779,155 +777,155 @@ def show_classic_home_page():
                     render_classic_points_season_odds(
                         league_id, current_gw, _odds_df, sigma_sample=_sample)
                 else:
-                    st.caption("Season odds are a few thousand simulated "
-                               "seasons, so they are computed on request.")
+                    st.caption("A few thousand simulated seasons, so they are "
+                               "computed on request.")
 
-    # Show pagination info
-    has_next = standings.get("has_next", False)
-    if has_next:
-        st.caption("Showing first page of standings. Large leagues have additional pages.")
+        # Show pagination info
+        has_next = standings.get("has_next", False)
+        if has_next:
+            st.caption("Showing first page of standings. Large leagues have additional pages.")
 
-    st.divider()
+        st.divider()
 
-    # ---------------------------
-    # POINTS PROGRESSION CHARTS
-    # ---------------------------
-    if df.empty:
-        st.info("Charts will be available once the season starts.")
-        return
+        # ---------------------------
+        # POINTS PROGRESSION CHARTS
+        # ---------------------------
+        if df.empty:
+            st.info("Charts will be available once the season starts.")
+            return
 
-    st.subheader("Season Progression")
+        st.subheader("Season Progression")
 
-    # Slider to select how many teams to show in charts
-    num_teams = len(df)
-    if num_teams > 5:
-        teams_to_show = st.slider(
-            "Number of teams to show in charts",
-            min_value=3,
-            max_value=min(num_teams, 20),
-            value=min(num_teams, 10),
-            help="Limit teams shown for cleaner charts. Teams are selected by current rank."
-        )
-    else:
-        teams_to_show = num_teams
-
-    # Get top N teams for charts
-    top_teams_df = df.head(teams_to_show)
-    team_ids = top_teams_df["entry_id"].tolist()
-    team_names = dict(zip(top_teams_df["entry_id"], top_teams_df["Team"]))
-
-    # Fetch history for these teams
-    with st.spinner("Loading team histories..."):
-        history_df = fetch_team_histories(team_ids, team_names)
-
-    if history_df.empty:
-        st.info("No gameweek data available yet. Charts will appear once games are played.")
-        return
-
-    # Create tabs for different charts
-    tab1, tab2, tab3 = st.tabs(["Total Points", "Gameweek Points", "Rank Progression"])
-
-    with tab1:
-        pts_view = st.radio(
-            "View",
-            ["All Teams", "vs League Average"],
-            index=1,
-            horizontal=True,
-            key="classic_total_pts_view",
-        )
-        if pts_view == "All Teams":
-            fig = plot_total_points_over_time(history_df)
+        # Slider to select how many teams to show in charts
+        num_teams = len(df)
+        if num_teams > 5:
+            teams_to_show = st.slider(
+                "Number of teams to show in charts",
+                min_value=3,
+                max_value=min(num_teams, 20),
+                value=min(num_teams, 10),
+                help="Limit teams shown for cleaner charts. Teams are selected by current rank."
+            )
         else:
-            fig = plot_total_points_vs_avg(history_df)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Not enough data to display chart.")
+            teams_to_show = num_teams
 
-    with tab2:
-        gw_pts_view = st.radio(
-            "View",
-            ["All Teams", "vs League Average"],
-            index=1,
-            horizontal=True,
-            key="classic_gw_pts_view",
-        )
-        if gw_pts_view == "All Teams":
-            fig = plot_gw_points_over_time(history_df)
-        else:
-            fig = plot_gw_points_vs_avg(history_df)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Not enough data to display chart.")
+        # Get top N teams for charts
+        top_teams_df = df.head(teams_to_show)
+        team_ids = top_teams_df["entry_id"].tolist()
+        team_names = dict(zip(top_teams_df["entry_id"], top_teams_df["Team"]))
 
-    with tab3:
-        # Option to show overall rank or GW rank
-        rank_type = st.radio(
-            "Rank Type",
-            ["Gameweek Rank", "Overall Rank"],
-            horizontal=True
-        )
-        use_overall = rank_type == "Overall Rank"
+        # Fetch history for these teams
+        with st.spinner("Loading team histories..."):
+            history_df = fetch_team_histories(team_ids, team_names)
 
-        fig = plot_rank_progression(history_df, use_overall_rank=use_overall)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption("Lower rank = better position (rank 1 is best)")
-        else:
-            st.info("Not enough data to display chart.")
+        if history_df.empty:
+            st.info("No gameweek data available yet. Charts will appear once games are played.")
+            return
 
-    st.divider()
+        # Create tabs for different charts
+        tab1, tab2, tab3 = st.tabs(["Total Points", "Gameweek Points", "Rank Progression"])
 
-    # ---------------------------
-    # SEASON SUPERLATIVES
-    # ---------------------------
-    # One row of four, rather than a 2x2 block and then a second section for
-    # the streaks table -- which is now beside the standings, where the other
-    # league table is. The four cards are the same shape, so they line up
-    # without being measured.
-    if scoring_type == "H2H" and h2h_weekly_scores is not None \
-            and not h2h_weekly_scores.empty:
-        st.subheader("Season Records")
-        ws = h2h_weekly_scores.copy()
-        ws["Margin"] = ws["Points"] - ws["Opp_Points"]
-        wins = ws[ws["Margin"] > 0]
+        with tab1:
+            pts_view = st.radio(
+                "View",
+                ["All Teams", "vs League Average"],
+                index=1,
+                horizontal=True,
+                key="classic_total_pts_view",
+            )
+            if pts_view == "All Teams":
+                fig = plot_total_points_over_time(history_df)
+            else:
+                fig = plot_total_points_vs_avg(history_df)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Not enough data to display chart.")
 
-        best = ws.loc[ws["Points"].idxmax()]
-        worst = ws.loc[ws["Points"].idxmin()]
-        records = [
-            ("Highest GW score", "%d pts" % int(best["Points"]),
-             "%s (GW%d)" % (best["Team"], int(best["Gameweek"])),
-             "against %d" % int(best["Opp_Points"]), cards.ACCENT),
-            ("Lowest GW score", "%d pts" % int(worst["Points"]),
-             "%s (GW%d)" % (worst["Team"], int(worst["Gameweek"])),
-             "against %d" % int(worst["Opp_Points"]), "#f87171"),
-        ]
-        if not wins.empty:
-            big = wins.loc[wins["Margin"].idxmax()]
-            close = wins.loc[wins["Margin"].idxmin()]
-            records.append(
-                ("Biggest win", "%d-%d" % (int(big["Points"]), int(big["Opp_Points"])),
-                 "%s (GW%d)" % (big["Team"], int(big["Gameweek"])),
-                 "+%d margin" % int(big["Margin"]), cards.ACCENT_ALT))
-            records.append(
-                ("Closest match", "%d-%d" % (int(close["Points"]), int(close["Opp_Points"])),
-                 "%s (GW%d)" % (close["Team"], int(close["Gameweek"])),
-                 "by %d pt%s" % (int(close["Margin"]),
-                                 "" if int(close["Margin"]) == 1 else "s"),
-                 "#facc15"))
+        with tab2:
+            gw_pts_view = st.radio(
+                "View",
+                ["All Teams", "vs League Average"],
+                index=1,
+                horizontal=True,
+                key="classic_gw_pts_view",
+            )
+            if gw_pts_view == "All Teams":
+                fig = plot_gw_points_over_time(history_df)
+            else:
+                fig = plot_gw_points_vs_avg(history_df)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Not enough data to display chart.")
 
-        bodies = [
-            cards.eyebrow(title)
-            + f'<div style="color:{accent};font-size:1.5em;font-weight:800;'
-              f'line-height:1.15;">{value}</div>'
-            + f'<div style="font-size:0.84em;font-weight:600;margin-top:3px;">'
-              f'{who}</div>'
-            + cards.push(cards.note(detail))
-            for title, value, who, detail, accent in records
-        ]
-        for column, html in zip(st.columns(len(bodies), gap="small"),
-                                cards.card_row(bodies)):
-            with column:
-                st.markdown(html, unsafe_allow_html=True)
+        with tab3:
+            # Option to show overall rank or GW rank
+            rank_type = st.radio(
+                "Rank Type",
+                ["Gameweek Rank", "Overall Rank"],
+                horizontal=True
+            )
+            use_overall = rank_type == "Overall Rank"
+
+            fig = plot_rank_progression(history_df, use_overall_rank=use_overall)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption("Lower rank = better position (rank 1 is best)")
+            else:
+                st.info("Not enough data to display chart.")
+
+        st.divider()
+
+        # ---------------------------
+        # SEASON SUPERLATIVES
+        # ---------------------------
+        # One row of four, rather than a 2x2 block and then a second section for
+        # the streaks table -- which is now beside the standings, where the other
+        # league table is. The four cards are the same shape, so they line up
+        # without being measured.
+        if scoring_type == "H2H" and h2h_weekly_scores is not None \
+                and not h2h_weekly_scores.empty:
+            st.subheader("Season Records")
+            ws = h2h_weekly_scores.copy()
+            ws["Margin"] = ws["Points"] - ws["Opp_Points"]
+            wins = ws[ws["Margin"] > 0]
+
+            best = ws.loc[ws["Points"].idxmax()]
+            worst = ws.loc[ws["Points"].idxmin()]
+            records = [
+                ("Highest GW score", "%d pts" % int(best["Points"]),
+                 "%s (GW%d)" % (best["Team"], int(best["Gameweek"])),
+                 "against %d" % int(best["Opp_Points"]), cards.ACCENT),
+                ("Lowest GW score", "%d pts" % int(worst["Points"]),
+                 "%s (GW%d)" % (worst["Team"], int(worst["Gameweek"])),
+                 "against %d" % int(worst["Opp_Points"]), "#f87171"),
+            ]
+            if not wins.empty:
+                big = wins.loc[wins["Margin"].idxmax()]
+                close = wins.loc[wins["Margin"].idxmin()]
+                records.append(
+                    ("Biggest win", "%d-%d" % (int(big["Points"]), int(big["Opp_Points"])),
+                     "%s (GW%d)" % (big["Team"], int(big["Gameweek"])),
+                     "+%d margin" % int(big["Margin"]), cards.ACCENT_ALT))
+                records.append(
+                    ("Closest match", "%d-%d" % (int(close["Points"]), int(close["Opp_Points"])),
+                     "%s (GW%d)" % (close["Team"], int(close["Gameweek"])),
+                     "by %d pt%s" % (int(close["Margin"]),
+                                     "" if int(close["Margin"]) == 1 else "s"),
+                     "#facc15"))
+
+            bodies = [
+                cards.eyebrow(title)
+                + f'<div style="color:{accent};font-size:1.5em;font-weight:800;'
+                  f'line-height:1.15;">{value}</div>'
+                + f'<div style="font-size:0.84em;font-weight:600;margin-top:3px;">'
+                  f'{who}</div>'
+                + cards.push(cards.note(detail))
+                for title, value, who, detail, accent in records
+            ]
+            for column, html in zip(st.columns(len(bodies), gap="small"),
+                                    cards.card_row(bodies)):
+                with column:
+                    st.markdown(html, unsafe_allow_html=True)
 

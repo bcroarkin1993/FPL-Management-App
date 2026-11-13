@@ -108,7 +108,7 @@ class TestClassicHomePage:
 
 
 class TestClassicHomeShowsTheWeek:
-    """Home renders the alert strip, for either scoring type."""
+    """The top band, and what the league tab holds."""
 
     def _standings(self, scoring):
         """A league with a real row in it.
@@ -129,64 +129,17 @@ class TestClassicHomeShowsTheWeek:
             ]},
         }
 
-    def _run(self, scoring):
-        targets = {
-            "get_classic_team_history": None,
-            "get_entry_details": {"name": "Test", "id": 1},
-            "get_current_gameweek": 12,
-            "get_all_h2h_league_matches": [],
-            "extract_classic_h2h_gw_scores": pd.DataFrame(),
-            "calculate_all_play_standings": pd.DataFrame(),
-        }
-        with ExitStack() as stack:
-            mod = "scripts.classic.home"
-            for name, value in targets.items():
-                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
-            stack.enter_context(patch(f"{mod}.get_league_standings",
-                                      return_value=self._standings(scoring)))
-            stack.enter_context(patch(f"{mod}.render_luck_adjusted_table"))
-            stack.enter_context(patch(f"{mod}.render_standings_table"))
-            section = stack.enter_context(
-                patch(f"{mod}.render_my_week_section"))
-            from scripts.classic.home import show_classic_home_page
-            show_classic_home_page()
-            return section
-
-    def test_the_strip_renders_in_a_classic_league(self, mock_all_utils):
-        section = self._run("Classic")
-        assert section.called
-        assert section.call_args.kwargs["scoring_type"] == "Classic"
-
-    def test_the_strip_renders_in_an_h2h_league(self, mock_all_utils):
-        """The scoring type has to reach it: the opponent row keys off it."""
-        section = self._run("H2H")
-        assert section.call_args.kwargs["scoring_type"] == "H2H"
-        assert section.call_args.kwargs["league_id"]
-
-    def _band_a(self, strip_px=221, team_id=1):
-        """Render Home and report what the top band was given.
-
-        Returns ``(league card min_height, my team card min_height)``.
-        """
+    def _run(self, scoring="Classic", team_id=1, view=None, extra=(),
+             radio=None):
+        """Render Home with the week stubbed, returning the patched names."""
         import scripts.classic.home as home
-        seen = {}
-        real_league, real_team = home._league_card, home._my_team_card
-
-        def league_spy(*a, **kw):
-            seen["league"] = kw.get("min_height")
-            return real_league(*a, **kw)
-
-        def team_spy(*a, **kw):
-            seen["team"] = kw.get("min_height")
-            return real_team(*a, **kw)
-
+        handles = {}
         with ExitStack() as stack:
             mod = "scripts.classic.home"
             for name, value in {
                 "get_classic_team_history": {"current": [
                     {"event": 11, "points": 60, "total_points": 742,
-                     "overall_rank": 412345, "rank": 90210}], "chips": [
-                    {"name": "wildcard", "event": 3}]},
+                     "overall_rank": 412345}], "chips": []},
                 "get_entry_details": {"name": "Test XI", "id": 1,
                                       "player_first_name": "A",
                                       "player_last_name": "Tester"},
@@ -197,132 +150,83 @@ class TestClassicHomeShowsTheWeek:
             }.items():
                 stack.enter_context(patch(f"{mod}.{name}", return_value=value))
             stack.enter_context(patch(f"{mod}.get_league_standings",
-                                      return_value=self._standings("Classic")))
+                                      return_value=self._standings(scoring)))
             stack.enter_context(patch(f"{mod}.render_luck_adjusted_table"))
-            stack.enter_context(patch(f"{mod}.render_standings_table"))
-            stack.enter_context(patch(f"{mod}.render_my_week_section",
-                                      return_value=strip_px))
+            handles["table"] = stack.enter_context(
+                patch(f"{mod}.render_standings_table"))
+            handles["view"] = stack.enter_context(
+                patch(f"{mod}.build_week_view", return_value=view))
+            handles["card"] = stack.enter_context(
+                patch(f"{mod}.week_card_html", return_value="<div>week</div>"))
+            handles["actions"] = stack.enter_context(
+                patch(f"{mod}.render_week_actions"))
+            handles["detail"] = stack.enter_context(
+                patch(f"{mod}.render_week_detail"))
+            handles["band"] = stack.enter_context(
+                patch.object(home, "_top_band", side_effect=home._top_band))
+            handles["luck"] = stack.enter_context(
+                patch(f"{mod}.get_classic_h2h_luck_adjusted",
+                      return_value=pd.DataFrame()))
             stack.enter_context(patch(f"{mod}.config.FPL_CLASSIC_TEAM_ID",
                                       team_id, create=True))
-            stack.enter_context(patch.object(home, "_league_card",
-                                             side_effect=league_spy))
-            stack.enter_context(patch.object(home, "_my_team_card",
-                                             side_effect=team_spy))
+            if radio:
+                stack.enter_context(patch("streamlit.radio", return_value=radio))
+            for ctx in extra:
+                stack.enter_context(ctx)
             from scripts.classic.home import show_classic_home_page
             show_classic_home_page()
-        return seen
+        return handles
 
-    def test_the_top_band_is_three_cards_at_one_height(self, mock_all_utils):
-        """They sit side by side, so they are drawn to the strip's height --
-        the league card less the selector stacked above it."""
+    def test_smoke_for_both_scoring_types(self, mock_all_utils):
+        self._run("Classic")
+        self._run("H2H")
+
+    def test_the_top_band_is_one_grid_of_three_cards(self, mock_all_utils):
+        """A grid rather than three columns: grid items stretch to the tallest
+        in the row, which is what makes the cards level however text wraps."""
         import scripts.classic.home as home
-        seen = self._band_a(strip_px=221)
-        assert seen["team"] == 221
-        assert seen["league"] == 221 - home._SELECTBOX_PX
+        handles = self._run(view=object())
+        league, team, week = handles["band"].call_args.args
+        assert league and team and week
+        markup = home._top_band(league, team, week)
+        assert "grid-template-columns:1fr 1fr 2fr" in markup
+        assert "align-items:stretch" in markup
 
-    def test_my_team_is_in_the_top_band_not_an_expander(self, mock_all_utils):
+    def test_my_team_is_in_the_band_not_an_expander(self, mock_all_utils):
         """It was four `st.metric`s in a collapsed expander below three
         dividers -- the most personal data on the page, hardest to reach."""
-        import scripts.classic.home as home
-        assert "team" in self._band_a()
-        card = home._my_team_card(self._standings("Classic")["standings"])
-        assert "Test XI" not in card or "742" in card   # built from history
+        handles = self._run(view=object())
+        _, team, _ = handles["band"].call_args.args
+        assert "742" in team and "My team" in team
 
     def test_no_configured_team_drops_the_middle_card(self, mock_all_utils):
-        """Two columns rather than three with a hole in them."""
-        seen = self._band_a(team_id=None, strip_px=None)
-        assert "team" not in seen
+        handles = self._run(team_id=None)
+        _, team, _ = handles["band"].call_args.args
+        assert team == ""
+
+    def test_the_week_detail_is_a_tab_not_an_expander(self, mock_all_utils):
+        """`st.tabs` renders every body, so the detail is one toggle away and
+        costs nothing extra -- the view is already assembled."""
+        handles = self._run(view=object())
+        assert handles["detail"].called
+        assert handles["actions"].called
 
     def test_the_luck_adjusted_view_is_not_computed_until_it_is_chosen(self, mock_all_utils):
         """The radio keeps the laziness the checkbox had: replaying every
         fixture against every other is the expensive half of this band."""
-        with ExitStack() as stack:
-            mod = "scripts.classic.home"
-            for name, value in {
-                "get_classic_team_history": None,
-                "get_entry_details": {"name": "T", "id": 1},
-                "get_current_gameweek": 12,
-                "get_all_h2h_league_matches": [],
-                "extract_classic_h2h_gw_scores": pd.DataFrame(),
-                "calculate_all_play_standings": pd.DataFrame(),
-            }.items():
-                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
-            stack.enter_context(patch(f"{mod}.get_league_standings",
-                                      return_value=self._standings("H2H")))
-            stack.enter_context(patch(f"{mod}.render_standings_table"))
-            stack.enter_context(patch(f"{mod}.render_luck_adjusted_table"))
-            stack.enter_context(patch(f"{mod}.render_my_week_section",
-                                      return_value=200))
-            luck = stack.enter_context(patch(
-                f"{mod}.get_classic_h2h_luck_adjusted",
-                return_value=pd.DataFrame()))
-            # The mocked radio hands back its first option, "Table".
-            from scripts.classic.home import show_classic_home_page
-            show_classic_home_page()
-        assert not luck.called
+        handles = self._run("H2H")          # the mocked radio returns "Table"
+        assert not handles["luck"].called
 
     def test_choosing_luck_adjusted_computes_it(self, mock_all_utils):
-        with ExitStack() as stack:
-            mod = "scripts.classic.home"
-            for name, value in {
-                "get_classic_team_history": None,
-                "get_entry_details": {"name": "T", "id": 1},
-                "get_current_gameweek": 12,
-                "get_all_h2h_league_matches": [],
-                "extract_classic_h2h_gw_scores": pd.DataFrame(),
-                "calculate_all_play_standings": pd.DataFrame(),
-            }.items():
-                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
-            stack.enter_context(patch(f"{mod}.get_league_standings",
-                                      return_value=self._standings("H2H")))
-            stack.enter_context(patch(f"{mod}.render_standings_table"))
-            stack.enter_context(patch(f"{mod}.render_luck_adjusted_table"))
-            stack.enter_context(patch(f"{mod}.render_my_week_section",
-                                      return_value=200))
-            stack.enter_context(patch("streamlit.radio",
-                                      return_value="Luck Adjusted"))
-            luck = stack.enter_context(patch(
-                f"{mod}.get_classic_h2h_luck_adjusted",
-                return_value=pd.DataFrame()))
-            from scripts.classic.home import show_classic_home_page
-            show_classic_home_page()
-        assert luck.called
+        handles = self._run("H2H", radio="Luck Adjusted")
+        assert handles["luck"].called
 
-    def test_no_strip_lets_the_card_size_itself(self, mock_all_utils):
-        """An unconfigured team renders no strip, and a card stretched to match
-        nothing would be a tall empty box."""
-        import scripts.classic.home as home
-        assert home._card_height(None) == 0
-        assert home._card_height(0) == 0
-
-    def test_a_broken_strip_does_not_stop_the_standings(self, mock_all_utils):
-        """It renders *above* the league, so it must not be able to hide it.
-
-        Guarded in Home as well as inside the section, because
-        `page_error_boundary` would replace the whole page with an error — and
-        the standings are why most visits happen.
-        """
-        targets = {
-            "get_classic_team_history": None,
-            "get_entry_details": {"name": "Test", "id": 1},
-            "get_current_gameweek": 12,
-            "get_all_h2h_league_matches": [],
-            "extract_classic_h2h_gw_scores": pd.DataFrame(),
-            "calculate_all_play_standings": pd.DataFrame(),
-        }
-        with ExitStack() as stack:
-            mod = "scripts.classic.home"
-            for name, value in targets.items():
-                stack.enter_context(patch(f"{mod}.{name}", return_value=value))
-            stack.enter_context(patch(f"{mod}.get_league_standings",
-                                      return_value=self._standings("Classic")))
-            stack.enter_context(patch(f"{mod}.render_luck_adjusted_table"))
-            table = stack.enter_context(patch(f"{mod}.render_standings_table"))
-            stack.enter_context(patch(f"{mod}.render_my_week_section",
-                                      side_effect=RuntimeError("strip exploded")))
-            from scripts.classic.home import show_classic_home_page
-            show_classic_home_page()
-        assert table.called
+    def test_a_broken_week_does_not_stop_the_standings(self, mock_all_utils):
+        """The league is why most visits happen, and the week renders above it."""
+        boom = [patch("scripts.classic.home.build_week_view",
+                      side_effect=RuntimeError("week exploded"))]
+        handles = self._run(extra=boom)
+        assert handles["table"].called
 
 
 class TestClassicFixtureProjectionsPage:
@@ -1464,9 +1368,12 @@ class TestMyWeekSection:
     def _run(self, resolution=None, plan=None, scoring_type="Classic",
              buttons=None, extra=(), capture=False, transfers_made=0,
              authed=False, confirm_file=None):
-        """Render the section the way Home calls it.
+        """Build the week and render all three of its parts.
 
-        Returns ``(build_transfer_plan mock, items or None)``.
+        Home places the card, the buttons and the detail in three different
+        containers, so the test exercises them the same way.
+
+        Returns ``(build_transfer_plan mock, WeekView or None)``.
         """
         import scripts.classic.my_week as mw
         mod = "scripts.classic.my_week"
@@ -1479,7 +1386,6 @@ class TestMyWeekSection:
             "get_fpl_availability_df": pd.DataFrame(),
             "_is_gameweek_started": False,
         }
-        seen = {}
         with ExitStack() as stack:
             for name, value in targets.items():
                 stack.enter_context(patch(f"{mod}.{name}", return_value=value))
@@ -1517,20 +1423,16 @@ class TestMyWeekSection:
                 else Path(tempfile.mkdtemp()) / "confirm.json"))
             if buttons is not None:
                 stack.enter_context(patch("streamlit.button", return_value=buttons))
-            if capture:
-                real = mw._render_strip
-
-                def spy(items, *a, **kw):
-                    seen["items"] = items
-                    return real(items, *a, **kw)
-
-                stack.enter_context(patch(f"{mod}._render_strip",
-                                          side_effect=spy))
             for ctx in extra:
                 stack.enter_context(ctx)
-            mw.render_my_week_section(league_id=777, scoring_type=scoring_type,
+
+            view = mw.build_week_view(league_id=777, scoring_type=scoring_type,
                                       current_gw=12)
-        return plan_mock, seen.get("items")
+            if view is not None:
+                mw.week_card_html(view)
+                mw.render_week_actions(view)
+            mw.render_week_detail(view)
+        return plan_mock, (view.items if (capture and view) else view)
 
     def test_smoke(self, mock_all_utils):
         self._run()
@@ -1686,49 +1588,23 @@ class TestMyWeekSection:
         assert row.status == "ok"
         assert row.page == "🔄  Transfer Suggestions"
 
-    def test_it_returns_the_height_it_rendered(self, mock_all_utils):
-        """Home needs it to size the league card beside it."""
-        import scripts.classic.my_week as mw
-        heights = {}
-        real = mw._render_strip
-
-        def spy(*a, **kw):
-            heights["px"] = real(*a, **kw)
-            return heights["px"]
-
-        with patch("scripts.classic.my_week._render_strip", side_effect=spy):
-            self._run()
-        assert isinstance(heights["px"], int) and heights["px"] > 0
-
-    def test_an_unconfigured_team_reports_no_height(self, mock_all_utils):
-        with patch("scripts.classic.my_week.config.FPL_CLASSIC_TEAM_ID", None,
-                   create=True):
-            from scripts.classic.my_week import render_my_week_section
-            assert render_my_week_section(league_id=1, scoring_type="Classic",
-                                          current_gw=12) is None
-
-    def test_more_alerts_make_a_taller_strip(self):
-        """The card matches it, so the height has to track the content."""
-        from scripts.classic.my_week import strip_height
-        assert strip_height(3, True, True) > strip_height(1, True, True)
-        assert strip_height(1, True, True) > strip_height(1, False, False)
-        assert strip_height(0, False, False) == strip_height(1, False, False)
-
-    def test_a_failure_does_not_take_home_down(self, mock_all_utils):
-        """The standings below it are why most visits happen."""
+    def test_a_failure_builds_no_view_rather_than_raising(self, mock_all_utils):
+        """Home renders the league around it, so the week must fail quietly."""
         with patch("scripts.classic.my_week._assemble",
                    side_effect=RuntimeError("everything is on fire")), \
              patch("scripts.classic.my_week.config.FPL_CLASSIC_TEAM_ID", 1,
                    create=True):
-            from scripts.classic.my_week import render_my_week_section
-            render_my_week_section(league_id=1, scoring_type="Classic",
-                                   current_gw=12)
+            from scripts.classic.my_week import build_week_view
+            assert build_week_view(league_id=1, scoring_type="Classic",
+                                   current_gw=12) is None
 
     def test_no_team_configured_offers_the_setup_page(self, mock_all_utils):
         import streamlit as st
         with patch("scripts.classic.my_week.config.FPL_CLASSIC_TEAM_ID", None,
                    create=True):
-            from scripts.classic.my_week import render_my_week_section
-            render_my_week_section(league_id=1, scoring_type="Classic",
+            from scripts.classic.my_week import build_week_view, render_week_detail
+            view = build_week_view(league_id=1, scoring_type="Classic",
                                    current_gw=12)
+            assert view is None
+            render_week_detail(view)
         assert st.session_state.get("_pending_nav_page") == "🆔  League Setup"
