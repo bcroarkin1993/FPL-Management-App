@@ -211,6 +211,35 @@ class TestClassicHomeShowsTheWeek:
         assert handles["detail"].called
         assert handles["actions"].called
 
+    def test_season_odds_and_streaks_always_render(self, mock_all_utils):
+        """Both are tables under the standings now, not things to ask for.
+
+        Asserted with every checkbox false, which is what the old gate read: at
+        0.002s for the simulation there was nothing to save by hiding it.
+        """
+        played = [{"event": 1, "finished": True,
+                   "entry_1_entry": 1, "entry_1_name": "A", "entry_1_points": 60,
+                   "entry_2_entry": 2, "entry_2_name": "B", "entry_2_points": 50}]
+        with patch("scripts.classic.home.render_classic_h2h_season_odds") as odds, \
+             patch("scripts.classic.home.render_styled_table") as table, \
+             patch("streamlit.checkbox", return_value=False):
+            # Passed as an `extra` so it is applied *after* `_run`'s own patch
+            # of the same name and actually wins -- otherwise there are no
+            # played fixtures and the streaks column renders its caption.
+            self._run("H2H", extra=(patch(
+                "scripts.classic.home.get_all_h2h_league_matches",
+                return_value=played),))
+        assert odds.called                      # season odds, no control pressed
+        assert table.called                     # the streaks table beside it
+
+    def test_a_points_league_renders_its_odds_too(self, mock_all_utils):
+        with patch("scripts.classic.home.render_classic_points_season_odds") as odds, \
+             patch("streamlit.checkbox", return_value=False), \
+             patch("scripts.classic.home.fetch_team_histories",
+                   return_value=pd.DataFrame()):
+            self._run("Classic")
+        assert odds.called
+
     def test_the_luck_adjusted_view_is_not_computed_until_it_is_chosen(self, mock_all_utils):
         """The radio keeps the laziness the checkbox had: replaying every
         fixture against every other is the expensive half of this band."""
