@@ -3158,16 +3158,18 @@ One alert list, each row carrying its own verdict, then a row of buttons, then a
 collapsed "Your week in full" with the nine checks and the transfer plan. Below
 that the standings, untouched.
 
-**The two columns end level because the heights are computed in Python**, the
-approach the Draft lineup cards already take: `render_my_week_section` returns
-its pixel height, `strip_height()` derives it from the number of alert rows, the
-caveat line and whether there is a button row, and `home._card_height()`
-subtracts what the selectbox above the card occupies (live: a 3-row strip is
-221px, so the card is drawn at 145px). The alternative was a CSS rule against
-Streamlit's internal DOM to make the columns stretch, which breaks silently on
-an upgrade — this file records that hazard for the Hub's tab strip. A wrong
-constant here costs alignment and nothing else, and `None` from the section
-means the card sizes itself rather than stretching to match nothing.
+**The heights are computed in Python**, the approach the Draft lineup cards
+already take: `render_my_week_section` returns its pixel height,
+`strip_height()` derives it from the number of alert rows, the caveat line and
+whether there is a button row, and `home._card_height()` passes it to the other
+two cards in the band (the league card less what the selectbox above it
+occupies). Live: a 3-row strip is 221px, so the team card is 221px and the
+league card 145px, and the three columns end level to the pixel. The alternative
+was a CSS rule against Streamlit's internal DOM to make the columns stretch,
+which breaks silently on an upgrade — this file records that hazard for the Hub's
+tab strip. A wrong constant costs alignment and nothing else, and `None` from
+the section means the cards size themselves rather than stretching to match
+nothing.
 
 Home writes to those columns **out of order**, which Streamlit allows: the
 selector runs first because its league id is what everything fetches, the strip
@@ -3342,6 +3344,55 @@ lane runs off the same cached blend instead of reassembling one.
 checklist is a different list — waiver deadline, claim order, locked players; no
 captain, chips or prices — and the Waiver Wire already answers most of it.
 
+
+### Classic Home — three bands, and one card shell
+
+`scripts/common/cards.py`, `scripts/classic/home.py`.
+
+**The page was six full-width bands separated by five `st.divider()`s.** Nothing
+sat beside anything but the top row and a 2x2 block of record cards; the
+standings are six narrow columns and used about 40% of their row on a wide
+display, while Season Odds rendered *underneath* them and pushed the rest of the
+page down. It is now three bands:
+
+| Band | Columns | Holds |
+|---|---|---|
+| A | `[1, 1, 2]` | league card (selector above it) · **my team** · the My Week strip |
+| B | `[3, 2]` | standings, with a Table/All-Play radio · Season Odds, and the Streaks table in H2H |
+| C | full width | the progression tabs, then one row of four season records |
+
+Dividers: five to two.
+
+**Your own team was last and hidden** — four `st.metric`s in a collapsed
+expander below three dividers, which is the most personal data on the page in
+the least reachable place, in the one widget style the rest of the app had
+already replaced with cards. It is the middle card of band A now: team and
+manager, total points, last gameweek, overall rank and chips played. The rank is
+**compacted** (`2.1m`, `412k`) because an overall rank is read for its order of
+magnitude, and the card returns `""` with no team configured so the band closes
+to two columns rather than holding an empty third.
+
+**Cards were built four different ways** — `_league_card`, `_record_card`, the
+strip's own shell and `st.metric` — so nothing lined up by construction, which is
+why levelling two cards needed a tuned pixel constant and the next card would
+have needed another. `cards.py` is the one shell: border, gradient, radius,
+padding, `box-sizing`, and a **flex column**, so `cards.push()` can hold a
+footer line to the bottom of a card that has been stretched to match its
+neighbours instead of leaving dead space under its heading. `card_row()` gives a
+row one height, so "they line up" is a property of the helper rather than of
+anyone's measurement. Every card still ends at `compact_html()`, for the reason
+recorded under "A blank line ends an HTML block".
+
+`min_height` rather than `height`, and clamped at zero: a card may always grow
+past the row's measure, which fails safe as a taller row instead of clipped text.
+
+**The standings view is a radio, not a checkbox.** Table and All-Play are
+alternative views of one table, not independent options — and the radio keeps
+the laziness, which matters because the all-play simulation is the expensive half
+of that band. `test_the_all_play_view_is_not_computed_until_it_is_chosen` pins
+it, and its twin pins that choosing All-Play does compute it; a mocked radio
+returns its first option, so without the second test the branch would simply
+never run.
 
 ### Caching
 
