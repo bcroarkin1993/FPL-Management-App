@@ -3151,12 +3151,29 @@ Fixture Projections, free transfers on Transfer Suggestions, the chip call on
 Chip Strategy, prices on Price Changes. Six pages — and the only way to learn
 that five of them had nothing to say was to open all six.
 
-It renders at the top of **Classic Home**, in the right-hand column beside a
-league identity card: those are the two questions a visit starts with ("which
-league am I looking at", "is there anything I have to do"). One alert list, each
-row carrying its own verdict, then a row of buttons, then a collapsed "Your week
-in full" with the nine checks and the transfer plan. Below that the standings,
-untouched.
+It renders at the top of **Classic Home**, in the right-hand column beside the
+league selector and a league identity card: those are the two questions a visit
+starts with ("which league am I looking at", "is there anything I have to do").
+One alert list, each row carrying its own verdict, then a row of buttons, then a
+collapsed "Your week in full" with the nine checks and the transfer plan. Below
+that the standings, untouched.
+
+**The two columns end level because the heights are computed in Python**, the
+approach the Draft lineup cards already take: `render_my_week_section` returns
+its pixel height, `strip_height()` derives it from the number of alert rows, the
+caveat line and whether there is a button row, and `home._card_height()`
+subtracts what the selectbox above the card occupies (live: a 3-row strip is
+221px, so the card is drawn at 145px). The alternative was a CSS rule against
+Streamlit's internal DOM to make the columns stretch, which breaks silently on
+an upgrade — this file records that hazard for the Hub's tab strip. A wrong
+constant here costs alignment and nothing else, and `None` from the section
+means the card sizes itself rather than stretching to match nothing.
+
+Home writes to those columns **out of order**, which Streamlit allows: the
+selector runs first because its league id is what everything fetches, the strip
+runs before the card because the card is sized from it, and the card still
+appears under the selector because that is the order the two `with identity:`
+blocks are written in.
 
 Three revisions got it here, and each was a real lesson:
 
