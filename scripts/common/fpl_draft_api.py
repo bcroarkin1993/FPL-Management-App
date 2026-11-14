@@ -1417,12 +1417,20 @@ def get_waiver_transactions_up_to_gameweek(league_id, gameweek):
     return [tx for tx in tx_with_event if tx['event'] <= gameweek]
 
 
+@st.cache_data(ttl=300)
 def pull_fpl_player_stats():
     """
     Fetches FPL player statistics from the Classic FPL API.
 
     Returns:
     - player_df: DataFrame with player statistics sorted by total_points.
+
+    **Cached at the same TTL as `get_classic_bootstrap_static`**, which reads
+    the same endpoint. This was the one heavy fetch on the Waiver Wire with no
+    decorator at all, and that page reruns wholesale on every widget
+    interaction -- so a full bootstrap download plus a ~670-row frame build was
+    paid for each keystroke in a filter. Nine callsites across six pages share
+    the saving.
     """
     from scripts.common.text_helpers import remove_duplicate_words, to_display_name
 
