@@ -3490,7 +3490,13 @@ def show_waiver_wire_page():
         # backfill that used to sit here filled 0 and is deleted; see the
         # tombstone in `player_matching`.
         my_roster = _attach_display_names(my_roster)
-        my_roster = _add_fdr_and_form(my_roster, fpl_stats, current_gw, lookahead)
+        # `form_weeks` as well as `lookahead`: the available pool got the widget
+        # value and the roster silently kept `config.FORM_LOOKBACK_WEEKS`, so moving
+        # the slider compared a 2-week pool form against a 4-week roster form -- in
+        # `_build_rationale`, which sets them side by side, and in the ROS form term.
+        # They agree at the default, which is why it never showed.
+        my_roster = _add_fdr_and_form(my_roster, fpl_stats, current_gw, lookahead,
+                                      form_weeks=form_weeks)
         my_roster = _add_injury_data(my_roster, fpl_stats)
 
     # --- Multi-GW Projections (FFP) ---
