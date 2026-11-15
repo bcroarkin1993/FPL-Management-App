@@ -3340,9 +3340,9 @@ additionally carries `Team_ID`, `now_cost` and `minutes` — every fixture join 
 keyed on the club id, and the transfer planner reads the other two, so the plan
 lane runs off the same cached blend instead of reassembling one.
 
-**Classic only, for now.** `ITEM_ORDER` is the extension point, but the Draft
-checklist is a different list — waiver deadline, claim order, locked players; no
-captain, chips or prices — and the Waiver Wire already answers most of it.
+**Draft has one too**, and it is a different list — see "Draft My Week" below.
+`DRAFT_ITEM_ORDER` sits beside `ITEM_ORDER` rather than extending it: sharing
+one order would put a chip row on a format that has no chips.
 
 
 ### Classic Home — three bands, and one card shell
@@ -3436,6 +3436,160 @@ managers): the table went from 19 rows to 20, the two separating into 109-10-71
 **The overall rank carries its denominator** — "2.1m / 11.3m". A rank reads as
 bad until you know the field it is out of, and `total_players` is on the
 bootstrap this page already caches.
+
+### The claim engine, separated from the page that renders it
+
+`scripts/draft/waiver_core.py` (computes), `scripts/draft/waiver_wire.py`
+(renders), `tests/draft/test_waiver_core_is_renderless.py`,
+`tests/draft/test_patch_targets_bite.py`.
+
+**`show_waiver_wire_page()` was the only place in the app that could answer
+"is there a claim worth making."** A second surface now needs that answer —
+the Draft My Week strip — and two implementations of one claim engine is the
+twin-drift failure this codebase keeps paying for.
+
+It was already a de-facto shared module: `trade_analyzer` imports six of these
+helpers and `classic/transfers` five more, both reaching into a Streamlit page
+to do it. 38 computing functions moved, 13 rendering ones stayed, and **36 of
+the 38 are byte-identical** — verified by comparing AST-extracted bodies
+against the previous commit, which is the neutrality check for a cut-and-paste.
+
+**`st.stop()` is an instruction to Streamlit's script runner, not a return.**
+The two functions that changed are the two that had to:
+`_available_from_projections` — whose job is to filter a DataFrame — could
+*end a page it had never heard of*, and `_align_roster_player_names_to_projections`
+could write to one. The terminal case is now `WaiverDataUnavailable`, which the
+page catches and renders exactly as before; advisory cases go to an explicit
+`notes` sink the caller drains. An explicit sink rather than module-level state
+because the board is cached, and global mutable state behind a cache shows a
+warning on the cold call and drops it on every warm one.
+
+`import streamlit` stays, and has to: six of these are memoised and
+`@st.cache_data` is how this codebase memoises. What is banned is rendering and
+control flow.
+
+#### The board
+
+```
+build_waiver_board(league_id, team_id, current_gw, *, entry_id, lookahead,
+                   form_weeks, rotowire_url) -> WaiverBoard     # cached, 120s
+search_board(board, *, positions, lanes, compact, limit)
+best_claim(board, *, lane)                       # THROUGH search_board
+```
+
+**Splitting build from search is what makes it cheap.** The search controls are
+arguments to `search_board`, never fields on the board, so changing a position
+filter re-searches a cached board rather than rebuilding it. Measured live on
+league 11347 at GW11:
+
+| | |
+|---|---|
+| cold | 14.81s (110 element-summary requests + `build_league_strength`) |
+| rerun, board cached | 0.00s |
+| re-built after the TTL, fetches warm | **0.49s** (median of 7, 0.48–0.54) |
+| search | 0.02s |
+| `best_claim` | 0.02s |
+
+Every parameter is a primitive, so no frame enters the cache key — the
+`my_week._assemble` rule. **A failure is cached as a failure**, with a non-`ok`
+status and the reason in `notes`: the `get_ffp_feed` lesson about pinning a
+transient outage as a success.
+
+**`best_claim` routes through `search_board` deliberately.** The locked-player
+filter and the cannot-play exclusion live *inside*
+`_compute_transfer_suggestions` so no caller can forget them, and the obvious
+shortcut for a checklist — take the top row of `board.available` by Transfer
+Score — bypasses both. That is how a player another manager dropped an hour ago
+gets recommended as a claim.
+
+**A `mock.patch` that silently does nothing is worse than no mock at all.**
+Moving the functions detached eight patch targets at once, and only one
+announced itself. Two were outright no-ops in the smoke test, one of them
+`compute_healthy_form` — one HTTP request *per player* — inside a test body
+wrapped in `except Exception: pass`. Two were `side_effect=AssertionError`
+guards asserting a function is never reached; detached, they assert nothing and
+still pass. And one unit test went green **while reading the live API**, because
+the real element map happens to return the ids its fixture hardcodes.
+`test_patch_targets_bite.py` asserts that every name a test patches on a module
+is actually called from a function that module defines.
+
+**`scripts/test_scoring.py` was the same failure, already live.** It hand-rolled
+this pipeline behind its own Streamlit stub and had drifted six ways — no
+`element_states` (so every *locked* player scored as claimable), no
+`_attach_minutes_dependency`, no `AvgFDRNextN` on the reference pool, no
+`remaining_gws`, one name merge instead of three, no display names. That file
+tunes ROS weights, so every weight was judged against inputs the app does not
+produce. It now calls `build_waiver_board`.
+
+### Draft My Week — the pre-deadline round, on Draft Home
+
+`scripts/common/week_check.py` (the Draft builders, beside Classic's),
+`scripts/common/week_render.py` (the shared card, rows and buttons),
+`scripts/draft/my_week.py` (resolvers and assembly), `scripts/draft/home.py`.
+
+The Draft manager's week was spread over four pages — the Waiver Wire, Fixture
+Projections, Availability and the Trade Analyzer — and Draft Home, a linear page
+of standings and charts, said nothing about any of it.
+
+`DRAFT_ITEM_ORDER` is `("deadline", "opponent", "squad", "availability",
+"fixtures", "lineup", "waivers", "claim", "trades")`. Four rows reuse Classic's
+builders unchanged; five are new. There are no chips, no prices and no captain
+(`settings.squad.captains_disabled` is true).
+
+**`/api/entry/{id}/event/{gw}` 404s for any gameweek whose deadline has not
+passed** — exactly like Classic's `picks`, and this feature was planned on the
+opposite assumption. Measured 2026-11-15 with GW11 five days out: GW9 and GW10
+return fifteen picks, GW11 and GW12 return 404. So the lineup row compares
+*last* deadline's XI, discloses that it did, and **can be confirmed away** — the
+alert is a claim the app cannot retract on its own, because the manager may have
+set the XI in FPL's own UI a minute ago. `_set_lineup` walks back up to two
+gameweeks, since one can be skipped around a blank. `lineup_confirm._key` now
+passes a non-numeric team id through, so Draft namespaces its entry id
+(`"draft-56086"`): a Draft entry id and a Classic entry id are both bare
+integers, and without a prefix one format could silence the other's alert.
+
+**The claim row is gated, and until it runs it is `unknown` — never `ok`.**
+Building the board costs ~15s cold, which is more than a Home page should spend
+unasked, so it sits behind a button. An unchecked row has *derived nothing*, and
+"nothing to do" and "not looked yet" are opposite claims; `unknown` also sorts
+above `ok`, so the row keeps its place in the alert list and carries the button
+that answers it. A search that ran and found nothing is a **derived** all-clear,
+with the pool size as its evidence.
+
+**Bench order is a warning, not an action.** Draft auto-subs come on in bench
+order (slot 12 is the reserve keeper; 13→14→15 the outfield order), so a
+stronger player at 15 than at 13 is points left on the bench — but only if a
+starter does not play. Keeping it a warning also leaves `check_week_plan`'s "an
+`act` must name a gain or a captain to move" rule intact, which with captains
+disabled reduces to "must name a gain".
+
+**`week_render.py` is the shared half**, because the card, the alert rows, the
+detail cards and the nav buttons read only `WeekItem` and were format-agnostic
+already. What differs is the buttons each format adds, and those arrive as
+`leading`/`trailing` entries rather than being special-cased — Classic keeps
+confirm-XI and connect-account, Draft has check-for-claims. Classic's 263 tests
+passing unchanged is what pins that refactor as behaviour-neutral.
+
+**Draft Home is now three bands**, matching Classic: a CSS grid of league card ·
+my team card · My Week strip, the week's buttons in a matching `st.columns`
+underneath, then League / My week in full tabs. `cards.band()` is Classic's
+`_top_band` lifted into the shared module. The team card carries **your waiver
+pick**, the Draft-specific number that decides whether a claim is a plan or a
+wish. The standings toggle became a radio, matching Classic — Table and Luck
+Adjusted are alternative views of one table, and the radio keeps the all-play
+replay lazy.
+
+Two faults found by running it against the live league rather than reasoning
+about it: `get_team_composition_for_gameweek` publishes no `Team_ID`, so the
+blanks-and-doubles row was handed an empty set of clubs and reported `unknown`
+over a perfectly readable fixture list — the "gate keyed on a column some frames
+do not carry" failure, for the fifth time; and the lineup row rendered "Igor
+Thiago Nascimento Rodrigues", because these frames come from the Draft bootstrap
+where `Player` is the full legal name.
+
+Live at GW11: nine rows, three flagged (1 out and 1 doubtful, an XI swap worth
++5.5, the unchecked claim), ~9s cold and cached for 120s; the gated search takes
+16.5s and returned "+1.2 — not worth a claim".
 
 ### Caching
 
@@ -5689,6 +5843,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Notes |
 |------|-------|
+| My Week (Draft) | Completed | The same strip on **Draft Home**, with a different list: the transaction window and your waiver pick, whether a claim is worth making, the XI you have set and your bench order, and the trade window. Required separating the claim engine out of the Waiver Wire page so both surfaces share one answer — see "The claim engine, separated from the page that renders it", which also killed a live drifted twin that was tuning ROS weights against a reference pool with no `AvgFDRNextN`. The claim row is **gated** (the board costs ~15s cold) and reads `unknown` until it runs, because an unchecked row has derived nothing. Draft Home became three bands to match Classic. Planned on the premise that Draft's XI is public; it is readable but the *pending* gameweek 404s exactly as Classic's does, so the lineup row discloses which gameweek it read and can be confirmed away. See "Draft My Week — the pre-deadline round, on Draft Home". |
 | My Week (Classic) | Completed | The whole pre-deadline round as an alert strip at the top of **Classic Home**, beside a league identity card: deadline, head-to-head opponent, squad provenance, fitness, blanks and doubles, **whether the XI you have set is the right one**, whether you have acted on the best transfer, chips, price exposure — one list, one button per flagged row jumping to the page that fixes it, and the detail in a collapsed expander. Computes nothing itself: verified live to agree with Chip Strategy to the digit. **Nothing is behind a button** (the ILP frontier measured 0.27s). Its one idea is that **an all-clear must be derived, never defaulted** — a checklist's unique failure is a right-looking absence of numbers — and its one concession to reality is that the XI alert can be *told* it is wrong, against a signature of the fifteen so a transfer re-arms it. See "My Week — the pre-deadline round, on Classic Home". |
 | Chip Strategy (Classic) | Completed | A **🎯 Chip Strategy** page scoring all four chips in expected points per gameweek, with an expiry clock read from `bootstrap-static.chips` — which nothing in the app had ever read, and which revealed that all four chips are double-use this season while `_parse_chip_status` modelled Free Hit and Triple Captain as single-use. Adds the H2H lane: a chip is worth the *win probability* it buys, which peaks when trailing by half its gain, so the biggest-points week is routinely not the most useful one. Also the app's first per-club fixture **count**, so blanks and doubles are detectable at all. See "Chips — the rules are published". |
 | Season Odds | Completed | A **Show Season Odds** toggle under the league table on both Home pages: title, playoff and last-place probabilities from a Monte Carlo of the remaining fixtures, using the same `Phi((muA-muB)/sqrt(2 sigma^2))` model as the per-match win probability. The feature betterdraft.co.uk has that this app had no equivalent of. Each simulation re-draws every manager's underlying mean from its own sampling distribution, because that mean rests on nine matches — live that is the difference between a 25.4% and a 31.4% title probability for the leader, and holding it fixed overstates how decided the league is. Covers Draft, Classic H2H and Classic total-points — the last is a different simulation, since nobody plays anybody and the table is ordered on accumulated points. Seeded on `(league, gameweek, n_sims)` so a Streamlit rerun cannot change the answer. `check_season_odds()` guards it on exact identities. First shipped as a ninth tab on League Analysis, which Streamlit's tab strip pushed off-screen. See "Season Odds" |
