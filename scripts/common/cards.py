@@ -111,3 +111,36 @@ def push(body: str = "") -> str:
     which is the look this module exists to remove.
     """
     return f'<div style="margin-top:auto;padding-top:9px;">{body}</div>'
+
+
+def band(*bodies: str, columns: str = "") -> str:
+    """Several cards as one CSS grid row.
+
+    **Grid items stretch to the tallest in the row by default**, which is what
+    makes these level however their text wraps -- the thing estimating pixel
+    heights could not do, because whether a verdict wraps onto a second line
+    is a browser's decision and not Python's. One block of markup rather than
+    several `st.columns`, for the same reason: columns are independent, a grid
+    row is not.
+
+    The controls belonging to these cards render underneath in a matching
+    `st.columns`, since a Streamlit widget cannot live inside one block of
+    markup. Write the band into an `st.empty()` slot reserved *before* that
+    row and the controls still run first -- which matters when one of them
+    returns the id everything below fetches.
+
+    Empty strings are dropped, so a page with no team configured closes to two
+    columns rather than holding an empty third.
+    """
+    present = [html for html in bodies if html]
+    if not present:
+        return ""
+    if not columns:
+        columns = {1: "1fr", 2: "1fr 2fr"}.get(len(present), "1fr 1fr 2fr")
+    return compact_html(
+        '<style>'
+        '.fpl-band{display:grid;gap:16px;align-items:stretch;'
+        'grid-template-columns:%s;margin-bottom:10px;}'
+        '@media (max-width:900px){.fpl-band{grid-template-columns:1fr;}}'
+        '</style>'
+        '<div class="fpl-band">%s</div>' % (columns, "".join(present)))

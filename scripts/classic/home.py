@@ -533,33 +533,10 @@ def _season_records(weekly_scores: pd.DataFrame) -> list:
 
 
 def _top_band(league_html: str, team_html: str, week_html: str) -> str:
-    """The three top cards as one CSS grid.
-
-    **Grid items stretch to the tallest in the row by default**, which is what
-    makes these level however their text wraps -- the thing estimating pixel
-    heights could not do, because whether a verdict wraps onto a second line is
-    a browser's decision and not Python's. One block of markup rather than three
-    Streamlit columns, for the same reason: columns are independent, a grid row
-    is not.
-
-    The controls that belong to these cards -- the league selector, the week's
-    buttons -- render underneath in a matching `st.columns`, since a Streamlit
-    widget cannot live inside one block of markup.
-    """
-    present = [html for html in (league_html, team_html, week_html) if html]
-    if len(present) == 3:
-        columns = "1fr 1fr 2fr"
-    elif len(present) == 2:
-        columns = "1fr 2fr"
-    else:
-        columns = "1fr"
-    return (
-        '<style>'
-        '.fpl-band{display:grid;gap:16px;align-items:stretch;'
-        'grid-template-columns:%s;margin-bottom:10px;}'
-        '@media (max-width:900px){.fpl-band{grid-template-columns:1fr;}}'
-        '</style>'
-        '<div class="fpl-band">%s</div>' % (columns, "".join(present)))
+    """The three top cards as one CSS grid. See `cards.band`, which Draft Home
+    shares -- a second copy of the grid is how the two pages come to disagree
+    about what a card looks like."""
+    return cards.band(league_html, team_html, week_html)
 
 
 def _total_players() -> int:

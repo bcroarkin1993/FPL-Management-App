@@ -18,6 +18,11 @@ def _empty_ffp_feed():
 
 
 class TestDraftHomePage:
+    """Home now renders the My Week strip, which fetches. Stub
+    `build_week_view` on the *page's* namespace -- Home resolves it there, and
+    leaving it live put this smoke test on the network, 404ing against a
+    fixture league id."""
+
     def test_smoke(self, mock_all_utils):
         with patch("scripts.draft.home.get_current_gameweek", return_value=25), \
              patch("scripts.draft.home.get_draft_league_details", return_value={"matches": [], "league_entries": [], "standings": []}), \
@@ -26,9 +31,54 @@ class TestDraftHomePage:
              patch("scripts.draft.home.calculate_all_play_standings", return_value=pd.DataFrame()), \
              patch("scripts.draft.home.render_luck_adjusted_table"), \
              patch("scripts.draft.home.render_standings_table"), \
-             patch("scripts.draft.home.build_draft_history_df", return_value=pd.DataFrame()):
+             patch("scripts.draft.home.build_draft_history_df", return_value=pd.DataFrame()), \
+             patch("scripts.draft.home.build_week_view", return_value=None), \
+             patch("scripts.draft.home.get_draft_transaction_window", return_value={}), \
+             patch("scripts.draft.home.get_league_waiver_order", return_value=[]), \
+             patch("scripts.draft.home.get_fpl_draft_league_standings",
+                   return_value=pd.DataFrame()):
             from scripts.draft.home import show_home_page
             show_home_page()
+
+    def test_the_week_strip_renders_and_its_buttons_navigate(self, mock_all_utils,
+                                                             mock_streamlit):
+        """The strip is new to this page, and a mocked radio returns its first
+        option -- so without an explicit test the Luck Adjusted branch and the
+        week tab would both go unexercised."""
+        from scripts.draft import my_week as dmw
+        from scripts.common import week_check as wc
+
+        item = wc.build_draft_squad_item(None)          # an unknown row, with a page
+        view = dmw.DraftWeekView(items=[item], team_id=1, league_id=2,
+                                 target_gw=11, squad_size=0, has_xi=False,
+                                 claim_checked=False)
+        assert view.flagged == [item]
+        assert dmw.week_card_html(view)                  # renders without raising
+
+        with patch("scripts.draft.home.get_current_gameweek", return_value=25), \
+             patch("scripts.draft.home.get_draft_league_details",
+                   return_value={"matches": [], "league_entries": [], "standings": []}), \
+             patch("scripts.draft.home.is_draft_league_reachable", return_value=True), \
+             patch("scripts.draft.home.render_standings_table"), \
+             patch("scripts.draft.home.render_luck_adjusted_table"), \
+             patch("scripts.draft.home.build_draft_history_df", return_value=pd.DataFrame()), \
+             patch("scripts.draft.home.build_week_view", return_value=view), \
+             patch("scripts.draft.home.get_draft_transaction_window",
+                   return_value={"mode": "waivers"}), \
+             patch("scripts.draft.home.get_league_waiver_order", return_value=[]), \
+             patch("scripts.draft.home.get_fpl_draft_league_standings",
+                   return_value=pd.DataFrame()):
+            from scripts.draft.home import show_home_page
+            show_home_page()
+
+        # mock_streamlit's buttons are unconditionally truthy, so pressing the
+        # row's Open button must have staged a real navigation target.
+        import main
+        import streamlit as st
+        section = st.session_state.get("_pending_nav_section")
+        page = st.session_state.get("_pending_nav_page")
+        assert section in main.SECTIONS, section
+        assert page in main.SECTIONS[section], page
 
     def test_stale_league_shows_error_and_stops(self, mock_all_utils, mock_streamlit):
         """When FPL_DRAFT_LEAGUE_ID doesn't resolve (e.g. a prior season's league,

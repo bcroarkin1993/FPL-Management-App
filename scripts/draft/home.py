@@ -20,6 +20,12 @@ from scripts.common.utils import (
     is_draft_league_reachable,
 )
 from scripts.common.styled_tables import render_styled_table
+from scripts.common import cards
+from scripts.common.fpl_draft_api import (get_draft_transaction_window,
+                                          get_league_waiver_order)
+from scripts.common.waiver_priority import my_waiver_pick
+from scripts.draft.my_week import (build_week_view, render_week_actions,
+                                   render_week_detail, week_card_html)
 
 _logger = get_logger("fpl_app.draft.home")
 
@@ -673,6 +679,87 @@ def plot_league_position_over_time(history_df):
 # MAIN PAGE
 # ---------------------------
 
+def _ordinal(value) -> str:
+    """1 -> 1st. Rendered beside a league position, so the suffix matters."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    if 10 <= n % 100 <= 20:
+        return "%dth" % n
+    return "%d%s" % (n, {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
+
+
+def _league_card(league_id, standings_df, current_gw, window) -> str:
+    """Which league, how big, and which transaction window is open.
+
+    The window is on the front page because it decides what a manager can do
+    today: in waivers a claim is a request processed in league order, in free
+    agency an available player is simply added.
+    """
+    name, size = "Draft League", 0
+    try:
+        details = get_draft_league_details(league_id) or {}
+        name = (details.get("league") or {}).get("name") or name
+        size = len(details.get("league_entries") or [])
+    except Exception:
+        _logger.warning("Could not read league details", exc_info=True)
+    if not size and standings_df is not None and not standings_df.empty:
+        size = len(standings_df)
+
+    mode = (window or {}).get("mode")
+    label = {"waivers": "Waivers open",
+             "free-agency": "Free agency"}.get(mode, "Window unknown")
+    colour = cards.ACCENT if mode == "free-agency" else cards.WARN
+
+    body = cards.eyebrow("League") + cards.headline(name)
+    body += cards.stats([cards.stat("%d" % size, "teams"),
+                         cards.stat("GW%s" % current_gw, "now")])
+    body += cards.push(cards.badge(label, colour))
+    return cards.card(body)
+
+
+def _my_team_card(standings_df, waiver_pick=None) -> str:
+    """Your own row, which was the least reachable thing on this page.
+
+    Returns "" with no team configured, so the band closes to two columns
+    rather than holding an empty third.
+    """
+    team_id = getattr(config, "FPL_DRAFT_TEAM_ID", None)
+    if not team_id or standings_df is None or standings_df.empty:
+        return ""
+    try:
+        entries = {int(e.get("entry_id")): e.get("entry_name")
+                   for e in (get_draft_league_details(
+                       config.FPL_DRAFT_LEAGUE_ID) or {}).get("league_entries", [])
+                   if e.get("entry_id") is not None}
+        my_name = entries.get(int(team_id))
+    except Exception:
+        my_name = None
+    if not my_name:
+        return ""
+
+    frame = standings_df.reset_index()
+    row = frame[frame["Team"].astype(str) == str(my_name)]
+    if row.empty:
+        return ""
+    row = row.iloc[0]
+
+    body = cards.eyebrow("My team") + cards.headline(str(row["Team"]))
+    body += cards.note(str(row.get("Player", "")), cards.MUTED)
+    body += cards.stats([
+        cards.stat(_ordinal(row.get("Rank")), "rank"),
+        cards.stat("%s-%s-%s" % (row.get("W"), row.get("D"), row.get("L")), "record"),
+        cards.stat("%s" % row.get("PF"), "points for"),
+    ])
+    if waiver_pick:
+        # The Draft-specific number worth putting on the front page: it decides
+        # whether a claim is a plan or a wish.
+        body += cards.push(cards.badge("Waiver pick %d" % waiver_pick,
+                                       cards.ACCENT_ALT))
+    return cards.card(body)
+
+
 def show_home_page():
     st.title("My Fantasy Draft Team & League Standings")
 
@@ -693,43 +780,108 @@ def show_home_page():
             icon=None,
         )
 
+    current_gw = get_current_gameweek() or 1
+
+    # ---------------------------
+    # THE TOP: the league, your team, and your week in it
+    # ---------------------------
+    # Three cards in one CSS grid so they stretch to each other, with their
+    # controls in a matching column row underneath -- a Streamlit widget cannot
+    # live inside a block of markup. The grid goes into a slot reserved *before*
+    # the controls so it still renders above them. Same shape as Classic Home.
+    band_slot = st.empty()
+
+    try:
+        week_view = build_week_view(league_id=config.FPL_DRAFT_LEAGUE_ID,
+                                    current_gw=current_gw)
+    except Exception:
+        # Guarded here as well as inside the section: `page_error_boundary`
+        # would replace the whole page with an error, and the standings below
+        # are why most visits happen, so a fault here must cost the week alone.
+        _logger.warning("Could not build the Draft week view", exc_info=True)
+        week_view = None
+
+    standings_df = get_fpl_draft_league_standings(config.FPL_DRAFT_LEAGUE_ID,
+                                                  show_luck_adjusted_stats=False)
+    try:
+        window = get_draft_transaction_window(config.FPL_DRAFT_LEAGUE_ID)
+    except Exception:
+        _logger.warning("Could not read the transaction window", exc_info=True)
+        window = {}
+    waiver_pick = None
+    try:
+        waiver_pick = my_waiver_pick(
+            get_league_waiver_order(config.FPL_DRAFT_LEAGUE_ID),
+            getattr(config, "FPL_DRAFT_TEAM_ID", None))
+    except Exception:
+        _logger.warning("Could not read the waiver order", exc_info=True)
+
+    team_html = _my_team_card(standings_df, waiver_pick)
+    band_slot.markdown(
+        cards.band(_league_card(config.FPL_DRAFT_LEAGUE_ID, standings_df,
+                                current_gw, window),
+                   team_html,
+                   week_card_html(week_view) if week_view else ""),
+        unsafe_allow_html=True)
+
+    if week_view is not None:
+        control_cols = st.columns([1, 1, 2] if team_html else [1, 2],
+                                  gap="medium")
+        with control_cols[-1]:
+            render_week_actions(week_view)
+
+    # ---------------------------
+    # THE LEAGUE, AND THE WEEK IN FULL
+    # ---------------------------
+    league_tab, week_tab = st.tabs(["🏆  League", "🗓️  My week in full"])
+
+    with week_tab:
+        render_week_detail(week_view)
+
+    with league_tab:
+        _render_league(standings_df, current_gw)
+
+
+def _render_league(standings_df, current_gw):
+    """The standings, the odds, the results and the progression charts."""
     st.subheader("FPL Draft League Table")
-    # Two views of the same table, both opt-in: one looks backwards at the
-    # schedule you were handed, the other forwards at the one you have left.
-    _col_luck, _col_odds = st.columns(2)
-    show_luck_adjusted_stats = _col_luck.checkbox("Show Luck Adjusted Standings")
-    show_season_odds = _col_odds.checkbox(
+    # A radio rather than two checkboxes: Table and Luck Adjusted are
+    # alternative views of one table, not independent options -- and the radio
+    # keeps the all-play replay lazy, which is the expensive half.
+    view_col, odds_col = st.columns([2, 1])
+    standings_view = view_col.radio(
+        "Standings view", ["Table", "Luck Adjusted"], index=0,
+        horizontal=True, label_visibility="collapsed",
+        key="draft_home_standings_view")
+    show_season_odds = odds_col.checkbox(
         "Show Season Odds",
         help="Plays the remaining fixtures out a few thousand times and counts "
              "how often each manager finishes where — title, playoff and "
              "last-place odds, using the same win-probability model as Fixture "
              "Projections.")
-    if show_luck_adjusted_stats:
+
+    if standings_view == "Luck Adjusted":
         st.caption("**All-Play Record**: simulates every team playing every other team each gameweek. "
                    "Luck +/- shows how much the actual schedule helped or hurt (positive = lucky).")
-    # Fetch the league standings based on the toggle
-    standings_df = get_fpl_draft_league_standings(config.FPL_DRAFT_LEAGUE_ID,
-                                                  show_luck_adjusted_stats=show_luck_adjusted_stats)
-    # Display the standings dataframe
-    if show_luck_adjusted_stats:
-        render_luck_adjusted_table(standings_df)
+        render_luck_adjusted_table(
+            get_fpl_draft_league_standings(config.FPL_DRAFT_LEAGUE_ID,
+                                           show_luck_adjusted_stats=True))
     else:
+        df = standings_df
         current_streaks = _compute_draft_current_streaks(config.FPL_DRAFT_LEAGUE_ID)
-        if current_streaks and not standings_df.empty:
-            standings_df = standings_df.reset_index()
-            standings_df["Streak"] = standings_df["Team"].map(current_streaks).fillna("-")
-            standings_df["Streak"] = standings_df["Streak"].apply(format_streak_html)
-            # Insert Streak between L and PF
-            cols = list(standings_df.columns)
+        if current_streaks and df is not None and not df.empty:
+            df = df.reset_index()
+            df["Streak"] = df["Team"].map(current_streaks).fillna("-")
+            df["Streak"] = df["Streak"].apply(format_streak_html)
+            cols = list(df.columns)
             l_idx = cols.index("L")
             cols.insert(l_idx + 1, cols.pop(cols.index("Streak")))
-            standings_df = standings_df[cols].set_index("Rank")
-        render_standings_table(standings_df, is_h2h=True)
+            df = df[cols].set_index("Rank")
+        render_standings_table(df, is_h2h=True)
 
     if show_season_odds:
         st.markdown("##### 🔮 Season Odds")
-        render_draft_season_odds(config.FPL_DRAFT_LEAGUE_ID,
-                                 get_current_gameweek() or 1)
+        render_draft_season_odds(config.FPL_DRAFT_LEAGUE_ID, current_gw)
 
     st.divider()
 
