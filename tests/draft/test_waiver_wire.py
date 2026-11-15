@@ -606,6 +606,7 @@ class TestFreeAgencyFraming:
     def test_the_cards_say_a_dropped_player_is_still_locked(self, mock_streamlit):
         """The one exception to "adds process immediately"."""
         import scripts.draft.waiver_wire as ww
+        import scripts.draft.waiver_core as wc
 
         ww._render_transfer_suggestions(self._suggestions(), current_gw=8,
                                         total_found=2, free_agency=True,
@@ -616,6 +617,7 @@ class TestFreeAgencyFraming:
 
     def test_the_cards_say_nothing_about_free_agency_during_waivers(self, mock_streamlit):
         import scripts.draft.waiver_wire as ww
+        import scripts.draft.waiver_core as wc
 
         ww._render_transfer_suggestions(self._suggestions(), current_gw=8,
                                         total_found=2, free_agency=False)
@@ -624,6 +626,7 @@ class TestFreeAgencyFraming:
     def test_the_claim_plan_becomes_a_pickup_order(self, mock_streamlit):
         """Presenting it as a ranked *request* list would describe a dead mechanic."""
         import scripts.draft.waiver_wire as ww
+        import scripts.draft.waiver_core as wc
 
         sugg = self._suggestions()
         pat, spy = self._expander_titles()
@@ -636,6 +639,7 @@ class TestFreeAgencyFraming:
 
     def test_the_claim_plan_keeps_its_waiver_framing_during_waivers(self, mock_streamlit):
         import scripts.draft.waiver_wire as ww
+        import scripts.draft.waiver_core as wc
 
         sugg = self._suggestions()
         pat, spy = self._expander_titles()
@@ -647,6 +651,7 @@ class TestFreeAgencyFraming:
     def test_the_queue_is_labelled_as_the_next_round(self, mock_streamlit):
         """`waiver_pick` is always the next round's order, never today's."""
         import scripts.draft.waiver_wire as ww
+        import scripts.draft.waiver_core as wc
 
         pat, spy = self._expander_titles()
         with pat:
@@ -663,6 +668,7 @@ class TestFreeAgencyFraming:
         per-position expectation that replaced the rival-need inference.
         """
         import scripts.draft.waiver_wire as ww
+        import scripts.draft.waiver_core as wc
 
         ww._render_waiver_queue(self._order(), 56091, self.STATS)
         text = self._captions(mock_streamlit)
@@ -673,6 +679,7 @@ class TestFreeAgencyFraming:
 
     def test_the_window_card_names_the_locked_exception(self, mock_streamlit):
         import scripts.draft.waiver_wire as ww
+        import scripts.draft.waiver_core as wc
 
         ww._render_transaction_window({"mode": "free-agency", "next_event": 9},
                                       locked_count=3, waiver_order=self._order(),
@@ -703,12 +710,13 @@ class TestWaiverContextDegradesQuietly:
         """Nothing ahead of you can take anyone, so no network call is warranted."""
         from unittest.mock import patch
         import scripts.draft.waiver_wire as ww
+        import scripts.draft.waiver_core as wc
 
         order = [{"pick": 1, "entry_id": 56094, "league_entry_id": 56190,
                   "team_name": "Starboys"},
                  {"pick": 2, "entry_id": 56086, "league_entry_id": 56182,
                   "team_name": "Stoned Squirrels"}]
-        with patch.object(ww, "_waiver_claim_stats", side_effect=AssertionError):
+        with patch.object(wc, "_waiver_claim_stats", side_effect=AssertionError):
             ctx = ww._build_waiver_context(order, 56094, 5)
         assert ctx == {"n_ahead": 0, "rival_needs": {}, "claim_rates": {},
                        "expected_gone": 0.0}
@@ -723,6 +731,7 @@ class TestWaiverContextDegradesQuietly:
         """
         from unittest.mock import patch
         import scripts.draft.waiver_wire as ww
+        import scripts.draft.waiver_core as wc
 
         order = [{"pick": 1, "entry_id": 56094, "league_entry_id": 56190,
                   "team_name": "Starboys"},
@@ -730,7 +739,7 @@ class TestWaiverContextDegradesQuietly:
                   "team_name": "Stoned Squirrels"}]
         # Neither the claim history nor Power Rankings should be reached for --
         # free agency is also the window that should cost the page the least.
-        with patch.object(ww, "_waiver_claim_stats", side_effect=AssertionError), \
+        with patch.object(wc, "_waiver_claim_stats", side_effect=AssertionError), \
                 patch("scripts.common.team_strength.build_league_strength",
                       side_effect=AssertionError):
             assert ww._build_waiver_context(
@@ -743,6 +752,7 @@ class TestWaiverContextDegradesQuietly:
         that would silently delete the feature for the duration.
         """
         import scripts.draft.waiver_wire as ww
+        import scripts.draft.waiver_core as wc
 
         order = [{"pick": 1, "entry_id": 56094, "league_entry_id": 56190,
                   "team_name": "Starboys"},
@@ -1222,7 +1232,8 @@ class TestOwnedPlayersAreExcludedByCode:
     def _run(self, ownership, states):
         from unittest.mock import patch
         from scripts.draft import waiver_wire as W
-        with patch.object(W, "get_fpl_player_mapping", return_value=self.PMAP):
+        from scripts.draft import waiver_core as wc
+        with patch.object(wc, "get_fpl_player_mapping", return_value=self.PMAP):
             return W._available_from_projections(
                 self.PROJ.copy(), self.STATS.copy(), ownership, states)
 
@@ -1245,8 +1256,9 @@ class TestOwnedPlayersAreExcludedByCode:
         the answer must be no worse than it was, never worse."""
         from unittest.mock import patch
         from scripts.draft import waiver_wire as W
+        from scripts.draft import waiver_core as wc
         proj = self.PROJ.drop(columns=["Player_Code"])
-        with patch.object(W, "get_fpl_player_mapping", return_value=self.PMAP):
+        with patch.object(wc, "get_fpl_player_mapping", return_value=self.PMAP):
             avail = W._available_from_projections(
                 proj, self.STATS.copy(),
                 {1: {"players": ["Free Agent"]}},
@@ -1262,19 +1274,22 @@ class TestCodesInState:
         name matching and no element-id translation."""
         from unittest.mock import patch
         from scripts.draft import waiver_wire as W
+        from scripts.draft import waiver_core as wc
         pmap = {295: {"Player_Code": 169432}, 57: {"Player_Code": 457569}}
         states = {295: {"status": "o"}, 57: {"status": "l"}, 1: {"status": "a"}}
-        with patch.object(W, "get_fpl_player_mapping", return_value=pmap):
+        with patch.object(wc, "get_fpl_player_mapping", return_value=pmap):
             assert W._codes_in_state(states, "o") == {169432}
             assert W._codes_in_state(states, "l") == {457569}
 
     def test_an_element_the_map_does_not_know_is_skipped(self):
         from unittest.mock import patch
         from scripts.draft import waiver_wire as W
-        with patch.object(W, "get_fpl_player_mapping", return_value={}):
+        from scripts.draft import waiver_core as wc
+        with patch.object(wc, "get_fpl_player_mapping", return_value={}):
             assert W._codes_in_state({1: {"status": "o"}}, "o") == set()
 
     def test_no_states_is_not_an_error(self):
         from scripts.draft import waiver_wire as W
+        from scripts.draft import waiver_core as wc
         assert W._codes_in_state(None, "o") == set()
         assert W._codes_in_state({}, "o") == set()

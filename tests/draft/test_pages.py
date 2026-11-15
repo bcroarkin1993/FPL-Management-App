@@ -75,12 +75,13 @@ class TestWaiverWirePage:
              patch("scripts.draft.waiver_wire.get_draft_transaction_window", return_value={}), \
              patch("scripts.draft.waiver_wire.get_league_entries", return_value={}), \
              patch("scripts.draft.waiver_wire.get_fpl_player_mapping", return_value={}), \
+             patch("scripts.draft.waiver_core.get_fpl_player_mapping", return_value={}), \
              patch("scripts.draft.waiver_wire.get_rotowire_player_projections", return_value=pd.DataFrame()), \
-             patch("scripts.draft.waiver_wire.merge_fpl_players_and_projections", return_value=pd.DataFrame()), \
+             patch("scripts.draft.waiver_core.merge_fpl_players_and_projections", return_value=pd.DataFrame()), \
              patch("scripts.draft.waiver_wire.pull_fpl_player_stats", return_value=pd.DataFrame()), \
              patch("scripts.draft.waiver_wire.normalize_fpl_players_to_rotowire_schema", return_value=pd.DataFrame()), \
              patch("scripts.draft.waiver_wire.normalize_rotowire_players", return_value=pd.DataFrame()), \
-             patch("scripts.draft.waiver_wire.compute_healthy_form", return_value=5.0), \
+             patch("scripts.draft.waiver_core.compute_healthy_form", return_value=5.0), \
              patch("scripts.draft.waiver_wire.get_ffp_feed", return_value=_empty_ffp_feed()), \
              patch("scripts.draft.waiver_wire.blend_multi_gw_projections", side_effect=lambda df, *a, **kw: df), \
              patch("scripts.draft.waiver_wire.compute_positional_depth", return_value={}):
