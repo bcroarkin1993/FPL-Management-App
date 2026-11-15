@@ -77,6 +77,7 @@ _OUT_STATUSES = {"i", "s", "u", "n"}
 #: because a renamed page would otherwise turn every button into a no-op.
 SECTION_FPL = "\u26bd  FPL App Home"
 SECTION_CLASSIC = "\U0001f3c6  Classic"
+SECTION_DRAFT = "\U0001f4cb  Draft"
 
 
 @dataclass(frozen=True)
@@ -638,7 +639,9 @@ def build_opponent_item(opponent_name: Optional[str] = None,
                         mine: Optional[float] = None,
                         theirs: Optional[float] = None,
                         win_prob: Optional[float] = None,
-                        stale: bool = True) -> Optional[WeekItem]:
+                        stale: bool = True,
+                        section: str = SECTION_CLASSIC,
+                        page: str = "\U0001f4c5  Fixture Projections") -> Optional[WeekItem]:
     """Who you play this gameweek, and how the two squads project.
 
     Returns **None** in a total-points league -- the caller simply does not call
@@ -652,7 +655,6 @@ def build_opponent_item(opponent_name: Optional[str] = None,
     so the row says so rather than implying a live view of a rival.
     """
     key, title = "opponent", "This week"
-    page, section = "\U0001f4c5  Fixture Projections", SECTION_CLASSIC
     if not opponent_name or mine is None or theirs is None:
         return _unknown(key, title,
                         "Could not resolve this gameweek's head-to-head fixture.",
@@ -670,6 +672,317 @@ def build_opponent_item(opponent_name: Optional[str] = None,
               "transfers." if stale else "")
     return WeekItem(key, title, STATUS_OK, verdict + ".", detail=detail,
                     page=page, section=section, evidence=evidence)
+
+
+# --------------------------------------------------------------------------
+# Draft. A different list: there are no chips, no prices and no captain
+# (`settings.squad.captains_disabled` is true), and in their place sit the two
+# questions a Draft round actually turns on -- which transaction window is
+# open, and whether a claim is worth making. The builders below are the
+# difference; everything else on the Draft checklist reuses the functions
+# above unchanged.
+# --------------------------------------------------------------------------
+#: Pages these rows send you to, named once.
+_WAIVER_PAGE = "\U0001f504  Waiver Wire"
+_DRAFT_FIXTURES_PAGE = "\U0001f4c5  Fixture Projections"
+_TRADE_PAGE = "\U0001f500  Trade Analyzer"
+
+
+def build_draft_squad_item(roster: Optional[Any] = None,
+                           team_name: str = "",
+                           locked_count: int = 0) -> WeekItem:
+    """Your fifteen. Informational, and it never warns.
+
+    Unlike Classic, a Draft roster is **public and current**: it comes from
+    `element-status` plus the league's accepted transactions, not from a
+    last-deadline picks payload. So there is no staleness caveat to carry and
+    nothing here for a manager to act on -- the row exists to say the squad
+    resolved, and to be the honest `unknown` when it did not.
+    """
+    key, title = "squad", "Your squad"
+    size = 0 if roster is None else len(roster)
+    if not size:
+        return _unknown(key, title,
+                        "Could not resolve your roster for this gameweek.",
+                        _WAIVER_PAGE, SECTION_DRAFT)
+    evidence = {"players": int(size), "team_name": team_name,
+                "locked_in_league": int(locked_count)}
+    detail = ""
+    if locked_count:
+        detail = ("%d player%s in the league %s locked and enter the next "
+                  "waiver round." % (locked_count, "" if locked_count == 1 else "s",
+                                     "is" if locked_count == 1 else "are"))
+    return WeekItem(key, title, STATUS_OK,
+                    "%d players%s." % (size, " in %s" % team_name if team_name else ""),
+                    detail=detail, page=_WAIVER_PAGE, section=SECTION_DRAFT,
+                    evidence=evidence)
+
+
+def build_draft_lineup_item(optimal_total: Optional[float] = None,
+                            set_total: Optional[float] = None,
+                            swap: Optional[dict] = None,
+                            bench_issue: Optional[dict] = None) -> WeekItem:
+    """The XI you have set, and the order of the bench behind it.
+
+    **No captain**: Draft disables them (`captains_disabled`), so the armband
+    half of the Classic row does not exist here -- and `check_week_plan`'s rule
+    that an ``act`` must name a gain or a captain to move therefore reduces to
+    "must name a gain", which this honours.
+
+    **No confirm button either**, and that is the structural difference from
+    Classic. `/api/entry/{id}/event/{gw}` publishes Draft picks without
+    credentials, so the XI being compared is the one the manager has actually
+    set right now rather than last deadline's guess -- there is nothing to be
+    told, because the app can see it.
+
+    Bench order is a **warning, not an action**. It costs points only if a
+    starter does not play, so it is a conditional loss rather than a claim
+    about this gameweek's score, and it must not read like one.
+    """
+    key, title = "lineup", "Your XI"
+    if optimal_total is None:
+        return _unknown(key, title,
+                        "No projection was available for your squad, so the XI "
+                        "could not be checked.", _DRAFT_FIXTURES_PAGE, SECTION_DRAFT)
+
+    gain = (None if set_total is None
+            else max(0.0, float(optimal_total) - float(set_total)))
+    evidence = {"optimal_total": round(float(optimal_total), 2),
+                "set_total": (None if set_total is None else round(float(set_total), 2)),
+                "gain": (None if gain is None else round(gain, 2)),
+                "bench_issue": dict(bench_issue) if bench_issue else None}
+
+    if set_total is None:
+        return WeekItem(key, title, STATUS_OK,
+                        "Best XI projects %.1f pts." % float(optimal_total),
+                        detail="Your saved lineup could not be read, so it is "
+                               "not compared.",
+                        page=_DRAFT_FIXTURES_PAGE, section=SECTION_DRAFT,
+                        evidence=evidence)
+
+    if gain and gain >= LINEUP_MIN_GAIN:
+        verdict = "Your XI is not optimal — "
+        verdict += ("start **%s** over **%s** (+%.1f)."
+                    % (swap.get("in_name"), swap.get("out_name"), gain) if swap
+                    else "your bench projects %.1f pts more than your XI." % gain)
+        return WeekItem(key, title, STATUS_ACT, verdict,
+                        detail="Draft publishes your lineup, so this is the XI "
+                               "you have set right now.",
+                        page=_DRAFT_FIXTURES_PAGE, section=SECTION_DRAFT,
+                        evidence=evidence)
+
+    if bench_issue:
+        return WeekItem(
+            key, title, STATUS_WARN,
+            "Your XI is right, but the bench order is not — **%s** (%.1f) is "
+            "behind **%s** (%.1f)." % (bench_issue.get("better_name"),
+                                       float(bench_issue.get("better_proj", 0.0)),
+                                       bench_issue.get("ahead_name"),
+                                       float(bench_issue.get("ahead_proj", 0.0))),
+            detail="Auto-subs come on in bench order, so this costs points only "
+                   "if a starter does not play.",
+            page=_DRAFT_FIXTURES_PAGE, section=SECTION_DRAFT, evidence=evidence)
+
+    return WeekItem(key, title, STATUS_OK,
+                    "Your XI is the best of your fifteen (%.1f pts)."
+                    % float(optimal_total),
+                    page=_DRAFT_FIXTURES_PAGE, section=SECTION_DRAFT,
+                    evidence=evidence)
+
+
+def build_waivers_item(window: Optional[dict] = None,
+                       deadline: Optional[datetime] = None,
+                       waiver_pick: Optional[int] = None,
+                       managers_ahead: Optional[int] = None,
+                       locked_count: int = 0,
+                       now: Optional[datetime] = None) -> WeekItem:
+    """Which transaction window is open, when it shuts, and where you sit in it.
+
+    The two windows are different questions, not two labels for one. In
+    **waivers** a claim is a request processed in league order, so your pick
+    number is the headline. In **free agency** an available player is simply
+    added: there is no queue, nobody to be beaten to him by, and quoting a
+    pick number there describes a mechanic that is not running.
+
+    An **unreadable** mode is not free agency -- the same rule
+    `_build_waiver_context` follows, and for the same reason: an outage must
+    not be indistinguishable from the permissive state.
+    """
+    key, title = "waivers", "Waivers"
+    mode = (window or {}).get("mode")
+    if not mode:
+        return _unknown(key, title,
+                        "Could not read whether waivers or free agency is open.",
+                        _WAIVER_PAGE, SECTION_DRAFT)
+
+    free_agency = mode == "free-agency"
+    hours = None
+    if deadline is not None:
+        ref = now or datetime.now(deadline.tzinfo or timezone.utc)
+        hours = (deadline - ref).total_seconds() / 3600.0
+
+    evidence = {"mode": mode, "free_agency": free_agency,
+                "deadline": deadline.isoformat() if deadline else None,
+                "hours_left": (None if hours is None else round(hours, 2)),
+                "waiver_pick": waiver_pick, "managers_ahead": managers_ahead,
+                "locked": int(locked_count)}
+
+    if free_agency:
+        verdict = "Free agency is open — adds process immediately."
+        detail = ("A player dropped this week is locked and cannot be picked "
+                  "up until the next waiver round.") if locked_count else ""
+    else:
+        verdict = "Waivers are open"
+        if waiver_pick:
+            verdict += " — you pick %d" % waiver_pick
+            if managers_ahead:
+                verdict += " of %d" % (managers_ahead + 1)
+        verdict += "."
+        detail = ("%d player%s locked until the round processes."
+                  % (locked_count, "" if locked_count == 1 else "s")
+                  if locked_count else "")
+
+    status = STATUS_OK
+    if hours is not None and 0 < hours <= DEADLINE_SOON_HOURS:
+        status = STATUS_WARN
+        verdict += " %s" % _hours_phrase(hours).capitalize()
+    return WeekItem(key, title, status, verdict, detail=detail,
+                    page=_WAIVER_PAGE, section=SECTION_DRAFT, evidence=evidence)
+
+
+def build_claim_item(claim: Optional[dict] = None,
+                     checked: bool = False,
+                     pool_size: Optional[int] = None,
+                     reason: str = "") -> WeekItem:
+    """Whether a waiver claim is worth making.
+
+    ``checked`` is the gate, and it is why this row exists separately from the
+    rest. Building the claim engine's board costs ~15s on a cold cache, so the
+    Draft strip runs it on request rather than on every Home load. Until it
+    has run, this row is **unknown** -- not ``ok``. It has derived nothing, and
+    "nothing to do" and "not looked yet" are opposite claims; `unknown` also
+    sorts above `ok`, so the row keeps its place in the alert list and carries
+    the button that answers it.
+    """
+    key, title = "claim", "Waiver claim"
+    if not checked:
+        return _unknown(key, title,
+                        "Not checked yet — the claim search runs on request.",
+                        _WAIVER_PAGE, SECTION_DRAFT)
+    if reason:
+        return _unknown(key, title, reason, _WAIVER_PAGE, SECTION_DRAFT)
+
+    if not claim:
+        # A *derived* all-clear: the search ran over a real pool and found
+        # nothing worth doing, which is what the evidence records.
+        return WeekItem(key, title, STATUS_OK,
+                        "No claim worth making this week.",
+                        detail=("Searched %d available players." % pool_size
+                                if pool_size else ""),
+                        page=_WAIVER_PAGE, section=SECTION_DRAFT,
+                        evidence={"checked": True, "pool": pool_size,
+                                  "best_gain": None})
+
+    gain = float(claim.get("points_gain") or 0.0)
+    lane = claim.get("lane") or ""
+    band = claim.get("outlook_band") or ""
+    evidence = {"checked": True, "pool": pool_size,
+                "best_gain": round(gain, 2), "lane": lane, "band": band,
+                "add": claim.get("add_player"), "drop": claim.get("drop_player")}
+
+    verdict = ("Claim **%s** for **%s** (+%.1f)."
+               % (claim.get("add_player"), claim.get("drop_player"), gain))
+    bits = []
+    if lane:
+        bits.append("rest of season" if "hold" in str(lane).lower() else "just this week")
+    if band:
+        bits.append(str(band).replace("_", " "))
+    detail = " · ".join(bits)
+    status = STATUS_ACT if gain >= MIN_INTERESTING_GAIN else STATUS_OK
+    if status is STATUS_OK:
+        verdict = "Best available move is only +%.1f — not worth a claim." % gain
+    return WeekItem(key, title, status, verdict, detail=detail,
+                    page=_WAIVER_PAGE, section=SECTION_DRAFT, evidence=evidence)
+
+
+def build_trades_item(window: Optional[dict] = None,
+                      deadline: Optional[datetime] = None,
+                      pending_mine: int = 0,
+                      approval_assumed: bool = False,
+                      now: Optional[datetime] = None) -> WeekItem:
+    """The trade window, and whether any of your players are tied up in one.
+
+    There is no "offers made to you" endpoint wired into this app. The only
+    pending-trade signal FPL publishes per player is `in_accepted_trade` on
+    element-status, so that is what this reports -- a player already inside an
+    accepted trade cannot be part of another, and proposing one produces an
+    offer FPL will void.
+
+    Trades close **24h before waivers** where the league requires approval. An
+    unreadable setting resolves to "approval required" at every callsite,
+    because that yields the earlier deadline and the two errors are not
+    symmetric: a reminder a day early is an annoyance, one after the window has
+    shut costs the manager the gameweek.
+    """
+    key, title = "trades", "Trades"
+    trades = (window or {}).get("trades")
+    if window is None or trades is None:
+        return _unknown(key, title, "Could not read the league's trade setting.",
+                        _TRADE_PAGE, SECTION_DRAFT)
+    if trades == "n":
+        return WeekItem(key, title, STATUS_OK, "This league has trades turned off.",
+                        page=_TRADE_PAGE, section=SECTION_DRAFT,
+                        evidence={"trades": trades, "enabled": False})
+
+    hours = None
+    if deadline is not None:
+        ref = now or datetime.now(deadline.tzinfo or timezone.utc)
+        hours = (deadline - ref).total_seconds() / 3600.0
+    evidence = {"trades": trades, "enabled": True,
+                "deadline": deadline.isoformat() if deadline else None,
+                "hours_left": (None if hours is None else round(hours, 2)),
+                "pending_mine": int(pending_mine),
+                "approval_assumed": bool(approval_assumed)}
+
+    detail = ("The league's trade setting could not be read, so this assumes "
+              "approval is required — the earlier of the two deadlines."
+              if approval_assumed else "")
+    if pending_mine:
+        return WeekItem(
+            key, title, STATUS_WARN,
+            "%d of your players %s in an accepted trade."
+            % (pending_mine, "is" if pending_mine == 1 else "are"),
+            detail=(detail or "They cannot be part of another trade, or be "
+                              "dropped, until it resolves."),
+            page=_TRADE_PAGE, section=SECTION_DRAFT, evidence=evidence)
+
+    verdict = "No trades of yours are pending."
+    status = STATUS_OK
+    if hours is not None and 0 < hours <= DEADLINE_SOON_HOURS:
+        status = STATUS_WARN
+        verdict = "Trade window shuts %s." % _hours_phrase(hours)
+    return WeekItem(key, title, status, verdict, detail=detail,
+                    page=_TRADE_PAGE, section=SECTION_DRAFT, evidence=evidence)
+
+
+#: The Draft checklist's order. Deliberately not `ITEM_ORDER` with extras: the
+#: two lists answer different rounds, and sharing one order would put a chip
+#: row on a format that has no chips.
+DRAFT_ITEM_ORDER = ("deadline", "opponent", "squad", "availability",
+                    "fixtures", "lineup", "waivers", "claim", "trades")
+
+
+def build_draft_week_checklist(*, deadline=None, opponent=None, squad=None,
+                               availability=None, fixtures=None, lineup=None,
+                               waivers=None, claim=None,
+                               trades=None) -> List[WeekItem]:
+    """Assemble the Draft items in :data:`DRAFT_ITEM_ORDER`, dropping none."""
+    by_key = {}
+    for item in (deadline, opponent, squad, availability, fixtures, lineup,
+                 waivers, claim, trades):
+        if item is not None:
+            by_key[item.key] = item
+    return [by_key[k] for k in DRAFT_ITEM_ORDER if k in by_key]
 
 
 #: The checklist's order, declared once so the page and its tests agree.
