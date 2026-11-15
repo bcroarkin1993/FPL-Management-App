@@ -38,7 +38,8 @@ import pandas as pd
 import streamlit as st
 
 import config
-from scripts.common import cards, chips, h2h, lineup_confirm, week_check
+from scripts.common import (cards, chips, h2h, lineup_confirm, week_check,
+                            week_render)
 from scripts.common.analytics import gameweek_deadlines
 from scripts.common.classic_squad import SOURCE_MY_TEAM, resolve_classic_squad
 from scripts.common.data_validation import check_week_plan
@@ -515,26 +516,10 @@ def _assemble(team_id: int, current_gw: int, league_id, is_h2h: bool,
 # Rendering
 # ------------------------------------------------------------------
 def _alert_row(item) -> str:
-    """One line of the alert list: status, what it is, and the number.
-
-    This replaces the pill strip *and* the "Needs action" tab, which said the
-    same thing twice -- the feedback that prompted the rewrite. One list, each
-    row carrying its own verdict, so nothing is repeated and nothing needs
-    opening to be read.
-    """
-    icon, colour = _STATUS_STYLE.get(item.status, ("•", "#9ca3af"))
-    label = _PILL_TEXT.get(item.key, item.title)
-    return compact_html(f'''
-        <div style="display:flex;align-items:baseline;gap:8px;padding:5px 0;
-                    border-top:1px solid #2a2a3e;">
-          <span style="font-size:0.9em;">{icon}</span>
-          <span style="color:{colour};font-size:0.72em;font-weight:700;
-                       text-transform:uppercase;letter-spacing:0.5px;
-                       min-width:78px;">{label}</span>
-          <span style="color:#e0e0e0;font-size:0.9em;line-height:1.35;">
-            {item.verdict}</span>
-        </div>
-    ''')
+    """Classic's alert row. The markup is shared; only the pill wording differs,
+    because this format's squad row is a staleness disclosure rather than a
+    fact about the roster."""
+    return week_render.alert_row(item, _PILL_TEXT)
 
 
 @dataclass(frozen=True)
@@ -565,117 +550,58 @@ class WeekView:
 def week_card_html(view: WeekView) -> str:
     """The strip as a card, for Home to drop into its top band.
 
-    Returns markup rather than rendering, because the band is one grid: grid
-    items stretch to the tallest row member by default, which is what makes the
-    three cards level however their text wraps. Estimating pixel heights could
-    not survive a verdict wrapping onto a second line.
+    The card itself is `week_render.week_card_html`; what is Classic's alone is
+    the staleness caveat. Between deadlines without credentials the squad is
+    *always* last deadline's, so it travels with the numbers as one grey line
+    rather than as a row that is permanently yellow and cannot be acted on.
     """
-    deadline = next((i for i in view.items if i.key == "deadline"), None)
-    stamp = ""
-    when = (deadline.evidence or {}).get("deadline") if deadline else None
-    if when:
-        try:
-            moment = pd.Timestamp(when).to_pydatetime()
-            stamp = "GW%s &middot; %s &middot; %s" % (
-                (deadline.evidence or {}).get("gameweek", ""),
-                format_deadline_stamp(moment), format_time_until(moment))
-        except (ValueError, TypeError):
-            stamp = ""
-
     squad_row = next((i for i in view.items if i.key == "squad"), None)
     caveat = ""
     if squad_row is not None and (squad_row.evidence or {}).get("stale"):
-        # The staleness travels with the numbers, in one grey line, rather than
-        # as a row that is permanently yellow and cannot be acted on.
         caveat = ("Reading your GW%s squad — FPL publishes no pending squad "
                   "without a connected account."
                   % (squad_row.evidence or {}).get("source_gw"))
-
-    rows = "".join(_alert_row(i) for i in view.flagged) or (
-        '<div style="padding:8px 0 2px;border-top:1px solid %s;color:%s;'
-        'font-size:0.92em;font-weight:600;">✅ Nothing needs doing before the '
-        'deadline.</div>' % (cards.RULE, cards.ACCENT))
-
-    header = (
-        '<div style="display:flex;justify-content:space-between;'
-        'align-items:baseline;margin-bottom:4px;">'
-        '<span style="color:%s;font-size:0.8em;font-weight:700;'
-        'text-transform:uppercase;letter-spacing:1px;">Your week</span>'
-        '<span style="color:%s;font-size:0.78em;">%s</span></div>'
-        % (cards.ACCENT, cards.MUTED, stamp))
-    return cards.card(header + rows + (cards.note(caveat) if caveat else ""))
+    return week_render.week_card_html(view, caveat=caveat,
+                                      pill_text=_PILL_TEXT)
 
 
 def render_week_actions(view: WeekView) -> None:
-    """One button per flagged row, plus the two that only exist here.
+    """The navigation buttons, plus the two that only exist in Classic.
 
-    Rendered under the band rather than inside the card, so the card can be a
-    grid item -- a Streamlit widget cannot live inside one block of markup.
-
-    `main.py` applies `_pending_nav_section` / `_pending_nav_page` before its
-    sidebar radios are instantiated, so a button here lands on the page that
-    owns the row -- Home's own "Go to League Setup" link is the precedent.
+    The confirm button is here because the app cannot see a pre-deadline
+    lineup without credentials, so the XI alert is a claim it cannot retract
+    on its own -- the manager may have fixed it in FPL's own UI a minute ago.
+    It is tied to a signature of the fifteen, so a transfer re-arms it.
     """
-    items, signature = view.items, view.signature
-    team_id, target_gw, authed = view.team_id, view.target_gw, view.authed
-    buttons = [i for i in view.flagged if i.page]
-    lineup_row = next((i for i in items if i.key == "lineup"), None)
-    can_confirm = (lineup_row is not None
-                   and lineup_row.status == week_check.STATUS_ACT
-                   and signature)
+    lineup_row = next((i for i in view.items if i.key == "lineup"), None)
+    leading, trailing = [], []
+    if (lineup_row is not None and lineup_row.status == week_check.STATUS_ACT
+            and view.signature):
+        leading.append(week_render.ActionButton(
+            label="✓ I've set my XI", key="confirm_xi",
+            help=("Silences the lineup alert for this gameweek. It comes back "
+                  "if you transfer, since the eleven would need setting again."),
+            on_click=lambda: lineup_confirm.confirm_lineup(
+                view.team_id, view.target_gw, view.signature)))
+    if not view.authed:
+        trailing.append(week_render.ActionButton(
+            label="Connect FPL account", key="connect",
+            help=("Without it, FPL publishes no pre-deadline squad, so every "
+                  "row above reads last deadline's team."),
+            on_click=lambda: _goto(week_check.SECTION_FPL,
+                                   "\U0001f194  League Setup")))
+    week_render.render_actions(view, key_prefix="my_week",
+                               leading=leading, trailing=trailing)
 
-    if not buttons and not can_confirm and authed:
-        return
 
-    cols = st.columns(max(1, len(buttons) + (1 if can_confirm else 0)
-                          + (0 if authed else 1)))
-    slot = 0
-    if can_confirm:
-        with cols[slot]:
-            if st.button("✓ I've set my XI", key="my_week_confirm_xi",
-                         use_container_width=True,
-                         help="Silences the lineup alert for this gameweek. It "
-                              "comes back if you transfer, since the eleven "
-                              "would need setting again."):
-                lineup_confirm.confirm_lineup(team_id, target_gw, signature)
-                st.rerun()
-        slot += 1
-    for item in buttons:
-        with cols[slot]:
-            if st.button(item.page.strip(), key="my_week_open_%s" % item.key,
-                         use_container_width=True,
-                         help="Go to %s" % item.page.strip()):
-                st.session_state["_pending_nav_section"] = item.section
-                st.session_state["_pending_nav_page"] = item.page
-                st.rerun()
-        slot += 1
-    if not authed:
-        with cols[slot]:
-            if st.button("Connect FPL account", key="my_week_connect",
-                         use_container_width=True,
-                         help="Without it, FPL publishes no pre-deadline squad, "
-                              "so every row above reads last deadline's team."):
-                st.session_state["_pending_nav_section"] = week_check.SECTION_FPL
-                st.session_state["_pending_nav_page"] = "\U0001f194  League Setup"
-                st.rerun()
+def _goto(section: str, page: str) -> None:
+    st.session_state["_pending_nav_section"] = section
+    st.session_state["_pending_nav_page"] = page
 
 
 def _item_card(item) -> str:
-    """One checklist row, for the full-checklist tab.
-
-    The accent is the status colour, which `cards.card` draws as a left edge.
-    """
-    icon, colour = _STATUS_STYLE.get(item.status, ("•", cards.MUTED))
-    body = (
-        f'<div style="display:flex;align-items:baseline;gap:9px;">'
-        f'<span>{icon}</span>'
-        f'<span style="color:{cards.MUTED};font-size:0.74em;'
-        f'text-transform:uppercase;letter-spacing:0.6px;min-width:104px;">'
-        f'{item.title}</span>'
-        f'<span style="font-size:0.95em;">{item.verdict}</span></div>')
-    if item.detail:
-        body += cards.note(item.detail, cards.MUTED)
-    return cards.card(body, accent=colour, padding="10px 13px")
+    """One checklist row. Shared markup -- see `week_render.item_card`."""
+    return week_render.item_card(item)
 
 
 def _render_plan(summary):

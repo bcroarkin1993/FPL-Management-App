@@ -55,7 +55,19 @@ def _load() -> dict:
 
 
 def _key(team_id, gameweek) -> str:
-    return "%s:%s" % (int(team_id), int(gameweek))
+    """``"<team>:<gw>"``.
+
+    The team part is coerced to ``int`` where it is one, so every key this
+    file already holds is unchanged -- but a non-numeric id is passed through
+    rather than raising. Draft namespaces its entry id (``"draft-56086"``)
+    because a Draft entry id and a Classic entry id are both bare integers,
+    and without a prefix one format could silence the other's alert.
+    """
+    try:
+        team = int(team_id)
+    except (TypeError, ValueError):
+        team = str(team_id)
+    return "%s:%s" % (team, int(gameweek))
 
 
 def confirm_lineup(team_id, gameweek, signature: str) -> bool:

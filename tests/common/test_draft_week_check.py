@@ -106,12 +106,35 @@ class TestTheXiYouHaveSet:
         assert "captain" not in (item.detail or "").lower()
         assert "captain" not in item.evidence and "set_captain" not in item.evidence
 
-    def test_no_confirm_flag_exists(self):
-        """Classic needs one because it cannot see a pre-deadline lineup.
-        Draft publishes picks without credentials, so there is nothing to be
-        told -- and a confirm button here would let a real fault be dismissed."""
-        import inspect
-        assert "confirmed" not in inspect.signature(W.build_draft_lineup_item).parameters
+    def test_a_last_deadline_lineup_discloses_itself(self):
+        """Draft picks are public, but the *pending* gameweek 404s exactly as
+        Classic's do -- measured 2026-11-15 with GW11 five days out, GW9 and
+        GW10 returned fifteen picks and GW11 returned 404. So the row compares
+        last deadline's XI and must say so rather than implying a live view."""
+        item = W.build_draft_lineup_item(
+            62.0, 58.0, swap={"in_name": "A", "out_name": "B"},
+            source_gw=10, target_gw=11)
+        assert item.status == W.STATUS_ACT
+        assert item.evidence["stale"] is True
+        assert item.evidence["source_gw"] == 10
+        assert "GW10" in item.detail
+
+    def test_a_current_lineup_carries_no_caveat(self):
+        item = W.build_draft_lineup_item(
+            62.0, 58.0, swap={"in_name": "A", "out_name": "B"},
+            source_gw=11, target_gw=11)
+        assert item.evidence["stale"] is False
+        assert not item.detail
+
+    def test_confirming_silences_the_row(self):
+        """The alert is a claim the app cannot retract on its own: the manager
+        may have set the XI in FPL's own UI a minute ago."""
+        item = W.build_draft_lineup_item(
+            62.0, 58.0, swap={"in_name": "A", "out_name": "B"},
+            source_gw=10, target_gw=11, confirmed=True)
+        assert item.status == W.STATUS_OK
+        assert item.evidence["confirmed"] is True
+        assert [i for i in check_week_plan([item]) if i.severity == "error"] == []
 
 
 class TestWhichWindowIsOpen:

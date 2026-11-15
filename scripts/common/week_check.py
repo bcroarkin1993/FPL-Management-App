@@ -721,7 +721,10 @@ def build_draft_squad_item(roster: Optional[Any] = None,
 def build_draft_lineup_item(optimal_total: Optional[float] = None,
                             set_total: Optional[float] = None,
                             swap: Optional[dict] = None,
-                            bench_issue: Optional[dict] = None) -> WeekItem:
+                            bench_issue: Optional[dict] = None,
+                            source_gw: Optional[int] = None,
+                            target_gw: Optional[int] = None,
+                            confirmed: bool = False) -> WeekItem:
     """The XI you have set, and the order of the bench behind it.
 
     **No captain**: Draft disables them (`captains_disabled`), so the armband
@@ -729,11 +732,13 @@ def build_draft_lineup_item(optimal_total: Optional[float] = None,
     that an ``act`` must name a gain or a captain to move therefore reduces to
     "must name a gain", which this honours.
 
-    **No confirm button either**, and that is the structural difference from
-    Classic. `/api/entry/{id}/event/{gw}` publishes Draft picks without
-    credentials, so the XI being compared is the one the manager has actually
-    set right now rather than last deadline's guess -- there is nothing to be
-    told, because the app can see it.
+    **The XI being compared is last deadline's**, and the row says so.
+    `/api/entry/{id}/event/{gw}` publishes Draft picks without credentials,
+    which is better than Classic -- but it still 404s for any gameweek whose
+    deadline has not passed, so a *pending* lineup is no more visible here
+    than there. Hence `confirmed`: the alert is a claim the app cannot
+    retract on its own, because the manager may have set the XI in FPL's own
+    UI a minute ago. Tied to the squad's membership, so a transfer re-arms it.
 
     Bench order is a **warning, not an action**. It costs points only if a
     starter does not play, so it is a conditional loss rather than a claim
@@ -747,10 +752,22 @@ def build_draft_lineup_item(optimal_total: Optional[float] = None,
 
     gain = (None if set_total is None
             else max(0.0, float(optimal_total) - float(set_total)))
+    stale = bool(source_gw and target_gw and int(source_gw) != int(target_gw))
     evidence = {"optimal_total": round(float(optimal_total), 2),
                 "set_total": (None if set_total is None else round(float(set_total), 2)),
                 "gain": (None if gain is None else round(gain, 2)),
-                "bench_issue": dict(bench_issue) if bench_issue else None}
+                "bench_issue": dict(bench_issue) if bench_issue else None,
+                "source_gw": source_gw, "stale": stale,
+                "confirmed": bool(confirmed)}
+    staleness = ("Read from your GW%s lineup — FPL publishes no pending XI "
+                 "before the deadline." % source_gw) if stale else ""
+
+    if confirmed:
+        return WeekItem(key, title, STATUS_OK,
+                        "You have set this gameweek's XI.",
+                        detail="This row re-arms itself if you transfer.",
+                        page=_DRAFT_FIXTURES_PAGE, section=SECTION_DRAFT,
+                        evidence=evidence)
 
     if set_total is None:
         return WeekItem(key, title, STATUS_OK,
@@ -765,9 +782,7 @@ def build_draft_lineup_item(optimal_total: Optional[float] = None,
         verdict += ("start **%s** over **%s** (+%.1f)."
                     % (swap.get("in_name"), swap.get("out_name"), gain) if swap
                     else "your bench projects %.1f pts more than your XI." % gain)
-        return WeekItem(key, title, STATUS_ACT, verdict,
-                        detail="Draft publishes your lineup, so this is the XI "
-                               "you have set right now.",
+        return WeekItem(key, title, STATUS_ACT, verdict, detail=staleness,
                         page=_DRAFT_FIXTURES_PAGE, section=SECTION_DRAFT,
                         evidence=evidence)
 
