@@ -75,166 +75,53 @@ CACHE_FILE = CACHE_DIR / "scoring_data.pkl"
 
 
 def _fetch_and_prepare_data() -> dict:
-    """Fetch all data from APIs and prepare the scoring inputs.
+    """The scoring inputs, from the one claim engine the app runs.
 
     Returns a dict with keys:
         my_roster, avail_all, fpl_stats, current_gw, depth_map, my_team_name
+
+    **This used to hand-roll the Waiver Wire's pipeline**, and had drifted six
+    ways from it -- which matters because this script exists to tune ROS
+    weights, so every weight was being judged against inputs the app does not
+    produce:
+
+      - `element_states` was never passed to `_available_from_projections`,
+        so every *locked* player scored as a claimable target;
+      - `_attach_minutes_dependency` was absent, so no deputy's horizon was
+        capped;
+      - the reference pool had no `AvgFDRNextN`, so the fixture term fell back
+        to a min-max of each frame against itself -- two populations compared
+        as one, which is the exact defect CLAUDE.md records as repaired;
+      - `remaining_gws` was omitted from all three multi-gameweek blends;
+      - the roster's `Projected_Points` used only the primary name merge,
+        without the two fallbacks the page carries;
+      - `_attach_display_names` was absent.
+
+    It now calls `build_waiver_board`, so there is one pipeline and tuning
+    happens against what the app actually scores.
     """
     print("Fetching data from APIs...")
+    from scripts.draft.waiver_core import build_waiver_board
 
-    # 1. Raw data
-    print("  [1/7] Rotowire projections...")
-    projections_raw = get_rotowire_player_projections(config.ROTOWIRE_URL)
+    board = build_waiver_board(
+        config.FPL_DRAFT_LEAGUE_ID, int(config.FPL_DRAFT_TEAM_ID),
+        entry_id=getattr(config, "FPL_DRAFT_TEAM_ID", None))
 
-    print("  [2/7] FPL player stats...")
-    fpl_stats_raw = pull_fpl_player_stats()
+    for severity, message in board.notes:
+        print("  [%s] %s" % (severity, message))
+    if not board.ok:
+        raise SystemExit("Could not build the waiver board: %s" % board.status)
 
-    print("  [3/7] FFP projections...")
-    try:
-        ffp_df = get_ffp_feed().df
-    except Exception:
-        ffp_df = None
-
-    print("  [4/7] Season rankings...")
-    try:
-        season_rankings_df = get_rotowire_season_rankings(config.ROTOWIRE_SEASON_RANKINGS_URL)
-    except Exception:
-        season_rankings_df = None
-
-    print("  [5/7] League ownership...")
-    ownership = get_league_player_ownership(config.FPL_DRAFT_LEAGUE_ID)
-
-    print("  [6/7] Current gameweek...")
-    try:
-        current_gw = int(get_current_gameweek() or 1)
-    except Exception:
-        current_gw = 1
-
-    # 2. Normalize
-    print("  [7/7] Normalizing schemas...")
-    teams_df = _bootstrap_teams_df()
-    try:
-        fpl_stats_norm = normalize_fpl_players_to_rotowire_schema(fpl_stats_raw, teams_df=teams_df)
-    except Exception:
-        fpl_stats_norm = fpl_stats_raw
-    try:
-        projections_norm = normalize_rotowire_players(projections_raw)
-    except Exception:
-        projections_norm = projections_raw
-
-    fpl_stats = _enforce_rw_schema_fpl(fpl_stats_norm, teams_df)
-    proj = _enforce_rw_schema_proj(projections_norm, teams_df)
-
-    if "Season_Points" not in fpl_stats.columns:
-        fpl_stats["Season_Points"] = 0
-
-    # 3. Available players
-    print("  Building available players pool...")
-    avail_all = _available_from_projections(proj, fpl_stats, ownership)
-
-    lookahead = config.UPCOMING_WEEKS_DEFAULT
-    form_weeks = config.FORM_LOOKBACK_WEEKS
-
-    avail_all = _add_fdr_and_form(avail_all, fpl_stats, current_gw, lookahead, form_weeks=form_weeks)
-    avail_all = _add_injury_data(avail_all, fpl_stats)
-
-    # Add Season_Points and starts
-    if "Player_ID" in avail_all.columns and "Season_Points" not in avail_all.columns:
-        sp_cols = ["Player_ID", "Season_Points"]
-        if "starts" in fpl_stats.columns:
-            sp_cols.append("starts")
-        sp_data = fpl_stats[sp_cols].drop_duplicates(subset=["Player_ID"])
-        avail_all = avail_all.merge(sp_data, on="Player_ID", how="left")
-    elif "Player_ID" in avail_all.columns and "starts" not in avail_all.columns and "starts" in fpl_stats.columns:
-        starts_data = fpl_stats[["Player_ID", "starts"]].drop_duplicates(subset=["Player_ID"])
-        avail_all = avail_all.merge(starts_data, on="Player_ID", how="left")
-    avail_all["Season_Points"] = pd.to_numeric(avail_all.get("Season_Points"), errors="coerce").fillna(0)
-    avail_all["starts"] = pd.to_numeric(avail_all.get("starts", 0), errors="coerce").fillna(0)
-
-    # 4. My roster
-    print("  Building roster...")
-    my_team_id = int(config.FPL_DRAFT_TEAM_ID)
-    my_team = ownership.get(my_team_id, {})
-    my_team_name = my_team.get("team_name", "(unknown)")
-
-    my_players = []
-    for pos, names in my_team.get("players", {}).items():
-        for nm in names:
-            my_players.append({"Player": nm, "Position": pos})
-    my_roster = pd.DataFrame(my_players)
-
-    if not my_roster.empty:
-        my_roster["__norm_name"] = my_roster["Player"].apply(canonical_normalize)
-        roster_merge_cols = ["Player", "Team", "Position", "Player_ID", "Season_Points"]
-        if "starts" in fpl_stats.columns:
-            roster_merge_cols.append("starts")
-        fpl_stats_for_roster = fpl_stats[roster_merge_cols].copy()
-        fpl_stats_for_roster["__norm_name"] = fpl_stats_for_roster["Player"].apply(canonical_normalize)
-
-        merge_right_cols = ["__norm_name", "Team", "Position", "Player_ID", "Season_Points"]
-        if "starts" in fpl_stats_for_roster.columns:
-            merge_right_cols.append("starts")
-        my_roster = my_roster.merge(
-            fpl_stats_for_roster[merge_right_cols],
-            on=["__norm_name", "Position"], how="left"
-        )
-        my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
-
-        my_roster = _ensure_team_col(my_roster, fpl_stats)
-        my_roster = _align_roster_player_names_to_projections(my_roster, proj)
-        my_roster["Team"] = my_roster["Team"].replace(TEAM_FULL_TO_SHORT)
-
-        # Add projected points
-        proj_points_df = proj[["Player", "Team", "Position", "Points"]].rename(
-            columns={"Points": "Projected_Points"}
-        ).copy()
-        proj_points_df["__norm_name"] = proj_points_df["Player"].apply(canonical_normalize)
-        my_roster["__norm_name"] = my_roster["Player"].apply(canonical_normalize)
-        my_roster = my_roster.merge(
-            proj_points_df[["__norm_name", "Team", "Position", "Projected_Points"]],
-            on=["__norm_name", "Team", "Position"], how="left"
-        )
-        my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
-
-        my_roster = _add_fdr_and_form(my_roster, fpl_stats, current_gw, lookahead)
-        my_roster = _add_injury_data(my_roster, fpl_stats)
-
-    # 5. Multi-GW, Season, FFP enrichment
-    print("  Enriching with multi-GW / season / FFP data...")
-    if not avail_all.empty:
-        avail_all = blend_multi_gw_projections(avail_all, ffp_df, single_gw_col="Points")
-    if not my_roster.empty:
-        pts_col = "Projected_Points" if "Projected_Points" in my_roster.columns else "Points"
-        my_roster = blend_multi_gw_projections(my_roster, ffp_df, single_gw_col=pts_col)
-
-    if not avail_all.empty:
-        avail_all = merge_season_projections(avail_all, season_rankings_df)
-    if not my_roster.empty:
-        my_roster = merge_season_projections(my_roster, season_rankings_df)
-
-    if not avail_all.empty:
-        avail_all = merge_ffp_single_gw_data(avail_all, ffp_df)
-    if not my_roster.empty:
-        my_roster = merge_ffp_single_gw_data(my_roster, ffp_df)
-
-    # 6. Enrich reference pool
-    fpl_stats = blend_multi_gw_projections(fpl_stats, ffp_df, single_gw_col="points_per_game")
-    fpl_stats = merge_season_projections(fpl_stats, season_rankings_df)
-    fpl_stats = merge_ffp_single_gw_data(fpl_stats, ffp_df)
-    fpl_stats = enrich_reference_with_projections(fpl_stats, proj)
-
-    # 7. Depth map
-    depth_map = {}
-    if not my_roster.empty:
-        depth_map = compute_positional_depth(my_roster)
-
+    print("  available=%d  roster=%d  reference=%d  gw=%d"
+          % (len(board.available), len(board.roster), len(board.reference),
+             board.current_gw))
     return {
-        "my_roster": my_roster,
-        "avail_all": avail_all,
-        "fpl_stats": fpl_stats,
-        "current_gw": current_gw,
-        "depth_map": depth_map,
-        "my_team_name": my_team_name,
+        "my_roster": board.roster,
+        "avail_all": board.available,
+        "fpl_stats": board.reference,
+        "current_gw": board.current_gw,
+        "depth_map": board.depth_map,
+        "my_team_name": board.team_name,
     }
 
 
