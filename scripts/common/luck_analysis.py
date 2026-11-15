@@ -48,8 +48,14 @@ def extract_draft_gw_scores(league_response: dict) -> pd.DataFrame:
         team1_name = team_names.get(match['league_entry_1'], 'Unknown')
         team2_name = team_names.get(match['league_entry_2'], 'Unknown')
 
-        rows.append({'gameweek': gw, 'team': team1_name, 'score': team1_score})
-        rows.append({'gameweek': gw, 'team': team2_name, 'score': team2_score})
+        # `league_entry_N` is the `league_entries[].id` space -- the one the
+        # standings are keyed on, which is what this id is joined against.
+        # *Not* `entry_id`, which keys element ownership; see the two-id-space
+        # note in CLAUDE.md.
+        rows.append({'gameweek': gw, 'team': team1_name, 'score': team1_score,
+                     'team_id': match.get('league_entry_1')})
+        rows.append({'gameweek': gw, 'team': team2_name, 'score': team2_score,
+                     'team_id': match.get('league_entry_2')})
 
     return pd.DataFrame(rows, columns=['gameweek', 'team', 'team_id', 'score'])
 
@@ -121,7 +127,18 @@ def calculate_all_play_standings(
         return pd.DataFrame()
 
     gameweeks = gw_scores['gameweek'].unique()
-    has_team_id = 'team_id' in gw_scores.columns
+    # **Presence is not the test.** `pd.DataFrame(rows, columns=[...])` creates
+    # any declared column the rows do not supply and fills it with NaN, so a
+    # frame can carry a `team_id` that identifies nobody. The Draft extractor
+    # did exactly that: every row keyed on the same NaN, so all ten squads
+    # collapsed into one all-play record and the merge back to the standings
+    # compared a float column against a name. The whole Luck Adjusted view
+    # died with "Could not load data while fetching league standings".
+    #
+    # Same shape as `_pool_col()` returning an all-None Series rather than
+    # None -- `is not None` was not the test there either.
+    has_team_id = ('team_id' in gw_scores.columns
+                   and gw_scores['team_id'].notna().any())
 
     # **Keyed on the team id where there is one, never on the name.** Two
     # managers who have not renamed their squad both show as "Change Name", and
@@ -130,9 +147,9 @@ def calculate_all_play_standings(
     # through was whichever appeared first. Reported from the app, and it is the
     # same "a name is not a join key" failure recorded all over this codebase.
     #
-    # The Draft extractors publish no id, so the name remains the fallback --
-    # which preserves their behaviour exactly, including that latent bug if two
-    # Draft squads ever share a name.
+    # Both extractors publish an id now. The name fallback remains for a frame
+    # that genuinely carries none -- a caller's own, or an older cached one --
+    # and `has_team_id` above is what makes that fallback reachable at all.
     key_col = 'team_id' if has_team_id else 'team'
     names = {}
     for key, name in zip(gw_scores[key_col], gw_scores['team']):

@@ -213,3 +213,81 @@ class TestTwoTeamsWithTheSameName:
         ])
         out = calculate_h2h_streaks(weekly)
         assert len(out) == 1 and out.iloc[0]["Longest_Win_Streak"] == 2
+
+
+class TestADeclaredColumnIsNotAnId:
+    """`pd.DataFrame(rows, columns=[...])` creates any declared column the rows
+    do not supply and fills it with NaN. So a frame can carry a `team_id` that
+    identifies nobody, and a presence check on it passes.
+
+    `extract_draft_gw_scores` did exactly that: it declared `team_id`, never
+    wrote it, and `calculate_all_play_standings` duly keyed on it -- so every
+    row shared the same NaN key, all ten squads collapsed into a single
+    all-play record, and merging back to the standings compared a float column
+    against a name. Reported from the app as "Could not load data while
+    fetching league standings" plus "Not enough match data to calculate
+    luck-adjusted standings", with the real cause nowhere in either message.
+    """
+
+    @staticmethod
+    def _league(n_teams=4, n_gws=3):
+        entries = [{"id": 100 + i, "entry_id": 200 + i,
+                    "entry_name": "Team %d" % i} for i in range(n_teams)]
+        matches = []
+        for gw in range(1, n_gws + 1):
+            for i in range(0, n_teams, 2):
+                matches.append({
+                    "event": gw,
+                    "league_entry_1": 100 + i, "league_entry_2": 100 + i + 1,
+                    "league_entry_1_points": 50 + i + gw,
+                    "league_entry_2_points": 40 + i + gw,
+                })
+        return {"matches": matches, "league_entries": entries}
+
+    def test_the_draft_extractor_populates_the_id_it_declares(self):
+        from scripts.common.luck_analysis import extract_draft_gw_scores
+        scores = extract_draft_gw_scores(self._league())
+        assert "team_id" in scores.columns
+        assert scores["team_id"].notna().all(), (
+            "team_id is declared but unpopulated -- every team would key on NaN")
+        assert scores["team_id"].nunique() == 4
+
+    def test_every_team_survives_the_all_play_calculation(self):
+        """The symptom: four squads in, one row out."""
+        from scripts.common.luck_analysis import (calculate_all_play_standings,
+                                                  extract_draft_gw_scores)
+        standings = calculate_all_play_standings(
+            extract_draft_gw_scores(self._league()))
+        assert len(standings) == 4, (
+            "expected one row per squad; got %d" % len(standings))
+        assert standings["Team"].nunique() == 4
+
+    def test_an_unpopulated_id_falls_back_to_the_name(self):
+        """The guard itself: a frame that really carries no id must still
+        produce a table, by keying on the name as it always did."""
+        import pandas as pd
+        from scripts.common.luck_analysis import calculate_all_play_standings
+        scores = pd.DataFrame(
+            [{"gameweek": g, "team": t, "score": s}
+             for g in (1, 2)
+             for t, s in (("Alpha", 50 + g), ("Beta", 40 + g))],
+            columns=["gameweek", "team", "team_id", "score"])
+        assert scores["team_id"].isna().all()      # the shape being guarded
+        standings = calculate_all_play_standings(scores)
+        assert len(standings) == 2
+        assert set(standings["Team"]) == {"Alpha", "Beta"}
+
+    def test_the_merge_back_to_the_standings_survives(self):
+        """The actual exception: merging a float column against a name."""
+        import pandas as pd
+        from scripts.common.luck_analysis import (calculate_all_play_standings,
+                                                  extract_draft_gw_scores)
+        scores = extract_draft_gw_scores(self._league())
+        actual = pd.DataFrame({
+            "actual_rank": [1, 2, 3, 4],
+            "team": ["Team 0", "Team 1", "Team 2", "Team 3"],
+            "actual_pts": [9, 6, 3, 0]})
+        standings = calculate_all_play_standings(scores, actual)
+        assert len(standings) == 4
+        assert "Luck +/-" in standings.columns
+        assert standings["Luck +/-"].notna().all()
