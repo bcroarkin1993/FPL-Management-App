@@ -35,6 +35,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from typing import Optional, Dict, Any, List, Tuple
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 import config
@@ -59,6 +60,8 @@ _logger = get_logger("fpl_app.draft.waiver_wire")
 #: an `unknown` row rather than a reassuring one.
 BOARD_OK = "ok"
 BOARD_NO_PROJECTIONS = "no_projections"
+BOARD_BAD_SCHEMA = "bad_schema"
+BOARD_POOL_FAILED = "pool_failed"
 
 
 class WaiverDataUnavailable(Exception):
@@ -2154,3 +2157,452 @@ def _next_waiver_deadline(gw: Optional[int]) -> Optional[datetime]:
     except Exception:
         _logger.warning("Could not resolve next transaction deadline", exc_info=True)
         return None
+
+
+# ===========================================================================
+# The board: one assembly of the claim engine's inputs, shared by every caller
+# ===========================================================================
+@dataclass(frozen=True)
+class WaiverBoard:
+    """Everything needed to answer "which claim is worth making", assembled once.
+
+    `frozen=True` is shallow -- the frames inside are still mutable pandas
+    objects. What protects callers from each other is that `st.cache_data`
+    returns a fresh object per call; what protects a caller from *itself* is
+    not mutating `available` or `roster` in place, which
+    `test_waiver_board.py` pins.
+
+    The search controls are deliberately *not* fields here. They belong to
+    `search_board()`, and that separation is the whole reason a widget
+    interaction on the Waiver Wire is free: changing the position filter
+    re-searches a cached board instead of rebuilding it.
+    """
+
+    available: pd.DataFrame
+    roster: pd.DataFrame
+    reference: pd.DataFrame
+    projections: pd.DataFrame
+    ownership: Dict[int, Dict[str, Any]]
+    element_states: Dict[int, Dict[str, Any]]
+    transaction_window: Dict[str, Any]
+    waiver_order: List[Dict[str, Any]]
+    waiver_context: Dict[str, Any]
+    floor_context: Dict[str, Any]
+    depth_map: Dict[str, Any]
+    locked_count: int
+    league_id: Any
+    team_id: Any
+    entry_id: Any
+    current_gw: int
+    lookahead: int
+    form_weeks: int
+    ffp: Any = None
+    status: str = BOARD_OK
+    notes: Tuple[Tuple[str, str], ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return self.status == BOARD_OK
+
+    @property
+    def free_agency(self) -> bool:
+        """An unreadable mode is *not* free agency -- see `_build_waiver_context`."""
+        return self.transaction_window.get("mode") == TRANSACTION_MODE_FREE_AGENCY
+
+    @property
+    def waiver_gw(self):
+        return (self.transaction_window.get("next_event")
+                or self.transaction_window.get("current_event"))
+
+    @property
+    def team_name(self) -> str:
+        return (self.ownership.get(self.team_id, {}) or {}).get(
+            "team_name", "Team %s" % self.team_id)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def build_waiver_board(league_id, team_id, current_gw=None, *, entry_id=None,
+                       lookahead=None, form_weeks=None,
+                       rotowire_url=None) -> WaiverBoard:
+    """Assemble the scored pools, the league's transaction state and the contexts.
+
+    Every argument is a primitive, so the whole board is cacheable -- the
+    `my_week._assemble` rule that no frame enters a cache key.
+
+    `entry_id` is separate from `team_id` because the page already
+    distinguishes them: the waiver pick and the reachability bands belong to
+    *your* entry, while the roster being scored is whichever team the picker
+    selects. Inspect a rival's squad and you get your own claim bands against
+    his players, which is how the page has always behaved.
+
+    **A failure is cached as a failure, never as a success** -- the
+    `get_ffp_feed` rule. A board that cannot be built comes back with a
+    non-`ok` status and the reason in `notes`, so the Waiver Wire can render
+    it and the My Week strip can turn it into an `unknown` row rather than a
+    reassuring one.
+    """
+    notes: List[Tuple[str, str]] = []
+    lookahead = int(lookahead if lookahead is not None
+                    else config.UPCOMING_WEEKS_DEFAULT)
+    form_weeks = int(form_weeks if form_weeks is not None
+                     else config.FORM_LOOKBACK_WEEKS)
+    if current_gw is None:
+        try:
+            current_gw = int(get_current_gameweek() or 1)
+        except Exception:
+            current_gw = 1
+    current_gw = int(current_gw)
+
+    def _empty(status: str) -> WaiverBoard:
+        return WaiverBoard(
+            available=pd.DataFrame(), roster=pd.DataFrame(),
+            reference=pd.DataFrame(), projections=pd.DataFrame(),
+            ownership={}, element_states={}, transaction_window={},
+            waiver_order=[], waiver_context={}, floor_context={}, depth_map={},
+            locked_count=0, league_id=league_id, team_id=team_id,
+            entry_id=entry_id, current_gw=current_gw, lookahead=lookahead,
+            form_weeks=form_weeks, status=status, notes=tuple(notes))
+
+    # --- League transaction state. Every reader fails open: an empty result
+    # means the engine behaves as it did before that signal existed. ---
+    try:
+        ownership = get_league_player_ownership(league_id)
+    except Exception as e:
+        _note(notes, "Unable to load league ownership: %s" % e)
+        ownership = {}
+    try:
+        element_states = get_league_element_states(league_id)
+    except Exception:
+        _logger.warning("Unable to load Draft element states", exc_info=True)
+        element_states = {}
+    try:
+        transaction_window = get_draft_transaction_window(league_id)
+    except Exception:
+        _logger.warning("Unable to load Draft transaction window", exc_info=True)
+        transaction_window = {}
+    try:
+        waiver_order = get_league_waiver_order(league_id)
+    except Exception:
+        _logger.warning("Unable to load Draft waiver order", exc_info=True)
+        waiver_order = []
+
+    locked_count = sum(1 for s in element_states.values()
+                       if s.get("status") == ELEMENT_STATE_LOCKED)
+
+    # --- Projections and the reference pool ---
+    if rotowire_url is None:
+        rotowire_url = config.ROTOWIRE_URL
+    if not rotowire_url:
+        _note(notes,
+              "\u26a0\ufe0f Rotowire player projections are unavailable \u2014 the app could not "
+              "discover the current rankings article URL. Rotowire may have changed "
+              "their URL format. To fix immediately, add `ROTOWIRE_URL=<article URL>` "
+              "to your `.env` file and restart the app.")
+    projections_raw = get_rotowire_player_projections(rotowire_url)
+    fpl_stats_raw = pull_fpl_player_stats()
+
+    teams_df = _bootstrap_teams_df()
+    try:
+        fpl_stats_norm = normalize_fpl_players_to_rotowire_schema(fpl_stats_raw, teams_df=teams_df)
+    except Exception as e:
+        _logger.warning("FPL stats normalization failed, using raw data: %s", e)
+        fpl_stats_norm = fpl_stats_raw
+    try:
+        projections_norm = normalize_rotowire_players(projections_raw)
+    except Exception as e:
+        _logger.warning("Projections normalization failed, using raw data: %s", e)
+        projections_norm = projections_raw
+
+    fpl_stats = _enforce_rw_schema_fpl(fpl_stats_norm, teams_df)
+    proj = _enforce_rw_schema_proj(projections_norm, teams_df)
+
+    req = {"Player", "Team", "Position"}
+    miss_stats = req - set(fpl_stats.columns)
+    if miss_stats:
+        _note(notes, "Failed to compute available players: "
+                     "fpl_player_statistics_df missing %s after normalization."
+                     % sorted(miss_stats), "error")
+        return _empty(BOARD_BAD_SCHEMA)
+    miss_proj = req - set(proj.columns)
+    if miss_proj:
+        _note(notes, "Projections table missing %s after normalization."
+                     % sorted(miss_proj), "error")
+        return _empty(BOARD_BAD_SCHEMA)
+
+    if "Season_Points" not in fpl_stats.columns:
+        fpl_stats["Season_Points"] = 0
+
+    # --- The available pool ---
+    try:
+        avail_all = _available_from_projections(proj, fpl_stats, ownership,
+                                                element_states, notes=notes)
+    except WaiverDataUnavailable as unavailable:
+        _note(notes, unavailable.message, "info")
+        board = _empty(unavailable.status)
+        return replace(board, projections=proj, ownership=ownership,
+                       element_states=element_states,
+                       transaction_window=transaction_window,
+                       waiver_order=waiver_order, locked_count=locked_count,
+                       notes=tuple(notes))
+    except Exception as e:
+        _note(notes, "Failed to compute available players: %s" % e, "error")
+        board = _empty(BOARD_POOL_FAILED)
+        return replace(board, projections=proj, ownership=ownership,
+                       element_states=element_states,
+                       transaction_window=transaction_window,
+                       waiver_order=waiver_order, locked_count=locked_count,
+                       notes=tuple(notes))
+
+    avail_all = _add_fdr_and_form(avail_all, fpl_stats, current_gw, lookahead,
+                                  form_weeks=form_weeks)
+    avail_all = _add_injury_data(avail_all, fpl_stats)
+
+    # Season_Points and starts via Player_ID
+    if 'Player_ID' in avail_all.columns and 'Season_Points' not in avail_all.columns:
+        sp_cols = ['Player_ID', 'Season_Points']
+        if 'starts' in fpl_stats.columns:
+            sp_cols.append('starts')
+        sp_data = fpl_stats[sp_cols].drop_duplicates(subset=['Player_ID'])
+        avail_all = avail_all.merge(sp_data, on='Player_ID', how='left')
+    elif 'Player_ID' in avail_all.columns and 'starts' not in avail_all.columns and 'starts' in fpl_stats.columns:
+        starts_data = fpl_stats[['Player_ID', 'starts']].drop_duplicates(subset=['Player_ID'])
+        avail_all = avail_all.merge(starts_data, on='Player_ID', how='left')
+    avail_all['Season_Points'] = numeric_col(avail_all, 'Season_Points', 0)
+    avail_all['starts'] = numeric_col(avail_all, 'starts', 0)
+
+    # **After the `starts` merge, never before it.** The depth rule reads season
+    # starts to tell a deputy from a regular; run earlier, where the column does
+    # not exist yet, it silently treats every available player as having zero
+    # starts. That shipped once. The assertion is cheap and the failure is not.
+    assert 'starts' in avail_all.columns or avail_all.empty, (
+        "_attach_minutes_dependency needs `starts`; see the deputy rule")
+    avail_all = _attach_minutes_dependency(avail_all, fpl_stats, current_gw)
+    avail_all = _attach_display_names(avail_all)
+
+
+    # --- Build MY ROSTER ---
+    my_players = []
+    for pos, names in ownership.get(team_id, {}).get("players", {}).items():
+        for nm in names:
+            my_players.append({"Player": nm, "Position": pos})
+    my_roster = pd.DataFrame(my_players)
+
+    if not my_roster.empty:
+        # Attach Team/Player_ID/Season_Points/starts from FPL master using normalized names
+        my_roster["__norm_name"] = my_roster["Player"].apply(canonical_normalize)
+        roster_merge_cols = ["Player", "Team", "Position", "Player_ID", "Season_Points"]
+        if "starts" in fpl_stats.columns:
+            roster_merge_cols.append("starts")
+        fpl_stats_for_roster = fpl_stats[roster_merge_cols].copy()
+        fpl_stats_for_roster["__norm_name"] = fpl_stats_for_roster["Player"].apply(canonical_normalize)
+
+        merge_right_cols = ["__norm_name", "Team", "Position", "Player_ID", "Season_Points"]
+        if "starts" in fpl_stats_for_roster.columns:
+            merge_right_cols.append("starts")
+        my_roster = my_roster.merge(
+            fpl_stats_for_roster[merge_right_cols],
+            on=["__norm_name", "Position"], how="left"
+        )
+        my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
+
+        # Ensure Team present and align names
+        my_roster = _ensure_team_col(my_roster, fpl_stats)
+        my_roster = _align_roster_player_names_to_projections(
+            my_roster, proj, notes=notes)
+        my_roster["Team"] = my_roster["Team"].replace(TEAM_FULL_TO_SHORT)
+
+        # After name alignment the Player column now holds Rotowire canonical names.
+        # Recover Team from proj for any player whose Team is still NaN/missing —
+        # this happens when the FPL short web-name ("Eze") didn't match the full FPL
+        # stats name ("Eberechi Eze") on the earlier normalized-name merge, leaving
+        # Team blank even though the name was correctly aligned to Rotowire.
+        _nan_team = my_roster["Team"].isna() | my_roster["Team"].isin(["nan", "None", ""])
+        if _nan_team.any():
+            _proj_team_lookup = (
+                proj[["Player", "Team"]]
+                .drop_duplicates(subset=["Player"], keep="first")
+                .set_index("Player")["Team"]
+            )
+            my_roster.loc[_nan_team, "Team"] = (
+                my_roster.loc[_nan_team, "Player"].map(_proj_team_lookup)
+            )
+
+        # Add next-GW projected points
+        proj_points_df = proj[["Player", "Team", "Position", "Points"]].rename(
+            columns={"Points": "Projected_Points"}
+        ).copy()
+        proj_points_df["__norm_name"] = proj_points_df["Player"].apply(canonical_normalize)
+        my_roster["__norm_name"] = my_roster["Player"].apply(canonical_normalize)
+
+        # Primary merge: name + team + position (exact)
+        my_roster = my_roster.merge(
+            proj_points_df[["__norm_name", "Team", "Position", "Projected_Points"]],
+            on=["__norm_name", "Team", "Position"],
+            how="left"
+        )
+        # Fallback 1: name + position only (catches team-code mismatches).
+        _still_missing = my_roster["Projected_Points"].isna()
+        if _still_missing.any():
+            _proj_name_pos = (
+                proj_points_df[["__norm_name", "Position", "Projected_Points"]]
+                .drop_duplicates(subset=["__norm_name", "Position"], keep="first")
+            )
+            _fallback = my_roster.loc[_still_missing, ["__norm_name", "Position"]].merge(
+                _proj_name_pos, on=["__norm_name", "Position"], how="left"
+            )
+            my_roster.loc[_still_missing, "Projected_Points"] = _fallback["Projected_Points"].values
+
+        # Fallback 2: name only (catches FPL vs Rotowire position classification differences,
+        # e.g. FPL MID vs Rotowire FWD for attacking players like Eze).
+        _still_missing2 = my_roster["Projected_Points"].isna()
+        if _still_missing2.any():
+            _proj_name_only = (
+                proj_points_df[["__norm_name", "Projected_Points"]]
+                .drop_duplicates(subset=["__norm_name"], keep="first")
+            )
+            _fallback2 = my_roster.loc[_still_missing2, ["__norm_name"]].merge(
+                _proj_name_only, on="__norm_name", how="left"
+            )
+            my_roster.loc[_still_missing2, "Projected_Points"] = _fallback2["Projected_Points"].values
+
+        my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
+
+        # `_attach_display_names` resolves by id first, so the ids must already
+        # be on the frame -- they come from the normalized-name merge above,
+        # which resolves 15 of 15 on the live roster. The `fuzz.WRatio`
+        # backfill that used to sit here filled 0 and is deleted; see the
+        # tombstone in `player_matching`.
+        my_roster = _attach_display_names(my_roster)
+        # `form_weeks` as well as `lookahead`: the available pool got the widget
+        # value and the roster silently kept `config.FORM_LOOKBACK_WEEKS`, so moving
+        # the slider compared a 2-week pool form against a 4-week roster form -- in
+        # `_build_rationale`, which sets them side by side, and in the ROS form term.
+        # They agree at the default, which is why it never showed.
+        my_roster = _add_fdr_and_form(my_roster, fpl_stats, current_gw, lookahead,
+                                      form_weeks=form_weeks)
+        my_roster = _add_injury_data(my_roster, fpl_stats)
+    # --- Multi-GW (FFP), season projections, and the reference pool ---
+    try:
+        ffp_feed_result = get_ffp_feed()
+        ffp_df = ffp_feed_result.df
+    except Exception:
+        ffp_feed_result, ffp_df = None, None
+
+    _remaining_gws = max(1, 38 - current_gw)
+    if not avail_all.empty:
+        avail_all = blend_multi_gw_projections(avail_all, ffp_df, single_gw_col="Points", remaining_gws=_remaining_gws)
+    if not my_roster.empty:
+        pts_col = "Projected_Points" if "Projected_Points" in my_roster.columns else "Points"
+        my_roster = blend_multi_gw_projections(my_roster, ffp_df, single_gw_col=pts_col, remaining_gws=_remaining_gws)
+
+    try:
+        season_rankings_df = get_rotowire_season_rankings(config.ROTOWIRE_SEASON_RANKINGS_URL)
+    except Exception:
+        season_rankings_df = None
+
+    if not avail_all.empty:
+        avail_all = merge_season_projections(avail_all, season_rankings_df)
+    if not my_roster.empty:
+        my_roster = merge_season_projections(my_roster, season_rankings_df)
+
+    if not avail_all.empty:
+        avail_all = merge_ffp_single_gw_data(avail_all, ffp_df)
+    if not my_roster.empty:
+        my_roster = merge_ffp_single_gw_data(my_roster, ffp_df)
+
+    # fpl_stats is the reference pool for positional_percentile(), so it must
+    # carry the same enrichment columns as the frames being scored against it.
+    fpl_stats = blend_multi_gw_projections(fpl_stats, ffp_df, single_gw_col="points_per_game", remaining_gws=_remaining_gws)
+    fpl_stats = merge_season_projections(fpl_stats, season_rankings_df)
+    fpl_stats = merge_ffp_single_gw_data(fpl_stats, ffp_df)
+    fpl_stats = enrich_reference_with_projections(fpl_stats, proj)
+    # **The fixture term's reference column, which never existed.** Written onto
+    # the scored frames and not onto the reference pool, `compute_player_scores`
+    # took its min-max fallback: the 15-row roster normalised against itself,
+    # the pool against itself, and the suggestion gap subtracts one from the
+    # other. Two populations, min-max rather than percentile, no symptom.
+    fpl_stats["AvgFDRNextN"] = pd.to_numeric(
+        fpl_stats["Team"].astype(str).map(_avg_fdr_by_short_name(current_gw, lookahead)),
+        errors="coerce")
+
+    depth_map = compute_positional_depth(my_roster) if not my_roster.empty else {}
+
+    waiver_context = _build_waiver_context(waiver_order, entry_id, current_gw,
+                                           transaction_mode=transaction_window.get("mode"))
+    floor_context = _build_floor_context(waiver_order, entry_id, league_id)
+
+    # Scoring happens here rather than inside the search, so that changing a
+    # position filter re-searches rather than re-percentiles.
+    if not my_roster.empty and not avail_all.empty:
+        try:
+            avail_all = _compute_waiver_score(avail_all, fpl_stats, current_gw=current_gw)
+            my_roster = _compute_keep_score(my_roster, fpl_stats, current_gw=current_gw,
+                                            depth_map=depth_map)
+        except Exception as e:
+            _note(notes, "Could not score the pools: %s" % e)
+
+    return WaiverBoard(
+        available=avail_all, roster=my_roster, reference=fpl_stats,
+        projections=proj, ownership=ownership, element_states=element_states,
+        transaction_window=transaction_window, waiver_order=waiver_order,
+        waiver_context=waiver_context, floor_context=floor_context,
+        depth_map=depth_map, locked_count=locked_count, league_id=league_id,
+        team_id=team_id, entry_id=entry_id, current_gw=current_gw,
+        lookahead=lookahead, form_weeks=form_weeks, ffp=ffp_feed_result,
+        status=BOARD_OK, notes=tuple(notes))
+
+
+def search_board(board: WaiverBoard, *, positions=None, lanes=None,
+                 compact: bool = True, limit=None):
+    """Search a built board. Returns `(suggestions, debug_rows, total_found)`.
+
+    Never mutates the board's frames -- the Waiver Wire renders them after
+    searching, and a board may be shared with the My Week strip inside one
+    rerun.
+    """
+    if board is None or not board.ok:
+        return [], [], 0
+    if board.roster.empty or board.available.empty or not positions:
+        return [], [], 0
+    try:
+        suggestions, debug_rows = _compute_transfer_suggestions(
+            board.available.copy(), board.roster.copy(),
+            top_n=None, depth_map=board.depth_map,
+            positions=positions,
+            roster_candidates=2 if compact else None,
+            avail_candidates=5 if compact else None,
+            one_per_position=compact,
+            waiver_context=board.waiver_context,
+            floor_context=board.floor_context,
+            lanes=lanes,
+        )
+    except Exception as e:
+        _logger.warning("Could not compute transfer suggestions: %s", e, exc_info=True)
+        return [], [], 0
+
+    total_found = len(suggestions)
+    if limit is not None:
+        # **Per lane, not across both.** A flat slice lets the hold lane fill
+        # the quota and the rental lane vanish -- the exact failure the two
+        # lanes exist to fix, re-created by a display limit.
+        kept = []
+        for lane in (LANE_HOLD, LANE_RENT):
+            kept.extend([x for x in suggestions if x["lane"] == lane][:limit])
+        suggestions = kept
+    return suggestions, debug_rows, total_found
+
+
+def best_claim(board: WaiverBoard, *, lane=LANE_HOLD, positions=None):
+    """The single best claim, or None.
+
+    Routed **through** `search_board` deliberately. The locked-player filter
+    and the cannot-play exclusion live *inside*
+    `_compute_transfer_suggestions` so that no caller can forget them, and the
+    obvious shortcut for a checklist -- take the top row of `board.available`
+    by Transfer Score -- bypasses both. That is how a player another manager
+    dropped an hour ago comes to be recommended as a claim.
+    """
+    suggestions, _, _ = search_board(
+        board, positions=positions or list(POSITION_LABEL_TO_CODE.values()),
+        lanes=(lane,), compact=False)
+    return suggestions[0] if suggestions else None

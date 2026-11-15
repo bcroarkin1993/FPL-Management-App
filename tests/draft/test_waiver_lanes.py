@@ -322,12 +322,18 @@ class TestItSurvivesTheFramesThePageActuallyBuilds:
             avail, self._pool().drop(columns=["news"]), current_gw=10)
         assert len(got) == 1
 
-    def test_the_page_attaches_it_after_the_starts_merge(self):
+    def test_the_builder_attaches_it_after_the_starts_merge(self):
         """The ordering fault, pinned in the source. The depth rule reads season
         starts to tell a deputy from a regular, so attaching before the merge
-        treats every available player as having none."""
+        treats every available player as having none.
+
+        Pinned on `build_waiver_board`, which is where the pipeline lives since
+        the claim engine was split out of the page. The builder also asserts it
+        at runtime, but an assertion only fires on a frame that reaches it --
+        this catches the lines being reordered at all."""
         import inspect
-        src = inspect.getsource(ww.show_waiver_wire_page)
+        import scripts.draft.waiver_core as wc
+        src = inspect.getsource(wc.build_waiver_board)
         i_starts = src.index("avail_all['starts'] = numeric_col")
         i_dep = src.index("_attach_minutes_dependency(avail_all")
         assert i_starts < i_dep, (

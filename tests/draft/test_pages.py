@@ -68,23 +68,30 @@ class TestDraftFixtureProjectionsPage:
 
 class TestWaiverWirePage:
     def test_smoke(self, mock_all_utils):
-        """Waiver wire with empty data will call st.stop() — we catch that."""
-        with patch("scripts.draft.waiver_wire.get_current_gameweek", return_value=25), \
+        """Waiver wire with empty data will call st.stop() — we catch that.
+
+        Most of these patches target `waiver_core`, not this page: the claim
+        engine was split out, so the fetches happen in `build_waiver_board`.
+        Patching the page module would still *succeed* and do nothing, which
+        is what `test_patch_targets_bite.py` exists to catch -- that is how
+        `compute_healthy_form`, one HTTP request per player, came to run for
+        real inside a test body wrapped in `except Exception: pass`."""
+        with patch("scripts.draft.waiver_core.get_current_gameweek", return_value=25), \
              patch("scripts.draft.waiver_wire.get_league_player_ownership", return_value={}), \
              patch("scripts.draft.waiver_wire.get_league_element_states", return_value={}), \
              patch("scripts.draft.waiver_wire.get_draft_transaction_window", return_value={}), \
              patch("scripts.draft.waiver_wire.get_league_entries", return_value={}), \
              patch("scripts.draft.waiver_wire.get_fpl_player_mapping", return_value={}), \
              patch("scripts.draft.waiver_core.get_fpl_player_mapping", return_value={}), \
-             patch("scripts.draft.waiver_wire.get_rotowire_player_projections", return_value=pd.DataFrame()), \
+             patch("scripts.draft.waiver_core.get_rotowire_player_projections", return_value=pd.DataFrame()), \
              patch("scripts.draft.waiver_core.merge_fpl_players_and_projections", return_value=pd.DataFrame()), \
-             patch("scripts.draft.waiver_wire.pull_fpl_player_stats", return_value=pd.DataFrame()), \
-             patch("scripts.draft.waiver_wire.normalize_fpl_players_to_rotowire_schema", return_value=pd.DataFrame()), \
-             patch("scripts.draft.waiver_wire.normalize_rotowire_players", return_value=pd.DataFrame()), \
+             patch("scripts.draft.waiver_core.pull_fpl_player_stats", return_value=pd.DataFrame()), \
+             patch("scripts.draft.waiver_core.normalize_fpl_players_to_rotowire_schema", return_value=pd.DataFrame()), \
+             patch("scripts.draft.waiver_core.normalize_rotowire_players", return_value=pd.DataFrame()), \
              patch("scripts.draft.waiver_core.compute_healthy_form", return_value=5.0), \
-             patch("scripts.draft.waiver_wire.get_ffp_feed", return_value=_empty_ffp_feed()), \
-             patch("scripts.draft.waiver_wire.blend_multi_gw_projections", side_effect=lambda df, *a, **kw: df), \
-             patch("scripts.draft.waiver_wire.compute_positional_depth", return_value={}):
+             patch("scripts.draft.waiver_core.get_ffp_feed", return_value=_empty_ffp_feed()), \
+             patch("scripts.draft.waiver_core.blend_multi_gw_projections", side_effect=lambda df, *a, **kw: df), \
+             patch("scripts.draft.waiver_core.compute_positional_depth", return_value={}):
             from scripts.draft.waiver_wire import show_waiver_wire_page
             try:
                 show_waiver_wire_page()

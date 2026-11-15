@@ -31,9 +31,11 @@ import pytest
 SCRIPTS = pathlib.Path(__file__).resolve().parents[2] / "scripts"
 FN = "_add_fdr_and_form"
 
-#: Pages that score a roster against an available pool, so the two frames'
+#: Modules that score a roster against an available pool, so the two frames'
 #: Form columns are read together.
-PAGES = [SCRIPTS / "draft" / "waiver_wire.py"]
+#: The claim engine, which is where both `_add_fdr_and_form` callsites
+#: live since it was split out of the page.
+PAGES = [SCRIPTS / "draft" / "waiver_core.py"]
 
 
 def _calls(tree, name):

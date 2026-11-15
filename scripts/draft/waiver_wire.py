@@ -105,7 +105,11 @@ from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings, 
 # import several of these by name, and the tests patch others.
 # ---------------------------------------------------------------
 from scripts.draft.waiver_core import (
+    BOARD_NO_PROJECTIONS,
     WaiverDataUnavailable,
+    best_claim,
+    build_waiver_board,
+    search_board,
     POSITION_CODE_TO_LABEL,
     POSITION_LABEL_TO_CODE,
     RENTAL_MIN_GAIN,
@@ -1337,322 +1341,58 @@ def show_waiver_wire_page():
             "No owned players detected. If the season hasn't started or the API returns no element owners, this is expected.")
 
     # Projections & FPL stats
-    rotowire_url = config.ROTOWIRE_URL
-    if not rotowire_url:
-        st.warning(
-            "⚠️ Rotowire player projections are unavailable — the app could not discover the current "
-            "rankings article URL. Rotowire may have changed their URL format. "
-            "To fix immediately, add `ROTOWIRE_URL=<article URL>` to your `.env` file and restart the app."
-        )
-    projections_raw = get_rotowire_player_projections(rotowire_url)
-    fpl_stats_raw = pull_fpl_player_stats()
+    # ---------------------------------------------------------------
+    # THE BOARD
+    # ---------------------------------------------------------------
+    # The scored pools, the reference pool and the claim contexts, assembled
+    # once by `waiver_core` and cached on primitives. The search controls above
+    # are deliberately *not* part of that cache key: changing a position filter
+    # re-searches this board rather than rebuilding it, which is what makes a
+    # widget interaction cheap. The Draft My Week strip reads the same board,
+    # so the two surfaces cannot disagree about the best claim.
+    board = build_waiver_board(
+        config.FPL_DRAFT_LEAGUE_ID, my_team_id,
+        entry_id=my_entry_id, lookahead=lookahead, form_weeks=form_weeks,
+    )
 
-    # Normalize both to a unified schema (and enforce minimal columns)
-    teams_df = _bootstrap_teams_df()
-    try:
-        fpl_stats_norm = normalize_fpl_players_to_rotowire_schema(fpl_stats_raw, teams_df=teams_df)
-    except Exception as e:
-        _logger.warning("FPL stats normalization failed, using raw data: %s", e)
-        fpl_stats_norm = fpl_stats_raw
-    try:
-        projections_norm = normalize_rotowire_players(projections_raw)
-    except Exception as e:
-        _logger.warning("Projections normalization failed, using raw data: %s", e)
-        projections_norm = projections_raw
+    # The engine reports; the page renders. `st.stop()` belongs here and
+    # nowhere else -- it ends *this* script run, and a library that can call it
+    # can end a page it has never heard of.
+    for _severity, _message in board.notes:
+        {"error": st.error, "info": st.info}.get(_severity, st.warning)(_message)
 
-    fpl_stats = _enforce_rw_schema_fpl(fpl_stats_norm, teams_df)
-    proj = _enforce_rw_schema_proj(projections_norm, teams_df)
-
-    # Guard-rails
-    req = {"Player", "Team", "Position"}
-    miss_stats = req - set(fpl_stats.columns)
-    if miss_stats:
-        st.error(f"Failed to compute available players: fpl_player_statistics_df missing {sorted(miss_stats)} after normalization.")
+    if board.status == BOARD_NO_PROJECTIONS:
         st.stop()
-
-    miss_proj = req - set(proj.columns)
-    if miss_proj:
-        st.error(f"Projections table missing {sorted(miss_proj)} after normalization.")
-        st.stop()
-
-    if "Season_Points" not in fpl_stats.columns:
-        fpl_stats["Season_Points"] = 0
-
-    # Current GW
-    try:
-        current_gw = int(get_current_gameweek() or 1)
-    except Exception:
-        current_gw = 1
-
-    # AVAILABLE PLAYERS — compute on ALL positions (no filter yet) for suggestions
-    #
-    # `engine_notes` is how `waiver_core` tells the page something the reader
-    # should see. It cannot say so itself: a module that renders can also halt,
-    # and `_available_from_projections` used to end this page from inside a
-    # function whose job is to filter a DataFrame.
-    engine_notes = []
-    try:
-        avail_all = _available_from_projections(proj, fpl_stats, ownership,
-                                                element_states, notes=engine_notes)
-    except WaiverDataUnavailable as unavailable:
-        # The engine's terminal status. Rendered exactly as it was when the
-        # engine rendered it itself -- an honest message, then stop; *not* the
-        # "failed to compute" debug dump below, which is for a real fault.
-        st.info(unavailable.message)
-        st.stop()
-    except Exception as e:
-        st.error(f"Failed to compute available players: {e}")
+    if not board.ok:
+        # A real fault, as opposed to "nothing published yet": show what the
+        # engine was looking at. Diagnostics for whoever debugs this.
         try:
-            st.caption("**Projections columns:** " + ", ".join(list(proj.columns)))
-            st.dataframe(proj.head(5), use_container_width=True)
-        except Exception:
-            pass
-        try:
-            owned_names = _flatten_owned_names(ownership)
+            st.caption("**Projections columns:** " + ", ".join(list(board.projections.columns)))
+            st.dataframe(board.projections.head(5), use_container_width=True)
+            owned_names = _flatten_owned_names(board.ownership)
             st.caption(f"**Sample owned (FPL) names (first 10 of {len(owned_names)}):** {owned_names[:10]}")
-            st.caption("**FPL stats columns:** " + ", ".join(list(fpl_stats.columns)))
         except Exception:
             pass
         st.stop()
 
-    for _severity, _message in engine_notes:
-        (st.info if _severity == "info" else st.warning)(_message)
+    current_gw = board.current_gw
+    # Copied because the page mutates these below (it recomputes scores on a
+    # position-filtered view), and the board may be shared with another caller
+    # inside this rerun.
+    avail_all = board.available.copy()
+    my_roster = board.roster.copy()
+    fpl_stats = board.reference
+    depth_map = board.depth_map
 
-    # Add FDR, Form, Injury data, and Season_Points to available players
-    avail_all = _add_fdr_and_form(avail_all, fpl_stats, current_gw, lookahead, form_weeks=form_weeks)
-    avail_all = _add_injury_data(avail_all, fpl_stats)
+    render_ffp_status(board.ffp, current_gw)
 
-    # Add Season_Points and starts to available players via Player_ID
-    if 'Player_ID' in avail_all.columns and 'Season_Points' not in avail_all.columns:
-        sp_cols = ['Player_ID', 'Season_Points']
-        if 'starts' in fpl_stats.columns:
-            sp_cols.append('starts')
-        sp_data = fpl_stats[sp_cols].drop_duplicates(subset=['Player_ID'])
-        avail_all = avail_all.merge(sp_data, on='Player_ID', how='left')
-    elif 'Player_ID' in avail_all.columns and 'starts' not in avail_all.columns and 'starts' in fpl_stats.columns:
-        starts_data = fpl_stats[['Player_ID', 'starts']].drop_duplicates(subset=['Player_ID'])
-        avail_all = avail_all.merge(starts_data, on='Player_ID', how='left')
-    avail_all['Season_Points'] = numeric_col(avail_all, 'Season_Points', 0)
-    avail_all['starts'] = numeric_col(avail_all, 'starts', 0)
-
-    # Whose absence is each available player starting because of. Needs the
-    # **whole** pool, because the man he is deputising for is injured and so is
-    # absent from Rotowire's XI -- and therefore from `avail_all` -- by
-    # construction.
-    #
-    # **After the `starts` merge above, not before it.** The depth rule reads
-    # season starts to tell a deputy from a regular, and this ran four lines
-    # earlier where the column does not exist yet: it silently treated every
-    # available player as having zero starts, and took the page down on the
-    # unsafe accessor into the bargain.
-    avail_all = _attach_minutes_dependency(avail_all, fpl_stats, current_gw)
-
-    # Resolve the name to render once, here, so the cards and the tables below all
-    # show the same thing. Player_ID is set by _add_fdr_and_form() above.
-    avail_all = _attach_display_names(avail_all)
-
-    # --- Build MY ROSTER ---
-    my_players = []
-    for pos, names in my_team.get("players", {}).items():
-        for nm in names:
-            my_players.append({"Player": nm, "Position": pos})
-    my_roster = pd.DataFrame(my_players)
-
-    if not my_roster.empty:
-        # Attach Team/Player_ID/Season_Points/starts from FPL master using normalized names
-        my_roster["__norm_name"] = my_roster["Player"].apply(canonical_normalize)
-        roster_merge_cols = ["Player", "Team", "Position", "Player_ID", "Season_Points"]
-        if "starts" in fpl_stats.columns:
-            roster_merge_cols.append("starts")
-        fpl_stats_for_roster = fpl_stats[roster_merge_cols].copy()
-        fpl_stats_for_roster["__norm_name"] = fpl_stats_for_roster["Player"].apply(canonical_normalize)
-
-        merge_right_cols = ["__norm_name", "Team", "Position", "Player_ID", "Season_Points"]
-        if "starts" in fpl_stats_for_roster.columns:
-            merge_right_cols.append("starts")
-        my_roster = my_roster.merge(
-            fpl_stats_for_roster[merge_right_cols],
-            on=["__norm_name", "Position"], how="left"
-        )
-        my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
-
-        # Ensure Team present and align names
-        my_roster = _ensure_team_col(my_roster, fpl_stats)
-        my_roster = _align_roster_player_names_to_projections(
-            my_roster, proj, notes=engine_notes)
-        my_roster["Team"] = my_roster["Team"].replace(TEAM_FULL_TO_SHORT)
-
-        # After name alignment the Player column now holds Rotowire canonical names.
-        # Recover Team from proj for any player whose Team is still NaN/missing —
-        # this happens when the FPL short web-name ("Eze") didn't match the full FPL
-        # stats name ("Eberechi Eze") on the earlier normalized-name merge, leaving
-        # Team blank even though the name was correctly aligned to Rotowire.
-        _nan_team = my_roster["Team"].isna() | my_roster["Team"].isin(["nan", "None", ""])
-        if _nan_team.any():
-            _proj_team_lookup = (
-                proj[["Player", "Team"]]
-                .drop_duplicates(subset=["Player"], keep="first")
-                .set_index("Player")["Team"]
-            )
-            my_roster.loc[_nan_team, "Team"] = (
-                my_roster.loc[_nan_team, "Player"].map(_proj_team_lookup)
-            )
-
-        # Add next-GW projected points
-        proj_points_df = proj[["Player", "Team", "Position", "Points"]].rename(
-            columns={"Points": "Projected_Points"}
-        ).copy()
-        proj_points_df["__norm_name"] = proj_points_df["Player"].apply(canonical_normalize)
-        my_roster["__norm_name"] = my_roster["Player"].apply(canonical_normalize)
-
-        # Primary merge: name + team + position (exact)
-        my_roster = my_roster.merge(
-            proj_points_df[["__norm_name", "Team", "Position", "Projected_Points"]],
-            on=["__norm_name", "Team", "Position"],
-            how="left"
-        )
-        # Fallback 1: name + position only (catches team-code mismatches).
-        _still_missing = my_roster["Projected_Points"].isna()
-        if _still_missing.any():
-            _proj_name_pos = (
-                proj_points_df[["__norm_name", "Position", "Projected_Points"]]
-                .drop_duplicates(subset=["__norm_name", "Position"], keep="first")
-            )
-            _fallback = my_roster.loc[_still_missing, ["__norm_name", "Position"]].merge(
-                _proj_name_pos, on=["__norm_name", "Position"], how="left"
-            )
-            my_roster.loc[_still_missing, "Projected_Points"] = _fallback["Projected_Points"].values
-
-        # Fallback 2: name only (catches FPL vs Rotowire position classification differences,
-        # e.g. FPL MID vs Rotowire FWD for attacking players like Eze).
-        _still_missing2 = my_roster["Projected_Points"].isna()
-        if _still_missing2.any():
-            _proj_name_only = (
-                proj_points_df[["__norm_name", "Projected_Points"]]
-                .drop_duplicates(subset=["__norm_name"], keep="first")
-            )
-            _fallback2 = my_roster.loc[_still_missing2, ["__norm_name"]].merge(
-                _proj_name_only, on="__norm_name", how="left"
-            )
-            my_roster.loc[_still_missing2, "Projected_Points"] = _fallback2["Projected_Points"].values
-
-        my_roster.drop(columns=["__norm_name"], inplace=True, errors="ignore")
-
-        # `_attach_display_names` resolves by id first, so the ids must already
-        # be on the frame -- they come from the normalized-name merge above,
-        # which resolves 15 of 15 on the live roster. The `fuzz.WRatio`
-        # backfill that used to sit here filled 0 and is deleted; see the
-        # tombstone in `player_matching`.
-        my_roster = _attach_display_names(my_roster)
-        # `form_weeks` as well as `lookahead`: the available pool got the widget
-        # value and the roster silently kept `config.FORM_LOOKBACK_WEEKS`, so moving
-        # the slider compared a 2-week pool form against a 4-week roster form -- in
-        # `_build_rationale`, which sets them side by side, and in the ROS form term.
-        # They agree at the default, which is why it never showed.
-        my_roster = _add_fdr_and_form(my_roster, fpl_stats, current_gw, lookahead,
-                                      form_weeks=form_weeks)
-        my_roster = _add_injury_data(my_roster, fpl_stats)
-
-    # --- Multi-GW Projections (FFP) ---
-    try:
-        ffp_feed_result = get_ffp_feed()
-        ffp_df = ffp_feed_result.df
-    except Exception:
-        ffp_feed_result, ffp_df = None, None
-
-    _remaining_gws = max(1, 38 - current_gw)
-    if not avail_all.empty:
-        avail_all = blend_multi_gw_projections(avail_all, ffp_df, single_gw_col="Points", remaining_gws=_remaining_gws)
-    if not my_roster.empty:
-        # Roster uses Projected_Points as single-GW col
-        pts_col = "Projected_Points" if "Projected_Points" in my_roster.columns else "Points"
-        my_roster = blend_multi_gw_projections(my_roster, ffp_df, single_gw_col=pts_col, remaining_gws=_remaining_gws)
-
-    # --- Rotowire Season Projections ---
-    try:
-        season_rankings_df = get_rotowire_season_rankings(config.ROTOWIRE_SEASON_RANKINGS_URL)
-    except Exception:
-        season_rankings_df = None
-
-    if not avail_all.empty:
-        avail_all = merge_season_projections(avail_all, season_rankings_df)
-    if not my_roster.empty:
-        my_roster = merge_season_projections(my_roster, season_rankings_df)
-
-    # --- FFP Single-GW Data (Predicted, Start, LongStart) ---
-    if not avail_all.empty:
-        avail_all = merge_ffp_single_gw_data(avail_all, ffp_df)
-    if not my_roster.empty:
-        my_roster = merge_ffp_single_gw_data(my_roster, ffp_df)
-
-    # --- Enrich reference pool with same data sources ---
-    # fpl_stats is used as the reference pool for positional_percentile().
-    # It must have the same enrichment columns (MultiGW_Proj, SeasonProjection, FFP_*)
-    # as the scoring datasets for percentile comparisons to be meaningful.
-    fpl_stats = blend_multi_gw_projections(fpl_stats, ffp_df, single_gw_col="points_per_game", remaining_gws=_remaining_gws)
-    fpl_stats = merge_season_projections(fpl_stats, season_rankings_df)
-    fpl_stats = merge_ffp_single_gw_data(fpl_stats, ffp_df)
-    fpl_stats = enrich_reference_with_projections(fpl_stats, proj)
-    # **The fixture term's reference column, which never existed.** `AvgFDRNextN`
-    # was written onto the scored frames (available pool and roster) and not onto
-    # the reference pool, so `compute_player_scores` took its min-max fallback:
-    # the 15-row roster normalised against itself, the 98-row pool against
-    # itself, and the suggestion gap then subtracts one from the other. Two
-    # populations, min-max rather than percentile, and no visible symptom.
-    #
-    # `fpl_stats["Team"]` is a short code after `_enforce_rw_schema_fpl`, so the
-    # key space matches the club-indexed Series exactly.
-    fpl_stats["AvgFDRNextN"] = pd.to_numeric(
-        fpl_stats["Team"].astype(str).map(_avg_fdr_by_short_name(current_gw, lookahead)),
-        errors="coerce")
-
-    render_ffp_status(ffp_feed_result, current_gw)
-
-    # --- Positional Depth ---
-    depth_map = {}
-    if not my_roster.empty:
-        depth_map = compute_positional_depth(my_roster)
-
-    # --- Compute transfer suggestions (before rendering) ---
-    # Pre-compute scores on both pools so _compute_transfer_suggestions can use them
-    suggestions = []
-    debug_rows: List[Dict] = []
-    total_found = 0
-    waiver_context = _build_waiver_context(waiver_order, my_entry_id, current_gw,
-                                           transaction_mode=_mode)
-    if not my_roster.empty and not avail_all.empty and sugg_positions:
-        try:
-            avail_all = _compute_waiver_score(avail_all, fpl_stats, current_gw=current_gw)
-            my_roster = _compute_keep_score(my_roster, fpl_stats, current_gw=current_gw, depth_map=depth_map)
-            # "Best per position" keeps the narrow 2x5 candidate window; every other
-            # view scans the full roster against the full pool so the list really is
-            # every move that would improve the team.
-            _compact = sugg_view == SUGGESTION_VIEW_BEST_PER_POS
-            suggestions, debug_rows = _compute_transfer_suggestions(
-                avail_all, my_roster,
-                top_n=None, depth_map=depth_map,
-                positions=sugg_positions,
-                roster_candidates=2 if _compact else None,
-                avail_candidates=5 if _compact else None,
-                one_per_position=_compact,
-                waiver_context=waiver_context,
-                floor_context=_build_floor_context(
-                    waiver_order, my_entry_id, config.FPL_DRAFT_LEAGUE_ID),
-                lanes=sugg_lanes,
-            )
-            total_found = len(suggestions)
-            _limit = SUGGESTION_VIEW_LIMITS.get(sugg_view)
-            if _limit is not None:
-                # **Per lane, not across both.** A flat slice lets the hold lane
-                # fill the whole quota and the rental lane vanish -- which is the
-                # exact failure this feature exists to fix, re-created by the
-                # display limit. `total_found` still reports the real count.
-                _kept = []
-                for _lane in (LANE_HOLD, LANE_RENT):
-                    _kept.extend([x for x in suggestions if x['lane'] == _lane][:_limit])
-                suggestions = _kept
-        except Exception as e:
-            st.warning(f"Could not compute transfer suggestions: {e}")
+    suggestions, debug_rows, total_found = search_board(
+        board,
+        positions=sugg_positions,
+        lanes=sugg_lanes,
+        compact=(sugg_view == SUGGESTION_VIEW_BEST_PER_POS),
+        limit=SUGGESTION_VIEW_LIMITS.get(sugg_view),
+    )
 
     # --- RENDER: Suggestion cards at top ---
     with suggestion_container:
