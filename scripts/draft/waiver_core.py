@@ -44,9 +44,12 @@ from scripts.common.injury_helpers import (
     ABSENCE_FROM_NEWS,
     OUT_OF_SQUAD_STATUSES,
     absence_estimate,
+    departed_mask,
     estimate_games_to_miss,
 )
 from scripts.common.projection_engine import DEPUTY_MAX_START_RATE
+from scripts.common import return_watch as return_watch_module
+from scripts.common.scraping import get_prior_season_rates
 from scripts.common.error_helpers import get_logger
 
 _logger = get_logger("fpl_app.draft.waiver_wire")
@@ -1274,8 +1277,7 @@ def _attach_minutes_dependency(df: pd.DataFrame, fpl_stats: pd.DataFrame,
     # A loan or a permanent exit is not a return anyone is waiting on, so the
     # deputy's place is not temporary -- `u` players are excluded by news rather
     # than by status, since the status alone cannot tell the two apart.
-    absent = absent[~absent["news"].astype(str).str.contains(
-        "has joined|has left|loan", case=False, na=False)]
+    absent = absent[~departed_mask(absent["news"]).to_numpy()]
     if absent.empty:
         return out
 
@@ -2606,3 +2608,89 @@ def best_claim(board: WaiverBoard, *, lane=LANE_HOLD, positions=None):
         board, positions=positions or list(POSITION_LABEL_TO_CODE.values()),
         lanes=(lane,), compact=False)
     return suggestions[0] if suggestions else None
+
+
+def _code_states(element_states: Optional[Dict[int, Dict[str, Any]]]) -> Dict[int, str]:
+    """``{player_code: state}`` for every element the league has a state for.
+
+    `element-status` is keyed on the **Draft** element id and every pool frame in
+    the app is keyed on the **Classic** one, and 64 of 669 of those ids disagree
+    -- every collision landing on a real but wrong player, so nothing raises and
+    every value on the row stays plausible. `get_fpl_player_mapping` carries each
+    element's permanent `Player_Code`, so this crosses to the app's join key with
+    neither name matching nor an id translation. The same route `_codes_in_state`
+    takes, generalised from one state to all of them.
+    """
+    if not element_states:
+        return {}
+    try:
+        player_map = get_fpl_player_mapping()
+    except Exception:
+        _logger.warning("Could not read the Draft player map for element states",
+                        exc_info=True)
+        return {}
+    out: Dict[int, str] = {}
+    for element_id, state in (element_states or {}).items():
+        status = (state or {}).get("status")
+        if not status:
+            continue
+        code = (player_map.get(element_id) or {}).get("Player_Code")
+        if code is None or pd.isna(code):
+            continue
+        out[int(code)] = str(status)
+    return out
+
+
+def return_watch(board: "WaiverBoard", *, limit=None):
+    """Claimable players returning from a spell out, best pedigree first.
+
+    ``(frame, notes)``. Deliberately **not** cached and deliberately taking the
+    board rather than ids: the expensive inputs are already cached one layer
+    down (``build_waiver_board`` at 120s, ``get_prior_season_rates`` at a day),
+    so all this adds is a percentile pass over ~670 rows. Re-deriving the board
+    from primitives in order to put a cache on it would pay 15s to save 20ms --
+    the same reasoning that keeps ``search_board`` uncached.
+
+    The pedigree reference needs the whole pool, not the available one, so this
+    reads ``board.reference``: ``board.available`` is built from Rotowire's
+    weekly table, and the players this board exists for are *absent from it* --
+    which is why they were invisible in the first place.
+    """
+    notes: List[Tuple[str, str]] = []
+    if board is None or not getattr(board, "ok", False):
+        return return_watch_module._empty(notes, "No waiver board, so no returning "
+                                                 "players can be identified."), tuple(notes)
+    reference = getattr(board, "reference", None)
+    if reference is None or len(reference) == 0:
+        return return_watch_module._empty(notes, "The player pool is empty."), tuple(notes)
+
+    pool = reference
+    rates = None
+    try:
+        ids = dict(zip(
+            pd.to_numeric(pool.get("Player_ID"), errors="coerce").dropna().astype(int),
+            pd.to_numeric(
+                pool.get("Player_Code", pool.get("code")), errors="coerce"
+            ).reindex(pool.index).dropna().astype(int),
+        ))
+        if ids:
+            rates = get_prior_season_rates(ids)
+    except Exception:
+        _logger.warning("Prior-season rates unavailable for the return watch",
+                        exc_info=True)
+
+    try:
+        deadlines = gameweek_deadlines()
+    except Exception:
+        deadlines = None
+
+    frame = return_watch_module.build_return_watch(
+        pool,
+        _code_states(getattr(board, "element_states", None)),
+        current_gw=getattr(board, "current_gw", None),
+        prior_rates=rates,
+        deadlines=deadlines,
+        limit=limit,
+        notes=notes,
+    )
+    return frame, tuple(notes)

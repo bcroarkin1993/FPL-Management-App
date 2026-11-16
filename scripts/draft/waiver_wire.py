@@ -104,6 +104,15 @@ from scripts.common.scraping import get_ffp_feed, get_rotowire_season_rankings, 
 # Re-exported here because `trade_analyzer` and `classic/transfers`
 # import several of these by name, and the tests patch others.
 # ---------------------------------------------------------------
+from scripts.common.return_watch import (
+    BAND_CLEARED,
+    BAND_IMMINENT,
+    BAND_WATCH,
+    RUNG_PRESEASON,
+    RUNG_PRIOR,
+    RUNG_THIS,
+    role_phrase,
+)
 from scripts.draft.waiver_core import (
     BOARD_NO_PROJECTIONS,
     WaiverDataUnavailable,
@@ -159,6 +168,7 @@ from scripts.draft.waiver_core import (
     _teams_map_short,
     _to_position_letter,
     _waiver_claim_stats,
+    return_watch,
 )
 
 
@@ -554,6 +564,153 @@ def _render_claim_plan(suggestions: List[Dict], free_agency: bool = False,
 
 
 
+
+
+#: Band -> (label, background, text colour). Ordered by how much the manager
+#: has to infer, not by how good the player is.
+_RETURN_BAND_STYLE = {
+    BAND_CLEARED: ("Cleared to play", "#1a472a", "#4ecca3"),
+    BAND_IMMINENT: ("Return date set", "#4a3a12", "#f0c040"),
+    BAND_WATCH: ("No return date", "#2a2a3e", "#9aa0b4"),
+}
+
+_RETURN_RUNG_LABEL = {
+    RUNG_THIS: "this season",
+    RUNG_PRIOR: "last full season",
+    RUNG_PRESEASON: "Rotowire preseason",
+}
+
+
+def _render_returning_section(board, limit=None):
+    """Claimable players returning from a spell out, ranked by pedigree.
+
+    This section exists because the rest of the page **cannot see these
+    players**. The available pool is built from Rotowire's weekly table, and a
+    man who has not played is not in it -- so a returning elite asset is not
+    ranked low here, he is absent. Measured live: William Saliba read 0 points,
+    0 starts and `ep_next` 0.0 while FPL had already cleared him to play, and a
+    rival spent waiver priority 1 on him.
+
+    Two rendering rules are deliberate:
+
+    * **Ranked, not thresholded.** An absolute top-decile bar empties the board
+      -- the percentile is against established starters, where a top-decile
+      defender is worth 6.97 points a start, so a returning player's realistic
+      ceiling is ~0.78.
+    * **Never sorted against the Hold or Rent lanes.** Those carry points per
+      gameweek; this carries a percentile. Two numbers that look alike and are
+      not comparable is the cross-currency mistake `rank_claim_plan` already
+      records.
+    """
+    frame, notes = return_watch(board, limit=limit)
+
+    st.subheader("Returning from injury")
+    st.caption(
+        "Players who are **not playing now** but were productive regulars in "
+        "their last full season -- and who you could still claim. Nothing else "
+        "on this page can see them: the board above is built from Rotowire's "
+        "weekly projections, and a player who has not featured is not in it. "
+        "Ranked by how good he is at his position, not by what he will score "
+        "this week, because this week he will score nothing."
+    )
+
+    for severity, message in notes:
+        (st.warning if severity == "warning" else st.caption)(message)
+
+    if frame is None or frame.empty:
+        # An empty board is the ordinary state and the notes above already say
+        # why. What must never happen is rendering nothing at all, which reads
+        # as "we checked and there is nobody" when it may mean "we could not
+        # check" -- the distinction `week_check.STATUS_UNKNOWN` exists for.
+        if not notes:
+            st.info("No claimable player is returning from a spell out with the "
+                    "pedigree to be worth a claim.")
+        return frame
+
+    cards = []
+    for _, row in frame.iterrows():
+        label, bg, fg = _RETURN_BAND_STYLE.get(
+            row.get("Band"), ("", "#2a2a3e", "#9aa0b4"))
+        rung = _RETURN_RUNG_LABEL.get(row.get("Pedigree_Rung"), "")
+        pct = row.get("Pedigree")
+        rate = row.get("Pedigree_Rate")
+
+        bits = []
+        phrase = role_phrase(row)
+        if phrase:
+            bits.append(phrase)
+        if pd.notna(rate) and rung:
+            bits.append("%.2f pts per start (%s)" % (float(rate), rung))
+        if str(row.get("Draft_State") or "").lower() == "l":
+            bits.append("<b>locked</b> &mdash; claimable at the next waiver")
+        if row.get("Band") == BAND_IMMINENT and pd.notna(row.get("Return_GW")):
+            bits.append("back for <b>GW%d</b>" % int(row["Return_GW"]))
+        news = str(row.get("News") or "").strip()
+        if news:
+            bits.append(news)
+
+        # Every optional fragment is folded into one joined string rather than
+        # emitted on its own line: an empty fragment on a line of its own ends
+        # the HTML block and dumps the closing tag on screen as literal text.
+        # `compact_html` is the other half of that guard.
+        detail = " &middot; ".join(bits)
+        cards.append(
+            '<div style="padding:8px 12px;border-bottom:1px solid #2a2a3e;">'
+            '<div style="display:flex;justify-content:space-between;'
+            'align-items:center;gap:10px;">'
+            '<div style="color:#e0e0e0;">'
+            '<b>%s</b> <span style="color:#9aa0b4;">%s &middot; %s</span>'
+            '</div>'
+            '<div style="display:flex;align-items:center;gap:8px;">'
+            '<span style="background:%s;color:%s;padding:2px 8px;'
+            'border-radius:10px;font-size:0.78em;white-space:nowrap;">%s</span>'
+            '<span style="color:#4ecca3;font-weight:600;white-space:nowrap;">'
+            'top %d%%</span>'
+            '</div></div>'
+            '<div style="color:#9aa0b4;font-size:0.85em;margin-top:3px;">%s</div>'
+            '</div>' % (
+                _display_of(row),
+                row.get("Team"), row.get("Position"),
+                bg, fg, label,
+                max(1, int(round((1.0 - float(pct)) * 100))) if pd.notna(pct) else 0,
+                detail,
+            )
+        )
+
+    st.markdown(compact_html(
+        '<div style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);'
+        'border:1px solid #333;border-radius:10px;overflow:hidden;">'
+        + "".join(cards) + '</div>'
+    ), unsafe_allow_html=True)
+
+    with st.expander("How this is worked out", expanded=False):
+        # Built by concatenation rather than %-formatting: this text is full of
+        # literal percent signs, and one unescaped `%` in a `%`-formatted
+        # string is a crash at render time rather than a typo.
+        gate = "%.0f%%" % (100 * config.RETURN_WATCH_MIN_ROLE)
+        st.markdown(
+            "**Pedigree is a rate; whether he gets his place back is a "
+            "separate test.**\n\n"
+            "- *How good he is* \u2014 FPL points per start, taken from the "
+            "most recent season that actually describes him: this season where "
+            "he has started enough for the number to mean something, otherwise "
+            "his last full season, otherwise Rotowire's preseason rate. Shown "
+            "as a percentile against **established starters** at his position, "
+            "so \u201ctop 20%\u201d means the top 20% of players who actually "
+            "play.\n"
+            "- *Whether he walks back in* \u2014 the share of that season he "
+            "started, which must clear " + gate + ". It is a gate rather than a "
+            "multiplier: a player injured in GW3 has started few of this "
+            "season's gameweeks, and folding that in would read him as a fringe "
+            "player when the absence itself is the reason.\n"
+            "- *Cleared to play* means FPL rates him fully available while he "
+            "still has not featured \u2014 the strongest signal here, and the "
+            "one no projection source has caught up with yet.\n\n"
+            "Players who have left the league are excluded, which matters more "
+            "than it sounds: `status` is the same letter for a loan, a transfer "
+            "and an injury, so it is read off the news text."
+        )
+    return frame
 
 
 def _render_transfer_suggestions(
@@ -1408,6 +1565,21 @@ def show_waiver_wire_page():
             _render_claim_plan(suggestions, free_agency=_free_agency,
                                lane=LANE_RENT, lane_label="just this week")
         _render_transfer_debug(debug_rows)
+
+    st.markdown("---")
+
+    # ---------------------------
+    # RETURNING FROM INJURY
+    # ---------------------------
+    # Below the suggestions rather than above: those are moves to make now,
+    # this is a player to get in before the rest of the league notices. It is
+    # guarded on its own because it reads a second data source (prior-season
+    # history) -- a failure there must cost this section, not the page.
+    try:
+        _render_returning_section(board)
+    except Exception:
+        _logger.warning("Returning-from-injury section failed", exc_info=True)
+        st.caption("The returning-player watch could not be built this time.")
 
     st.markdown("---")
 

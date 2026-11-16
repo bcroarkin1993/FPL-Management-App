@@ -149,6 +149,108 @@ class TestWaiverWirePage:
                 pass  # st.stop() raises _StopException, which is expected
 
 
+class TestReturningSection:
+    """The returning-from-injury section on the Waiver Wire.
+
+    It needs a test of its own because the page smoke test above runs on empty
+    data and ends at `st.stop()`, so it never reaches this section at all --
+    exactly the "one test covered it for free and then quietly stopped" trap
+    `TestHubSections` was written for on the Projections Hub.
+
+    `get_prior_season_rates` is patched on **`waiver_core`**, which is where
+    `return_watch` resolves it. Patching `scripts.common.scraping` would
+    succeed, do nothing, and leave the test making ~670 element-summary
+    requests -- the failure `test_patch_targets_bite.py` exists to catch.
+    """
+
+    @staticmethod
+    def _board(reference, states=None, current_gw=11):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            ok=True, reference=reference, element_states=states or {1: {"status": "a"}},
+            current_gw=current_gw, notes=(),
+        )
+
+    @staticmethod
+    def _pool():
+        """One returning elite defender and twelve established starters."""
+        rows = [dict(Player_Code=462424, Player_ID=6, Player="William Saliba",
+                     Team="ARS", Position="D", starts=0, minutes=0,
+                     total_points=0, status="a",
+                     chance_of_playing_next_round=100, news="")]
+        rows += [dict(Player_Code=5000 + i, Player_ID=900 + i,
+                      Player="Starter %d" % i, Team="ARS", Position="D",
+                      starts=10, minutes=900, total_points=30, status="a",
+                      chance_of_playing_next_round=100, news="")
+                 for i in range(12)]
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def _rates():
+        return pd.DataFrame([dict(Player_Code=462424, Prior_PPS=137 / 30,
+                                  Prior_Role=30 / 38, Prior_Season="2025/26",
+                                  Prior_Starts=30, Prior_Points=137)])
+
+    def test_it_renders_a_populated_board(self, mock_streamlit):
+        from scripts.draft.waiver_wire import _render_returning_section
+        pool = self._pool()
+        states = {int(c): {"status": "a"} for c in pool["Player_Code"]}
+        with patch("scripts.draft.waiver_core.get_prior_season_rates",
+                   return_value=self._rates()),              patch("scripts.draft.waiver_core.get_fpl_player_mapping",
+                   return_value={int(c): {"Player_Code": int(c)}
+                                 for c in pool["Player_Code"]}),              patch("scripts.draft.waiver_core.gameweek_deadlines", return_value=None):
+            frame = _render_returning_section(
+                self._board(pool, {int(c): {"status": "a"}
+                                   for c in pool["Player_Code"]}))
+        # Pinned to the fixture's own player, not merely "non-empty": with the
+        # network up, a patch on the wrong module silently builds a real board
+        # and every "is it populated" assertion passes anyway.
+        assert frame is not None and not frame.empty
+        assert 462424 in set(frame["Player_Code"])
+        assert frame.iloc[0]["Band"] == "cleared"
+
+    def test_an_empty_board_still_renders(self, mock_streamlit):
+        """And must not raise -- it is the ordinary state for most gameweeks."""
+        from scripts.draft.waiver_wire import _render_returning_section
+        with patch("scripts.draft.waiver_core.get_prior_season_rates",
+                   return_value=pd.DataFrame()),              patch("scripts.draft.waiver_core.get_fpl_player_mapping",
+                   return_value={}),              patch("scripts.draft.waiver_core.gameweek_deadlines", return_value=None):
+            frame = _render_returning_section(self._board(self._pool(), {}))
+        assert frame is None or frame.empty
+
+    def test_a_failed_board_renders_rather_than_raising(self, mock_streamlit):
+        from types import SimpleNamespace
+        from scripts.draft.waiver_wire import _render_returning_section
+        board = SimpleNamespace(ok=False, reference=pd.DataFrame(),
+                                element_states={}, current_gw=11, notes=())
+        frame = _render_returning_section(board)
+        assert frame is None or frame.empty
+
+    def test_the_card_never_leaves_a_dangling_tag(self, mock_streamlit):
+        """Every optional fragment goes through `compact_html`.
+
+        A fragment that renders to "" on a line of its own ends the HTML block
+        and dumps the closing `</div>` on screen as literal text -- and which
+        fragments are empty depends on the data, which is how it ships.
+        """
+        from scripts.draft.waiver_wire import _render_returning_section
+        pool = self._pool()
+        with patch("scripts.draft.waiver_core.get_prior_season_rates",
+                   return_value=self._rates()),              patch("scripts.draft.waiver_core.get_fpl_player_mapping",
+                   return_value={int(c): {"Player_Code": int(c)}
+                                 for c in pool["Player_Code"]}),              patch("scripts.draft.waiver_core.gameweek_deadlines", return_value=None):
+            _render_returning_section(
+                self._board(pool, {int(c): {"status": "a"}
+                                   for c in pool["Player_Code"]}))
+        # `mock_streamlit` yields the dict of started patches, not a module.
+        markdown_calls = [c for c in mock_streamlit["markdown"].call_args_list
+                          if c[0] and "border-radius" in str(c[0][0])]
+        assert markdown_calls, "The card was never rendered"
+        html = str(markdown_calls[-1][0][0])
+        assert "\n" not in html, "Card HTML was not flattened by compact_html"
+        assert html.count("<div") == html.count("</div>")
+
+
 class TestTeamAnalysisPage:
     def test_smoke(self, mock_all_utils):
         # `get_league_player_ownership` was patched here too, but the page

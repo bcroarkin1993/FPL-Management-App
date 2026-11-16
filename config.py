@@ -427,6 +427,70 @@ def _env_int(name: str, default: int = 0) -> int:
         return int(default)
 
 
+# ----- Returning-elite watch (Draft) -----
+# Flagging the player who is about to come back, before a league mate claims him.
+#
+# The case that prompted it: William Saliba, out all season, claimed off waivers
+# by a rival at priority 1. Every signal the app has rated him zero -- 0 minutes,
+# 0 starts, `ep_next` 0.0, absent from Rotowire's weekly table and therefore
+# absent from the Waiver Wire's pool entirely -- while FPL had already cleared
+# him (`status` 'a', chance 100, `news` ""). There was nothing to rank and no
+# news to flag.
+#
+# `scripts/common/return_watch.py` is the detector. Pedigree is a points-per-start
+# **rate**; whether he walks back into the XI is a separate **gate** on his start
+# share. Multiplying the two was tried and is wrong: this season's share is over
+# elapsed gameweeks and a prior season's is over all 38, and mixing those
+# denominators systematically buries the prior rung (measured: it took the live
+# board to zero rows).
+
+#: Start share required in the reference season to assume he gets his place back.
+#: Gating on it rather than multiplying by it is what prunes the small-sample
+#: tail a pure rate admits -- Tomiyasu's 7.00 points per start off 10 starts
+#: outranked every genuine elite defender until this gate removed him.
+RETURN_WATCH_MIN_ROLE = float(os.getenv("FPL_RETURN_WATCH_MIN_ROLE", "0.60"))
+
+#: He is not playing *now*: starts per elapsed gameweek at or below this. A rate,
+#: so it is scale-free, mirroring `projection_engine.DEPUTY_MAX_START_RATE`.
+RETURN_WATCH_MAX_START_RATE = float(
+    os.getenv("FPL_RETURN_WATCH_MAX_START_RATE", "0.25"))
+
+#: Soft floor on the pedigree percentile -- the positional median starter.
+#: Deliberately **not** a top-decile bar: the percentile is measured against
+#: established starters, where a top-decile defender is Gabriel at 6.97 points a
+#: start, so the realistic ceiling for a returning player is ~0.78 and any bar
+#: at 0.80 or above empties the board. A hard 0.70 was also rejected on
+#: measurement -- it would have excluded Saliba at 0.748. The section ranks and
+#: truncates instead; this only drops the tail.
+RETURN_WATCH_MIN_PCTILE = float(os.getenv("FPL_RETURN_WATCH_MIN_PCTILE", "0.50"))
+
+#: How many rows the Returning section shows.
+RETURN_WATCH_LIMIT = _env_int("FPL_RETURN_WATCH_LIMIT", 10)
+
+#: Gameweeks ahead a *stated* return date must fall within to count as imminent.
+RETURN_WATCH_HORIZON = _env_int("FPL_RETURN_WATCH_HORIZON", 3)
+
+#: Below this gameweek the detector abstains entirely. At GW1 every player has
+#: nothing played, so "he is not playing" is not a statement about anybody --
+#: and an empty board with a stated reason is honest where a silent all-clear is
+#: not. The `STATUS_UNKNOWN` discipline from `week_check`.
+RETURN_WATCH_MIN_GWS = _env_int("FPL_RETURN_WATCH_MIN_GWS", 3)
+
+#: Minimum established starters at a position before a percentile over them means
+#: anything. "Elite among four players" is not a percentile, and a gate keyed on
+#: a cohort some frames cannot fill is the silent failure this codebase has now
+#: paid for five times.
+RETURN_WATCH_MIN_REFERENCE = _env_int("FPL_RETURN_WATCH_MIN_REFERENCE", 5)
+
+#: Starts needed in a prior season for its rate to be usable (rung 2), and in
+#: *this* season for a player to enter the reference pool (as a share of elapsed
+#: gameweeks). The reference bar is higher than the candidate bar on purpose:
+#: `team_strength.attach_reference_pps` does the same thing, because a rate from
+#: a handful of starts is noise and noise in the *denominator* reprices everyone.
+RETURN_WATCH_PRIOR_MIN_STARTS = _env_int("FPL_RETURN_WATCH_PRIOR_MIN_STARTS", 10)
+RETURN_WATCH_REF_MIN_START_RATE = float(
+    os.getenv("FPL_RETURN_WATCH_REF_MIN_START_RATE", "0.50"))
+
 # ----- Premier League content API -----
 # premierleague.com's own CMS, public and keyless. It carries the weekly
 # predicted-lineups article (whose XIs are PNG graphics, not text) and the

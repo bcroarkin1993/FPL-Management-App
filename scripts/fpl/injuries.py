@@ -12,14 +12,12 @@ from scripts.common.injury_helpers import (
     ABSENCE_FROM_NEWS,
     ABSENCE_NONE,
     absence_estimate,
+    is_departed,
 )
 
 _logger = get_logger("fpl_app.injuries")
 
 # FPL element_type -> position letter
-#: News text meaning the player has gone, not that he is hurt. Matched on the
-#: prose because `status` cannot tell a departure from an injury: both are 'u'.
-_DEPARTED_RE = re.compile(r"has joined|has left|on loan", re.I)
 
 _POS_LETTER = {1:"G", 2:"D", 3:"M", 4:"F"}
 
@@ -237,7 +235,7 @@ def render_injuries_tab(key_prefix: str = "inj"):
         # reports a transferred player as "~5 GW" -- which reads as a man due
         # back next month. This is the same distinction `transfer_risk` draws:
         # the line is Premier League membership, not a return date.
-        if _DEPARTED_RE.search(_news):
+        if is_departed(_news):
             _est.append("season"); _src.append("left the club")
             continue
         if source == ABSENCE_NONE or not weeks:

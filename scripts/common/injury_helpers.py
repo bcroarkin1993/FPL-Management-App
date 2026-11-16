@@ -192,6 +192,59 @@ ABSENCE_NONE = "none"               # fit, or nothing to go on
 ABSENCE_STATED_SOURCES = (ABSENCE_FROM_NEWS,)
 
 
+#: Bootstrap ``news`` phrasings that mean "he has left", not "he is hurt".
+#:
+#: ``status`` is ``'u'`` for a loan, a permanent exit **and** a merely
+#: unavailable player, so the code alone cannot tell a departure from an injury
+#: -- and the difference matters: a chance bucket reported a transferred player
+#: as "~5 GW", which reads as a man due back next month. The line being drawn is
+#: membership of the league, which is why `transfer_risk` draws it too.
+#:
+#: Two copies of this predicate had grown up independently, in `injuries.py` and
+#: `waiver_core.py`, and they disagreed: one matched ``loan`` anywhere while the
+#: other required ``on loan``, and only one caught the bootstrap's bare "not
+#: included in squad". Consolidated here because the returning-elite watch
+#: depends on it being right: **7 of 18 raw candidate rows were departures**, and
+#: every one of them reads as a plausible injury row.
+#:
+#: `transfer_risk._JOINED_RE` is deliberately *not* folded in. It looks similar
+#: and does a different job -- it captures *which club* a player joined, bounded
+#: on both sides so a headline's trailing clause is not swallowed. Replacing it
+#: with a boolean predicate would throw the destination away, and the
+#: destination is the whole transfer-risk model.
+# ``loan`` is matched as a bare substring rather than a whole word, which is
+# the broadest of the three patterns this replaces (``waiver_core``'s). It
+# costs nothing: no English word contains "loan" but the loan family itself,
+# and narrowing it to ``\\bloan\\b`` silently dropped "Loaned out".
+_DEPARTURE_PATTERN = r"has joined|has left|not included in squad|loan"
+_DEPARTED_RE = re.compile(_DEPARTURE_PATTERN, re.IGNORECASE)
+
+
+def is_departed(news) -> bool:
+    """Does this ``news`` text say the player has left the league?
+
+    Prose rather than ``status``, because ``'u'`` covers a departure and an
+    ordinary absence alike. A missing or non-string value is not a departure --
+    the safe direction, since a false positive *hides* a player who is merely
+    injured.
+    """
+    if news is None:
+        return False
+    try:
+        if pd.isna(news):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return bool(_DEPARTED_RE.search(str(news)))
+
+
+def departed_mask(news) -> pd.Series:
+    """``is_departed`` over a Series, as a boolean Series aligned to its index."""
+    s = pd.Series(news)
+    return s.astype("string").fillna("").str.contains(
+        _DEPARTURE_PATTERN, case=False, na=False, regex=True)
+
+
 def absence_estimate(news, chance, status, deadlines=None, now=None):
     """``(gameweeks_missed, source)`` -- the estimate and where it came from.
 

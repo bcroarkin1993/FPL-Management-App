@@ -38,6 +38,7 @@ from scripts.common.data_validation import (
     check_ffp_horizon,
     check_chip_timing,
     check_chip_definitions,
+    check_return_watch,
 )
 
 
@@ -2378,3 +2379,121 @@ class TestCheckWeekPlan:
         assert any(i.severity == "warning" and "omits" in i.message
                    for i in issues)
         assert not any(i.severity == "error" for i in issues)
+
+
+# =============================================================================
+# check_return_watch
+# =============================================================================
+
+class TestCheckReturnWatch:
+    """The returning-elite board carries no projection to corroborate it.
+
+    Every row is a player the rest of the app rates at zero, by construction --
+    so nothing downstream can sanity-check these numbers and the structural
+    claims are the only ones worth asserting. Each fixture below is a real row
+    measured off the live pool on 2026-11-15.
+    """
+
+    @staticmethod
+    def _board(**overrides):
+        row = dict(Display_Name="William Saliba", Pedigree=0.75, Role=0.79,
+                   Band="cleared", Return_GW=11, Draft_State="a",
+                   Pedigree_Rung="prior_season", News="",
+                   Evidence={"rung": "prior_season", "season": "2025/26"})
+        row.update(overrides)
+        return pd.DataFrame([row])
+
+    def test_a_real_board_is_clean(self):
+        assert check_return_watch(self._board(), current_gw=11) == []
+
+    def test_an_empty_board_is_not_a_finding(self):
+        """The ordinary state for most gameweeks; the detector states its reason."""
+        assert check_return_watch(pd.DataFrame(), current_gw=11) == []
+
+    def test_an_absent_board_is_a_warning_not_an_error(self):
+        issues = check_return_watch(None, current_gw=11)
+        assert [i.severity for i in issues] == ["warning"]
+
+    def test_an_owned_player_is_an_error(self):
+        """The board's whole purpose is players you could claim.
+
+        This is also the shape a code-keyed join produces when fed element ids
+        from the wrong API space -- 64 of 669 resolve to a real but wrong player.
+        """
+        issues = check_return_watch(self._board(Draft_State="o"), current_gw=11)
+        assert any(i.severity == "error" and "claimable" in i.message
+                   for i in issues)
+
+    def test_a_departed_player_is_an_error(self):
+        """7 of 18 raw live candidate rows had left the league."""
+        issues = check_return_watch(
+            self._board(Display_Name="Ollie Watkins",
+                        News="Has joined Al Hilal permanently"), current_gw=11)
+        assert any(i.severity == "error" and "left the league" in i.message
+                   for i in issues)
+
+    @pytest.mark.parametrize("col,value", [("Pedigree", 1.4), ("Pedigree", -0.1),
+                                           ("Role", 1.2), ("Role", -0.5)])
+    def test_a_share_outside_zero_to_one_is_an_error(self, col, value):
+        issues = check_return_watch(self._board(**{col: value}), current_gw=11)
+        assert any(i.severity == "error" and col in i.message for i in issues)
+
+    def test_an_imminent_row_with_no_return_gameweek_is_an_error(self):
+        issues = check_return_watch(
+            self._board(Band="imminent", Return_GW=None), current_gw=11)
+        assert any(i.severity == "error" and "no return gameweek" in i.message
+                   for i in issues)
+
+    def test_a_return_gameweek_already_past_is_an_error(self):
+        """A date that has elapsed means he is back, not that he is out."""
+        issues = check_return_watch(
+            self._board(Band="imminent", Return_GW=8), current_gw=11)
+        assert any(i.severity == "error" and "already past" in i.message
+                   for i in issues)
+
+    def test_an_unrecognised_band_is_an_error(self):
+        issues = check_return_watch(self._board(Band="probably"), current_gw=11)
+        assert any(i.severity == "error" and "band" in i.message.lower()
+                   for i in issues)
+
+    @pytest.mark.parametrize("evidence", [None, {}])
+    def test_a_row_with_no_evidence_is_an_error(self, evidence):
+        issues = check_return_watch(self._board(Evidence=evidence), current_gw=11)
+        assert any(i.severity == "error" and "evidence" in i.message
+                   for i in issues)
+
+    def test_a_thin_reference_cohort_is_an_error(self):
+        """"Elite among four players" is not a percentile.
+
+        The silent-gate failure this codebase has paid for five times: every
+        number it produces still lands inside [0, 1].
+        """
+        issues = check_return_watch(self._board(), current_gw=11,
+                                    reference_counts={"G": 2, "D": 88},
+                                    min_reference=5)
+        assert any(i.severity == "error" and "established starter" in i.message
+                   for i in issues)
+        assert not any("at D" in i.message for i in issues)
+
+    def test_a_position_nobody_plays_is_not_a_finding(self):
+        """Zero is "we did not look there", not a cohort of zero."""
+        issues = check_return_watch(self._board(), current_gw=11,
+                                    reference_counts={"G": 0}, min_reference=5)
+        assert not any("established starter" in i.message for i in issues)
+
+    def test_computing_it_too_early_is_a_warning(self):
+        issues = check_return_watch(self._board(), current_gw=1, min_gws=3)
+        assert any(i.severity == "warning" and "before GW3" in i.message
+                   for i in issues)
+
+    def test_one_rung_carrying_every_row_is_a_warning(self):
+        """What a rung silently ceasing to contribute looks like.
+
+        Measured 15 of 15 rows before the mutually-exclusive gate was found.
+        """
+        board = pd.concat([self._board(Display_Name="A"),
+                           self._board(Display_Name="B"),
+                           self._board(Display_Name="C")], ignore_index=True)
+        issues = check_return_watch(board, current_gw=11)
+        assert any(i.severity == "warning" and "prior_season rung" in i.message
+                   for i in issues)

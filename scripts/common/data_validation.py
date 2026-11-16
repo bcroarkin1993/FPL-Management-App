@@ -58,6 +58,7 @@ __all__ = [
     "check_chip_timing",
     "check_chip_definitions",
     "check_week_plan",
+    "check_return_watch",
     "format_issues",
     "raise_on_error",
 ]
@@ -4170,5 +4171,186 @@ def check_week_plan(items: Sequence[Any],
             "The checklist omits %s." % ", ".join(missing),
             "Those two frame everything below them; an omitted row is less "
             "honest than an unknown one."))
+
+    return issues
+
+
+def check_return_watch(watch: Optional[pd.DataFrame],
+                       current_gw: Optional[int] = None,
+                       reference_counts: Optional[Dict[str, int]] = None,
+                       min_reference: int = 5,
+                       min_gws: int = 3,
+                       claimable_states: Sequence[str] = ("a", "l")) -> List[Issue]:
+    """Is this returning-elite board one a manager could act on?
+
+    The board exists because a player returning from a long absence is invisible
+    to every score the app has -- so by construction its rows carry *no*
+    corroborating projection, and nothing downstream can sanity-check them. That
+    makes the structural claims the only ones worth asserting, and each of the
+    errors below is a failure whose rows would otherwise read as entirely
+    plausible:
+
+    * A row that is **not claimable** defeats the board's whole purpose. Showing
+      an owned player as a target is the failure `_available_from_projections`
+      already guards the Waiver Wire against, and it is the shape a code-keyed
+      join silently produces when it is fed element ids from the wrong API
+      space -- 64 of 669 of which resolve to a real but wrong player.
+    * A **departed** player is the single likeliest false positive. `status` is
+      `'u'` for a loan, a permanent exit and an ordinary absence alike, so a
+      departure can only be told from the prose -- and measured on the live
+      pool, **7 of 18 raw candidate rows had left the league**, every one of
+      them reading as a perfectly ordinary injury row.
+    * A percentile or start share **outside [0, 1]** means the reference pool or
+      the denominator moved, which reprices the whole board at once.
+    * An **`imminent` band with no return gameweek**, or one already in the
+      past, is the band asserting precisely the fact it is named for and not
+      having it. A stale date is how a player written off for a season turned
+      out to be available all along.
+    * A **reference cohort too thin to percentile against** is the silent-gate
+      failure this codebase has now paid for five times: "elite among four
+      players" is not a percentile, and every number it produces still lands
+      inside [0, 1].
+
+    An **empty board is not a finding** -- it is the expected state for most
+    gameweeks, and the detector states its own reason for being empty. Likewise
+    a board computed before `min_gws` is a warning rather than an error: it
+    should have abstained, but the numbers it produced are merely weak, not
+    wrong.
+    """
+    check = "return_watch"
+    issues: List[Issue] = []
+
+    if current_gw is not None:
+        try:
+            if int(current_gw) < int(min_gws):
+                issues.append(Issue(
+                    check, "warning",
+                    "Board computed at GW%s, before GW%s." % (current_gw, min_gws),
+                    "Too early for a start rate to mean anything -- the detector "
+                    "should abstain and say so rather than rank on noise."))
+        except (TypeError, ValueError):
+            pass
+
+    if watch is None:
+        return issues + [Issue(check, "warning", "No returning-elite board to check.",
+                               "An absent board and an empty one are different; "
+                               "the detector returns an empty frame with a reason.")]
+
+    for pos, n in sorted((reference_counts or {}).items()):
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            continue
+        if 0 < n < int(min_reference):
+            issues.append(Issue(
+                check, "error",
+                "Only %d established starter(s) at %s to percentile against." % (n, pos),
+                "A pedigree percentile over a handful of players is not a "
+                "percentile. Widen the reference or drop the position."))
+
+    if len(watch) == 0:
+        return issues
+
+    def _num(col):
+        if col not in watch.columns:
+            return pd.Series(dtype="float64")
+        return pd.to_numeric(watch[col], errors="coerce")
+
+    for col in ("Pedigree", "Role"):
+        vals = _num(col)
+        bad = vals[vals.notna() & ((vals < 0) | (vals > 1))]
+        if len(bad):
+            issues.append(Issue(
+                check, "error",
+                "%d row(s) have %s outside [0, 1] (worst %.3f)."
+                % (len(bad), col, bad.abs().max()),
+                "Both are shares. Out of range means the reference pool or the "
+                "denominator changed shape, which reprices every row at once."))
+        if col in watch.columns and not vals.notna().any():
+            issues.append(Issue(
+                check, "error", "No row carries a %s." % col,
+                "The board ranks on Pedigree and gates on Role; neither can be "
+                "absent on every row."))
+
+    if "Draft_State" in watch.columns:
+        states = watch["Draft_State"].astype("string").str.lower()
+        bad = watch[~states.isin([str(s).lower() for s in claimable_states])]
+        if len(bad):
+            names = ", ".join(str(n) for n in bad.get("Display_Name", bad.index)[:4])
+            issues.append(Issue(
+                check, "error",
+                "%d row(s) are not claimable (states %s): %s"
+                % (len(bad), sorted(set(states[~states.isin(
+                    [str(s).lower() for s in claimable_states])].dropna())), names),
+                "The board's entire purpose is players you could claim. An owned "
+                "player here is the id-space trap: a Draft element id read as a "
+                "Classic one resolves to a real but wrong player."))
+
+    if "News" in watch.columns or "news" in watch.columns:
+        news_col = "News" if "News" in watch.columns else "news"
+        gone = watch[watch[news_col].astype("string").fillna("").str.contains(
+            "has joined|has left|not included in squad|loan", case=False, na=False)]
+        if len(gone):
+            issues.append(Issue(
+                check, "error",
+                "%d row(s) have left the league: %s" % (
+                    len(gone), ", ".join(str(n) for n in
+                                         gone.get("Display_Name", gone.index)[:4])),
+                "A departure is not an absence. Filter on the news prose -- "
+                "`status` cannot tell the two apart, and 7 of 18 live candidate "
+                "rows were departures."))
+
+    if "Band" in watch.columns:
+        imminent = watch[watch["Band"].astype("string") == "imminent"]
+        ret = pd.to_numeric(imminent.get("Return_GW"), errors="coerce") \
+            if len(imminent) else pd.Series(dtype="float64")
+        if len(imminent) and ret.isna().any():
+            issues.append(Issue(
+                check, "error",
+                "%d 'imminent' row(s) state no return gameweek." % int(ret.isna().sum()),
+                "The band means a return date was stated. Without one it is a "
+                "'watch' row, and claiming otherwise invents the fact."))
+        if current_gw is not None and len(ret):
+            try:
+                stale = ret[ret.notna() & (ret < int(current_gw))]
+            except (TypeError, ValueError):
+                stale = pd.Series(dtype="float64")
+            if len(stale):
+                issues.append(Issue(
+                    check, "error",
+                    "%d return gameweek(s) are already past (earliest GW%d, now GW%s)."
+                    % (len(stale), int(stale.min()), current_gw),
+                    "A date that has elapsed means he is back, not that he is "
+                    "out -- the `_resolve_year` failure seen from the other side."))
+
+        unknown = set(watch["Band"].astype("string").dropna()) - {
+            "cleared", "imminent", "watch"}
+        if unknown:
+            issues.append(Issue(
+                check, "error", "Unrecognised band(s): %s" % sorted(unknown),
+                "Each band is a different claim about how imminent the return "
+                "is; an unknown one cannot be rendered honestly."))
+
+    if "Evidence" in watch.columns:
+        blank = watch[watch["Evidence"].isna()
+                      | watch["Evidence"].astype("string").isin(["", "{}"])]
+        if len(blank):
+            issues.append(Issue(
+                check, "error",
+                "%d row(s) carry no evidence." % len(blank),
+                "These rows have no projection to corroborate them, so the "
+                "evidence is the only thing a reader can disagree with. A row "
+                "that cannot explain itself should not be on the page."))
+
+    if "Pedigree_Rung" in watch.columns and len(watch) >= 3:
+        rungs = set(watch["Pedigree_Rung"].astype("string").dropna())
+        if len(rungs) == 1:
+            issues.append(Issue(
+                check, "warning",
+                "Every row's pedigree came from the %s rung." % rungs.pop(),
+                "Plausible on a small board, but it is also what one rung "
+                "silently ceasing to contribute looks like -- the gate that "
+                "could never fire, which measured 15 of 15 rows before it was "
+                "found."))
 
     return issues

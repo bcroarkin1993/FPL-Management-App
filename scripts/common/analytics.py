@@ -1494,11 +1494,32 @@ def blend_multi_gw_projections(
     return result
 
 
+#: The column `merge_season_projections` writes Rotowire's published points-per-90
+#: into, beside the season total.
+#:
+#: The total is a *forecast of accumulation* -- Rotowire builds it as
+#: `PP/90 x expected 90s`, and the implied nineties run 4.4 to 38.1 across the
+#: table -- so it bakes in a minutes assumption and systematically buries anyone
+#: whose minutes were in doubt when it was written. Measured across the players
+#: the returning-elite watch exists for, rank correlation against their real
+#: prior-season points per start:
+#:
+#:     Rotowire `Points` (the total this merge has always carried)   0.101
+#:     Rotowire `PP/90`  (the rate, published alongside, discarded)  0.602
+#:
+#: Ekitike's 6.01 PP/90 sits in the table's *bottom decile* on `Points` (33.40).
+#: The rate was being downloaded every two hours and thrown away; carrying it is
+#: one extra assignment in the claim loop below, and it reads NaN for every
+#: caller that does not ask for it.
+SEASON_RATE_COL = "Season_PP90"
+
+
 def merge_season_projections(
     player_df: pd.DataFrame,
     season_rankings_df: Optional[pd.DataFrame],
     output_col: str = "SeasonProjection",
     stats: Optional[dict] = None,
+    rate_col: Optional[str] = SEASON_RATE_COL,
 ) -> pd.DataFrame:
     """Merge Rotowire season-long projected points onto a player DataFrame.
 
@@ -1510,12 +1531,19 @@ def merge_season_projections(
         season_rankings_df: Rotowire season rankings with Player, Team, Points.
         output_col: Column name for the merged season projection.
         stats: Optional dict, populated with matched/total/rate/tiers.
+        rate_col: Column to write Rotowire's published `PP/90` into, or None to
+            skip it. See `SEASON_RATE_COL` -- the total and the rate rank the
+            same players very differently, and only the rate is a pedigree
+            signal. Written from the *same* claimed reference row as
+            `output_col`, so the two can never describe different players.
 
     Returns:
-        player_df with output_col added.
+        player_df with output_col added (and rate_col, where published).
     """
     result = player_df.copy()
     result[output_col] = np.nan
+    if rate_col:
+        result[rate_col] = np.nan
 
     if season_rankings_df is None or season_rankings_df.empty:
         return result
@@ -1546,8 +1574,13 @@ def merge_season_projections(
         source_name="season projections",
         stats=stats,
     )
+    has_rate = bool(rate_col) and "PP/90" in sr.columns
+    if has_rate:
+        sr["PP/90"] = pd.to_numeric(sr["PP/90"], errors="coerce")
     for idx, ref_idx in claims.items():
         result.at[idx, output_col] = sr.at[ref_idx, "Points"]
+        if has_rate:
+            result.at[idx, rate_col] = sr.at[ref_idx, "PP/90"]
     matched = len(claims)
 
     issues = check_merge_match_rate(matched, len(sr), "season projections -> %s" % output_col,

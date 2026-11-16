@@ -3591,6 +3591,190 @@ Live at GW11: nine rows, three flagged (1 out and 1 doubtful, an XI swap worth
 +5.5, the unchecked claim), ~9s cold and cached for 120s; the gated search takes
 16.5s and returned "+1.2 — not worth a claim".
 
+### Returning from injury — the player the app could not see at all
+
+`scripts/common/player_history.py` (prior seasons), `return_watch.py` (the
+detector), `waiver_core.return_watch()` (the adapter),
+`waiver_wire._render_returning_section()`, `check_return_watch()`.
+
+**Reported from the app: William Saliba was claimed off waivers by a rival while
+returning from a season-long injury, and the app had said nothing.** Confirmed in
+the league's own transaction log -- GW10, **waiver priority 1** -- and three days
+later the same manager took Hugo Ekitike in free agency. Those are the #1 and #7
+names this detector produces, so a rival was already running the play by hand.
+
+**The app was not ranking these players badly. It could not see them.** Measured
+live at GW10:
+
+| Signal | Saliba |
+|---|---|
+| `status` / `chance_of_playing` / `news` | `a` / `100` / `""` -- FPL cleared him in **July** |
+| `minutes`, `starts`, `total_points` | 0, 0, 0 |
+| `ep_next`, `form`, `points_per_game` | 0.0, 0.0, 0.0 |
+| Rotowire's weekly 220-row table | **absent**, as were all 8 candidates |
+| `board.available` | **absent**, because it is built from that table |
+| `SeasonProjection` | 86.88 -- the Top-400's *median* |
+
+Four consequences, each of which shaped the design:
+
+1. **It cannot be a re-ranking of the Waiver Wire.** `_available_from_projections`
+   builds the pool from the weekly projections, so these players are not ranked
+   low, they are not on the board. The detector reads `board.reference` -- the
+   whole ~670-row pool -- instead.
+2. **No news-based or change-detecting trigger would ever have fired.** His
+   `news` had been empty since 23 July. The trigger has to be a *standing state*
+   test, not a transition.
+3. **The app had no previous-season data at all.** `grep history_past` returned
+   nothing. `element-summary` has published it all along.
+4. **The pedigree signal the app does use is the wrong one, and the right one was
+   already being scraped and discarded.** Rank correlation against measured
+   prior-season points per start, within this cohort:
+
+   | | rank corr |
+   |---|---|
+   | Rotowire `Points` (the season **total** `season_quality` percentiles) | **0.101** |
+   | Rotowire `PP/90` (the **rate**, in the same table, dropped by the merge) | **0.602** |
+
+   The total is built as `PP/90 x expected 90s`, so it bakes in a minutes
+   assumption and inverts: Ekitike's 6.01 PP/90 sits in the table's **bottom
+   decile** on `Points` (33.40), and Mudryk's 5.22 at the 30th percentile.
+   `merge_season_projections` now carries `PP/90` as `Season_PP90` from the same
+   claimed reference row, so the two can never describe different players.
+
+**FIFA ratings were considered and rejected.** No public or licensed API;
+scraping SoFIFA would be the app's only non-football-data source; and a rating is
+a game designer's opinion in the **wrong currency** -- FPL pays defenders for
+clean sheets, so an elite centre-back on a leaky defence scores badly, and
+`projection_accuracy` could never score it afterwards. Two measured alternatives
+already existed in FPL points per start, one of them already downloaded hourly
+and thrown away.
+
+#### Pedigree is a rate; role is a gate
+
+Settled by measurement. Three cuts were tried and the first two produced boards
+that looked entirely plausible:
+
+| Cut | Saliba | Why it is wrong |
+|---|---|---|
+| rate, reference scoped to the same rung | 0.92 | rung 2 only applies to players who are *not playing*, so the reference is selected on the very thing being measured -- "elite among benchwarmers". 2 rows. |
+| `rate x start share`, pooled reference | 0.77, **0 rows** | this season's share is over elapsed gameweeks and a prior season's over all 38; mixing the denominators buries the prior rung |
+| **rate, reference = established starters, role as a gate** | **0.75, 3rd of 18** | small-sample tail pruned by the gate |
+
+Multiplying by the share is therefore rejected outright and a test pins it. The
+gate prunes exactly the noise a bare rate admits: Tomiyasu's 7.00 a start off 10
+starts outranked every genuine elite defender until it was added. Afterwards the
+top of the defender list reads Gabriel, Guehi, Van Dijk, Senesi, Tarkowski.
+
+**The rate ladder, best rung first** -- and all three rungs are **points per
+start**, which is what makes one shared reference legitimate where
+`_start_consistency` needs a per-rung one:
+
+| Rung | Source | Case | Live |
+|---|---|---|---|
+| `this_season` | `total_points / starts`, >= 4 starts | hurt mid-season (Semenyo, 6.17) | 2 rows |
+| `prior_season` | `history_past`, most recent season with >= 10 starts | out all season (**Saliba**, 4.57) | 16 rows |
+| `preseason_rate` | Rotowire `PP/90` | no PL history -- new signings, promoted clubs | fallback |
+
+Rung 2 takes the **most recent** qualifying season, not the best: a four-year-old
+peak is not pedigree. Note `starts` is 0 for every season before 2022/23 because
+FPL did not track it, so those never qualify -- a `minutes` fallback would be
+wrong, and a live test pins that recent seasons still publish it.
+
+**The rate and the role may come from different rungs**, recorded in `Role_Src`.
+A player hurt in GW3 has started 3 of 10 elapsed gameweeks, which reads as a
+fringe player when the absence is the reason -- so the role takes the most
+favourable rung, whose only failure mode is losing a real candidate.
+`prior_season_rate` keeps `Prior_PPS` and `Prior_Role` separate for the same
+reason. Rung 3's role is the nineties Rotowire's own two columns imply
+(`Points / PP90 / 38`, live 4.4 to 38.1), which is the only role signal a
+preseason table carries.
+
+**The reference is established starters** -- rung-1 players with `starts >= 0.5 x
+elapsed`. Pooling everyone with four starts let a hot streak define the ceiling
+(Guimaraes 7.00 off 4 starts) and a genuine elite defender then landed at the
+77th percentile. The same asymmetry `attach_reference_pps` applies, because noise
+in the *denominator* reprices everyone. Live that is 21/88/100/21 at G/D/M/F.
+
+#### The gates, and the one that could never fire
+
+- **Not playing now** is two shapes, and the season-long rate caught only one.
+  `starts / elapsed <= 0.25` finds the absentee; **`OUT_OF_SQUAD_STATUSES` finds
+  the regular who got hurt**, and without that leg rung 1 was unreachable -- it
+  needs four starts while 0.25 x 10 elapsed allows two, so the two conditions
+  were mutually exclusive until GW17 and **15 of 15 live rows came from last
+  season**. `d` stays excluded for the reason it always was: a doubtful player
+  who has started every gameweek is fully visible to every score the app has,
+  and admitting him turns this into a list of the week's knocks (measured, the
+  `chance < 100` version admitted 17 players of whom 13 were exactly that).
+- **Was a regular**: `role >= 0.60`.
+- **Claimable**: element state `a` or `l` only, `l` flagged as claimable at the
+  next waiver. Crossed on **`Player_Code`** via `_code_states()`, never an
+  element id -- `element-status` is Draft-keyed and the pool is Classic-keyed,
+  and 64 of 669 disagree, every collision landing on a real but wrong player.
+- **Not departed**: **7 of 18 raw candidate rows had left the league** (Watkins,
+  Digne, Woltemade, Chalobah, Romero, Ogbene, Richarlison), every one reading as
+  an ordinary injury row. `injury_helpers.is_departed()` is now the one
+  predicate; it consolidates the two divergent copies in `injuries.py` and
+  `waiver_core.py` (which disagreed on `on loan` versus `loan`, and only one
+  caught "not included in squad"). `transfer_risk._JOINED_RE` is deliberately
+  **not** folded in -- it captures *which club*, and a boolean would throw the
+  destination away.
+- **Abstain before GW3.** At GW1 nobody has played, so "he is not playing" says
+  nothing about anybody, and the reference pool does not exist yet. It returns an
+  empty frame **with a stated reason** -- the `week_check.STATUS_UNKNOWN`
+  discipline, because "nothing to do" and "we could not check" are opposite
+  claims that render identically.
+
+#### Ranked, not thresholded
+
+An absolute top-decile bar yields **zero rows**: the percentile is against
+established starters, where a top-decile defender is Gabriel at 6.97 a start, so
+this cohort's realistic ceiling is ~0.78. A hard 0.70 was rejected too -- it
+would have **excluded Saliba at 0.748**, missing the reported case by a rounding
+margin. The section shows the top `RETURN_WATCH_LIMIT` (10) by pedigree above a
+soft floor at the positional median starter, which keeps Taylor Harwood-Bellis
+(0.07) out. **Never sorted against the Hold or Rent lanes**, which carry points
+per gameweek where this carries a percentile.
+
+**Every row states its evidence** -- the rate and its rung, the role and its
+season, the band, the return gameweek where one is stated. These rows have no
+projection to corroborate them, so the evidence is the only thing a reader can
+disagree with, and `check_return_watch()` errors on a row that carries none.
+
+Three bands, because they are three different claims: `cleared` (FPL rates him
+fit while he still has not featured -- the signal nothing else in the app can
+see, 14 live), `imminent` (a date the *news* states, within 3 gameweeks, via
+`news_stated_games_to_miss` so a chance bucket cannot invent one, 2 live), and
+`watch` (out, no date, 2 live).
+
+**Live effect: `Proj`, `Proj_Start`, `Start_Pct` and `Proj_Next3` are
+byte-identical over all 672 players, and both waiver lanes return identical
+suggestions.** This adds a surface and moves no number. The only behaviour change
+elsewhere is two rows on the Injuries page -- Dovin and Richarlison, "not
+included in squad" -- which now read "season / left the club" instead of the
+chance bucket's "~5 GW", the exact failure that paragraph already documents.
+
+It costs one pooled `history_past` fetch, ~3.4s cold behind a 24-hour cache
+(`history_past` is a completed season and cannot change) and nothing warm, on top
+of a board the page has already built. The section is separately guarded, so a
+failure in the second data source costs the section rather than the page.
+
+Risk accepted: a dependency on `history_past` and on `PP/90`, both of which fail
+to an empty rung rather than a wrong number. `tests/live/test_return_watch.py`
+fails if `history_past` stops carrying `starts` for recent seasons, if Rotowire
+stops publishing `PP/90`, if `Points` and `PP/90` stop implying a sane number of
+nineties, if a departed or owned player reaches the board, or if an empty board
+records no reason.
+
+**Deliberately not built**: Discord alerting and a Draft My Week row, both left
+out at the user's direction. `waiver_alerts.py` already has the cron, the mention
+plumbing and once-per-gameweek state, and `DRAFT_ITEM_ORDER` has room for a
+`returning` row; the detector is a pure function, so neither needs it reworked.
+Giving pedigree a weight in `ROS` is also out: nothing in the app scores ROS
+after the fact, and Phase 4's discipline is no reweighting without a measurement
+-- but `Season_PP90` and a per-start prior-season rate now exist on a frame,
+which is what that work was blocked on.
+
 ### Caching
 
 Two-tier caching strategy for fast page navigation:
@@ -3652,6 +3836,7 @@ to import from GitHub Actions.
 | `check_ros_terms()` | A weighted ROS term that has quietly stopped being a percentile. Both defects it was written for were invisible in any single value -- every number stayed inside [0,1] and looked right -- and showed up only as a term with **no spread**, which is the `check_team_strength` "every team scores exactly 50" signature one model over. Also catches a crossed scale: a raw `starts` count or a 0-100 `FFP_LongStart` reaching a 0-1 term |
 | `check_mini_league_ownership()` | A league ownership table computed over the wrong denominator. Ownership is a *share*, so resolving two of twelve rival squads still renders a full table of plausible percentages. Anchored on an exact invariant — `sum(Owners) == 15 x n_squads` — plus the un-normalised `my-team` signature (every multiplier 1, caught as a flat column since the *total* varies legitimately across chips and autosubs). Note EO's ceiling is **300**, not 100 |
 | `check_league_trade_config()` | The league's trade rules changing shape — `league.trades` vanishing or coming back null, `trades_time_for_approval` ceasing to be a bool. Both make the Trade Analyzer fall back to "assume approval is required", which is safe but is no longer a statement about *this* league and looks identical on screen. An **unrecognised** trades code is only a warning: three of the four codes are genuinely unknown, and a check that fires on expected ignorance gets muted |
+| `check_return_watch()` | A returning-elite board a manager could not act on. Every row is a player the rest of the app rates at **zero** by construction, so nothing downstream can corroborate it and the structural claims are the only ones worth asserting: an **owned** player (the id-space trap), a **departed** one (7 of 18 raw live rows, each reading as an ordinary injury), a share outside [0,1], an `imminent` band with no return gameweek or one already past, a reference cohort too thin to percentile against, and a row carrying no evidence. An empty board is **not** a finding — it is the expected state most weeks, and the detector states its own reason |
 | `check_week_plan()` | A pre-deadline checklist that reports an all-clear it never derived. Every other check here catches a wrong *number*; this one catches a right-looking **absence** of one, because "nothing to do this week" and "we could not check" render identically and are opposite claims — so an `ok` whose item recorded no `evidence` is an error. Also a past deadline presented as the next one, a captain change recommended against last deadline's armband, and a full row of green ticks over a squad that is not a legal fifteen |
 
 Ranges are deliberately wide — these are "this cannot be right" boundaries, not
@@ -3811,6 +3996,9 @@ Score = α × 1GW + (1-α) × ROS
 | `_start_consistency()` | `scripts/common/analytics.py` | The long-run start rate as a 0-1 Series, on the best rung shared by frame **and** reference |
 | `_referenced_percentile()` | `scripts/common/analytics.py` | `positional_percentile` where a useless reference is a *declared* neutral rather than a silent within-frame min-max |
 | `_deputy_start_weeks()` | `scripts/common/projection_engine.py` | Weeks a stand-in keeps starting, so his horizon stops where the incumbent's stated return begins |
+| `build_return_watch()` | `scripts/common/return_watch.py` | Claimable players not playing now who were productive regulars — the board Saliba was invisible to |
+| `prior_season_rate()` / `fetch_history_past()` | `scripts/common/player_history.py` | The app's first previous-season data: points per start and start share from `element-summary`'s `history_past`, keyed on `Player_Code` |
+| `is_departed()` / `departed_mask()` | `scripts/common/injury_helpers.py` | Has he left the league rather than being hurt — one predicate, where two divergent copies had grown up |
 | `absence_estimate()` | `scripts/common/injury_helpers.py` | `(gameweeks, source)` — the absence estimate *and* whether the news stated it or a bucket inferred it |
 | `news_stated_games_to_miss()` | `scripts/common/injury_helpers.py` | Gameweeks missed only where the text states a duration — the gate for asserting anything about future gameweeks |
 | `_attach_minutes_dependency()` | `scripts/draft/waiver_wire.py` | Whose absence each available player is starting because of, with the provenance of the estimate |
@@ -5832,6 +6020,7 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 
 | Task | Status | Notes |
 |------|--------|-------|
+| Returning-elite watch (Draft) | Completed | A **Returning from injury** section on the Draft Waiver Wire: claimable players who are not playing now but were productive regulars, ranked by a points-per-start percentile against established starters. Built because a rival claimed William Saliba at waiver priority 1 while the app said nothing — and it said nothing because he was *absent* from the available pool, which is built from Rotowire's weekly table. Adds the app's first previous-season data (`history_past`) and recovers Rotowire's `PP/90`, which was being downloaded hourly and discarded despite correlating with real pedigree at 0.602 against the season total's 0.101. FIFA ratings rejected: wrong currency, no licensed source, unscoreable. Engine numbers byte-identical. See "Returning from injury". |
 | Transfer Risk Tracking | Phases 1-3 complete | Outbound (Google News RSS + bootstrap ground truth + per-region windows), inbound (per-club feeds, arrivals watchlist, minutes competition, fee attribution, `Transfer_Status`) and bookmaker odds are wired into the Draft Helper board and the Availability page. Remaining: Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model" and "Transfer Odds Model". |
 | ROS season-quality on rates, not totals | Not started | The two remaining halves of the defect found under "Rent vs keep". `season_pts_pctile` percentiles **cumulative** season points (Madueke 14 pts / 3 starts = 4.67 per start against Dewsbury-Hall's 4.56 and Ayari's 5.38 -- comparable as rates, 0.357 against 0.940 as totals), and `season_proj_pctile` percentiles a **pinned preseason total** that bakes in a minutes assumption (`Points = PP/90 x expected 90s`, implied nineties 4.4-38.1 across the 430 rows; Madueke `58.66 = 5.28 x 11.1`, a squad-player forecast made before he moved club). **`PP/90` is published in the same table and `merge_season_projections()` drops it** -- it exists on no frame in the app. Together ~33% of ROS, and a third place the same missed gameweek is charged after `start` and form dampening. Blocked on evidence, not design: `team_strength` already has `_points_per_start` / `_MIN_STARTS_FOR_ACTUALS` / `attach_reference_pps`, but **nothing in the app scores ROS after the fact**, so this needs a retrospective scorer first (`projection_accuracy` has the archive and the machinery -- `_actual_window`, `_starts_before`, `spearman` -- but scores only the projection engine). Measured: fixing both moves Madueke 4th -> 3rd at MID and repriced the whole board, which is why it did not ship on one player's anecdote |
 | Mini-League Rival Tracker | Completed (Classic) | **🎯 Rival Tracker** tab on Classic League Analysis: differentials, the template you are missing, effective ownership across the league (captaincy-weighted, so it can exceed 100%), and every rival's projected gameweek total. Deliberately **not** built for Draft — ownership there is exclusive, so every owned player is a 100% differential and EO collapses to 0/1; roster comparison already lives in the Trade Analyzer's Explore Teams tab. No transfer advice (handled elsewhere). See "Mini-league ownership". |

@@ -25,6 +25,7 @@ from scripts.common.text_helpers import TZ_ET, format_last_updated
 from scripts.common import ffp_feed
 from scripts.common import pl_content
 from scripts.common import projection_sources
+from scripts.common import player_history
 
 _logger = get_logger("fpl_app.scraping")
 
@@ -1179,3 +1180,28 @@ def render_ffp_status(feed: "FFPFeed", expected_gw: Optional[int] = None,
         if feed.note:
             bits.append(feed.note)
     st.caption("Projections blended with " + " · ".join(bits) + ".")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_prior_season_rates(id_to_code: dict) -> pd.DataFrame:
+    """Each player's rate and start share from the last season that described him.
+
+    ``player_history.prior_season_rate`` over ``fetch_history_past``, cached for
+    a day: ``history_past`` is a *completed* season and cannot change, so a
+    shorter TTL would re-fetch ~670 endpoints to get the same answer. Measured
+    cold at 3.3s for the whole pool and 5.1s including the rate pass.
+
+    ``id_to_code`` must be keyed on **Classic** element ids, which is what
+    ``element-summary`` indexes -- a Draft id resolves to a real but wrong
+    player for 64 of 669. Passing the mapping rather than deriving it here is
+    what keeps that decision at the callsite, where the id space is known.
+
+    An empty frame on any failure, so the rung simply stops contributing.
+    """
+    try:
+        history = player_history.fetch_history_past(id_to_code)
+        return player_history.prior_season_rate(
+            history, min_starts=config.RETURN_WATCH_PRIOR_MIN_STARTS)
+    except Exception:
+        _logger.warning("Prior-season rates unavailable", exc_info=True)
+        return player_history.prior_season_rate(None)
