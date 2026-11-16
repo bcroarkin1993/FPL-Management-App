@@ -448,3 +448,106 @@ class TestLaneVetoes:
         assert not is_first_choice_penalty_taker(pd.Series({"penalties_order": 2}))
         assert not is_first_choice_penalty_taker(pd.Series({"penalties_order": None}))
         assert not is_first_choice_penalty_taker(pd.Series({}))
+
+
+class TestRentLaneDropSelection:
+    """Which player the rent lane offers up, not which one it brings in.
+
+    Reported from the app: "Enzo Le Fee is not the person that should be dropped
+    for Rayan Vitor. I have better options that could be dropped instead." He
+    was the *fourth* weakest of five midfielders and still won the pairing.
+
+    Two causes, both pinned here. The live numbers for adding Vitor, by drop:
+
+        Tel        keep 0.623  ROS 0.70  gain -1.71  (rejected)
+        Madueke    keep 0.668  ROS 0.58  gain +0.58
+        Iwobi      keep 0.735  ROS 0.81  gain +1.24
+        Le Fee     keep 0.773  ROS 0.82  gain +1.46  <- chosen
+        Dewsbury-Hall keep 0.820 ROS 0.86 gain +0.48
+
+    The gain rises with how much you want to keep the player.
+    """
+
+    @staticmethod
+    def _roster():
+        """Five midfielders with the live Keep Score / projection shape."""
+        return pd.DataFrame([
+            dict(Player="Mathys Tel", Position="M", Proj=2.16, Proj_Next3=13.77,
+                 ROS=0.70, Season_Points=24,
+                 **{"Keep Score": 0.623, "Transfer Score": 0.60}),
+            dict(Player="Noni Madueke", Position="M", Proj=4.44, Proj_Next3=10.62,
+                 ROS=0.58, Season_Points=22,
+                 **{"Keep Score": 0.668, "Transfer Score": 0.65}),
+            dict(Player="Alex Iwobi", Position="M", Proj=3.08, Proj_Next3=10.82,
+                 ROS=0.81, Season_Points=40,
+                 **{"Keep Score": 0.735, "Transfer Score": 0.72}),
+            dict(Player="Enzo Le Fee", Position="M", Proj=3.56, Proj_Next3=10.40,
+                 ROS=0.82, Season_Points=46,
+                 **{"Keep Score": 0.773, "Transfer Score": 0.76}),
+            dict(Player="Kiernan Dewsbury-Hall", Position="M", Proj=3.72,
+                 Proj_Next3=11.58, ROS=0.86, Season_Points=50,
+                 **{"Keep Score": 0.820, "Transfer Score": 0.80}),
+        ])
+
+    @staticmethod
+    def _avail():
+        rows = [dict(Player="Rayan Vitor", Position="M", Proj=5.02,
+                     Proj_Next3=14.34, ROS=0.88, Season_Points=30,
+                     **{"Keep Score": 0.5, "Transfer Score": 0.88})]
+        # A floor needs MIN_FLOOR_POOL players to be quoted at all.
+        rows += [dict(Player="Filler %d" % i, Position="M", Proj=3.4 - i * 0.1,
+                      Proj_Next3=10.5 - i * 0.2, ROS=0.5, Season_Points=15,
+                      **{"Keep Score": 0.4, "Transfer Score": 0.5})
+                 for i in range(8)]
+        return pd.DataFrame(rows)
+
+    def _run(self, **kw):
+        opts = dict(roster_candidates=2, avail_candidates=5,
+                    one_per_position=False, lanes=(LANE_RENT,),
+                    floor_context=FLOOR_CTX, top_n=None)
+        opts.update(kw)
+        sugg, _dbg = _compute_transfer_suggestions(
+            self._avail(), self._roster(), **opts)
+        return [s for s in sugg if s["lane"] == LANE_RENT]
+
+    def test_it_offers_up_a_player_you_would_actually_drop(self):
+        """The rent lane used to iterate the *whole* position.
+
+        The hold lane has always windowed its drop candidates to the weakest N;
+        the rent lane did not, so a player who was never a drop candidate in
+        Hold at all could be offered here.
+        """
+        rent = self._run()
+        assert rent, "the lane should still find a rental"
+        dropped = {s["drop_player"] for s in rent}
+        assert "Enzo Le Fee" not in dropped
+        assert "Kiernan Dewsbury-Hall" not in dropped
+
+    def test_among_competing_drops_it_releases_the_one_you_value_least(self):
+        """`release_cost` floors at zero, and then the ranking inverts.
+
+        Every roster player whose forward rate sits below the wire's floor looks
+        *equally* free to release. Once it saturates, `rental_gain` is driven by
+        `-Proj(drop)` -- whoever contributes least **this week** wins the
+        pairing, which is a different question from who you would rather keep.
+        """
+        rent = self._run(roster_candidates=None)
+        vitor = [s for s in rent if s["add_player"] == "Rayan Vitor"]
+        assert vitor, "Vitor should still be claimed by somebody"
+        assert vitor[0]["drop_player"] == "Noni Madueke", (
+            "expected the weakest viable midfielder, got %s"
+            % vitor[0]["drop_player"])
+
+    def test_the_biggest_gain_no_longer_wins_outright(self):
+        """Le Fee's pairing yields more points and is still not the one taken.
+
+        Every candidate has already cleared `RENTAL_MIN_GAIN`, so each is worth
+        doing on its own terms; the only question left is which player to give
+        up, and a bigger number against a better player is not a better answer.
+        """
+        rent = self._run(roster_candidates=None)
+        by_drop = {s["drop_player"]: s["points_gain"] for s in rent}
+        if "Enzo Le Fee" in by_drop and "Noni Madueke" in by_drop:
+            assert by_drop["Noni Madueke"] <= by_drop["Enzo Le Fee"]
+        vitor = [s for s in rent if s["add_player"] == "Rayan Vitor"][0]
+        assert vitor["drop_player"] == "Noni Madueke"

@@ -3645,7 +3645,40 @@ honestly: Vitor beats him on this gameweek (5.02 v 3.56), the window (14.34 v
 not have, which is why the card states it rather than the engine silently
 out-voting the manager.
 
-Live: **9 suggestions to 5.** Thiago -> Wilson, Tarkowski -> Khusanov, Iwobi ->
+**And the rent lane was offering up the wrong player.** Reported from the app:
+"Enzo Le Fee is not the person that should be dropped for Rayan Vitor. I have
+better options that could be dropped instead." Vitor is a good add; Le Fee was
+the **fourth weakest of five** midfielders and still won the pairing. Two
+causes:
+
+- **The rent lane iterated the whole position.** The hold lane has always
+  windowed its drop candidates to the weakest N by `_adj_value`
+  (`roster_candidates`); the rent lane did not, so a player who was never a
+  drop candidate in Hold could be offered here. It now shares the window.
+- **`release_cost` saturates, and then the ranking inverts.** It floors at
+  zero, so every roster player whose forward rate sits below the wire's floor
+  looks *equally* free to release -- and `rental_gain` is then driven by
+  `-Proj(drop)`, i.e. whoever contributes least **this week** wins. That is a
+  different question from who you would rather keep. Measured for adding Vitor,
+  the gain rose *monotonically* with Keep Score:
+
+  | drop | Keep | ROS | gain |
+  |---|---|---|---|
+  | Tel | 0.623 | 0.70 | −1.71 (rejected) |
+  | Madueke | 0.668 | 0.58 | +0.58 |
+  | Iwobi | 0.735 | 0.81 | +1.24 |
+  | Le Fee | 0.773 | 0.82 | **+1.46** |
+  | Dewsbury-Hall | 0.820 | 0.86 | +0.48 |
+
+  Competing drops are now ordered by **Keep Score first, gain as the
+  tie-break**. Every candidate has already cleared `RENTAL_MIN_GAIN`, so each is
+  worth doing on its own terms and the only question left is which player to
+  give up; a bigger number against a better player is not a better answer. In
+  the default view the lane now proposes **Madueke -> Vitor** at +0.58 where it
+  proposed Le Fee at +1.46.
+
+Live: **9 suggestions to 5** (and to 3 in the default "Best per position"
+view). Thiago -> Wilson, Tarkowski -> Khusanov, Iwobi ->
 Alysson and the duplicate Hume -> Collins are gone; Madueke -> King, Tel ->
 Vitor and Muharemovic -> Pinnock are untouched. An earlier, blunter version of
 the elite-drop guard also killed Madueke -> King, which is a perfectly

@@ -2002,8 +2002,22 @@ def _compute_transfer_suggestions(
             if avail_candidates is not None:
                 rent_avail = rent_avail.head(avail_candidates)
 
+            # **The same drop window as the hold lane**, and for the same
+            # reason: these are the players you would actually consider
+            # releasing, weakest first (`roster_sorted` is ordered by
+            # `_adj_value`). The rent lane used to iterate the *whole* position,
+            # which is why a player could be offered up here who was never a
+            # drop candidate in Hold at all.
+            #
+            # Reported from the app: "Enzo Le Fee is not the person that should
+            # be dropped for Rayan Vitor. I have better options that could be
+            # dropped instead." Le Fee was the *fourth* weakest of five
+            # midfielders and still won the pairing.
+            rent_roster = (roster_sorted if roster_candidates is None
+                           else roster_sorted.head(roster_candidates))
+
             rent_cands = []
-            for drop_idx, drop_row in roster_pos.iterrows():
+            for drop_idx, drop_row in rent_roster.iterrows():
                 for add_idx, add_row in rent_avail.iterrows():
                     gain = rental_gain(drop_row, add_row, floors, horizon=horizon)
                     if gain is None or gain <= RENTAL_MIN_GAIN:
@@ -2021,8 +2035,27 @@ def _compute_transfer_suggestions(
                         'drop': drop_row, 'add': add_row,
                     })
 
+            # **Among drops competing for the same add, release the one you
+            # value least** -- not the one that yields the biggest number.
+            #
+            # `rental_gain` is `(Proj(add) - Proj(drop)) - (H-1) x release_cost`,
+            # and `release_cost` floors at zero, so every roster player whose
+            # forward rate sits below the wire's floor looks *equally* free to
+            # release. Once it saturates, the ranking is driven by
+            # `-Proj(drop)`: whoever contributes least **this week** wins the
+            # pairing, which is a different question from who you would rather
+            # keep. Measured on the live board, the gain for adding Rayan Vitor
+            # rose monotonically with Keep Score -- Madueke (0.668, ROS 0.58)
+            # yielded +0.58 while Le Fee (0.773, ROS 0.82) yielded +1.46, so the
+            # lane proposed releasing the better midfielder.
+            #
+            # Keep Score first, gain as the tie-break. Every pair here has
+            # already cleared `RENTAL_MIN_GAIN`, so each is worth doing on its
+            # own terms; the only question left is which player to give up.
             r_drops, r_adds = set(), set()
-            for cand in sorted(rent_cands, key=lambda c: c['gain'], reverse=True):
+            for cand in sorted(rent_cands,
+                               key=lambda c: (float(c['drop'].get('Keep Score', 0) or 0),
+                                              -c['gain'])):
                 if cand['drop_idx'] in r_drops or cand['add_idx'] in r_adds:
                     continue
                 r_outlook = None
