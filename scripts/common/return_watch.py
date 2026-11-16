@@ -163,6 +163,7 @@ def build_return_watch(
     evidence_minutes=None,
     evidence_apps=None,
     claim_lead=None,
+    benched_pctile=None,
 ):
     """Claimable players who are not playing but were productive regulars.
 
@@ -203,6 +204,8 @@ def build_return_watch(
                      if evidence_apps is None else float(evidence_apps))
     claim_lead = (config.RETURN_WATCH_CLAIM_LEAD_GWS
                   if claim_lead is None else float(claim_lead))
+    benched_pctile = (config.RETURN_WATCH_BENCHED_PCTILE
+                      if benched_pctile is None else float(benched_pctile))
     limit = config.RETURN_WATCH_LIMIT if limit is None else limit
 
     try:
@@ -499,6 +502,35 @@ def build_return_watch(
     cand["Out_For"] = out_for
     cand["Basis"] = basis
 
+    # **A cleared player who has appeared without starting has been answered,
+    # weakly.** He was available for selection and the manager used him off the
+    # bench instead -- counter-evidence against the one thing this board claims,
+    # which is that he walks back into the XI.
+    #
+    # One cameo is thin, so it raises the bar rather than disqualifying: only a
+    # genuinely elite player gets the benefit of the doubt. Scoped to `cleared`
+    # on purpose -- for a player still out, his appearances predate the absence
+    # and say nothing about selection *after* he returns.
+    #
+    # Zero appearances is deliberately **not** counter-evidence, which is what
+    # keeps Saliba: a man FPL never flagged and a man who is simply unused look
+    # identical from here.
+    apps = pd.to_numeric(cand.get("Appearances"), errors="coerce")
+    starts_now = pd.to_numeric(cand.get("starts"), errors="coerce").fillna(0)
+    benched = (
+        cand["Band"].eq(BAND_CLEARED)
+        & apps.notna() & apps.ge(1) & starts_now.le(0)
+        & (pd.to_numeric(cand["Pedigree"], errors="coerce") < benched_pctile)
+    )
+    if benched.any():
+        for name in cand.loc[benched, "Player"].tolist():
+            _note(notes, "%s is fit and has come off the bench without starting, "
+                         "so he is not clearly returning to the XI." % name, "info")
+        cand = cand[~benched].copy()
+        if cand.empty:
+            return _empty(notes, "No claimable player is returning from a spell "
+                                 "out with the pedigree to be worth a claim.")
+
     # ---- when you have to claim him, which is not when he returns ----------
     #
     # "The more elite a player is, the earlier I will need to pick him up."
@@ -656,9 +688,12 @@ def return_phrase(row):
     band = row.get("Band")
     if band == BAND_CLEARED:
         return "available now"
-    expected = row.get("Expected_Return_GW")
-    if expected is None or pd.isna(expected):
-        return ""
     if band == BAND_IMMINENT and pd.notna(row.get("Return_GW")):
         return "back for GW%d" % int(row["Return_GW"])
-    return "back ~GW%d (no stated date)" % int(expected)
+    # **No gameweek where the news states no date.** `Expected_Return_GW` falls
+    # back to `absence_estimate`'s chance and status buckets, which are a guess:
+    # status `i` alone yields four gameweeks and a zero chance yields five, on no
+    # evidence about this player at all. It is fit to *sort* by and must not be
+    # rendered as a date -- "back ~GW16 (no stated date)" states a gameweek and
+    # disclaims it in the same breath, which is worse than saying nothing.
+    return "out — no return date given"

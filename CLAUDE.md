@@ -3888,6 +3888,29 @@ up), `imminent` (a date the *news* states, within 3 gameweeks, via
 `news_stated_games_to_miss` so a chance bucket cannot invent one), and `watch`
 (out, no date).
 
+**A `watch` row renders no gameweek at all.** `Expected_Return_GW` falls back to
+`absence_estimate`'s chance and status buckets -- status `i` alone yields four
+gameweeks and a zero chance yields five, on no evidence about that player -- so
+it is fit to *sort* by and must not be rendered. Reported from the app: "how are
+we saying ~GW16 when it also says no stated date?" Fair: it stated a gameweek
+and disclaimed it in the same breath, which is worse than saying nothing. It now
+reads "out — no return date given", and `return_phrase` is the only place that
+decides, so the estimate cannot leak onto a card by another route.
+
+**A cleared player who has appeared without starting has been answered, weakly.**
+Reported from the app: "Minteh is not an elite player and is back healthy now
+and only got 8 minutes in the last game. I'm not confident he'll break into the
+XI for Brighton when they've been doing well without him." An appearance that is
+not a start is counter-evidence against the one thing this board claims. One
+cameo is thin evidence, so it **raises the pedigree bar**
+(`RETURN_WATCH_BENCHED_PCTILE`, 0.85 -- the engine's own `ALPHA_TIERS` definition
+of elite) rather than disqualifying: a genuinely irreplaceable player still gets
+the benefit of the doubt. Scoped to `cleared`, because for a player still out his
+appearances predate the absence and say nothing about selection after it. **Zero
+appearances is deliberately not counter-evidence**, which is what keeps Saliba.
+The exclusion is stated on the page rather than silently shortening the list.
+Live it drops Minteh (0.68) and Nørgaard, taking the board to 4.
+
 **There has to be an absence to return from, and a bare absence of doubt is not
 one.** Reported from the app: Nick Pope sat on the board with 0 minutes while
 perfectly fit, benched behind Hornicek. The `cleared` band read "FPL has not

@@ -720,7 +720,7 @@ class TestRankingAndTruncation:
         row = out.iloc[0]
         assert pd.isna(row["Return_GW"])
         assert pd.notna(row["Expected_Return_GW"])
-        assert "no stated date" in return_phrase(row)
+        assert "no return date" in return_phrase(row)
 
     def test_a_cleared_player_reads_as_available_now(self):
         pool = _pool([SALIBA] + _starters())
@@ -809,3 +809,122 @@ class TestItValidatesItsOwnOutput:
         out = build_return_watch(pool, _states(pool), current_gw=GW,
                                  prior_rates=SALIBA_PRIOR)
         assert len(out) <= config.RETURN_WATCH_LIMIT
+
+
+class TestAClearedPlayerWhoIsOnlyGettingCameos:
+    """Reported from the app: "Minteh is not an elite player and is back healthy
+    now and only got 8 minutes in the last game. I'm not confident he'll break
+    into the XI for Brighton when they've been doing well without him."
+
+    An appearance that is not a start is counter-evidence against the one thing
+    this board claims -- that he walks back into the XI. One cameo is weak, so
+    it raises the pedigree bar rather than disqualifying outright.
+    """
+
+    @staticmethod
+    def _run(*, apps, starts, minutes, pedigree_rate, status="a", news="",
+             chance=100, benched_pctile=0.85):
+        cand = dict(Player="Candidate", Player_Code=777, Player_ID=777,
+                    Team="ARS", Position="M", starts=starts, minutes=minutes,
+                    total_points=0, status=status, news=news,
+                    chance_of_playing_next_round=chance)
+        prior = pd.DataFrame([dict(Player_Code=777, Prior_PPS=pedigree_rate,
+                                   Prior_Role=26 / 38, Prior_Season="2025/26",
+                                   Prior_Starts=26, Prior_Points=117,
+                                   Appearances=apps)])
+        # A reference with a spread, so the pedigree percentile is meaningful.
+        spread = [dict(Player_Code=5000 + i, Player_ID=900 + i,
+                       Player="Starter %d" % i, Team="ARS", Position="M",
+                       starts=ELAPSED, minutes=90 * ELAPSED,
+                       total_points=(i + 1.0) * ELAPSED) for i in range(14)]
+        pool = _pool([cand] + spread)
+        notes = []
+        out = build_return_watch(pool, _states(pool), current_gw=GW,
+                                 prior_rates=prior, min_pctile=0.0,
+                                 benched_pctile=benched_pctile, notes=notes)
+        return out, notes
+
+    def test_a_sub_cameo_drops_a_non_elite_player(self):
+        """Minteh: fit, one appearance, no starts, 8 minutes."""
+        out, notes = self._run(apps=1, starts=0, minutes=8, pedigree_rate=4.5)
+        assert 777 not in set(out["Player_Code"])
+        assert any("without starting" in m for _s, m in notes), \
+            "the exclusion must say why -- a silently shorter list is not an answer"
+
+    def test_no_appearances_is_not_counter_evidence(self):
+        """Saliba: fit, zero appearances.
+
+        A man FPL never flagged and a man who is simply unused look identical
+        from here, so absence of appearances can never be read as a benching --
+        it is the case the whole feature exists for.
+        """
+        out, _notes = self._run(apps=0, starts=0, minutes=0, pedigree_rate=4.5)
+        assert 777 in set(out["Player_Code"])
+
+    def test_an_elite_player_gets_the_benefit_of_the_doubt(self):
+        """One cameo is weak evidence, so it raises the bar rather than
+        disqualifying."""
+        out, _notes = self._run(apps=1, starts=0, minutes=8, pedigree_rate=20.0)
+        row = out[out["Player_Code"] == 777]
+        assert len(row) == 1
+        assert float(row.iloc[0]["Pedigree"]) >= 0.85
+
+    def test_a_player_still_out_is_unaffected(self):
+        """His appearances predate the absence and say nothing about selection
+        after he returns."""
+        out, _notes = self._run(apps=2, starts=0, minutes=15, pedigree_rate=4.5,
+                                status="i", chance=0,
+                                news="Knee injury - Unknown return date")
+        assert 777 in set(out["Player_Code"])
+
+    def test_a_cleared_player_who_has_started_is_unaffected(self):
+        """One appearance and it was a start -- nothing counter-evidential.
+
+        Kept deliberately below the current-season evidence thresholds (90
+        minutes / 3 appearances): past them the earlier "this season decides"
+        rule takes over and a man who has started 2 of 10 while fit is a
+        Senesi-shaped exclusion, which is a different rule doing its job.
+        """
+        out, _notes = self._run(apps=1, starts=1, minutes=60, pedigree_rate=4.5)
+        assert 777 in set(out["Player_Code"])
+
+
+class TestNoFabricatedReturnGameweek:
+    """`Expected_Return_GW` falls back to `absence_estimate`'s chance and status
+    buckets -- status `i` alone yields four gameweeks and a zero chance yields
+    five, on no evidence about this player at all.
+
+    Reported from the app: "How are we saying ~GW16 when it also says no stated
+    date?" Fair -- it stated a gameweek and disclaimed it in the same breath.
+    """
+
+    @staticmethod
+    def _row(news, status="i", chance=0):
+        pool = _pool([dict(SALIBA, status=status, news=news,
+                           chance_of_playing_next_round=chance)] + _starters())
+        out = build_return_watch(pool, _states(pool), current_gw=GW,
+                                 prior_rates=SALIBA_PRIOR)
+        return out.iloc[0]
+
+    def test_an_inferred_return_renders_no_gameweek(self):
+        phrase = return_phrase(self._row("Knee injury - Unknown return date"))
+        assert "GW" not in phrase
+        assert "no return date" in phrase
+
+    def test_the_estimate_still_exists_for_ordering(self):
+        """Fit to sort by, never to render -- the ordering must still work."""
+        row = self._row("Knee injury - Unknown return date")
+        assert pd.notna(row["Expected_Return_GW"])
+        assert pd.notna(row["Claim_By_GW"])
+        assert pd.isna(row["Return_GW"])
+
+    def test_a_stated_return_does_render_its_gameweek(self):
+        pool = _pool([dict(SALIBA, status="i", chance_of_playing_next_round=0,
+                           news="Groin injury - Expected back 21 Nov")]
+                     + _starters())
+        out = build_return_watch(
+            pool, _states(pool), current_gw=GW, prior_rates=SALIBA_PRIOR,
+            deadlines=[pd.Timestamp("2026-11-21T18:00:00Z"),
+                       pd.Timestamp("2026-11-28T18:00:00Z")],
+            now=pd.Timestamp("2026-11-16").to_pydatetime())
+        assert "GW" in return_phrase(out.iloc[0])

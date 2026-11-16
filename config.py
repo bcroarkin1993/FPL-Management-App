@@ -504,6 +504,27 @@ RETURN_WATCH_MIN_REFERENCE = _env_int("FPL_RETURN_WATCH_MIN_REFERENCE", 5)
 RETURN_WATCH_EVIDENCE_MINUTES = _env_int("FPL_RETURN_WATCH_EVIDENCE_MINUTES", 90)
 RETURN_WATCH_EVIDENCE_APPS = _env_int("FPL_RETURN_WATCH_EVIDENCE_APPS", 3)
 
+#: Pedigree a *cleared* player needs once he has appeared without starting.
+#:
+#: Reported from the app: "Minteh is not an elite player and is back healthy now
+#: and only got 8 minutes in the last game. I'm not confident he'll break into
+#: the XI for Brighton when they've been doing well without him."
+#:
+#: An appearance that is not a start is counter-evidence against the whole case
+#: for a returning player -- he was available for selection and the manager
+#: brought him off the bench instead. One cameo is weak evidence, which is why
+#: it does not disqualify on its own: it raises the bar instead, and only a
+#: genuinely elite player gets the benefit of the doubt.
+#:
+#: The value is the engine's own definition of elite -- the top band of
+#: `ALPHA_TIERS`, "genuinely irreplaceable, hold through a bad week" -- rather
+#: than a new number. Live that drops Minteh (0.68) while leaving Saliba (0.75)
+#: untouched, because Saliba has **not appeared at all**: a man the bootstrap
+#: never flagged and a man who is simply unused look identical from here, so no
+#: appearances can never be read as counter-evidence.
+RETURN_WATCH_BENCHED_PCTILE = float(
+    os.getenv("FPL_RETURN_WATCH_BENCHED_PCTILE", "0.85"))
+
 #: How many gameweeks ahead of his return an *elite* returning player gets
 #: claimed, and therefore how early you have to act to get him.
 #:
