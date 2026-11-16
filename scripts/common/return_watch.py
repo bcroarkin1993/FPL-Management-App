@@ -96,7 +96,8 @@ CLAIMABLE_STATES = ("a", "l")
 WATCH_COLUMNS = [
     "Player_Code", "Player_ID", "Player", "Display_Name", "Team", "Position",
     "Pedigree", "Pedigree_Rate", "Pedigree_Rung", "Role", "Role_Src",
-    "Band", "Return_GW", "Out_For", "Basis",
+    "Band", "Return_GW", "Expected_Return_GW", "Claim_By_GW", "Claim_Lead",
+    "Out_For", "Basis",
     "Draft_State", "starts", "minutes", "Appearances", "News",
     "Prior_Season", "Prior_Starts", "Evidence",
 ]
@@ -161,6 +162,7 @@ def build_return_watch(
     ref_min_start_rate=None,
     evidence_minutes=None,
     evidence_apps=None,
+    claim_lead=None,
 ):
     """Claimable players who are not playing but were productive regulars.
 
@@ -199,6 +201,8 @@ def build_return_watch(
                         if evidence_minutes is None else float(evidence_minutes))
     evidence_apps = (config.RETURN_WATCH_EVIDENCE_APPS
                      if evidence_apps is None else float(evidence_apps))
+    claim_lead = (config.RETURN_WATCH_CLAIM_LEAD_GWS
+                  if claim_lead is None else float(claim_lead))
     limit = config.RETURN_WATCH_LIMIT if limit is None else limit
 
     try:
@@ -495,6 +499,35 @@ def build_return_watch(
     cand["Out_For"] = out_for
     cand["Basis"] = basis
 
+    # ---- when you have to claim him, which is not when he returns ----------
+    #
+    # "The more elite a player is, the earlier I will need to pick him up."
+    # Saliba went before he was even scheduled to return; a more marginal player
+    # is still there the week he comes back, because the rest of the league is
+    # less sure he walks straight into the side.
+    #
+    # So the board is ordered on `claim_by`, not on the return date. That is
+    # what lets a top-of-the-pool player with a distant return outrank a
+    # marginal one returning next week -- ordering purely by return date would
+    # bury exactly the player you lose first.
+    #
+    # `Expected_Return_GW` is kept **separate from `Return_GW`** on purpose.
+    # `Return_GW` is a claim about a gameweek and is only ever set where the
+    # news stated one (or he is already cleared); this is an estimate that
+    # falls back to `absence_estimate`'s chance and status buckets, which
+    # CLAUDE.md is explicit are a guess. It is fit to *sort* by and must never
+    # be rendered as a stated return, which is what `Basis` is for.
+    expected = pd.to_numeric(cand["Out_For"], errors="coerce").fillna(0)
+    cand["Expected_Return_GW"] = current_gw + expected
+    cand["Claim_Lead"] = (
+        pd.to_numeric(cand["Pedigree"], errors="coerce").fillna(0.0)
+        * float(claim_lead)
+    ).round().astype(int)
+    # Deliberately **not** floored at the current gameweek: a negative margin
+    # means you are already late, which is a different thing to say than "claim
+    # this week" and the one the reader most needs to hear.
+    cand["Claim_By_GW"] = cand["Expected_Return_GW"] - cand["Claim_Lead"]
+
     # ---- rank, floor, truncate --------------------------------------------
     # A *rank*, not a threshold. An absolute top-decile bar empties the board:
     # the percentile is against established starters, where a top-decile
@@ -509,9 +542,13 @@ def build_return_watch(
                              "positional median starter." % before)
 
     cand = attach_display_names(cand)
-    cand["_band_order"] = cand["Band"].map(_BAND_ORDER).fillna(len(BANDS))
-    cand = cand.sort_values(["Pedigree", "Pedigree_Rate"], ascending=False,
-                            kind="mergesort")
+    # Urgency first, quality as the tie-break. Sorting on pedigree alone answered
+    # "who is best" where the question this board exists for is "who do I lose
+    # if I wait", and sorting on the return date alone answered neither.
+    # The rate is the final tie-break: percentiles saturate at 1.0 for everyone
+    # above the reference, and without it a tie falls back to input order.
+    cand = cand.sort_values(["Claim_By_GW", "Pedigree", "Pedigree_Rate"],
+                            ascending=[True, False, False], kind="mergesort")
 
     cand["Evidence"] = [_evidence(r, current_gw, elapsed) for _, r in cand.iterrows()]
 
@@ -550,6 +587,10 @@ def _evidence(row, current_gw, elapsed):
         ev["season_starts"] = _round(row.get("Prior_Starts"), 0)
     if pd.notna(row.get("Return_GW")) and row.get("Band") == BAND_IMMINENT:
         ev["return_gw"] = int(row.get("Return_GW"))
+    for key, col in (("expected_return_gw", "Expected_Return_GW"),
+                     ("claim_by_gw", "Claim_By_GW"), ("claim_lead", "Claim_Lead")):
+        if pd.notna(row.get(col)):
+            ev[key] = int(row.get(col))
     return ev
 
 
@@ -581,3 +622,43 @@ def role_phrase(row):
     if rung == RUNG_THIS:
         return "started %.0f%% of this season's gameweeks" % (100 * float(role))
     return "Rotowire expected him to start %.0f%% of the season" % (100 * float(role))
+
+
+def claim_phrase(row, current_gw):
+    """When you have to act, in words.
+
+    Reads the computed columns rather than recomputing, so the sentence and the
+    ordering can never disagree.
+    """
+    by = row.get("Claim_By_GW")
+    if by is None or pd.isna(by):
+        return ""
+    by = int(by)
+    try:
+        now = int(current_gw)
+    except (TypeError, ValueError):
+        return ""
+    if by < now:
+        return "claim now — already overdue"
+    if by == now:
+        return "claim this week"
+    return "claim by GW%d" % by
+
+
+def return_phrase(row):
+    """When he is expected back, hedged exactly as far as the evidence allows.
+
+    A stated date is reported as a gameweek; an inferred one is reported as an
+    approximation and says so. The two must not read alike -- a bucket's guess
+    presented as a date is how a player gets written off, or claimed, on a
+    number nobody asserted.
+    """
+    band = row.get("Band")
+    if band == BAND_CLEARED:
+        return "available now"
+    expected = row.get("Expected_Return_GW")
+    if expected is None or pd.isna(expected):
+        return ""
+    if band == BAND_IMMINENT and pd.notna(row.get("Return_GW")):
+        return "back for GW%d" % int(row["Return_GW"])
+    return "back ~GW%d (no stated date)" % int(expected)

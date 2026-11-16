@@ -26,6 +26,8 @@ from scripts.common.return_watch import (
     THIS_SEASON_MIN_STARTS,
     WATCH_COLUMNS,
     build_return_watch,
+    claim_phrase,
+    return_phrase,
     role_phrase,
 )
 
@@ -619,6 +621,112 @@ class TestBands:
 
 
 class TestRankingAndTruncation:
+
+    def test_a_more_elite_player_must_be_claimed_earlier(self):
+        """"The more elite a player is, the earlier I will need to pick him up."
+
+        Held against an identical return date, so the only thing varying is
+        pedigree. Saliba went before he was even scheduled back; a marginal
+        player is still there the week he returns, because the rest of the
+        league is less sure he walks straight into the side.
+        """
+        out = self._two_absentees(elite_rate=15.0, marginal_rate=8.0)
+        elite = out[out["Player_Code"] == 31].iloc[0]
+        marginal = out[out["Player_Code"] == 32].iloc[0]
+        assert elite["Expected_Return_GW"] == marginal["Expected_Return_GW"]
+        assert elite["Claim_Lead"] > marginal["Claim_Lead"]
+        assert elite["Claim_By_GW"] < marginal["Claim_By_GW"]
+        assert out.iloc[0]["Player_Code"] == 31
+
+    def test_eliteness_shifts_urgency_rather_than_dominating_it(self):
+        """A marginal player back *much* sooner still leads, and should.
+
+        The lead time moves an elite player up the order; it does not suspend
+        the calendar. Pinned because the opposite -- pedigree overriding the
+        return date outright -- would put a man who is out for months above one
+        who plays this weekend.
+        """
+        out = self._two_absentees(elite_rate=15.0, marginal_rate=8.0,
+                                  marginal_news="Groin injury - Expected back 21 Nov",
+                                  deadlines=[pd.Timestamp("2026-11-21T18:00:00Z")],
+                                  now=pd.Timestamp("2026-11-16").to_pydatetime())
+        marginal = out[out["Player_Code"] == 32].iloc[0]
+        elite = out[out["Player_Code"] == 31].iloc[0]
+        assert marginal["Expected_Return_GW"] < elite["Expected_Return_GW"]
+        assert out.iloc[0]["Player_Code"] == 32
+
+    @staticmethod
+    def _two_absentees(*, elite_rate, marginal_rate,
+                       marginal_news="Knee injury - Unknown return date",
+                       deadlines=None, now=None):
+        """Two out-injured players against a reference with a real spread.
+
+        The spread matters: against a flat reference every candidate percentiles
+        to 1.0, the lead times tie, and a test of this mechanism silently
+        exercises nothing.
+        """
+        elite = dict(Player_Code=31, Player_ID=31, status="i",
+                     chance_of_playing_next_round=0,
+                     news="Knee injury - Unknown return date")
+        marginal = dict(Player_Code=32, Player_ID=32, status="i",
+                        chance_of_playing_next_round=0, news=marginal_news)
+        prior = pd.DataFrame([
+            dict(Player_Code=31, Prior_PPS=elite_rate, Prior_Role=0.95,
+                 Prior_Season="2025/26", Prior_Starts=36,
+                 Prior_Points=elite_rate * 36, Appearances=0),
+            dict(Player_Code=32, Prior_PPS=marginal_rate, Prior_Role=0.75,
+                 Prior_Season="2025/26", Prior_Starts=28,
+                 Prior_Points=marginal_rate * 28, Appearances=0),
+        ])
+        spread = [dict(Player_Code=5000 + i, Player_ID=900 + i,
+                       Player="Starter %d" % i, Team="ARS", Position="D",
+                       starts=ELAPSED, minutes=90 * ELAPSED,
+                       total_points=(i + 1.0) * ELAPSED)
+                  for i in range(14)]
+        pool = _pool([elite, marginal] + spread)
+        return build_return_watch(pool, _states(pool), current_gw=GW,
+                                  prior_rates=prior, min_pctile=0.0,
+                                  claim_lead=4, deadlines=deadlines,
+                                  now=now).reset_index(drop=True)
+
+    def test_the_lead_time_scales_with_pedigree(self):
+        pool = _pool([SALIBA] + _starters())
+        out = build_return_watch(pool, _states(pool), current_gw=GW,
+                                 prior_rates=SALIBA_PRIOR, claim_lead=4)
+        row = out.iloc[0]
+        assert row["Claim_Lead"] == round(4 * float(row["Pedigree"]))
+        assert row["Claim_By_GW"] == row["Expected_Return_GW"] - row["Claim_Lead"]
+
+    def test_being_already_late_is_said_rather_than_clamped(self):
+        """A negative margin is a different thing to say than "claim now"."""
+        pool = _pool([SALIBA] + _starters())
+        out = build_return_watch(pool, _states(pool), current_gw=GW,
+                                 prior_rates=SALIBA_PRIOR, claim_lead=4)
+        row = out.iloc[0]
+        assert row["Claim_By_GW"] < GW
+        assert "overdue" in claim_phrase(row, GW)
+
+    def test_an_inferred_return_is_never_reported_as_a_stated_one(self):
+        """`Return_GW` is a claim; `Expected_Return_GW` is an estimate.
+
+        The second falls back to `absence_estimate`'s chance and status buckets,
+        which are a guess -- fine to sort by, never to render as a date.
+        """
+        pool = _pool([dict(SALIBA, status="i", chance_of_playing_next_round=0,
+                           news="Knee injury - Unknown return date")]
+                     + _starters())
+        out = build_return_watch(pool, _states(pool), current_gw=GW,
+                                 prior_rates=SALIBA_PRIOR)
+        row = out.iloc[0]
+        assert pd.isna(row["Return_GW"])
+        assert pd.notna(row["Expected_Return_GW"])
+        assert "no stated date" in return_phrase(row)
+
+    def test_a_cleared_player_reads_as_available_now(self):
+        pool = _pool([SALIBA] + _starters())
+        out = build_return_watch(pool, _states(pool), current_gw=GW,
+                                 prior_rates=SALIBA_PRIOR)
+        assert return_phrase(out.iloc[0]) == "available now"
 
     def test_it_ranks_by_pedigree_and_truncates(self):
         rows = [dict(Player_Code=100 + i, Player_ID=100 + i) for i in range(6)]

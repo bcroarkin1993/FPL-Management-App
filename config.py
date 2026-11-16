@@ -504,6 +504,33 @@ RETURN_WATCH_MIN_REFERENCE = _env_int("FPL_RETURN_WATCH_MIN_REFERENCE", 5)
 RETURN_WATCH_EVIDENCE_MINUTES = _env_int("FPL_RETURN_WATCH_EVIDENCE_MINUTES", 90)
 RETURN_WATCH_EVIDENCE_APPS = _env_int("FPL_RETURN_WATCH_EVIDENCE_APPS", 3)
 
+#: How many gameweeks ahead of his return an *elite* returning player gets
+#: claimed, and therefore how early you have to act to get him.
+#:
+#: Reported from the app: "the more elite a player is, the earlier I will need
+#: to pick him up. Saliba is an ELITE player and went early, before he was even
+#: scheduled to return. A player like Sarr is more of a question mark on whether
+#: he returns to starting immediately, so he goes later."
+#:
+#: So the board is ordered on **when you must claim**, not when he returns:
+#:
+#:     claim_by = expected return - round(RETURN_WATCH_CLAIM_LEAD_GWS x pedigree)
+#:
+#: That is what lets a top-of-the-pool player with a distant return outrank a
+#: marginal one returning next week. Live, it is the difference between Semenyo
+#: (pedigree 0.96, out with no date) sitting above Mateta (0.62, back in three)
+#: and below him.
+#:
+#: **This is judgement, not measurement, and deliberately labelled as such.**
+#: Calibrating it needs claims made on players who were unavailable at the time,
+#: paired with when they actually returned. The league's own log has 148
+#: accepted claims and the projection archive covers GW3-GW10, and the
+#: intersection is **one row** -- Ekitike, claimed while out with no stated
+#: return. One row is an anecdote. The archive grows every gameweek, so this
+#: becomes fittable later; until then it is a stated assumption rather than a
+#: number dressed up as a result.
+RETURN_WATCH_CLAIM_LEAD_GWS = _env_int("FPL_RETURN_WATCH_CLAIM_LEAD_GWS", 4)
+
 #: Starts needed in a prior season for its rate to be usable (rung 2), and in
 #: *this* season for a player to enter the reference pool (as a share of elapsed
 #: gameweeks). The reference bar is higher than the candidate bar on purpose:

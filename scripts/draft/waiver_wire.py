@@ -111,6 +111,8 @@ from scripts.common.return_watch import (
     RUNG_PRESEASON,
     RUNG_PRIOR,
     RUNG_THIS,
+    claim_phrase,
+    return_phrase,
     role_phrase,
 )
 from scripts.draft.waiver_core import (
@@ -603,6 +605,7 @@ def _render_returning_section(board, limit=None):
       records.
     """
     frame, notes = return_watch(board, limit=limit)
+    current_gw = getattr(board, "current_gw", None) or 0
 
     st.subheader("Returning from injury")
     st.caption(
@@ -610,8 +613,8 @@ def _render_returning_section(board, limit=None):
         "their last full season -- and who you could still claim. Nothing else "
         "on this page can see them: the board above is built from Rotowire's "
         "weekly projections, and a player who has not featured is not in it. "
-        "Ranked by how good he is at his position, not by what he will score "
-        "this week, because this week he will score nothing."
+        "Ordered by **when you have to claim**, not by when he returns \u2014 the "
+        "better a player is, the earlier the rest of the league takes him."
     )
 
     for severity, message in notes:
@@ -636,6 +639,9 @@ def _render_returning_section(board, limit=None):
         rate = row.get("Pedigree_Rate")
 
         bits = []
+        back = return_phrase(row)
+        if back:
+            bits.append(back)
         phrase = role_phrase(row)
         if phrase:
             bits.append(phrase)
@@ -664,6 +670,17 @@ def _render_returning_section(board, limit=None):
         # the HTML block and dumps the closing tag on screen as literal text.
         # `compact_html` is the other half of that guard.
         detail = " &middot; ".join(bits)
+
+        # The urgency is the badge, because it is what the list is ordered on --
+        # a board sorted by one number and captioned with another is the app
+        # disagreeing with itself.
+        urgency = claim_phrase(row, current_gw)
+        by = row.get("Claim_By_GW")
+        overdue = pd.notna(by) and int(by) < int(current_gw)
+        urgency_colour = "#ff8080" if overdue else (
+            "#f0c040" if pd.notna(by) and int(by) == int(current_gw) else "#4ecca3")
+        urgency = urgency.replace("claim now — already overdue", "claim NOW")
+        urgency = urgency.replace("claim this week", "claim this week")
         cards.append(
             '<div style="padding:8px 12px;border-bottom:1px solid #2a2a3e;">'
             '<div style="display:flex;justify-content:space-between;'
@@ -674,8 +691,9 @@ def _render_returning_section(board, limit=None):
             '<div style="display:flex;align-items:center;gap:8px;">'
             '<span style="background:%s;color:%s;padding:2px 8px;'
             'border-radius:10px;font-size:0.78em;white-space:nowrap;">%s</span>'
-            '<span style="color:#4ecca3;font-weight:600;white-space:nowrap;">'
+            '<span style="color:#9aa0b4;font-size:0.82em;white-space:nowrap;">'
             'top %d%%</span>'
+            '<span style="color:%s;font-weight:600;white-space:nowrap;">%s</span>'
             '</div></div>'
             '<div style="color:#9aa0b4;font-size:0.85em;margin-top:3px;">%s</div>'
             '</div>' % (
@@ -683,6 +701,7 @@ def _render_returning_section(board, limit=None):
                 row.get("Team"), row.get("Position"),
                 bg, fg, label,
                 max(1, int(round((1.0 - float(pct)) * 100))) if pd.notna(pct) else 0,
+                urgency_colour, urgency,
                 detail,
             )
         )
