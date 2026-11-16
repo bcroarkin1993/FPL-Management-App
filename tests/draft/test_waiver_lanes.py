@@ -22,7 +22,7 @@ from scripts.draft.waiver_core import (
     _dedupe_across_lanes,
     _hold_lane_improves_ros,
     _rent_lane_keeps_the_better_asset,
-    is_first_choice_penalty_taker,
+    _rentable_drops,
 )
 
 
@@ -437,18 +437,6 @@ class TestLaneVetoes:
         b = {"lane": LANE_RENT, "drop_player": "Trai Hume", "add_player": "B"}
         assert len(_dedupe_across_lanes([a, b])) == 2
 
-    def test_a_first_choice_penalty_taker_is_recognised(self):
-        """A points source the projections do not price.
-
-        The board proposed dropping two of them in one pass -- Enzo Le Fee and
-        Igor Thiago, both their club's number one -- for replacements who take
-        none.
-        """
-        assert is_first_choice_penalty_taker(pd.Series({"penalties_order": 1}))
-        assert not is_first_choice_penalty_taker(pd.Series({"penalties_order": 2}))
-        assert not is_first_choice_penalty_taker(pd.Series({"penalties_order": None}))
-        assert not is_first_choice_penalty_taker(pd.Series({}))
-
 
 class TestRentLaneDropSelection:
     """Which player the rent lane offers up, not which one it brings in.
@@ -551,3 +539,74 @@ class TestRentLaneDropSelection:
             assert by_drop["Noni Madueke"] <= by_drop["Enzo Le Fee"]
         vitor = [s for s in rent if s["add_player"] == "Rayan Vitor"][0]
         assert vitor["drop_player"] == "Noni Madueke"
+
+
+class TestARentalIsFundedFromTheWeakerHalf:
+    """Reported from the app, twice: "Tarkowski is an ELITE def. I am NOT
+    dropping him, even if another player has a better projection for a couple
+    GWs."
+
+    He kept reappearing because he is genuinely mid-table *by Keep Score* --
+    6th of 15 -- so every rank-based drop window still included him, and the
+    engine's own tiers put his ROS of 0.73 below the 0.75 "strong" band, into
+    the churn zone where short-term value is meant to dominate.
+
+    A rental buys one gameweek and costs a roster spot permanently, so the man
+    you give up has to be one you were close to moving on anyway.
+    """
+
+    #: The live roster, ROS only. Median 0.706.
+    ROSTER = [("Igor Thiago", "F", 0.375), ("Taiwo Awoniyi", "F", 0.457),
+              ("Noni Madueke", "M", 0.585), ("Robin Roefs", "G", 0.585),
+              ("Trai Hume", "D", 0.635), ("Caoimhin Kelleher", "G", 0.687),
+              ("Mathys Tel", "M", 0.700), ("Ian Maatsen", "D", 0.706),
+              ("James Tarkowski", "D", 0.732), ("Tarik Muharemovic", "D", 0.754),
+              ("Oli McBurnie", "F", 0.793), ("Alex Iwobi", "M", 0.806),
+              ("Antonio Joao Silva", "D", 0.818), ("Enzo Le Fee", "M", 0.824),
+              ("Kiernan Dewsbury-Hall", "M", 0.862)]
+
+    def _roster(self):
+        return pd.DataFrame([dict(Player=n, Position=p, ROS=r)
+                             for n, p, r in self.ROSTER])
+
+    def test_the_bar_is_the_squads_own_median(self):
+        roster = self._roster()
+        eligible = set(_rentable_drops(roster, roster)["Player"])
+        assert "James Tarkowski" not in eligible
+        assert "Enzo Le Fee" not in eligible
+        assert "Tarik Muharemovic" not in eligible
+        assert "Noni Madueke" in eligible
+        assert "Trai Hume" in eligible
+
+    def test_it_is_relative_rather_than_an_absolute_band(self):
+        """"Elite" on a strong roster is not "elite" on a weak one.
+
+        The same player is protected in one squad and available in another,
+        which is right: the question is only ever which of *your* players to
+        give up. An absolute threshold would have to be tuned until one named
+        player fell the right side of it.
+        """
+        weak = pd.DataFrame([dict(Player="A", Position="D", ROS=0.20),
+                             dict(Player="B", Position="D", ROS=0.30),
+                             dict(Player="Tarkowski", Position="D", ROS=0.73)])
+        assert "Tarkowski" not in set(_rentable_drops(weak, weak)["Player"])
+        strong = pd.DataFrame([dict(Player="A", Position="D", ROS=0.90),
+                               dict(Player="B", Position="D", ROS=0.95),
+                               dict(Player="Tarkowski", Position="D", ROS=0.73)])
+        assert "Tarkowski" in set(_rentable_drops(strong, strong)["Player"])
+
+    def test_a_position_entirely_above_the_median_funds_no_rental(self):
+        """Which is a real answer, not a gap to be filled."""
+        roster = self._roster()
+        defs = roster[roster["Position"] == "D"]
+        elite_only = defs[defs["ROS"] > 0.70]
+        assert _rentable_drops(roster, elite_only).empty
+
+    def test_it_falls_open_without_ros(self):
+        """A lane that silently stops working is worse than one occasionally
+        too generous."""
+        roster = pd.DataFrame([dict(Player="A", Position="D"),
+                               dict(Player="B", Position="D")])
+        assert len(_rentable_drops(roster, roster)) == 2
+        blank = self._roster().assign(ROS=float("nan"))
+        assert len(_rentable_drops(blank, blank)) == len(self.ROSTER)

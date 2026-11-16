@@ -3628,23 +3628,6 @@ truncation, keeping **Hold**: "worth keeping" subsumes "worth renting", and the
 rent card would otherwise invite a lasting upgrade followed by handing the
 player back.
 
-**Set-piece duty was never scored, or even carried.** `penalties_order` is on
-the bootstrap and `pull_fpl_player_stats` keeps it, but it reached
-`board.reference` and stopped -- never the scored frames, so no suggestion, card
-or score could see it. The board proposed dropping **two first-choice penalty
-takers in one pass** (Enzo Le Fee, Igor Thiago) for replacements who take none.
-`_attach_set_pieces()` now carries it onto both frames and the card says so.
-
-**It is surfaced, not scored, and that is deliberate.** A penalty is worth
-roughly half a goal in expectation and a weight for it belongs with a
-measurement; `projection_accuracy` has no opinion on this yet, and CLAUDE.md's
-own rule is no reweighting without one. Carrying the column is what makes that
-measurement possible. Note the Le Fee suggestion survives all three vetoes
-honestly: Vitor beats him on this gameweek (5.02 v 3.56), the window (14.34 v
-10.40) and ROS (0.88 v 0.82). The disagreement is about a signal the model does
-not have, which is why the card states it rather than the engine silently
-out-voting the manager.
-
 **And the rent lane was offering up the wrong player.** Reported from the app:
 "Enzo Le Fee is not the person that should be dropped for Rayan Vitor. I have
 better options that could be dropped instead." Vitor is a good add; Le Fee was
@@ -3677,8 +3660,34 @@ causes:
   the default view the lane now proposes **Madueke -> Vitor** at +0.58 where it
   proposed Le Fee at +1.46.
 
-Live: **9 suggestions to 5** (and to 3 in the default "Best per position"
-view). Thiago -> Wilson, Tarkowski -> Khusanov, Iwobi ->
+**And a rental is funded from the weaker half of your squad.** Reported twice:
+"Tarkowski is an ELITE def. I am NOT dropping him, even if another player has a
+better projection for a couple GWs." He kept reappearing because he is
+mid-table *by Keep Score* -- 6th of 15 -- so every rank-based window still
+included him, and `ALPHA_TIERS` puts his ROS of 0.73 below the 0.75 "strong"
+band, into the churn zone where short-term value is meant to dominate.
+
+`_rentable_drops()` bars anyone at or above the **squad's own median ROS**. A
+rental buys one gameweek and costs a roster spot permanently, so the man given
+up has to be one you were close to moving on anyway. The bar is relative rather
+than absolute for two reasons: "elite" on a strong roster is not "elite" on a
+weak one, and the question here is only ever which of *your* players to give up;
+and an absolute threshold would have had to be tuned until one named player fell
+the right side of it, which is fitting to an anecdote. It falls open where ROS
+is missing -- a lane that silently stops working is worse than one occasionally
+too generous. Live, the median is 0.706, protecting Tarkowski (0.732),
+Muharemovic (0.754) and Le Fee (0.824) while leaving Madueke (0.585) to fund the
+rental that was wanted.
+
+A set-piece experiment was tried here and **reverted**: `penalties_order` was
+carried onto both frames and the card warned when a swap gave up a first-choice
+penalty taker. Reported back: "the projections are certainly accounting for this
+points source from PKs." Right -- Rotowire and FFP both price expected goals
+including penalties, so the note was double-counting a signal already inside
+`Proj`, and the plumbing went with it rather than being left as unused weight.
+
+Live: **9 suggestions to 4**, and to **3** in the default "Best per position"
+view -- Hume -> Collins and Tel -> Vitor on Hold, Madueke -> Vitor on Rent. Thiago -> Wilson, Tarkowski -> Khusanov, Iwobi ->
 Alysson and the duplicate Hume -> Collins are gone; Madueke -> King, Tel ->
 Vitor and Muharemovic -> Pinnock are untouched. An earlier, blunter version of
 the elite-drop guard also killed Madueke -> King, which is a perfectly

@@ -1476,11 +1476,6 @@ def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef,
                               else float(best_avail.get('Dep_Weeks'))),
         'add_blocker_source': str(best_avail.get('Dep_Source', '') or ''),
         'thin_wire': thin_wire,
-        # Set-piece duty, carried so a card can say it. A first-choice penalty
-        # taker has a points source his replacement does not, and the app
-        # scored that at zero -- it proposed dropping two of them in one board.
-        'drop_penalties': is_first_choice_penalty_taker(worst_roster),
-        'add_penalties': is_first_choice_penalty_taker(best_avail),
         'release_cost': (None if release_cost is None or pd.isna(release_cost)
                          else round(float(release_cost), 2)),
         'position_floor': (None if floor is None else round(float(floor), 2)),
@@ -1495,55 +1490,48 @@ def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef,
 
 
 
-#: Set-piece duties FPL publishes and the app has never scored.
-#:
-#: `penalties_order == 1` is a first-choice penalty taker, and a penalty is
-#: worth roughly half a goal in expectation -- 2 to 3 points a time for the
-#: positions that take them. The bootstrap has carried it all along and only the
-#: Player Statistics page reads it.
-#:
-#: Reported from the app, twice in one breath: it proposed dropping **Enzo Le
-#: Fee** (Sunderland's first-choice penalty *and* corner taker) and **Igor
-#: Thiago** (Brentford's first-choice penalty taker), in both cases for a
-#: replacement who takes neither. It is surfaced here rather than scored: a
-#: weight belongs with a measurement, and the accuracy harness has no opinion on
-#: this yet. Carrying the column is what makes that measurement possible later.
-_SET_PIECE_COLS = ("penalties_order", "direct_freekicks_order",
-                   "corners_and_indirect_freekicks_order")
 
+def _rentable_drops(roster_df: pd.DataFrame, roster_pos: pd.DataFrame) -> pd.DataFrame:
+    """The players a rental may be funded by releasing.
 
-def _attach_set_pieces(df: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
-    """Carry set-piece duties from the reference pool onto a scored frame.
+    **A rental is funded from the weaker half of your squad.** It buys one
+    gameweek and costs a roster spot permanently, so the man you give up has to
+    be someone you were close to moving on anyway -- never a player you would
+    hold through a bad run.
 
-    `pull_fpl_player_stats` has always published these and nothing downstream
-    ever received them -- they reached `board.reference` and stopped there, so
-    no suggestion, card or score could see them.
+    Reported from the app, twice: "Tarkowski is an ELITE def. I am NOT dropping
+    him, even if another player has a better projection for a couple GWs." He
+    kept reappearing because he is genuinely mid-table *by Keep Score* -- 6th of
+    15 -- so every rank-based window still included him, and the engine's own
+    tiers put his ROS of 0.73 below the 0.75 "strong" band and into the churn
+    zone where short-term value is supposed to dominate.
+
+    The bar is the **squad's own median ROS** rather than an absolute band, for
+    two reasons. It is self-calibrating: "elite" on a strong roster is not
+    "elite" on a weak one, and the question here is only ever which of *your*
+    players to give up. And it needs no invented constant -- the alternative was
+    a threshold tuned until one named player fell the right side of it, which
+    is fitting to an anecdote.
+
+    Live, the median is 0.706: Tarkowski (0.732), Muharemovic (0.754) and Le Fee
+    (0.824) are protected, while Madueke (0.585) stays available to fund a
+    rental, which is the move that was wanted.
+
+    Falls open -- if ROS is missing there is no basis to protect anybody, and a
+    lane that silently stops working is worse than one that is occasionally too
+    generous.
     """
-    if df is None or df.empty or reference is None or reference.empty:
-        return df
-    if 'Player_ID' not in df.columns or 'Player_ID' not in reference.columns:
-        return df
-    cols = [c for c in _SET_PIECE_COLS if c in reference.columns]
-    if not cols:
-        return df
-    have = [c for c in cols if c in df.columns]
-    if len(have) == len(cols):
-        return df
-    src = reference[['Player_ID'] + cols].drop_duplicates(subset=['Player_ID'])
-    return df.merge(src, on='Player_ID', how='left',
-                    suffixes=('', '_ref'))
-
-
-def is_first_choice_penalty_taker(row) -> bool:
-    """Is he his club's number-one penalty taker?"""
-    try:
-        order = row.get('penalties_order')
-    except AttributeError:
-        return False
-    try:
-        return int(order) == 1
-    except (TypeError, ValueError):
-        return False
+    if 'ROS' not in roster_df.columns or 'ROS' not in roster_pos.columns:
+        return roster_pos
+    ros = pd.to_numeric(roster_df['ROS'], errors='coerce').dropna()
+    if ros.empty:
+        return roster_pos
+    median = float(ros.median())
+    own = pd.to_numeric(roster_pos['ROS'], errors='coerce')
+    eligible = roster_pos[own < median]
+    # Every player at this position is above the squad median, so there is
+    # nobody here a rental should be funded by. That is a real answer.
+    return eligible
 
 
 def _lane_num(row, *cols):
@@ -2013,8 +2001,9 @@ def _compute_transfer_suggestions(
             # be dropped for Rayan Vitor. I have better options that could be
             # dropped instead." Le Fee was the *fourth* weakest of five
             # midfielders and still won the pairing.
-            rent_roster = (roster_sorted if roster_candidates is None
-                           else roster_sorted.head(roster_candidates))
+            rent_roster = _rentable_drops(roster_df, roster_sorted)
+            if roster_candidates is not None:
+                rent_roster = rent_roster.head(roster_candidates)
 
             rent_cands = []
             for drop_idx, drop_row in rent_roster.iterrows():
@@ -2562,7 +2551,6 @@ def build_waiver_board(league_id, team_id, current_gw=None, *, entry_id=None,
         avail_all = avail_all.merge(starts_data, on='Player_ID', how='left')
     avail_all['Season_Points'] = numeric_col(avail_all, 'Season_Points', 0)
     avail_all['starts'] = numeric_col(avail_all, 'starts', 0)
-    avail_all = _attach_set_pieces(avail_all, fpl_stats)
 
     # **After the `starts` merge, never before it.** The depth rule reads season
     # starts to tell a deputy from a regular; run earlier, where the column does
@@ -2667,7 +2655,6 @@ def build_waiver_board(league_id, team_id, current_gw=None, *, entry_id=None,
         # backfill that used to sit here filled 0 and is deleted; see the
         # tombstone in `player_matching`.
         my_roster = _attach_display_names(my_roster)
-        my_roster = _attach_set_pieces(my_roster, fpl_stats)
         # `form_weeks` as well as `lookahead`: the available pool got the widget
         # value and the roster silently kept `config.FORM_LOOKBACK_WEEKS`, so moving
         # the slider compared a 2-week pool form against a 4-week roster form -- in
