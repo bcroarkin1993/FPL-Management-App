@@ -484,6 +484,71 @@ class TestClaimability:
         assert any("player code" in m for _s, m in notes)
 
 
+class TestThereMustBeAnAbsenceToReturnFrom:
+    """Reported from the app: Nick Pope sat on this board with 0 minutes while
+    perfectly fit -- benched behind Hornicek, with no injury to come back from.
+
+    The band read "FPL has not flagged him as doubtful", which is true of every
+    benched squad player in the game. What it should read is "FPL published news
+    about him and has since cleared it", which is an explicit
+    ``chance_of_playing`` of 100.
+
+    Measured live, the field separates the two cohorts exactly: of 479 fit
+    players, 183 carry an explicit 100 and **all 183** also carry a
+    ``news_added`` stamp; 296 carry None and **none of them** does.
+    """
+
+    @staticmethod
+    def _run(**kw):
+        row = dict(Player_Code=462424, Player_ID=6, Player="Test Player",
+                   Team="ARS", Position="D", starts=0, minutes=0, total_points=0,
+                   status="a", chance_of_playing_next_round=100, news="")
+        row.update(kw)
+        prior = pd.DataFrame([dict(Player_Code=462424, Prior_PPS=137 / 30,
+                                   Prior_Role=30 / 38, Prior_Season="2025/26",
+                                   Prior_Starts=30, Prior_Points=137,
+                                   Appearances=0)])
+        pool = _pool([row] + _starters())
+        return build_return_watch(pool, _states(pool), current_gw=GW,
+                                  prior_rates=prior, min_pctile=0.0)
+
+    def test_a_never_flagged_player_is_not_returning_from_anything(self):
+        """Pope: fit, 0 minutes, and `chance_of_playing` is None.
+
+        None is FPL never having said a word about him. Reading it as "cleared"
+        turns "nobody mentioned him" into "he has recovered".
+        """
+        out = self._run(chance_of_playing_next_round=None)
+        assert 462424 not in set(out["Player_Code"])
+
+    def test_an_explicitly_cleared_player_is(self):
+        """Saliba: the same 0 minutes, but FPL states 100 outright."""
+        out = self._run(chance_of_playing_next_round=100)
+        row = out[out["Player_Code"] == 462424].iloc[0]
+        assert row["Band"] == BAND_CLEARED
+
+    def test_a_currently_injured_player_is(self):
+        out = self._run(status="i", chance_of_playing_next_round=0,
+                        news="Knee injury - Unknown return date")
+        assert 462424 in set(out["Player_Code"])
+
+    def test_a_cleared_flag_needs_the_news_to_be_gone(self):
+        """A 100 alongside live news text is not a clearance."""
+        out = self._run(chance_of_playing_next_round=100,
+                        news="Knee injury - 100% chance of playing")
+        assert 462424 not in set(out["Player_Code"])
+
+    def test_the_band_and_the_gate_read_the_same_flag(self):
+        """They cannot disagree about who has been cleared.
+
+        Two independent spellings of one test is how a band comes to say
+        `cleared` about a player the gate admitted for a different reason.
+        """
+        out = self._run(chance_of_playing_next_round=100)
+        assert out[out["Player_Code"] == 462424].iloc[0]["Band"] == BAND_CLEARED
+        assert self._run(chance_of_playing_next_round=None).empty
+
+
 class TestDeparturesAreExcluded:
     """7 of 18 raw live candidate rows had left the league."""
 

@@ -70,8 +70,11 @@ RUNGS = (RUNG_THIS, RUNG_PRIOR, RUNG_PRESEASON)
 #: How imminent the return is. Three *different claims*, not three scores.
 #:
 #: ``cleared`` is the band nothing else in the app can see, and the most
-#: actionable: FPL has already said he is available and no projection source has
-#: caught up. ``imminent`` rests on a date the news actually states.
+#: actionable: FPL has **cleared news it previously published** -- an explicit
+#: ``chance_of_playing`` of 100 -- and no projection source has caught up. It is
+#: deliberately not "FPL has not flagged him", which is true of every benched
+#: squad player in the game. ``imminent`` rests on a date the news actually
+#: states.
 BAND_CLEARED = "cleared"
 BAND_IMMINENT = "imminent"
 BAND_WATCH = "watch"
@@ -255,6 +258,26 @@ def build_return_watch(
     # evidence about selection or about a treatment table.
     currently_out = status.str.lower().isin(list(OUT_OF_SQUAD_STATUSES))
 
+    # **An explicit 100 is FPL clearing news it had published**, and that is a
+    # far stronger statement than the absence of a doubt.
+    #
+    # Reported from the app: Nick Pope sat on this board having played 0 minutes
+    # while perfectly fit -- benched behind Hornicek, with no injury to come
+    # back from. He is not a returning player, and neither is any of the 154
+    # others in that state.
+    #
+    # Measured live, the field separates the two cohorts exactly: of 479 fit
+    # players, 183 carry an explicit 100 and **all 183** also carry a
+    # `news_added` stamp; 296 carry None and **none of them** does. So a 100 is
+    # FPL saying "he had something and it is resolved", while None is FPL never
+    # having said anything at all. Reading NaN as cleared -- which is what this
+    # did -- turns "nobody mentioned him" into "he has recovered".
+    explicitly_cleared = (
+        status.str.lower().eq("a")
+        & chance.notna() & chance.ge(100)
+        & news.str.strip().eq("")
+    )
+
     # Has this season produced enough of him to read? An appearance is the
     # signal that matters: a fit substitute and an absentee both record 0
     # minutes in a given week, and only the appearance count tells them apart.
@@ -412,6 +435,14 @@ def build_return_watch(
     # `chance < 100` version admitted 17 players of whom 13 were ordinary
     # weekly doubts.
     not_playing = ((starts / float(elapsed)) <= max_start_rate) | currently_out
+
+    # **There has to be an absence to return from.** A fit player FPL has never
+    # said a word about is not recovering from anything; he is simply not being
+    # picked, and last season's pedigree is not a reason to claim him. This is
+    # the structural half of the Senesi/Pope pair -- the role rule above catches
+    # the man who has played and not started, and this catches the one who has
+    # not played at all because nobody rates him.
+    has_absence = currently_out | explicitly_cleared
     was_regular = df["Role"].fillna(0.0) >= min_role
     rated = df["Pedigree_Rate"].notna()
     # A departure is not an absence. `status` is 'u' for a loan, a permanent exit
@@ -428,7 +459,7 @@ def build_return_watch(
         return _empty(notes, "League ownership could not be read, so there is no "
                              "way to tell which returning players are claimable.")
 
-    cand = df[rated & not_playing & was_regular & ~gone & in_state].copy()
+    cand = df[rated & not_playing & was_regular & has_absence & ~gone & in_state].copy()
     if cand.empty:
         return _empty(notes, "No claimable player is returning from a spell out "
                              "with the pedigree to be worth a claim.")
@@ -446,10 +477,7 @@ def build_return_watch(
         # from a code, so "Unknown return date" would become a confident date.
         stated = news_stated_games_to_miss(row_news, deadlines, now=now)
 
-        cleared = (row_status == "a"
-                   and (pd.isna(row_chance) or float(row_chance) >= 100)
-                   and not row_news.strip())
-        if cleared:
+        if bool(explicitly_cleared.get(idx, False)):
             bands.append(BAND_CLEARED)
             return_gws.append(current_gw)
         elif stated is not None and 0 <= int(stated) <= horizon:

@@ -3723,8 +3723,9 @@ rather than asserting a role it cannot see.
 
 Live effect of this rule: the board went from 10 rows to 7, dropping Senesi,
 Welbeck, Kulusevski, Kovacic, Keane, Hinshelwood and Wieffer -- every one fit,
-available and not being picked. Saliba stays 3rd and the genuinely-injured
-(Semenyo, Hato, Sarr, Mateta) are untouched.
+available and not being picked. Requiring an absence then dropped Pope and Kepa,
+taking it to **5** (6 with Saliba un-owned). Saliba stays 3rd and the
+genuinely-injured (Semenyo, Hato, Sarr, Mateta) are untouched throughout.
 
 **The reference is established starters** -- rung-1 players with `starts >= 0.5 x
 elapsed`. Pooling everyone with four starts let a hot streak define the ceiling
@@ -3778,11 +3779,43 @@ season, the band, the return gameweek where one is stated. These rows have no
 projection to corroborate them, so the evidence is the only thing a reader can
 disagree with, and `check_return_watch()` errors on a row that carries none.
 
-Three bands, because they are three different claims: `cleared` (FPL rates him
-fit while he still has not featured -- the signal nothing else in the app can
-see, 14 live), `imminent` (a date the *news* states, within 3 gameweeks, via
-`news_stated_games_to_miss` so a chance bucket cannot invent one, 2 live), and
-`watch` (out, no date, 2 live).
+Three bands, because they are three different claims: `cleared` (FPL has
+**cleared news it previously published** and no projection source has caught
+up), `imminent` (a date the *news* states, within 3 gameweeks, via
+`news_stated_games_to_miss` so a chance bucket cannot invent one), and `watch`
+(out, no date).
+
+**There has to be an absence to return from, and a bare absence of doubt is not
+one.** Reported from the app: Nick Pope sat on the board with 0 minutes while
+perfectly fit, benched behind Hornicek. The `cleared` band read "FPL has not
+flagged him", which is true of every benched squad player in the game.
+
+The field that separates them is `chance_of_playing_next_round`, and it does so
+**exactly**: of 479 fit players, 183 carry an explicit `100` and *all 183* also
+carry a `news_added` stamp; 296 carry `None` and *none of them* does. So a 100
+is FPL saying "he had something and it is resolved" -- which is an absence that
+ended -- while `None` is FPL never having said anything at all. Reading NaN as
+cleared, which is what this did, turns "nobody mentioned him" into "he has
+recovered". Among fit, barely-starting players that is 71 genuinely cleared
+against **154 simply benched**. A player now reaches the board only if he is
+`currently_out` **or** `explicitly_cleared`, and the band reads the same flag so
+the two cannot disagree.
+
+**"How long has he been cleared" is deliberately not used, because it is not
+observable.** The obvious refinement -- Saliba was cleared days ago and has had
+an international break, Pope has been fit for months -- cannot be read from the
+API: **`news_added` records when news was last *set*, not when it was cleared**.
+Measured live, the minimum stamp age across all 183 cleared players is 8 days
+(never 0), and the freshest stamps belong to the players with the *most*
+minutes, who were flagged recently and have played since; Saliba's stamp is 116
+days old, which is when his injury was announced. A live test pins that, so if
+FPL ever does start touching the field on clearing, the failure is the prompt to
+use it.
+
+What remains is a player cleared long ago who is fit with no appearances at all.
+Only 2-7% of cleared players have zero minutes, and any who have appeared are
+already caught by the this-season role rule above -- so the residue is small,
+and the card prints the appearance count rather than hiding it.
 
 **Live effect: `Proj`, `Proj_Start`, `Start_Pct` and `Proj_Next3` are
 byte-identical over all 672 players, and both waiver lanes return identical

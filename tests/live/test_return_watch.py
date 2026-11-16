@@ -316,3 +316,59 @@ def test_no_fit_and_unpicked_player_reaches_the_live_board(board, pool):
     assert offenders.empty, (
         "Fit players with a real run of this season on the board: %s"
         % offenders["Display_Name"].tolist())
+
+
+def test_news_added_is_not_a_clearance_timestamp(pool):
+    """Pinned because it is tempting and wrong.
+
+    The obvious way to ask "how long has he been fit and not playing" is the age
+    of his `news_added` stamp. FPL does **not** update that field when it clears
+    news -- it records when news was last *set*. Measured live: across every
+    explicitly-cleared player the minimum stamp age was 8 days (never 0), and
+    the freshest stamps belong to players with the *most* minutes, who were
+    flagged recently and have been playing since. Saliba's stamp was 116 days
+    old, which is when his injury was announced rather than when it ended.
+
+    So "gameweeks since cleared" is not recoverable from a bootstrap snapshot,
+    and any rule built on it would be measuring the wrong thing.
+    """
+    from datetime import datetime, timezone
+    cleared = pool[(pool["status"] == "a")
+                   & (pd.to_numeric(pool["chance_of_playing_next_round"],
+                                    errors="coerce") == 100)
+                   & (pool["news"].astype(str).str.strip() == "")]
+    if len(cleared) < 20:
+        pytest.skip("Too few cleared players to characterise the stamp")
+    stamps = pd.to_datetime(cleared["news_added"], errors="coerce", utc=True)
+    assert stamps.notna().mean() > 0.95, \
+        "An explicit 100 should always carry a news_added stamp"
+    ages = (datetime.now(timezone.utc) - stamps).dt.days
+    assert ages.min() >= 1, (
+        "A news_added stamp younger than a day means FPL has started updating "
+        "the field on clearing. If so, gameweeks-since-cleared becomes "
+        "observable and the returning watch should use it.")
+
+
+def test_every_board_row_has_an_absence_to_return_from(board, pool):
+    """A fit player FPL never flagged is benched, not recovering.
+
+    Nick Pope was on this board with 0 minutes while fit, behind an ever-present
+    keeper. `chance_of_playing` is None for him and for 296 other fit players --
+    FPL has never said anything about any of them.
+    """
+    frame, _notes = board
+    if frame.empty:
+        pytest.skip("Empty board -- a legitimate state")
+    merged = frame.merge(
+        pool[["code", "status", "chance_of_playing_next_round", "news"]].rename(
+            columns={"code": "Player_Code"}),
+        on="Player_Code", how="left", suffixes=("", "_pool"))
+    out_now = merged["status"].astype(str).str.lower().isin(["i", "s", "u", "n"])
+    chance = pd.to_numeric(merged["chance_of_playing_next_round"], errors="coerce")
+    cleared = (merged["status"].astype(str).str.lower().eq("a")
+               & chance.notna() & chance.ge(100)
+               & merged["news"].astype(str).str.strip().eq(""))
+    offenders = merged[~(out_now | cleared)]
+    assert offenders.empty, (
+        "Players on the board with no absence to return from: %s"
+        % offenders["Display_Name"].tolist())
