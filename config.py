@@ -482,6 +482,28 @@ RETURN_WATCH_MIN_GWS = _env_int("FPL_RETURN_WATCH_MIN_GWS", 3)
 #: paid for five times.
 RETURN_WATCH_MIN_REFERENCE = _env_int("FPL_RETURN_WATCH_MIN_REFERENCE", 5)
 
+#: When the season in progress has already answered "does he start?".
+#:
+#: Reported from the app: Marcos Senesi topped the board on an elite prior
+#: season (97% of starts) while having started **2 of 10** for his new club --
+#: fit the whole time, simply not picked. The role gate took the most
+#: favourable rung, which is right for a player whose absence depressed his
+#: share and wrong for one whose selection did.
+#:
+#: The discriminator is whether he is *currently out*. An injured player's
+#: this-season share is depressed by the injury, so his prior role is the better
+#: read of what happens when he returns. A **fit** player who is not playing has
+#: already been answered: he is available and overlooked.
+#:
+#: "Enough evidence" is a full match's worth of minutes **or** three
+#: appearances. An appearance is the signal that matters -- a fit substitute and
+#: a man in the treatment room both read 0 minutes in a given week, and only the
+#: appearance count separates them. Either threshold alone leaves a real case
+#: behind: Kulusevski at 42 minutes across 4 appearances is plainly not
+#: starting, and Minteh at 8 minutes in 1 is plainly just back.
+RETURN_WATCH_EVIDENCE_MINUTES = _env_int("FPL_RETURN_WATCH_EVIDENCE_MINUTES", 90)
+RETURN_WATCH_EVIDENCE_APPS = _env_int("FPL_RETURN_WATCH_EVIDENCE_APPS", 3)
+
 #: Starts needed in a prior season for its rate to be usable (rung 2), and in
 #: *this* season for a player to enter the reference pool (as a share of elapsed
 #: gameweeks). The reference bar is higher than the candidate bar on purpose:

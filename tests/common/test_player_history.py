@@ -14,10 +14,12 @@ import pandas as pd
 import pytest
 
 from scripts.common.player_history import (
+    CURRENT_COLUMNS,
     HISTORY_COLUMNS,
     RATE_COLUMNS,
     SEASON_GWS,
     fetch_history_past,
+    fetch_player_history,
     prior_season_rate,
 )
 
@@ -107,6 +109,50 @@ class TestPriorSeasonRate:
 
 class TestFetchHistoryPast:
 
+    def test_both_halves_come_from_one_request(self):
+        """The current season's usage costs no extra call.
+
+        They answer different questions -- what he is worth, and whether he is
+        being picked -- but they arrive in the same payload, and two fetchers
+        hitting one endpoint is the twin-drift failure this codebase keeps
+        paying for.
+        """
+        payload = {
+            "history_past": [{"season_name": "2025/26", "total_points": 137,
+                              "starts": 30, "minutes": 2614}],
+            "history": [{"minutes": 90, "starts": 1}, {"minutes": 0, "starts": 0},
+                        {"minutes": 88, "starts": 1}, {"minutes": 12, "starts": 0}],
+        }
+        with mock.patch("scripts.common.player_history.requests.Session") as sess:
+            sess.return_value.get.return_value.json.return_value = payload
+            past, current = fetch_player_history({6: 462424})
+        assert sess.return_value.get.call_count == 1
+        assert list(current.columns) == CURRENT_COLUMNS
+        row = current.iloc[0]
+        assert row["Player_Code"] == 462424
+        # Three gameweeks with minutes on the pitch, two of them starts.
+        assert row["Appearances"] == 3
+        assert row["Current_Starts"] == 2
+        assert row["Current_Minutes"] == 190
+        assert len(past) == 1
+
+    def test_an_appearance_is_a_gameweek_he_played_not_one_he_started(self):
+        """The distinction the bootstrap cannot make.
+
+        A fit substitute and a man in the treatment room both record 0 minutes
+        in a given week; only the appearance count separates them, and that is
+        the whole basis for deciding whether this season has answered anything.
+        """
+        payload = {"history_past": [],
+                   "history": [{"minutes": 12, "starts": 0},
+                               {"minutes": 3, "starts": 0},
+                               {"minutes": 0, "starts": 0}]}
+        with mock.patch("scripts.common.player_history.requests.Session") as sess:
+            sess.return_value.get.return_value.json.return_value = payload
+            _past, current = fetch_player_history({6: 462424})
+        assert current.iloc[0]["Appearances"] == 2
+        assert current.iloc[0]["Current_Starts"] == 0
+
     def test_it_keys_on_the_code_the_caller_supplies(self):
         """Not on the element id the endpoint was addressed by.
 
@@ -143,6 +189,36 @@ class TestFetchHistoryPast:
     @pytest.mark.parametrize("mapping", [None, {}, {None: 1}, {1: None}])
     def test_an_unusable_mapping_fetches_nothing(self, mapping):
         with mock.patch("scripts.common.player_history.requests.Session") as sess:
-            out = fetch_history_past(mapping)
+            past, current = fetch_player_history(mapping)
             sess.return_value.get.assert_not_called()
-        assert out.empty
+        assert past.empty and current.empty
+        assert list(current.columns) == CURRENT_COLUMNS
+
+
+class TestUsageIsAttachedToTheRate:
+
+    def test_appearances_ride_along_with_the_prior_rate(self):
+        current = pd.DataFrame([dict(Player_Code=462424, Appearances=2,
+                                     Current_Starts=2, Current_Minutes=178)])
+        out = prior_season_rate(SALIBA, current, min_starts=20)
+        assert out.iloc[0]["Appearances"] == 2
+        assert out.iloc[0]["Prior_PPS"] == pytest.approx(137 / 30)
+
+    def test_a_player_with_no_prior_season_still_gets_his_appearances(self):
+        """An outer join, because the two halves cover different players.
+
+        The appearance count is what says whether this season has answered the
+        question, and that matters just as much for a player with no prior
+        season at all.
+        """
+        current = pd.DataFrame([dict(Player_Code=999, Appearances=5,
+                                     Current_Starts=0, Current_Minutes=60)])
+        out = prior_season_rate(SALIBA, current, min_starts=20)
+        assert set(out["Player_Code"]) == {462424, 999}
+        assert out[out["Player_Code"] == 999].iloc[0]["Appearances"] == 5
+        assert pd.isna(out[out["Player_Code"] == 999].iloc[0]["Prior_PPS"])
+
+    def test_no_usage_still_declares_the_column(self):
+        out = prior_season_rate(SALIBA, None, min_starts=20)
+        assert list(out.columns) == RATE_COLUMNS
+        assert out["Appearances"].isna().all()

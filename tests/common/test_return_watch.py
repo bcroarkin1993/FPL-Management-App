@@ -259,6 +259,148 @@ class TestTheRoleGate:
         assert row["Pedigree_Rate"] != pytest.approx((137 / 30) * (30 / 38), abs=1e-3)
 
 
+class TestThisSeasonOverrulesPriorRole:
+    """Reported from the app: Marcos Senesi topped the board on last season's
+    97% start share while having started **2 of 10** for his new club -- fit the
+    whole time, simply not picked.
+
+    The most favourable rung is right for a player whose *absence* depressed his
+    share and wrong for one whose *selection* did, and what separates them is
+    whether he is currently out. These are the real live numbers.
+    """
+
+    @staticmethod
+    def _candidate(**kw):
+        row = dict(Player_Code=462424, Player_ID=6, Player="Test Player",
+                   Team="ARS", Position="D", starts=0, minutes=0, total_points=0,
+                   status="a", chance_of_playing_next_round=100, news="")
+        row.update(kw)
+        return row
+
+    @staticmethod
+    def _prior(role=30 / 38, apps=0):
+        return pd.DataFrame([dict(Player_Code=462424, Prior_PPS=137 / 30,
+                                  Prior_Role=role, Prior_Season="2025/26",
+                                  Prior_Starts=round(role * 38), Prior_Points=137,
+                                  Appearances=apps)])
+
+    def _run(self, candidate, prior):
+        pool = _pool([candidate] + _starters())
+        return build_return_watch(pool, _states(pool), current_gw=GW,
+                                  prior_rates=prior, min_pctile=0.0)
+
+    def test_senesi_is_dropped(self):
+        """Fit, 178 minutes across 2 appearances, 2 starts of 10. Not a returnee."""
+        out = self._run(self._candidate(minutes=178, starts=2, total_points=9),
+                        self._prior(role=37 / 38, apps=2))
+        assert 462424 not in set(out["Player_Code"])
+
+    def test_saliba_is_kept(self):
+        """Fit, but *zero* appearances -- this season has said nothing at all.
+
+        This is the case the whole feature exists for, and it is why no
+        appearances can never mean "not a starter": a man FPL never flagged and
+        a man who is simply unused look identical from here.
+        """
+        out = self._run(self._candidate(minutes=0, starts=0),
+                        self._prior(role=30 / 38, apps=0))
+        row = out[out["Player_Code"] == 462424].iloc[0]
+        assert row["Role"] == pytest.approx(30 / 38)
+        assert row["Role_Src"] == RUNG_PRIOR
+        assert row["Evidence"]["role_from_this_season"] is False
+
+    def test_a_fit_substitute_is_dropped_on_appearances_alone(self):
+        """Kulusevski: 42 minutes, but *four* appearances and no starts.
+
+        Under a minutes-only threshold he would survive on 42 minutes, which is
+        why the appearance count is the other half of the test.
+        """
+        out = self._run(self._candidate(minutes=42, starts=0, total_points=4),
+                        self._prior(role=27 / 38, apps=4))
+        assert 462424 not in set(out["Player_Code"])
+
+    def test_a_player_just_back_keeps_his_old_role(self):
+        """Minteh: 8 minutes in 1 appearance -- too little to conclude anything."""
+        out = self._run(self._candidate(minutes=8, starts=0, total_points=1),
+                        self._prior(role=26 / 38, apps=1))
+        row = out[out["Player_Code"] == 462424].iloc[0]
+        assert row["Role_Src"] == RUNG_PRIOR
+        assert row["Evidence"]["role_from_this_season"] is False
+
+    def test_an_injured_regular_keeps_his_prior_role(self):
+        """Semenyo: 6 starts of 10 then a knee injury.
+
+        His this-season share is depressed by the injury, which is evidence
+        about the injury and not about whether his manager rates him. Without
+        this branch a man hurt early enough would be dropped for being hurt.
+        """
+        out = self._run(
+            self._candidate(minutes=553, starts=6, total_points=37, status="i",
+                            chance_of_playing_next_round=0,
+                            news="Knee injury - Unknown return date"),
+            self._prior(role=37 / 38, apps=7))
+        row = out[out["Player_Code"] == 462424].iloc[0]
+        assert row["Role"] == pytest.approx(37 / 38)
+        assert row["Evidence"]["role_from_this_season"] is False
+
+    def test_a_fit_player_with_evidence_can_never_reach_the_board(self):
+        """The override is purely exclusionary, and that is structural.
+
+        Once this season decides, a fit player's role *is* his start rate -- and
+        the not-playing gate has already capped that at 0.25, well under the
+        0.60 role bar. So no fit player with real current-season evidence can
+        satisfy both, whatever he did last year. That is the intended meaning:
+        a man who is available and not being picked is not a returning asset.
+        """
+        for minutes, starts, apps in [(178, 2, 2), (126, 1, 8), (42, 0, 4),
+                                      (227, 2, 4), (99, 1, 3)]:
+            out = self._run(
+                self._candidate(minutes=minutes, starts=starts, total_points=10),
+                self._prior(role=37 / 38, apps=apps))
+            assert 462424 not in set(out["Player_Code"]), \
+                "fit, %d mins / %d apps / %d starts should be excluded" % (
+                    minutes, apps, starts)
+
+    def test_role_src_can_still_read_this_season_for_an_injured_player(self):
+        """Via the best-rung branch, not the override.
+
+        Jorrel Hato: 6 starts of 10 then injured, and a *weaker* prior season --
+        so the best rung is this one. The override flag stays False, because he
+        is out and this season's share was not what decided it.
+        """
+        out = self._run(
+            self._candidate(minutes=412, starts=6, total_points=25, status="i",
+                            chance_of_playing_next_round=0,
+                            news="Unspecified injury - Unknown return date"),
+            self._prior(role=0.3, apps=6))
+        row = out[out["Player_Code"] == 462424].iloc[0]
+        assert row["Role_Src"] == RUNG_THIS
+        assert row["Role"] == pytest.approx(0.60)
+        assert row["Evidence"]["role_from_this_season"] is False
+        assert "this season" in role_phrase(row)
+
+    def test_without_appearance_data_the_minutes_threshold_still_applies(self):
+        """`Appearances` is absent whenever the history fetch failed.
+
+        The rung must degrade rather than switch off, so minutes alone still
+        decide -- a frame with no appearance column is an ordinary state.
+        """
+        prior = self._prior(role=37 / 38).drop(columns=["Appearances"])
+        out = self._run(self._candidate(minutes=178, starts=2, total_points=9),
+                        prior)
+        assert 462424 not in set(out["Player_Code"])
+
+    def test_thresholds_are_configurable(self):
+        candidate = self._candidate(minutes=178, starts=2, total_points=9)
+        pool = _pool([candidate] + _starters())
+        # Raise the bar past his minutes and appearances: he is a returnee again.
+        out = build_return_watch(pool, _states(pool), current_gw=GW,
+                                 prior_rates=self._prior(role=37 / 38, apps=2),
+                                 min_pctile=0.0, evidence_minutes=500,
+                                 evidence_apps=10)
+        assert 462424 in set(out["Player_Code"])
+
+
 class TestTheNotPlayingGate:
 
     def test_a_season_long_absentee_qualifies(self):

@@ -641,6 +641,16 @@ def _render_returning_section(board, limit=None):
             bits.append(phrase)
         if pd.notna(rate) and rung:
             bits.append("%.2f pts per start (%s)" % (float(rate), rung))
+        # How much of this season there is to go on. Load-bearing rather than
+        # decorative: a fit player with no appearances is *indistinguishable*
+        # from a returning one using FPL's fields alone -- Saliba carried no
+        # news at all -- so the board keeps him and the card says plainly how
+        # thin the evidence is, instead of asserting a role it cannot see.
+        apps = row.get("Appearances")
+        if pd.notna(apps):
+            bits.append("no appearances this season" if int(apps) == 0
+                        else "%d appearance%s this season"
+                             % (int(apps), "" if int(apps) == 1 else "s"))
         if str(row.get("Draft_State") or "").lower() == "l":
             bits.append("<b>locked</b> &mdash; claimable at the next waiver")
         if row.get("Band") == BAND_IMMINENT and pd.notna(row.get("Return_GW")):
@@ -703,6 +713,12 @@ def _render_returning_section(board, limit=None):
             "multiplier: a player injured in GW3 has started few of this "
             "season's gameweeks, and folding that in would read him as a fringe "
             "player when the absence itself is the reason.\n"
+            "- **Where this season has already answered it, this season wins.** "
+            "A player who is *fit* and still not starting is not a returning "
+            "asset, however good he was last year \u2014 so once he has a full "
+            "match's minutes or three appearances, his current start share is "
+            "the one that counts. Only a player who is currently out, or who "
+            "has barely featured at all, keeps his old role.\n"
             "- *Cleared to play* means FPL rates him fully available while he "
             "still has not featured \u2014 the strongest signal here, and the "
             "one no projection source has caught up with yet.\n\n"

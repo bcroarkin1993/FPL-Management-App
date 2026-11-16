@@ -3682,12 +3682,49 @@ wrong, and a live test pins that recent seasons still publish it.
 
 **The rate and the role may come from different rungs**, recorded in `Role_Src`.
 A player hurt in GW3 has started 3 of 10 elapsed gameweeks, which reads as a
-fringe player when the absence is the reason -- so the role takes the most
-favourable rung, whose only failure mode is losing a real candidate.
-`prior_season_rate` keeps `Prior_PPS` and `Prior_Role` separate for the same
-reason. Rung 3's role is the nineties Rotowire's own two columns imply
-(`Points / PP90 / 38`, live 4.4 to 38.1), which is the only role signal a
-preseason table carries.
+fringe player when the absence is the reason. `prior_season_rate` keeps
+`Prior_PPS` and `Prior_Role` separate for the same reason. Rung 3's role is the
+nineties Rotowire's own two columns imply (`Points / PP90 / 38`, live 4.4 to
+38.1), which is the only role signal a preseason table carries.
+
+**But where the season in progress has already answered "does he start?", it
+wins.** Reported from the app: Marcos Senesi topped the board on last season's
+97% start share while having started **2 of 10** for his new club -- fit
+throughout, simply not picked. Taking the most favourable rung is right for a
+player whose *absence* depressed his share and wrong for one whose *selection*
+did, and what separates them is whether he is **currently out**:
+
+| | role | why |
+|---|---|---|
+| currently out | best rung | his share is evidence about the injury, not about whether his manager rates him |
+| fit, with this season to go on | **this season** | he is available and overlooked -- that is the answer |
+| fit, barely featured | best rung | this season has said nothing |
+
+"Enough to go on" is `RETURN_WATCH_EVIDENCE_MINUTES` (90, a full match) **or**
+`RETURN_WATCH_EVIDENCE_APPS` (3). Both are needed: Kulusevski at 42 minutes
+across four appearances is plainly not starting, and Minteh at 8 minutes in one
+is plainly just back. **An appearance is the signal that matters**, and the
+bootstrap cannot supply it -- it publishes `starts` and `minutes`, and a fit
+substitute and a man in the treatment room both read 0 minutes in a given week.
+`fetch_player_history` returns it from the `history` array in the payload
+`history_past` already comes from, so it costs no extra request.
+
+The override is **purely exclusionary**, which is structural rather than
+incidental: once this season decides, a fit player's role *is* his start rate,
+and the not-playing gate has already capped that at 0.25 against a 0.60 role
+bar. No fit player with real current-season evidence can satisfy both. A test
+pins that.
+
+**Zero appearances can never mean "not a starter"**, and this is the case the
+whole feature exists for: Saliba was fit per FPL with no news at all, and a man
+the bootstrap never flagged is indistinguishable from one who is simply unused.
+So he keeps his prior role and the card states the appearance count plainly
+rather than asserting a role it cannot see.
+
+Live effect of this rule: the board went from 10 rows to 7, dropping Senesi,
+Welbeck, Kulusevski, Kovacic, Keane, Hinshelwood and Wieffer -- every one fit,
+available and not being picked. Saliba stays 3rd and the genuinely-injured
+(Semenyo, Hato, Sarr, Mateta) are untouched.
 
 **The reference is established starters** -- rung-1 players with `starts >= 0.5 x
 elapsed`. Pooling everyone with four starts let a hot streak define the ceiling
@@ -3997,7 +4034,7 @@ Score = α × 1GW + (1-α) × ROS
 | `_referenced_percentile()` | `scripts/common/analytics.py` | `positional_percentile` where a useless reference is a *declared* neutral rather than a silent within-frame min-max |
 | `_deputy_start_weeks()` | `scripts/common/projection_engine.py` | Weeks a stand-in keeps starting, so his horizon stops where the incumbent's stated return begins |
 | `build_return_watch()` | `scripts/common/return_watch.py` | Claimable players not playing now who were productive regulars — the board Saliba was invisible to |
-| `prior_season_rate()` / `fetch_history_past()` | `scripts/common/player_history.py` | The app's first previous-season data: points per start and start share from `element-summary`'s `history_past`, keyed on `Player_Code` |
+| `prior_season_rate()` / `fetch_player_history()` | `scripts/common/player_history.py` | The app's first previous-season data: points per start and start share from `element-summary`'s `history_past`, plus this season's **appearances** from the same payload, keyed on `Player_Code` |
 | `is_departed()` / `departed_mask()` | `scripts/common/injury_helpers.py` | Has he left the league rather than being hurt — one predicate, where two divergent copies had grown up |
 | `absence_estimate()` | `scripts/common/injury_helpers.py` | `(gameweeks, source)` — the absence estimate *and* whether the news stated it or a bucket inferred it |
 | `news_stated_games_to_miss()` | `scripts/common/injury_helpers.py` | Gameweeks missed only where the text states a duration — the gate for asserting anything about future gameweeks |

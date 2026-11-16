@@ -47,10 +47,16 @@ HISTORY_COLUMNS = [
     "total_points", "starts", "minutes",
 ]
 
+#: Current-season usage, one row per player. ``Appearances`` is the count of
+#: gameweeks he got on the pitch at all, which the bootstrap does not publish --
+#: it has ``starts`` and ``minutes``, and neither can tell a fit substitute from
+#: an absentee. It arrives free from the same payload ``history_past`` does.
+CURRENT_COLUMNS = ["Player_Code", "Appearances", "Current_Starts", "Current_Minutes"]
+
 #: What ``prior_season_rate`` emits, one row per player.
 RATE_COLUMNS = [
     "Player_Code", "Prior_PPS", "Prior_Role",
-    "Prior_Season", "Prior_Starts", "Prior_Points",
+    "Prior_Season", "Prior_Starts", "Prior_Points", "Appearances",
 ]
 
 #: Gameweeks in a season -- the denominator for a prior season's start share.
@@ -65,32 +71,41 @@ def _empty(columns):
 
 
 def _fetch_one(session, player_id, player_code, timeout):
-    """``(player_code, player_id, rows)`` for one element, or empty rows."""
+    """``(player_code, player_id, past_rows, current_rows)`` for one element."""
     try:
         payload = session.get(ELEMENT_SUMMARY_URL % player_id, timeout=timeout).json()
     except Exception:
         _logger.debug("element-summary failed for id %r", player_id, exc_info=True)
-        return player_code, player_id, []
-    rows = payload.get("history_past") or []
-    return player_code, player_id, rows if isinstance(rows, list) else []
+        return player_code, player_id, [], []
+    past = payload.get("history_past") or []
+    current = payload.get("history") or []
+    return (player_code, player_id,
+            past if isinstance(past, list) else [],
+            current if isinstance(current, list) else [])
 
 
-def fetch_history_past(id_to_code, *, workers=DEFAULT_WORKERS,
-                       timeout=DEFAULT_TIMEOUT, session=None):
-    """Prior-season rows for the given players, as one long frame.
+def fetch_player_history(id_to_code, *, workers=DEFAULT_WORKERS,
+                         timeout=DEFAULT_TIMEOUT, session=None):
+    """``(past, current)`` for the given players, from one pass over the API.
+
+    Both halves come from the same ``element-summary`` payload, so the current
+    season's usage costs no extra request. They are returned separately because
+    they answer different questions -- what he is worth, and whether he is being
+    picked -- and only the second can be read off the season in progress.
 
     Args:
         id_to_code: mapping of **Classic** element id -> permanent player code.
-            A mapping rather than a bare list of ids so the returned frame
+            A mapping rather than a bare list of ids so the returned frames
             cannot be keyed on the wrong identifier; see the module docstring.
         workers: pooled request concurrency. The work is pure network latency,
-            so it parallelises -- measured 672 requests in 3.3s. Follows
+            so it parallelises -- measured 672 players in 3.3s. Follows
             ``pl_content.fetch_pl_injuries``.
 
     Returns:
-        A frame of ``HISTORY_COLUMNS``, empty (with the columns declared) if
-        nothing could be read. **A failure is never an exception**: this feeds
-        one rung of a three-rung ladder, and the other two must keep working.
+        ``(HISTORY_COLUMNS frame, CURRENT_COLUMNS frame)``, both empty (with
+        their columns declared) if nothing could be read. **A failure is never
+        an exception**: this feeds one rung of a three-rung ladder, and the
+        other two must keep working.
     """
     pairs = []
     for player_id, code in dict(id_to_code or {}).items():
@@ -103,18 +118,18 @@ def fetch_history_past(id_to_code, *, workers=DEFAULT_WORKERS,
             pass
         pairs.append((int(player_id), int(code)))
     if not pairs:
-        return _empty(HISTORY_COLUMNS)
+        return _empty(HISTORY_COLUMNS), _empty(CURRENT_COLUMNS)
 
     own_session = session is None
     session = session or requests.Session()
-    records = []
+    records, usage = [], []
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
             futures = [pool.submit(_fetch_one, session, pid, code, timeout)
                        for pid, code in pairs]
             for future in concurrent.futures.as_completed(futures):
-                code, pid, rows = future.result()
-                for row in rows:
+                code, pid, past, current = future.result()
+                for row in past:
                     if not isinstance(row, dict):
                         continue
                     records.append({
@@ -125,9 +140,22 @@ def fetch_history_past(id_to_code, *, workers=DEFAULT_WORKERS,
                         "starts": row.get("starts"),
                         "minutes": row.get("minutes"),
                     })
+                mins = [r.get("minutes") or 0 for r in current if isinstance(r, dict)]
+                starts = [r.get("starts") or 0 for r in current if isinstance(r, dict)]
+                if current:
+                    usage.append({
+                        "Player_Code": code,
+                        # An appearance is a gameweek he got on the pitch at
+                        # all. That, not minutes, is what says he was available
+                        # and passed over -- a fit substitute and a man in the
+                        # treatment room both read 0 minutes in a given week.
+                        "Appearances": sum(1 for m in mins if (m or 0) > 0),
+                        "Current_Starts": sum(starts),
+                        "Current_Minutes": sum(mins),
+                    })
     except Exception:
-        _logger.warning("Prior-season history fetch failed outright", exc_info=True)
-        return _empty(HISTORY_COLUMNS)
+        _logger.warning("Player history fetch failed outright", exc_info=True)
+        return _empty(HISTORY_COLUMNS), _empty(CURRENT_COLUMNS)
     finally:
         if own_session:
             try:
@@ -135,17 +163,32 @@ def fetch_history_past(id_to_code, *, workers=DEFAULT_WORKERS,
             except Exception:
                 pass
 
-    if not records:
+    past_df = _empty(HISTORY_COLUMNS)
+    if records:
+        past_df = pd.DataFrame.from_records(records)
+        for col in ("total_points", "starts", "minutes"):
+            past_df[col] = pd.to_numeric(past_df[col], errors="coerce")
+        past_df = past_df[HISTORY_COLUMNS]
+    else:
         _logger.info("No prior-season history for any of %d players", len(pairs))
-        return _empty(HISTORY_COLUMNS)
 
-    out = pd.DataFrame.from_records(records)
-    for col in ("total_points", "starts", "minutes"):
-        out[col] = pd.to_numeric(out[col], errors="coerce")
-    return out[HISTORY_COLUMNS]
+    current_df = _empty(CURRENT_COLUMNS)
+    if usage:
+        current_df = pd.DataFrame.from_records(usage)[CURRENT_COLUMNS]
+    return past_df, current_df
 
 
-def prior_season_rate(history, *, min_starts=10, season_gws=SEASON_GWS):
+def fetch_history_past(id_to_code, **kwargs):
+    """The prior-season half of ``fetch_player_history``.
+
+    A thin wrapper rather than a second fetcher: two functions hitting the same
+    endpoint is the twin-drift failure this codebase keeps paying for.
+    """
+    return fetch_player_history(id_to_code, **kwargs)[0]
+
+
+def prior_season_rate(history, current=None, *, min_starts=10,
+                      season_gws=SEASON_GWS):
     """One pedigree row per player: his rate, and how regularly he started.
 
     ``Prior_PPS`` is points per start and ``Prior_Role`` is the share of the
@@ -165,12 +208,12 @@ def prior_season_rate(history, *, min_starts=10, season_gws=SEASON_GWS):
     everybody (Tomiyasu's 7.00 off 10 starts).
     """
     if history is None or len(history) == 0:
-        return _empty(RATE_COLUMNS)
+        return _attach_usage(_empty(RATE_COLUMNS), current)
     need = {"Player_Code", "Season_Name", "total_points", "starts"}
     if not need.issubset(set(history.columns)):
         _logger.warning("Prior-season history is missing %s",
                         sorted(need - set(history.columns)))
-        return _empty(RATE_COLUMNS)
+        return _attach_usage(_empty(RATE_COLUMNS), current)
 
     df = history.copy()
     df["starts"] = pd.to_numeric(df["starts"], errors="coerce")
@@ -178,7 +221,7 @@ def prior_season_rate(history, *, min_starts=10, season_gws=SEASON_GWS):
     df = df[df["starts"].notna() & df["total_points"].notna()]
     df = df[df["starts"] >= float(min_starts)]
     if df.empty:
-        return _empty(RATE_COLUMNS)
+        return _attach_usage(_empty(RATE_COLUMNS), current)
 
     # Sort by season label rather than trusting the payload's order. "2025/26"
     # sorts after "2024/25" lexicographically, so this is stable without
@@ -194,4 +237,31 @@ def prior_season_rate(history, *, min_starts=10, season_gws=SEASON_GWS):
         "Prior_Starts": df["starts"],
         "Prior_Points": df["total_points"],
     }).reset_index(drop=True)
-    return out[RATE_COLUMNS]
+    return _attach_usage(out, current)
+
+
+def _attach_usage(rates, current):
+    """Current-season appearances alongside the prior-season rate.
+
+    An **outer** join, because the two halves cover different players and both
+    matter: a player with no prior season still needs his appearance count (it
+    is what says whether this season has answered the question), and a player
+    with no appearances at all still needs his prior rate.
+    """
+    if current is None or len(current) == 0:
+        out = rates.copy()
+        if "Appearances" not in out.columns:
+            out["Appearances"] = pd.Series(dtype="float64")
+        return out[RATE_COLUMNS]
+    usage = current.drop_duplicates(subset=["Player_Code"]).copy()
+    usage["Player_Code"] = pd.to_numeric(usage["Player_Code"], errors="coerce")
+    base = rates.drop(columns=["Appearances"], errors="ignore")
+    if len(base):
+        base = base.copy()
+        base["Player_Code"] = pd.to_numeric(base["Player_Code"], errors="coerce")
+    merged = base.merge(usage[["Player_Code", "Appearances"]],
+                        on="Player_Code", how="outer")
+    for col in RATE_COLUMNS:
+        if col not in merged.columns:
+            merged[col] = pd.NA
+    return merged[RATE_COLUMNS].reset_index(drop=True)

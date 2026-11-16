@@ -26,6 +26,7 @@ from scripts.common.fpl_draft_api import pull_fpl_player_stats
 from scripts.common.player_history import (
     SEASON_GWS,
     fetch_history_past,
+    fetch_player_history,
     prior_season_rate,
 )
 from scripts.common.return_watch import BANDS, build_return_watch
@@ -46,16 +47,26 @@ def pool():
 
 
 @pytest.fixture(scope="module")
-def history(pool):
-    """Prior-season rows for the most prominent slice of the pool."""
+def fetched(pool):
+    """Prior seasons *and* current-season usage for a slice of the pool."""
     top = pool.sort_values("total_points", ascending=False).head(_SAMPLE)
     ids = dict(zip(pd.to_numeric(top["id"], errors="coerce").astype(int),
                    pd.to_numeric(top["code"], errors="coerce").astype(int)))
-    df = skip_if_unreachable(lambda: fetch_history_past(ids),
-                             "element-summary history_past")
-    if df.empty:
+    past, current = skip_if_unreachable(
+        lambda: fetch_player_history(ids) or None, "element-summary")
+    if past.empty:
         pytest.skip("No prior-season history published for the sampled players")
-    return df
+    return past, current
+
+
+@pytest.fixture(scope="module")
+def history(fetched):
+    return fetched[0]
+
+
+@pytest.fixture(scope="module")
+def current(fetched):
+    return fetched[1]
 
 
 @pytest.fixture(scope="module")
@@ -110,6 +121,48 @@ def test_a_rate_is_plausible_for_a_footballer(history):
 def test_the_rate_is_one_row_per_player(history):
     rates = prior_season_rate(history, min_starts=10)
     assert rates["Player_Code"].is_unique
+
+
+def test_the_current_season_half_is_published_too(current, pool):
+    """``history`` is what says whether this season has answered the question.
+
+    A fit player who is not being picked and a player in the treatment room both
+    record 0 minutes in a given week; only the appearance count separates them.
+    Without it the role gate falls back to last season for everybody, and a man
+    who has been available and overlooked all year reads as a returning asset --
+    which is exactly what was reported for Marcos Senesi.
+    """
+    assert not current.empty, "element-summary stopped publishing `history`"
+    assert list(current.columns) == ["Player_Code", "Appearances",
+                                     "Current_Starts", "Current_Minutes"]
+    apps = pd.to_numeric(current["Appearances"], errors="coerce")
+    assert apps.notna().all()
+    assert apps.between(0, 38).all(), "Appearances outside [0, 38]"
+    # These are the pool's highest scorers, so most of them are playing.
+    assert apps.gt(0).mean() > 0.8
+
+
+def test_appearances_are_never_fewer_than_starts(current):
+    """A start is an appearance. If this inverts, the two are being read from
+    different fields and the evidence test is measuring nothing."""
+    apps = pd.to_numeric(current["Appearances"], errors="coerce")
+    starts = pd.to_numeric(current["Current_Starts"], errors="coerce")
+    assert (apps >= starts).all(), \
+        "%d player(s) have more starts than appearances" % int((apps < starts).sum())
+
+
+def test_current_usage_agrees_with_the_bootstrap(current, pool):
+    """Cross-checked against `starts` and `minutes`, which the bootstrap
+    publishes independently -- so a changed `history` shape shows up as a
+    disagreement rather than as a quietly different number."""
+    merged = current.merge(
+        pool[["code", "starts", "minutes"]].rename(columns={"code": "Player_Code"}),
+        on="Player_Code", how="inner")
+    assert len(merged) > 10
+    assert (pd.to_numeric(merged["Current_Starts"], errors="coerce")
+            == pd.to_numeric(merged["starts"], errors="coerce")).mean() > 0.95
+    assert (pd.to_numeric(merged["Current_Minutes"], errors="coerce")
+            == pd.to_numeric(merged["minutes"], errors="coerce")).mean() > 0.95
 
 
 # =============================================================================
@@ -176,7 +229,8 @@ def board(pool, season_rankings, current_gw):
         season_rankings)
     ids = dict(zip(pd.to_numeric(enriched["Player_ID"], errors="coerce").astype(int),
                    pd.to_numeric(enriched["Player_Code"], errors="coerce").astype(int)))
-    rates = prior_season_rate(fetch_history_past(ids),
+    past, current_usage = fetch_player_history(ids)
+    rates = prior_season_rate(past, current_usage,
                               min_starts=config.RETURN_WATCH_PRIOR_MIN_STARTS)
     notes = []
     frame = build_return_watch(enriched, states, current_gw=current_gw,
@@ -235,3 +289,30 @@ def test_an_empty_board_always_states_why(board):
     if frame.empty:
         assert notes, ("The board is empty and recorded no reason, so a reader "
                        "cannot tell a quiet week from a broken feed.")
+
+
+def test_no_fit_and_unpicked_player_reaches_the_live_board(board, pool):
+    """The Senesi case, asserted against live data.
+
+    A player FPL rates available, who has had a real chance to play and has not
+    been starting, is not a returning asset however good he was last season.
+    """
+    frame, _notes = board
+    if frame.empty:
+        pytest.skip("Empty board -- a legitimate state")
+    merged = frame.merge(
+        pool[["code", "status", "minutes", "starts"]].rename(
+            columns={"code": "Player_Code"}),
+        on="Player_Code", how="left", suffixes=("", "_pool"))
+    fit = ~merged["status"].astype(str).str.lower().isin(["i", "s", "u", "n"])
+    evidenced = (
+        pd.to_numeric(merged["minutes_pool"], errors="coerce").fillna(0)
+        >= config.RETURN_WATCH_EVIDENCE_MINUTES
+    ) | (
+        pd.to_numeric(merged["Appearances"], errors="coerce").fillna(0)
+        >= config.RETURN_WATCH_EVIDENCE_APPS
+    )
+    offenders = merged[fit & evidenced]
+    assert offenders.empty, (
+        "Fit players with a real run of this season on the board: %s"
+        % offenders["Display_Name"].tolist())

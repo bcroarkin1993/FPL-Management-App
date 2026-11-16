@@ -1186,7 +1186,7 @@ def render_ffp_status(feed: "FFPFeed", expected_gw: Optional[int] = None,
 def get_prior_season_rates(id_to_code: dict) -> pd.DataFrame:
     """Each player's rate and start share from the last season that described him.
 
-    ``player_history.prior_season_rate`` over ``fetch_history_past``, cached for
+    ``player_history.prior_season_rate`` over ``fetch_player_history``, cached for
     a day: ``history_past`` is a *completed* season and cannot change, so a
     shorter TTL would re-fetch ~670 endpoints to get the same answer. Measured
     cold at 3.3s for the whole pool and 5.1s including the rate pass.
@@ -1196,12 +1196,16 @@ def get_prior_season_rates(id_to_code: dict) -> pd.DataFrame:
     player for 64 of 669. Passing the mapping rather than deriving it here is
     what keeps that decision at the callsite, where the id space is known.
 
+    Carries ``Appearances`` alongside the prior-season rate: both come from the
+    same payload, and the appearance count is what says whether the season in
+    progress has already answered "does he start?".
+
     An empty frame on any failure, so the rung simply stops contributing.
     """
     try:
-        history = player_history.fetch_history_past(id_to_code)
+        past, current = player_history.fetch_player_history(id_to_code)
         return player_history.prior_season_rate(
-            history, min_starts=config.RETURN_WATCH_PRIOR_MIN_STARTS)
+            past, current, min_starts=config.RETURN_WATCH_PRIOR_MIN_STARTS)
     except Exception:
         _logger.warning("Prior-season rates unavailable", exc_info=True)
         return player_history.prior_season_rate(None)

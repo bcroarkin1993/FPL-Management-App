@@ -94,7 +94,7 @@ WATCH_COLUMNS = [
     "Player_Code", "Player_ID", "Player", "Display_Name", "Team", "Position",
     "Pedigree", "Pedigree_Rate", "Pedigree_Rung", "Role", "Role_Src",
     "Band", "Return_GW", "Out_For", "Basis",
-    "Draft_State", "starts", "minutes", "News",
+    "Draft_State", "starts", "minutes", "Appearances", "News",
     "Prior_Season", "Prior_Starts", "Evidence",
 ]
 
@@ -156,6 +156,8 @@ def build_return_watch(
     min_gws=None,
     min_reference=None,
     ref_min_start_rate=None,
+    evidence_minutes=None,
+    evidence_apps=None,
 ):
     """Claimable players who are not playing but were productive regulars.
 
@@ -190,6 +192,10 @@ def build_return_watch(
                      if min_reference is None else int(min_reference))
     ref_min_start_rate = (config.RETURN_WATCH_REF_MIN_START_RATE
                           if ref_min_start_rate is None else float(ref_min_start_rate))
+    evidence_minutes = (config.RETURN_WATCH_EVIDENCE_MINUTES
+                        if evidence_minutes is None else float(evidence_minutes))
+    evidence_apps = (config.RETURN_WATCH_EVIDENCE_APPS
+                     if evidence_apps is None else float(evidence_apps))
     limit = config.RETURN_WATCH_LIMIT if limit is None else limit
 
     try:
@@ -242,6 +248,27 @@ def build_return_watch(
     # Carried through so the card can show it and `check_return_watch` can see a
     # departure that slipped the gate -- the likeliest false positive here.
     df["News"] = news
+
+    # Whether FPL has him out of the squad right now. Computed here because the
+    # role resolution below needs it as well as the not-playing gate further
+    # down: it is the one fact that says whether this season's start share is
+    # evidence about selection or about a treatment table.
+    currently_out = status.str.lower().isin(list(OUT_OF_SQUAD_STATUSES))
+
+    # Has this season produced enough of him to read? An appearance is the
+    # signal that matters: a fit substitute and an absentee both record 0
+    # minutes in a given week, and only the appearance count tells them apart.
+    appearances = pd.Series(np.nan, index=df.index, dtype="float64")
+    if prior_rates is not None and len(prior_rates) > 0 \
+            and {"Player_Code", "Appearances"}.issubset(set(prior_rates.columns)):
+        app_map = (prior_rates.drop_duplicates(subset=["Player_Code"])
+                   .set_index("Player_Code")["Appearances"])
+        appearances = pd.to_numeric(df["Player_Code"].map(app_map), errors="coerce")
+    df["Appearances"] = appearances
+    has_current_evidence = (
+        (minutes >= float(evidence_minutes))
+        | (appearances.fillna(0.0) >= float(evidence_apps))
+    )
 
     # ---- the pedigree ladder: rate, and the role that goes with it ----------
     # The **rate** comes from the best rung -- the most recent adequate sample.
@@ -300,24 +327,46 @@ def build_return_watch(
     m1 = starts >= THIS_SEASON_MIN_STARTS
     rate = rate.mask(m1, points / starts.replace(0.0, np.nan))
     rung = rung.mask(m1, RUNG_THIS)
-    roles[RUNG_THIS] = (starts / float(elapsed)).where(m1).clip(upper=1.0)
+    # The *role* is recorded for everyone, not only where the rate is usable:
+    # a player with two starts has no readable rate and a perfectly readable
+    # share, and those are separate questions.
+    this_role = (starts / float(elapsed)).clip(upper=1.0)
+    roles[RUNG_THIS] = this_role
 
     role_frame = pd.DataFrame(roles) if roles else pd.DataFrame(index=df.index)
     df["Pedigree_Rate"] = rate
     df["Pedigree_Rung"] = rung
     if len(role_frame.columns):
-        df["Role"] = role_frame.max(axis=1)
+        best = role_frame.max(axis=1)
         # `idxmax` over an all-NA row is deprecated and due to raise, and a row
         # with no role signal at all is ordinary here -- a player no rung could
         # rate. Ask only of the rows that have one.
         has_role = role_frame.notna().any(axis=1)
-        src = pd.Series(pd.NA, index=df.index, dtype="object")
+        best_src = pd.Series(pd.NA, index=df.index, dtype="object")
         if has_role.any():
-            src.loc[has_role] = role_frame.loc[has_role].idxmax(axis=1)
-        df["Role_Src"] = src
+            best_src.loc[has_role] = role_frame.loc[has_role].idxmax(axis=1)
+
+        # **Where this season has already answered the question, it wins.**
+        #
+        # The most favourable rung is right for a player whose *absence*
+        # depressed his share, and wrong for one whose *selection* did. Reported
+        # from the app: Senesi topped the board on 97% of starts last season
+        # while having started 2 of 10 for his new club, fit throughout.
+        #
+        # `currently_out` is the discriminator, and it is the same test as the
+        # second leg of the not-playing gate below -- an injured man's share is
+        # evidence about his injury, not about whether his manager rates him.
+        # A player with too little of this season to read falls back as before,
+        # which is what keeps a genuine absentee (Saliba, no appearances at all)
+        # and a man just returning (Minteh, 8 minutes) on the board.
+        current_decides = (~currently_out) & has_current_evidence
+        df["Role"] = best.mask(current_decides, this_role)
+        df["Role_Src"] = best_src.mask(current_decides, RUNG_THIS)
+        df["Role_Decided_By_Season"] = current_decides
     else:
         df["Role"] = np.nan
         df["Role_Src"] = pd.Series(pd.NA, index=df.index, dtype="object")
+        df["Role_Decided_By_Season"] = False
 
     # ---- the reference pool: established starters only ---------------------
     # `positional_percentile` compares against whatever the reference holds, and
@@ -362,7 +411,6 @@ def build_return_watch(
     # would turn this board into a list of this week's knocks. Measured, the
     # `chance < 100` version admitted 17 players of whom 13 were ordinary
     # weekly doubts.
-    currently_out = status.str.lower().isin(list(OUT_OF_SQUAD_STATUSES))
     not_playing = ((starts / float(elapsed)) <= max_start_rate) | currently_out
     was_regular = df["Role"].fillna(0.0) >= min_role
     rated = df["Pedigree_Rate"].notna()
@@ -462,6 +510,8 @@ def _evidence(row, current_gw, elapsed):
         "pedigree": _round(row.get("Pedigree"), 3),
         "role": _round(row.get("Role"), 2),
         "role_src": row.get("Role_Src"),
+        "role_from_this_season": bool(row.get("Role_Decided_By_Season")),
+        "appearances": _round(row.get("Appearances"), 0),
         "band": row.get("Band"),
         "state": row.get("Draft_State"),
         "starts": _round(row.get("starts"), 0),
