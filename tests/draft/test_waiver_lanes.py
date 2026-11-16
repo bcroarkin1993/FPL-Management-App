@@ -16,6 +16,14 @@ import pytest
 from scripts.common import claim_value as cv
 import scripts.draft.waiver_wire as ww
 from scripts.draft.waiver_wire import _compute_transfer_suggestions
+from scripts.draft.waiver_core import (
+    LANE_HOLD,
+    LANE_RENT,
+    _dedupe_across_lanes,
+    _hold_lane_improves_ros,
+    _rent_lane_keeps_the_better_asset,
+    is_first_choice_penalty_taker,
+)
 
 
 FLOOR_CTX = {"n_ahead": 5, "claim_rates": {"M": 0.475, "D": 0.25}}
@@ -338,3 +346,105 @@ class TestItSurvivesTheFramesThePageActuallyBuilds:
         i_dep = src.index("_attach_minutes_dependency(avail_all")
         assert i_starts < i_dep, (
             "_attach_minutes_dependency must run after the starts merge")
+
+
+class TestLaneVetoes:
+    """Four bad suggestions reported from the live board, each pinned.
+
+    They share one root: the engine models "what do I gain" well and "what do I
+    lose" poorly. Every number on every one of these cards was individually
+    plausible.
+    """
+
+    @staticmethod
+    def _row(**kw):
+        base = dict(Player="X", Position="D", ROS=0.5, Proj=3.0, Proj_Next3=9.0,
+                    Season_Points=20, **{"Keep Score": 0.5, "Transfer Score": 0.5})
+        base.update(kw)
+        return pd.Series(base)
+
+    def test_hold_refuses_an_add_that_is_worse_rest_of_season(self):
+        """Igor Thiago -> Callum Wilson.
+
+        Thiago: elite forward, suspended until 5 Dec, so the engine correctly
+        wrote both his projections to zero. Wilson: 1.3 points across the next
+        three gameweeks and ROS 0.19. Every observable the sanity veto compares
+        favoured Wilson; only the rest-of-season view could see it.
+        """
+        thiago = self._row(Player="Igor Thiago", ROS=0.38, Proj=0.0,
+                           Proj_Next3=0.0, Season_Points=30)
+        wilson = self._row(Player="Callum Wilson", ROS=0.19, Proj=3.23,
+                           Proj_Next3=1.27, Season_Points=6)
+        assert not _hold_lane_improves_ros(thiago, wilson)
+
+    def test_hold_allows_a_genuine_rest_of_season_upgrade(self):
+        hume = self._row(Player="Trai Hume", ROS=0.64, Proj=2.37, Proj_Next3=7.24)
+        collins = self._row(Player="Nathan Collins", ROS=0.70, Proj=3.60,
+                            Proj_Next3=10.80)
+        assert _hold_lane_improves_ros(hume, collins)
+
+    def test_hold_passes_when_either_side_has_no_ros(self):
+        """No comparable data is not a finding -- the veto must not fire on a
+        degraded feed, which would suppress every suggestion at once."""
+        a = self._row(ROS=float("nan"))
+        b = self._row(ROS=0.9)
+        assert _hold_lane_improves_ros(a, b)
+        assert _hold_lane_improves_ros(b, a)
+
+    def test_rent_refuses_to_give_up_the_better_window(self):
+        """James Tarkowski -> Abdukodir Khusanov.
+
+        A rental lasts a week and the drop is permanent, so trading 7.1 points
+        over three gameweeks for 6.1 to gain 0.8 this week is a loss however
+        cheap `release_cost` claims the release is. The percentile gap on this
+        pair was already negative.
+        """
+        tark = self._row(Player="James Tarkowski", Proj=2.62, Proj_Next3=7.09)
+        khusanov = self._row(Player="Abdukodir Khusanov", Proj=3.42,
+                             Proj_Next3=6.08)
+        assert not _rent_lane_keeps_the_better_asset(tark, khusanov)
+
+    def test_rent_allows_a_rental_that_upgrades_the_window_too(self):
+        muharemovic = self._row(Proj=2.52, Proj_Next3=7.86)
+        pinnock = self._row(Proj=3.40, Proj_Next3=8.44)
+        assert _rent_lane_keeps_the_better_asset(muharemovic, pinnock)
+
+    def test_rent_passes_when_the_horizon_is_unknown(self):
+        a = self._row(Proj_Next3=float("nan"))
+        b = self._row(Proj_Next3=9.0)
+        assert _rent_lane_keeps_the_better_asset(a, b)
+
+    def test_one_card_per_pair_and_hold_wins(self):
+        """Hume -> Collins was rendering in both lanes.
+
+        Hold is the stronger claim: "worth keeping" subsumes "worth renting",
+        and the rent card would otherwise invite a lasting upgrade followed by
+        handing the player back.
+        """
+        hold = {"lane": LANE_HOLD, "drop_player": "Trai Hume",
+                "add_player": "Nathan Collins"}
+        rent = {"lane": LANE_RENT, "drop_player": "Trai Hume",
+                "add_player": "Nathan Collins"}
+        other = {"lane": LANE_RENT, "drop_player": "Alex Iwobi",
+                 "add_player": "Ethan Pinnock"}
+        kept = _dedupe_across_lanes([hold, rent, other])
+        assert [k["lane"] for k in kept] == [LANE_HOLD, LANE_RENT]
+        assert kept[0]["drop_player"] == "Trai Hume"
+        assert kept[1]["drop_player"] == "Alex Iwobi"
+
+    def test_a_different_add_for_the_same_drop_is_not_a_duplicate(self):
+        a = {"lane": LANE_HOLD, "drop_player": "Trai Hume", "add_player": "A"}
+        b = {"lane": LANE_RENT, "drop_player": "Trai Hume", "add_player": "B"}
+        assert len(_dedupe_across_lanes([a, b])) == 2
+
+    def test_a_first_choice_penalty_taker_is_recognised(self):
+        """A points source the projections do not price.
+
+        The board proposed dropping two of them in one pass -- Enzo Le Fee and
+        Igor Thiago, both their club's number one -- for replacements who take
+        none.
+        """
+        assert is_first_choice_penalty_taker(pd.Series({"penalties_order": 1}))
+        assert not is_first_choice_penalty_taker(pd.Series({"penalties_order": 2}))
+        assert not is_first_choice_penalty_taker(pd.Series({"penalties_order": None}))
+        assert not is_first_choice_penalty_taker(pd.Series({}))

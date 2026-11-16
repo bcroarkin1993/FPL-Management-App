@@ -962,6 +962,25 @@ def _render_suggestion_cards(suggestions, pos_labels, mgw_label):
                 f'<div style="color:#8ab4f8;font-size:0.78em;margin-top:4px;">'
                 f'Release cost {_rc:.2f} pts/GW &mdash; {_verdict}{_fl_txt}</div>')
 
+        # Set-piece duty, which the scoring model does not price at all. A
+        # first-choice penalty taker has a points source his replacement does
+        # not, and the board proposed dropping two of them in one pass (Enzo Le
+        # Fee and Igor Thiago, both their club's number one). Rendered as a
+        # warning rather than folded into the gain: a weight belongs with a
+        # measurement, and the accuracy harness has no opinion on this yet.
+        pens_html = ""
+        if s.get('drop_penalties') and not s.get('add_penalties'):
+            pens_html = (
+                f'<div style="color:#f0c040;font-size:0.78em;margin-top:4px;">'
+                f'{s["drop_player"]} is his club\'s first-choice penalty taker '
+                f'and {s["add_player"]} is not &mdash; a points source the '
+                f'projections above do not price.</div>')
+        elif s.get('add_penalties') and not s.get('drop_penalties'):
+            pens_html = (
+                f'<div style="color:#4ecca3;font-size:0.78em;margin-top:4px;">'
+                f'{s["add_player"]} is his club\'s first-choice penalty '
+                f'taker.</div>')
+
         drop_mgw_str = f" &bull; {mgw_label}: {s['drop_3gw_proj']:.1f}" if s.get('drop_3gw_proj', 0) > 0 else ""
         add_mgw_str = f" &bull; {mgw_label}: {s['add_3gw_proj']:.1f}" if s.get('add_3gw_proj', 0) > 0 else ""
 
@@ -996,7 +1015,7 @@ def _render_suggestion_cards(suggestions, pos_labels, mgw_label):
                 </div>
             </div>
             <div style="color: #aaa; font-size: 0.82em; font-style: italic; border-top: 1px solid #333;
-                        padding-top: 6px;">{s['rationale']}</div>{blocker_html}{thin_html}{release_html}{outlook_note}
+                        padding-top: 6px;">{s['rationale']}</div>{blocker_html}{thin_html}{release_html}{pens_html}{outlook_note}
         </div>
         """
         st.markdown(compact_html(card_html), unsafe_allow_html=True)

@@ -1476,6 +1476,11 @@ def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef,
                               else float(best_avail.get('Dep_Weeks'))),
         'add_blocker_source': str(best_avail.get('Dep_Source', '') or ''),
         'thin_wire': thin_wire,
+        # Set-piece duty, carried so a card can say it. A first-choice penalty
+        # taker has a points source his replacement does not, and the app
+        # scored that at zero -- it proposed dropping two of them in one board.
+        'drop_penalties': is_first_choice_penalty_taker(worst_roster),
+        'add_penalties': is_first_choice_penalty_taker(best_avail),
         'release_cost': (None if release_cost is None or pd.isna(release_cost)
                          else round(float(release_cost), 2)),
         'position_floor': (None if floor is None else round(float(floor), 2)),
@@ -1487,6 +1492,150 @@ def _build_suggestion(worst_roster, best_avail, pos, txn_score, depth_map, _ef,
         'rationale': _build_rationale(worst_roster, best_avail),
         'urgency': compute_transfer_urgency(pos, depth_map) if depth_map else "",
     }
+
+
+
+#: Set-piece duties FPL publishes and the app has never scored.
+#:
+#: `penalties_order == 1` is a first-choice penalty taker, and a penalty is
+#: worth roughly half a goal in expectation -- 2 to 3 points a time for the
+#: positions that take them. The bootstrap has carried it all along and only the
+#: Player Statistics page reads it.
+#:
+#: Reported from the app, twice in one breath: it proposed dropping **Enzo Le
+#: Fee** (Sunderland's first-choice penalty *and* corner taker) and **Igor
+#: Thiago** (Brentford's first-choice penalty taker), in both cases for a
+#: replacement who takes neither. It is surfaced here rather than scored: a
+#: weight belongs with a measurement, and the accuracy harness has no opinion on
+#: this yet. Carrying the column is what makes that measurement possible later.
+_SET_PIECE_COLS = ("penalties_order", "direct_freekicks_order",
+                   "corners_and_indirect_freekicks_order")
+
+
+def _attach_set_pieces(df: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
+    """Carry set-piece duties from the reference pool onto a scored frame.
+
+    `pull_fpl_player_stats` has always published these and nothing downstream
+    ever received them -- they reached `board.reference` and stopped there, so
+    no suggestion, card or score could see them.
+    """
+    if df is None or df.empty or reference is None or reference.empty:
+        return df
+    if 'Player_ID' not in df.columns or 'Player_ID' not in reference.columns:
+        return df
+    cols = [c for c in _SET_PIECE_COLS if c in reference.columns]
+    if not cols:
+        return df
+    have = [c for c in cols if c in df.columns]
+    if len(have) == len(cols):
+        return df
+    src = reference[['Player_ID'] + cols].drop_duplicates(subset=['Player_ID'])
+    return df.merge(src, on='Player_ID', how='left',
+                    suffixes=('', '_ref'))
+
+
+def is_first_choice_penalty_taker(row) -> bool:
+    """Is he his club's number-one penalty taker?"""
+    try:
+        order = row.get('penalties_order')
+    except AttributeError:
+        return False
+    try:
+        return int(order) == 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _lane_num(row, *cols):
+    """First numeric value among ``cols`` on a Series row, or None."""
+    for col in cols:
+        try:
+            if col not in row.index:
+                continue
+            val = float(row.get(col))
+        except (TypeError, ValueError):
+            continue
+        if not pd.isna(val):
+            return val
+    return None
+
+
+def _hold_lane_improves_ros(drop_row, add_row) -> bool:
+    """Does this swap actually improve the squad for the rest of the season?
+
+    The hold lane's whole premise is a lasting upgrade, and it ranks on
+    ``Transfer Score`` -- a blend that is mostly ROS but still carries this
+    gameweek. For a player who is temporarily unavailable that blend collapses,
+    because the engine correctly writes his gameweek projection to zero.
+
+    Reported from the app: it offered to drop **Igor Thiago** -- an elite
+    forward, suspended until 5 Dec, and his club's first-choice penalty taker --
+    for Callum Wilson, who projected **1.3 points across the next three
+    gameweeks** against Thiago's 30 season points. Every observable the sanity
+    veto compares favoured Wilson, because the suspension had zeroed both of
+    Thiago's projections; only the rest-of-season view can see that Wilson is
+    replacement level (ROS 0.19) and Thiago is not (0.38).
+
+    So the lane now asserts the thing it is named for. A **veto**, never a
+    ranking input: it can only remove a suggestion, and no comparable data on
+    either side passes.
+    """
+    drop_ros = _lane_num(drop_row, "ROS")
+    add_ros = _lane_num(add_row, "ROS")
+    if drop_ros is None or add_ros is None:
+        return True
+    return add_ros > drop_ros
+
+
+def _rent_lane_keeps_the_better_asset(drop_row, add_row,
+                                      horizon_col="Proj_Next3") -> bool:
+    """A rental lasts a week; the drop is permanent.
+
+    ``release_cost`` is meant to price that asymmetry, and it is computed
+    against the **waiver floor** -- what you could re-claim at this position
+    next round. Where the floor exceeds the roster player's own forward rate the
+    cost comes out at zero, i.e. "the wire replaces him for free", and the lane
+    will then trade away a better medium-term asset for a one-week bump.
+
+    Reported from the app: drop **James Tarkowski** (56 season points, 7.1 over
+    the next three) for Abdukodir Khusanov (18, **6.1**) to gain 0.8 points this
+    week. The percentile gap on that pair was already negative. The same shape
+    proposed dropping Alex Iwobi for a player worth less over the window.
+
+    The floor is not so much wrong as over-claimed: it assumes you re-claim the
+    replacement next round, while the rental has already spent this round's
+    claim on somebody else. Rather than re-model that, this refuses the case
+    where it bites -- permanently losing the better three-gameweek asset. A
+    rental that genuinely upgrades the window is untouched.
+    """
+    drop_h = _lane_num(drop_row, horizon_col)
+    add_h = _lane_num(add_row, horizon_col)
+    if drop_h is None or add_h is None:
+        return True
+    return add_h >= drop_h
+
+
+def _dedupe_across_lanes(suggestions):
+    """One card per (drop, add) pair, keeping the Hold one.
+
+    Both lanes search the same roster against the same pool, so a swap that is
+    good this week *and* for the rest of the season legitimately qualifies for
+    both -- and then renders twice. Reported from the app for Hume -> Collins.
+
+    Hold wins because it is the stronger claim: "worth keeping" subsumes "worth
+    renting", and the rent card would otherwise invite the manager to make a
+    lasting upgrade and then hand the player back. Relies on the caller having
+    already sorted Hold ahead of Rent, which the sort above guarantees.
+    """
+    seen, kept = set(), []
+    for item in suggestions:
+        key = (item.get("drop_player"), item.get("add_player"))
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(item)
+    return kept
+
 
 def _compute_transfer_suggestions(
     avail_df: pd.DataFrame,
@@ -1752,6 +1901,10 @@ def _compute_transfer_suggestions(
                     pos_debug_pairs.append(pair_info)
 
                 if txn_score > min_threshold:
+                    if not _hold_lane_improves_ros(worst_roster, best_avail):
+                        pair_info['passed'] = False
+                        pair_info['sanity'] = 'add is worse rest-of-season'
+                        continue
                     sanity_ok, sanity_reason = _sanity_check_suggestion(worst_roster, best_avail)
                     pair_info['sanity'] = sanity_reason
                     if not sanity_ok:
@@ -1855,6 +2008,8 @@ def _compute_transfer_suggestions(
                     gain = rental_gain(drop_row, add_row, floors, horizon=horizon)
                     if gain is None or gain <= RENTAL_MIN_GAIN:
                         continue
+                    if not _rent_lane_keeps_the_better_asset(drop_row, add_row):
+                        continue
                     # The sanity veto applies here too: it compares raw
                     # observables and is just as able to catch a nonsense
                     # one-week swap as a season-long one.
@@ -1937,6 +2092,9 @@ def _compute_transfer_suggestions(
     # draws them as separate sections for the same reason.
     suggestions.sort(key=lambda x: (x['lane'] != LANE_HOLD,
                                     -x['points_gain'], -x['transaction_score']))
+    # After the sort, so Hold already leads, and before the per-lane truncation,
+    # so a deduped rent card frees its slot for the next one.
+    suggestions = _dedupe_across_lanes(suggestions)
     if top_n is not None:
         kept = []
         for lane in (LANE_HOLD, LANE_RENT):
@@ -2371,6 +2529,7 @@ def build_waiver_board(league_id, team_id, current_gw=None, *, entry_id=None,
         avail_all = avail_all.merge(starts_data, on='Player_ID', how='left')
     avail_all['Season_Points'] = numeric_col(avail_all, 'Season_Points', 0)
     avail_all['starts'] = numeric_col(avail_all, 'starts', 0)
+    avail_all = _attach_set_pieces(avail_all, fpl_stats)
 
     # **After the `starts` merge, never before it.** The depth rule reads season
     # starts to tell a deputy from a regular; run earlier, where the column does
@@ -2475,6 +2634,7 @@ def build_waiver_board(league_id, team_id, current_gw=None, *, entry_id=None,
         # backfill that used to sit here filled 0 and is deleted; see the
         # tombstone in `player_matching`.
         my_roster = _attach_display_names(my_roster)
+        my_roster = _attach_set_pieces(my_roster, fpl_stats)
         # `form_weeks` as well as `lookahead`: the available pool got the widget
         # value and the roster silently kept `config.FORM_LOOKBACK_WEEKS`, so moving
         # the slider compared a 2-week pool form against a 4-week roster form -- in

@@ -3591,6 +3591,67 @@ Live at GW11: nine rows, three flagged (1 out and 1 doubtful, an XI swap worth
 +5.5, the unchecked claim), ~9s cold and cached for 120s; the gated search takes
 16.5s and returned "+1.2 — not worth a claim".
 
+### Four bad suggestions, one root: the drop side was under-priced
+
+`_hold_lane_improves_ros()`, `_rent_lane_keeps_the_better_asset()`,
+`_dedupe_across_lanes()`, `_attach_set_pieces()` (`waiver_core.py`).
+
+Four reported from one live board, and every number on every card was
+individually plausible. They share a root: the engine models **what you gain**
+well and **what you lose** poorly.
+
+**A suspended elite player reads as worthless.** It offered to drop Igor Thiago
+-- elite forward, suspended until 5 Dec -- for Callum Wilson, who projected
+**1.3 points across three gameweeks** against Thiago's 30 season points. The
+engine had correctly zeroed both of Thiago's projections, so every observable
+the sanity veto compares favoured Wilson, and `Transfer Score` is only *mostly*
+ROS. The hold lane now asserts the thing it is named for: **the add must beat
+the drop on ROS** (Wilson 0.19, Thiago 0.38). A veto, never a ranking input, and
+no comparable data on either side passes -- a degraded feed must not suppress
+every suggestion at once.
+
+**A rental could permanently lose the better asset.** It offered Tarkowski (56
+season points, 7.1 over three gameweeks) for Khusanov (18, **6.1**) to gain 0.8
+points *this week*, and the percentile gap on that pair was already negative.
+`release_cost` is meant to price the asymmetry -- the rental lasts a week, the
+drop is forever -- but it is computed against the waiver floor, and where the
+floor exceeds the roster player's own forward rate it returns **zero**: "the
+wire replaces him for free". The floor is less wrong than over-claimed: it
+assumes you re-claim the replacement next round, while the rental has already
+spent this round's claim on somebody else. Rather than re-model that, the lane
+refuses the case where it bites -- **the add may not be worse over the window**.
+
+**One pair, two cards.** Both lanes search the same roster against the same
+pool, so a swap good this week *and* for the season qualifies for both and
+rendered twice (Hume -> Collins). Deduped after the sort and before the per-lane
+truncation, keeping **Hold**: "worth keeping" subsumes "worth renting", and the
+rent card would otherwise invite a lasting upgrade followed by handing the
+player back.
+
+**Set-piece duty was never scored, or even carried.** `penalties_order` is on
+the bootstrap and `pull_fpl_player_stats` keeps it, but it reached
+`board.reference` and stopped -- never the scored frames, so no suggestion, card
+or score could see it. The board proposed dropping **two first-choice penalty
+takers in one pass** (Enzo Le Fee, Igor Thiago) for replacements who take none.
+`_attach_set_pieces()` now carries it onto both frames and the card says so.
+
+**It is surfaced, not scored, and that is deliberate.** A penalty is worth
+roughly half a goal in expectation and a weight for it belongs with a
+measurement; `projection_accuracy` has no opinion on this yet, and CLAUDE.md's
+own rule is no reweighting without one. Carrying the column is what makes that
+measurement possible. Note the Le Fee suggestion survives all three vetoes
+honestly: Vitor beats him on this gameweek (5.02 v 3.56), the window (14.34 v
+10.40) and ROS (0.88 v 0.82). The disagreement is about a signal the model does
+not have, which is why the card states it rather than the engine silently
+out-voting the manager.
+
+Live: **9 suggestions to 5.** Thiago -> Wilson, Tarkowski -> Khusanov, Iwobi ->
+Alysson and the duplicate Hume -> Collins are gone; Madueke -> King, Tel ->
+Vitor and Muharemovic -> Pinnock are untouched. An earlier, blunter version of
+the elite-drop guard also killed Madueke -> King, which is a perfectly
+reasonable rest-of-season upgrade -- the narrower rules are what the live board
+was used to settle.
+
 ### Returning from injury — the player the app could not see at all
 
 `scripts/common/player_history.py` (prior seasons), `return_watch.py` (the
