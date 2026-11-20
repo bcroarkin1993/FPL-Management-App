@@ -790,9 +790,19 @@ class TestBoardCharts:
             "Team": (["ARS", "MCI", "LIV", "AVL"] * 10)[:n],
             "Pos": (["G", "D", "M", "F"] * 10)[:n],
             "Proj": [0.2 * i for i in range(n)],
+            # Every fifth player is not expected to start -- a modulus that is
+            # coprime with the four positions, so the benched players spread
+            # evenly across the lanes. At `i % 4` they landed entirely on the
+            # forwards and wiped that lane, which is a fixture bug that reads
+            # as a code bug.
+            "Start %": [12.0 if i % 5 == 4 else 90.0 for i in range(n)],
             "Rotowire": [0.2 * i + 0.1 for i in range(n)],
             "FFP": [0.2 * i - 0.1 if i % 7 else 0.2 * i + 2.4 for i in range(n)],
         })
+
+    @staticmethod
+    def _starters(board):
+        return board[board["Start %"] >= 50]
 
     def test_both_charts_render(self, mock_streamlit):
         from unittest.mock import patch
@@ -859,7 +869,7 @@ class TestBoardCharts:
         with patch("streamlit.plotly_chart") as chart:
             pp._position_strip_chart(board, board)
         fig = chart.call_args[0][0]
-        starters = board[board["Proj"] > 0]
+        starters = self._starters(board)
         lanes = {t.name for t in fig.data if t.name in ("G", "D", "M", "F")}
         assert lanes == {"G", "D", "M", "F"}
         for trace in fig.data:
@@ -879,7 +889,7 @@ class TestBoardCharts:
         board = self._board()
         with patch("streamlit.plotly_chart") as chart:
             pp._position_strip_chart(board, board)
-        starters = board[board["Proj"] > 0]
+        starters = self._starters(board)
         labels = list(chart.call_args[0][0].layout.yaxis.ticktext)
         assert labels == [
             "%s \u00b7 %d" % (p, int((starters["Pos"] == p).sum()))
@@ -899,11 +909,55 @@ class TestBoardCharts:
         # One track plus one median tick per lane.
         assert len(shapes) == 8
         medians = sorted(s.x0 for s in shapes if s.x0 == s.x1)
-        starters = board[board["Proj"] > 0]
+        starters = self._starters(board)
         expected = sorted(
             float(starters.loc[starters["Pos"] == p, "Proj"].median())
             for p in ("G", "D", "M", "F"))
         assert medians == pytest.approx(expected)
+
+    def test_a_low_start_player_is_excluded_however_big_his_projection(self):
+        """The reported case, and why `Proj > 0` was the wrong test.
+
+        `Proj` is `Proj_Start x Start_Pct`, so a player at 2% to start off a
+        4.0 conditional projection scores 0.08 -- non-zero, and straight
+        through a `Proj > 0` filter. Reported from the app: Luca Gunter at
+        Spurs, 2% to start, in the midfield field alongside players who will
+        actually play. Live he carries `Proj` 0.024, so the old filter kept
+        him. Measured over the whole board, the two tests differ by a third:
+        384 players against 248.
+        """
+        from unittest.mock import patch
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        board.loc[board.index[-1], ["Player", "Pos", "Start %", "Proj"]] = [
+            "Luca Gunter", "M", 2.0, 4.0]
+        with patch("streamlit.plotly_chart") as chart:
+            pp._position_strip_chart(board, board)
+        fig = chart.call_args[0][0]
+        names = [n for t in fig.data if t.name == "M"
+                 for n in (list(t.text) if t.text is not None else [])]
+        assert "Luca Gunter" not in names, (
+            "a 2%-to-start player is not a candidate for the slot, whatever "
+            "his projection would be if he played"
+        )
+
+    def test_the_filter_reads_the_start_column_not_the_projection(self):
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        kept = pp._expected_to_start(board)
+        assert set(kept["Start %"]) == {90.0}
+        assert len(kept) == int((board["Start %"] >= 50).sum())
+
+    def test_a_frame_with_no_start_column_falls_back_and_says_so(self, caplog):
+        """A gate keyed on a column some frames do not carry is the failure
+        this codebase has recorded five times, and it is always silent."""
+        import logging
+        from scripts.fpl import player_projections as pp
+        board = self._board().drop(columns=["Start %"])
+        with caplog.at_level(logging.WARNING):
+            kept = pp._expected_to_start(board)
+        assert len(kept) == int((board["Proj"] > 0).sum())
+        assert any("Start %" in r.message for r in caplog.records)
 
     def test_declared_non_starters_are_left_off_the_strips(self):
         """The fix for what the first render of this chart actually looked like.
@@ -918,14 +972,14 @@ class TestBoardCharts:
         from unittest.mock import patch
         from scripts.fpl import player_projections as pp
         board = self._board()
-        zeros = int((board["Proj"] <= 0).sum())
-        assert zeros, "the fixture needs a non-starter for this to mean anything"
+        benched = int((board["Start %"] < 50).sum())
+        assert benched, "the fixture needs a non-starter for this to mean anything"
         with patch("streamlit.plotly_chart") as chart:
             pp._position_strip_chart(board, board)
         fig = chart.call_args[0][0]
         plotted = sum(len(t.x) for t in fig.data
                       if t.name in ("G", "D", "M", "F"))
-        assert plotted == len(board) - zeros
+        assert plotted == len(board) - benched
         medians = [s.x0 for s in fig.layout.shapes if s.x0 == s.x1]
         assert all(m > 0 for m in medians), (
             "a median at zero is the signature of the wall of non-starters"
@@ -936,7 +990,7 @@ class TestBoardCharts:
         from unittest.mock import patch
         from scripts.fpl import player_projections as pp
         board = self._board()
-        board["Proj"] = 0.0
+        board["Start %"] = 0.0
         with patch("streamlit.plotly_chart") as chart:
             pp._position_strip_chart(board, board)
         assert chart.call_count == 0

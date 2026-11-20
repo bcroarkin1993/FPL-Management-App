@@ -1782,6 +1782,46 @@ def _agreement_chart(board, shown) -> None:
     st.plotly_chart(fig, use_container_width=True, theme=None)
 
 
+#: A player below this resolved start probability is not expected to start, so
+#: he is not a candidate for the slot and does not belong in the field a number
+#: is read against. The app already draws this line twice at the same place --
+#: `chance_of_playing < 50` is what `projection_engine` calls *unavailable*,
+#: and `DEPUTY_MIN_START_PCT` is 0.5 for "he is third choice" -- so this reuses
+#: the existing threshold rather than introducing a tuned one.
+EXPECTED_TO_START_PCT = 50.0
+
+
+def _expected_to_start(board):
+    """The rows that are candidates for a starting slot.
+
+    **`Proj > 0` is the wrong test and was the first thing tried.** `Proj` is
+    `Proj_Start x Start_Pct`, so a player at 2% to start off a 4.0 conditional
+    projection scores 0.08 -- non-zero, and through the filter. Reported from
+    the app: Luca Gunter at Spurs, 2% to start, sitting in the midfield field
+    alongside players who will actually play. That test only removes the
+    players the engine zeroed *outright*, which is a different and much
+    smaller cohort.
+
+    Filtering on the start probability itself is the test that matches what the
+    chart claims. Measured live at GW11 the two differ by a third of the
+    board: `Proj > 0` leaves 384 players and `Start % >= 50` leaves 255.
+
+    Falls back to the `Proj` test with a warning when the frame carries no
+    start column. That is the weaker filter, and saying so in the log matters:
+    a gate keyed on a column some frames do not carry is the failure this
+    codebase has recorded five times, and it is always silent.
+    """
+    if board is None or board.empty:
+        return board
+    if "Start %" not in board.columns:
+        _logger.warning(
+            "Position strips: no 'Start %%' column, so the field falls back to "
+            "Proj > 0 -- which keeps players with a small chance of starting.")
+        return board[pd.to_numeric(board["Proj"], errors="coerce").fillna(0) > 0]
+    start = pd.to_numeric(board["Start %"], errors="coerce").fillna(0)
+    return board[start >= EXPECTED_TO_START_PCT]
+
+
 def _position_strip_chart(board, shown) -> None:
     """The shape of each positional field, which a rank cannot show.
 
@@ -1803,16 +1843,8 @@ def _position_strip_chart(board, shown) -> None:
     if board is None or board.empty or "Pos" not in board.columns:
         return
 
-    # Only players anyone expects to start. The engine writes `Proj = 0` for a
-    # declared non-starter -- absence from Rotowire's XI *is* the "not
-    # starting" signal -- and live that is more than half the pool. Left in,
-    # they are a wall of dots on the axis that pins every median near 0.3 and
-    # squeezes the range anyone is actually choosing between into a third of
-    # the width. The question this chart answers is "where does 4.4 sit among
-    # the players who could fill that slot", and a man nobody expects on the
-    # pitch is not one of them.
-    board = board[pd.to_numeric(board["Proj"], errors="coerce").fillna(0) > 0]
-    if board.empty:
+    board = _expected_to_start(board)
+    if board is None or board.empty:
         return
     order = [p for p in ("G", "D", "M", "F") if (board["Pos"] == p).any()]
     if not order:
@@ -1895,7 +1927,7 @@ def _render_board_charts(board, shown) -> None:
         _agreement_chart(board, shown)
     with right:
         st.markdown("**Is 4.4 good? It depends on the slot**")
-        st.caption("Every player **expected to start**, by position, with the "
+        st.caption("Every player **at 50%+ to start**, by position, with the "
                    "**median** marked. The four pools differ in size and in "
                    "range, so the same number sits differently in each.")
         _position_strip_chart(board, shown)

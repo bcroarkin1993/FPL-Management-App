@@ -1746,15 +1746,37 @@ Note the callsites set axis titles through `fig.update_xaxes(title_text=...)`
 rather than passing `title` into `compact_layout`. The merge is one level deep,
 so an override replaces the whole `title` dict and takes the font with it.
 
-**And the strips were dominated by players nobody expects to play.** The engine
-writes `Proj = 0` for a declared non-starter — absence from Rotowire's XI *is*
-the "not starting" signal — and live at GW11 that is **288 of 672**. Plotted,
-they are a wall of dots on the axis: every lane's median sat near 0.3, and the
-range a manager is actually choosing between was squeezed into a third of the
-width. Restricted to expected starters the lanes read G·25 / D·138 / M·181 /
-F·40 with medians 2.17 / 2.78 / 2.83 / 3.03, which is a chart. The question it
-answers is where a number sits among the players who could fill that slot, and
-a man nobody expects on the pitch is not one of them.
+**And the strips were dominated by players nobody expects to play**, which
+took two goes to fix because the obvious filter is the wrong one.
+
+The field a number is read against should be the players who could fill that
+slot. The first attempt filtered on `Proj > 0`, reasoning that the engine
+zeroes a declared non-starter. It removes the right *kind* of player and far
+too few of them: **`Proj` is `Proj_Start × Start_Pct`**, so a player at 2% to
+start off a 4.0 conditional projection scores 0.08 — non-zero, and straight
+through. Reported from the app: Luca Gunter at Spurs, 2% to start, in the
+midfield field alongside players who will actually play. Live he carries `Proj`
+0.024.
+
+The test that matches what the chart claims is on the **start probability
+itself**, and the threshold is not a new one: `projection_engine` already calls
+`chance_of_playing < 50` *unavailable*, and `DEPUTY_MIN_START_PCT` is 0.5 for
+"he is third choice". So `EXPECTED_TO_START_PCT` reuses that line rather than
+introducing a tuned constant.
+
+Measured live at GW11, the three populations:
+
+| | players | lanes | medians |
+|---|---|---|---|
+| whole board | 672 | — | — |
+| `Proj > 0` | 384 | G·25 D·138 M·181 F·40 | 2.17 / 2.78 / 2.83 / 3.03 |
+| `Start % >= 50` | **248** | G·21 D·95 M·109 F·23 | 3.15 / 2.86 / 3.52 / 3.60 |
+
+A third of the board separates the two tests, and the medians move by up to
+0.97. `_expected_to_start` falls back to the `Proj` test **with a warning**
+when a frame carries no start column — the weaker filter, said out loud,
+because a gate keyed on a column some frames do not carry is the failure this
+codebase has recorded five times and it is always silent.
 
 Two smaller reversions, both pinned by tests so they are not re-added by
 instinct. **The scatter does not label its outliers**: the widest gaps are not
