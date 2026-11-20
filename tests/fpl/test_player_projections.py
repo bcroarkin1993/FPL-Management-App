@@ -1,5 +1,7 @@
 """Tests for scripts/fpl/player_projections.py's pure helper functions."""
 
+import pytest
+
 from scripts.fpl.player_projections import is_rotowire_url_stale
 
 
@@ -857,11 +859,117 @@ class TestBoardCharts:
         with patch("streamlit.plotly_chart") as chart:
             pp._position_strip_chart(board, board)
         fig = chart.call_args[0][0]
-        boxes = {t.name for t in fig.data if t.type == "box"}
-        assert boxes == {"G", "D", "M", "F"}
+        starters = board[board["Proj"] > 0]
+        lanes = {t.name for t in fig.data if t.name in ("G", "D", "M", "F")}
+        assert lanes == {"G", "D", "M", "F"}
         for trace in fig.data:
-            if trace.type == "box":
-                assert len(trace.x) == int((board["Pos"] == trace.name).sum())
+            if trace.name in lanes:
+                expected = int((starters["Pos"] == trace.name).sum())
+                assert len(trace.x) == expected, (
+                    "lane %s plots %d of %d expected starters -- every one of "
+                    "them is the chart here, not a quartile summary"
+                    % (trace.name, len(trace.x), expected))
+
+    def test_each_lane_is_labelled_with_its_own_size(self):
+        """The counts are the point: the four pools are not comparable
+        populations, and the axis is the only place the label fits -- the
+        longest lane reaches the top of the x range."""
+        from unittest.mock import patch
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        with patch("streamlit.plotly_chart") as chart:
+            pp._position_strip_chart(board, board)
+        starters = board[board["Proj"] > 0]
+        labels = list(chart.call_args[0][0].layout.yaxis.ticktext)
+        assert labels == [
+            "%s \u00b7 %d" % (p, int((starters["Pos"] == p).sum()))
+            for p in ("G", "D", "M", "F")]
+        ticks = list(chart.call_args[0][0].layout.yaxis.tickvals)
+        assert ticks == sorted(ticks, reverse=True), (
+            "goalkeepers belong at the top, as in every table on this page"
+        )
+
+    def test_the_median_is_marked_once_per_lane(self):
+        from unittest.mock import patch
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        with patch("streamlit.plotly_chart") as chart:
+            pp._position_strip_chart(board, board)
+        shapes = chart.call_args[0][0].layout.shapes
+        # One track plus one median tick per lane.
+        assert len(shapes) == 8
+        medians = sorted(s.x0 for s in shapes if s.x0 == s.x1)
+        starters = board[board["Proj"] > 0]
+        expected = sorted(
+            float(starters.loc[starters["Pos"] == p, "Proj"].median())
+            for p in ("G", "D", "M", "F"))
+        assert medians == pytest.approx(expected)
+
+    def test_declared_non_starters_are_left_off_the_strips(self):
+        """The fix for what the first render of this chart actually looked like.
+
+        The engine writes `Proj = 0` for a player no source expects to start --
+        absence from Rotowire's XI *is* the "not starting" signal -- and live
+        that is 288 of 672. Left in, they are a wall of dots on the axis: every
+        lane's median sat near 0.3, and the range anyone is choosing between
+        was squeezed into a third of the width. The question the chart answers
+        is where a number sits among players who could fill that slot.
+        """
+        from unittest.mock import patch
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        zeros = int((board["Proj"] <= 0).sum())
+        assert zeros, "the fixture needs a non-starter for this to mean anything"
+        with patch("streamlit.plotly_chart") as chart:
+            pp._position_strip_chart(board, board)
+        fig = chart.call_args[0][0]
+        plotted = sum(len(t.x) for t in fig.data
+                      if t.name in ("G", "D", "M", "F"))
+        assert plotted == len(board) - zeros
+        medians = [s.x0 for s in fig.layout.shapes if s.x0 == s.x1]
+        assert all(m > 0 for m in medians), (
+            "a median at zero is the signature of the wall of non-starters"
+        )
+
+    def test_a_board_of_only_non_starters_draws_nothing(self):
+        import pandas as pd
+        from unittest.mock import patch
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        board["Proj"] = 0.0
+        with patch("streamlit.plotly_chart") as chart:
+            pp._position_strip_chart(board, board)
+        assert chart.call_count == 0
+
+    def test_the_scatter_does_not_label_its_outliers(self):
+        """Tried, reverted, and pinned so it is not re-added by instinct.
+
+        The widest gaps are not scattered across the chart -- they sit in one
+        diagonal band, because they are all players Rotowire rates well above
+        FFP. Three labels landed on top of each other and on the dots. Hover
+        names every point and the tile beside the chart names the widest.
+        """
+        from unittest.mock import patch
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        with patch("streamlit.plotly_chart") as chart:
+            pp._agreement_chart(board, board)
+        fig = chart.call_args[0][0]
+        assert not any("text" in (t.mode or "") for t in fig.data)
+
+    def test_the_jitter_is_seeded_so_a_rerun_does_not_reshuffle(self):
+        """An unseeded cloud moves on every keystroke, which reads as a broken
+        page rather than as sampling noise."""
+        from unittest.mock import patch
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        ys = []
+        for _ in range(2):
+            with patch("streamlit.plotly_chart") as chart:
+                pp._position_strip_chart(board, board)
+            fig = chart.call_args[0][0]
+            ys.append([tuple(t.y) for t in fig.data if t.name == "M"])
+        assert ys[0] == ys[1]
 
     def test_the_strips_mark_a_small_filter(self, mock_streamlit):
         from unittest.mock import patch

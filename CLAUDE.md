@@ -1725,6 +1725,51 @@ claim — a points MAE beside it would invite exactly the comparison this
 paragraph exists to prevent.
 `test_the_model_is_scored_on_the_same_population_as_its_baseline` pins the flag.
 
+#### Two charts, and both needed looking at before they were right
+
+The first pair shipped on a numeric check — margins, ranges, trace counts all
+as intended — and rendered badly. Two causes, and only opening the page found
+either.
+
+**`DARK_LAYOUT` has no opinion about margins, and plotly does not grow one to
+fit.** The house theme was tuned for a single full-width chart with a 20px
+centred title: 14px body text, 13px ticks, no margin key at all. Two charts in
+an `st.columns` row are ~340px wide, and a `margin=dict(l=10, r=10, t=8, b=10)`
+does not shrink the axis furniture to suit — it draws the y-axis title and the
+tick labels on top of each other, and puts a legend at `y=1.14` outside the
+paper. `charts.compact_layout()` is the re-proportioned variant: 11px titles in
+a muted grey, 10px ticks, legends off by default, and **l=62 / b=52 reserved
+deliberately**. A per-chart heading and caption carry what a legend would, at a
+tenth of a 330px chart's height.
+
+Note the callsites set axis titles through `fig.update_xaxes(title_text=...)`
+rather than passing `title` into `compact_layout`. The merge is one level deep,
+so an override replaces the whole `title` dict and takes the font with it.
+
+**And the strips were dominated by players nobody expects to play.** The engine
+writes `Proj = 0` for a declared non-starter — absence from Rotowire's XI *is*
+the "not starting" signal — and live at GW11 that is **288 of 672**. Plotted,
+they are a wall of dots on the axis: every lane's median sat near 0.3, and the
+range a manager is actually choosing between was squeezed into a third of the
+width. Restricted to expected starters the lanes read G·25 / D·138 / M·181 /
+F·40 with medians 2.17 / 2.78 / 2.83 / 3.03, which is a chart. The question it
+answers is where a number sits among the players who could fill that slot, and
+a man nobody expects on the pitch is not one of them.
+
+Two smaller reversions, both pinned by tests so they are not re-added by
+instinct. **The scatter does not label its outliers**: the widest gaps are not
+scattered across the chart but sit in one diagonal band — they are all players
+Rotowire rates above FFP — so three labels landed on each other and on the
+dots. Hover names every point and the tile beside the chart names the widest.
+And the "they agree" annotation moved from 0.70 along the diagonal to 0.90,
+because 0.70 is the densest part of the cloud.
+
+**A strip plot rather than a box plot**, and **the jitter is seeded**. Quartile
+boxes answer a question nobody asked here and hide the one that matters, which
+is how thin the top of a position is. An unseeded cloud reshuffles on every
+keystroke, which reads as a broken page rather than as sampling noise — the
+same reasoning that seeds `season_sim`'s Monte Carlo.
+
 #### The two charts are drawn from the whole board
 
 `Spread` gives the *size* of a disagreement and never its direction, so the
@@ -4393,6 +4438,7 @@ Score = α × 1GW + (1-α) × ROS
 | `value_rgb()` | `scripts/common/styled_tables.py` | The table ramp's colour for one value, so a sparkline is painted by the same scale as the numbers beside it |
 | `relative_age()` | `scripts/common/text_helpers.py` | Just the age ("3h ago"), factored out of `format_last_updated` for the Hub's one-line source strip |
 | `dark_layout()` / `DARK_LAYOUT` | `scripts/common/charts.py` | The house plotly theme, in one place, merging an axis override instead of colliding with it |
+| `compact_layout()` | `scripts/common/charts.py` | The same theme re-proportioned for a chart that shares a row — smaller type and, the part that actually breaks, **margins reserved for the axis furniture** |
 | `blended_pool()` | `scripts/common/player_pool.py` | The blended projection over the whole FPL pool, cached on `(gameweek, rotowire_url)`. Shared by the Projections Hub and the Classic Rival Tracker |
 | `positional_percentile()` | `scripts/common/analytics.py` | Within-position percentile against full FPL pool |
 | `season_progress_weight()` | `scripts/common/analytics.py` | Concave GW→weight curve for season quality blend |

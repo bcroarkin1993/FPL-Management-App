@@ -1702,13 +1702,18 @@ def _agreement_chart(board, shown) -> None:
 
     `Spread` gives the *size* of a disagreement and not its direction, so the
     board can tell you two sources are 1.5 points apart and never whose number
-    you are taking. Which side of the diagonal a player falls is the whole
+    you are taking. Which side of the diagonal a player falls on is the whole
     content of this chart.
 
     Drawn from the **whole board** with the current filter ringed, never from
     the filtered rows: a scatter of one club against itself has no diagonal
     worth reading, and grading a selection against itself is the trap this
     page's fixed colour ranges and pre-filter ranks already avoid twice over.
+
+    No legend. Three colour-coded series above a 330px chart would cost a tenth
+    of its height to say what the caption above it says in the page's own
+    voice, so the diagonal is annotated in place and the dots are explained in
+    words -- which is also what the design this was built from did.
     """
     if board is None or board.empty:
         return
@@ -1722,8 +1727,9 @@ def _agreement_chart(board, shown) -> None:
 
     bx, by = x[both], y[both]
     names = board.loc[both, "Player"].astype(str)
-    far = (bx - by).abs() >= 1.5
-    top = float(max(bx.max(), by.max())) * 1.03
+    gap = (bx - by).abs()
+    far = gap >= 1.5
+    top = float(max(bx.max(), by.max())) * 1.06
     hover = "%{text}<br>Rotowire %{x:.2f} \u00b7 FFP %{y:.2f}<extra></extra>"
 
     fig = go.Figure()
@@ -1731,15 +1737,25 @@ def _agreement_chart(board, shown) -> None:
         x=[0, top], y=[0, top], mode="lines", name="They agree",
         line=dict(color=cards.ACCENT_ALT, width=1.4, dash="dash"),
         hoverinfo="skip"))
+    # Up at the sparse end of the line. At 0.70 it sat on the densest part of
+    # the cloud, which is where most of the board is.
+    fig.add_annotation(
+        x=top * 0.90, y=top * 0.90, text="they agree", showarrow=False,
+        xanchor="center", yanchor="bottom", yshift=6,
+        font=dict(color=cards.ACCENT_ALT, size=10))
     fig.add_trace(go.Scatter(
         x=bx[~far], y=by[~far], mode="markers", name="Within 1.5",
-        marker=dict(size=6, color="#5d5a7a"), text=names[~far],
+        marker=dict(size=5.5, color="#5d5a7a"), text=names[~far],
         hovertemplate=hover))
     if int(far.sum()):
         fig.add_trace(go.Scatter(
             x=bx[far], y=by[far], mode="markers", name="Apart by 1.5+",
-            marker=dict(size=9, color=cards.WARN), text=names[far],
+            marker=dict(size=8.5, color=cards.WARN), text=names[far],
             hovertemplate=hover))
+        # No names on the points. Tried and reverted: the widest gaps are not
+        # scattered across the chart, they sit in one diagonal band -- three
+        # labels landed on top of each other and on the dots. Hover names every
+        # point, and the tile beside this chart names the widest.
 
     if shown is not None and 0 < len(shown) < len(board):
         sx = pd.to_numeric(shown.get("Rotowire"), errors="coerce")
@@ -1748,18 +1764,21 @@ def _agreement_chart(board, shown) -> None:
         if 0 < int(m.sum()) <= 60:
             fig.add_trace(go.Scatter(
                 x=sx[m], y=sy[m], mode="markers", name="Your filter",
-                marker=dict(size=13, color="rgba(0,0,0,0)",
+                marker=dict(size=12, color="rgba(0,0,0,0)",
                             line=dict(width=2, color=cards.ACCENT)),
                 text=shown.loc[m, "Player"].astype(str),
                 hovertemplate="%{text}<extra></extra>"))
 
-    fig.update_layout(**charts.dark_layout(
-        height=310, margin=dict(l=10, r=10, t=8, b=10),
-        legend=dict(orientation="h", y=1.14, x=0,
-                    font=dict(color="#ffffff", size=11)),
-        xaxis=dict(title="Rotowire - points if he starts", rangemode="tozero"),
-        yaxis=dict(title="FFP - points if he starts", rangemode="tozero"),
+    fig.update_layout(**charts.compact_layout(
+        height=330,
+        xaxis=dict(dtick=2, range=[0, top]),
+        yaxis=dict(dtick=2, range=[0, top], scaleanchor="x", scaleratio=1),
     ))
+    # `update_*axes` rather than passing `title` through `compact_layout`: the
+    # merge is one level deep, so an override replaces the whole `title` dict
+    # and takes its font with it.
+    fig.update_xaxes(title_text="Rotowire \u2014 points if he starts")
+    fig.update_yaxes(title_text="FFP \u2014 points if he starts")
     st.plotly_chart(fig, use_container_width=True, theme=None)
 
 
@@ -1769,58 +1788,116 @@ def _position_strip_chart(board, shown) -> None:
     `Proj` of 4.2 is a leading goalkeeper and a replaceable forward. `Pos RK`
     fixes the *ranking* but says nothing about how far clear the top of a
     position is or how flat its middle runs -- and the four pools are not
-    comparable populations: live they hold roughly 73 / 217 / 298 / 79 players.
+    comparable populations: live they hold roughly 75 / 219 / 299 / 79 players.
+
+    A strip of every player per lane rather than a box plot. Quartile boxes
+    answer a question nobody asked here ("what is the interquartile range of
+    midfielders") and hide the thing that matters, which is how thin the top of
+    a position is -- so the dots are the chart and the median is one tick.
+
+    **The jitter is seeded.** Streamlit reruns the page function on every
+    keystroke, and an unseeded cloud reshuffles on each one, which reads as a
+    broken page rather than as sampling noise -- the same reasoning that seeds
+    `season_sim`'s Monte Carlo.
     """
     if board is None or board.empty or "Pos" not in board.columns:
         return
 
+    # Only players anyone expects to start. The engine writes `Proj = 0` for a
+    # declared non-starter -- absence from Rotowire's XI *is* the "not
+    # starting" signal -- and live that is more than half the pool. Left in,
+    # they are a wall of dots on the axis that pins every median near 0.3 and
+    # squeezes the range anyone is actually choosing between into a third of
+    # the width. The question this chart answers is "where does 4.4 sit among
+    # the players who could fill that slot", and a man nobody expects on the
+    # pitch is not one of them.
+    board = board[pd.to_numeric(board["Proj"], errors="coerce").fillna(0) > 0]
+    if board.empty:
+        return
+    order = [p for p in ("G", "D", "M", "F") if (board["Pos"] == p).any()]
+    if not order:
+        return
+    # Lane 1 is the bottom of the chart, so iterate in reverse to put
+    # goalkeepers at the top -- the order every table on this page uses.
+    lane = {pos: len(order) - i for i, pos in enumerate(order)}
+    rng = np.random.default_rng(0)
+
     fig = go.Figure()
-    drawn = 0
-    # Reversed, because plotly stacks the first horizontal trace lowest and
-    # goalkeeper-first is the order every other table on this page uses.
-    for pos in ("F", "M", "D", "G"):
-        vals = pd.to_numeric(board.loc[board["Pos"] == pos, "Proj"],
-                             errors="coerce").dropna()
+    ticks, labels = [], []
+    for pos in order:
+        rows = board[board["Pos"] == pos]
+        vals = pd.to_numeric(rows["Proj"], errors="coerce")
+        keep = vals.notna()
+        vals = vals[keep]
         if vals.empty:
             continue
-        drawn += 1
-        fig.add_trace(go.Box(
-            x=vals, name=pos, orientation="h", boxpoints="all", jitter=0.55,
-            pointpos=0, marker=dict(size=4, color="#6f6b90", opacity=0.5),
-            line=dict(color=cards.ACCENT_ALT, width=1.3),
-            fillcolor="rgba(78,204,163,0.08)", showlegend=False,
-            hovertemplate=pos + " \u00b7 %{x:.2f}<extra></extra>"))
-    if not drawn:
+        y0 = lane[pos]
+        fig.add_shape(type="line", x0=float(vals.min()), x1=float(vals.max()),
+                      y0=y0, y1=y0, layer="below",
+                      line=dict(color="#302c48", width=7))
+        fig.add_trace(go.Scatter(
+            x=vals, y=y0 + rng.uniform(-0.2, 0.2, len(vals)), mode="markers",
+            marker=dict(size=4, color="#6f6b90", opacity=0.55),
+            text=rows.loc[keep, "Player"].astype(str), name=pos,
+            hovertemplate="%{text}<br>" + pos + " \u00b7 %{x:.2f}<extra></extra>"))
+        med = float(vals.median())
+        fig.add_shape(type="line", x0=med, x1=med, y0=y0 - 0.26, y1=y0 + 0.26,
+                      line=dict(color=cards.ACCENT_ALT, width=2))
+        ticks.append(y0)
+        # The count belongs on the axis, not in an annotation at the right-hand
+        # edge: the longest lane reaches the top of the x range, so there is no
+        # room out there to put it.
+        labels.append("%s \u00b7 %d" % (pos, len(vals)))
+
+    if not ticks:
         return
 
     if shown is not None and 0 < len(shown) < len(board) and len(shown) <= 25:
         sp = pd.to_numeric(shown.get("Proj"), errors="coerce")
-        m = sp.notna()
+        m = sp.notna() & shown["Pos"].isin(lane)
         if int(m.sum()):
             fig.add_trace(go.Scatter(
-                x=sp[m], y=shown.loc[m, "Pos"].astype(str), mode="markers",
-                name="Your filter", showlegend=False,
-                marker=dict(size=12, symbol="diamond", color=cards.ACCENT,
+                x=sp[m], y=[lane[p] for p in shown.loc[m, "Pos"]],
+                mode="markers", name="Your filter",
+                marker=dict(size=11, symbol="diamond", color=cards.ACCENT,
                             line=dict(width=1, color="#06220f")),
                 text=shown.loc[m, "Player"].astype(str),
                 hovertemplate="%{text}<br>%{x:.2f}<extra></extra>"))
 
-    fig.update_layout(**charts.dark_layout(
-        height=310, margin=dict(l=10, r=10, t=8, b=10), showlegend=False,
-        xaxis=dict(title="Proj - expected points this gameweek",
-                   rangemode="tozero"),
-        yaxis=dict(title=""),
+    fig.update_layout(**charts.compact_layout(
+        height=330,
+        # The lanes are the whole y axis, so it carries no gridlines and no
+        # title -- the tick label already says which position and how many.
+        yaxis=dict(tickvals=ticks, ticktext=labels, showgrid=False,
+                   range=[0.45, len(order) + 0.55],
+                   tickfont=dict(color=cards.TEXT, size=11)),
+        xaxis=dict(rangemode="tozero"),
+        margin=dict(l=52, r=16, t=16, b=52),
     ))
+    fig.update_xaxes(title_text="Proj \u2014 expected points this gameweek")
     st.plotly_chart(fig, use_container_width=True, theme=None)
 
 
 def _render_board_charts(board, shown) -> None:
-    """The two charts, under the board they describe."""
+    """The two charts, under the board they describe.
+
+    Each gets its own heading and one line of caption, which is what replaces
+    the legends -- see `charts.compact_layout`. The shared note underneath is
+    the property both depend on and neither can show.
+    """
     st.markdown("##### What the table cannot say")
     left, right = st.columns(2)
     with left:
+        st.markdown("**Where the two sources disagree**")
+        st.caption("One dot per player, on the *if he starts* basis. "
+                   "On the dashed line they agree; **amber** is 1.5+ points "
+                   "apart, which is where the blend is doing real work.")
         _agreement_chart(board, shown)
     with right:
+        st.markdown("**Is 4.4 good? It depends on the slot**")
+        st.caption("Every player **expected to start**, by position, with the "
+                   "**median** marked. The four pools differ in size and in "
+                   "range, so the same number sits differently in each.")
         _position_strip_chart(board, shown)
     st.caption(
         "Both are drawn from the **whole board** with your current filter "
@@ -1828,7 +1905,6 @@ def _render_board_charts(board, shown) -> None:
         "against itself has no diagonal worth reading, and a field re-derived "
         "from a selection grades that selection against itself."
     )
-
 
 def _blend_filter_bar(board):
     """The board's filters, as a control row rather than a collapsed expander.

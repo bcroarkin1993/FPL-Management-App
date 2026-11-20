@@ -83,6 +83,52 @@ DARK_LAYOUT_BARE: Dict[str, Any] = dict(
 )
 
 
+#: A chart that shares a row, re-proportioned. See `compact_layout`.
+DARK_LAYOUT_COMPACT: Dict[str, Any] = dict(
+    paper_bgcolor=PANEL,
+    plot_bgcolor=PANEL,
+    font=dict(color=TEXT, size=11),
+    showlegend=False,
+    # Margins are the half that actually breaks. Plotly does **not** grow a
+    # margin to fit an axis title or a tick label -- it draws them into
+    # whatever room it was given and lets them overlap or clip. So these are
+    # reserved deliberately: left for the y tick labels plus a rotated title,
+    # bottom for the x labels plus its title, top for a little air.
+    margin=dict(l=62, r=16, t=16, b=52),
+    xaxis=dict(gridcolor=GRID, zerolinecolor=GRID, zeroline=False,
+               tickfont=dict(color=TEXT, size=10),
+               title=dict(font=dict(color="#9b96ad", size=11), standoff=10)),
+    yaxis=dict(gridcolor=GRID, zerolinecolor=GRID, zeroline=False,
+               tickfont=dict(color=TEXT, size=10),
+               title=dict(font=dict(color="#9b96ad", size=11), standoff=10)),
+    legend=dict(bgcolor=LEGEND_BG, font=dict(color=TEXT, size=10)),
+    hoverlabel=dict(bgcolor="#16213e", bordercolor=GRID,
+                    font=dict(color=TEXT, size=11)),
+)
+
+
+def compact_layout(**overrides: Any) -> Dict[str, Any]:
+    """`DARK_LAYOUT` re-proportioned for a chart that shares a row.
+
+    `DARK_LAYOUT` was tuned for one full-width chart with a 20px centred
+    title: 14px body text, 13px ticks, and **no opinion about margins at
+    all**. Two charts side by side in `st.columns` are about 340px wide, where
+    those sizes crowd the plot area and an axis title has nowhere to sit.
+
+    The margins are the part that actually goes wrong, and it is worth being
+    explicit about why: plotly does not grow a margin to fit axis furniture, so
+    a 10px left margin does not shrink the y-axis title -- it draws the title
+    and the tick labels on top of each other, which is exactly how the
+    Projections Hub's first pair of charts came out.
+
+    Legends are off by default: a horizontal legend above a 330px chart costs a
+    tenth of its height, and a per-chart heading and caption carry the same
+    information in the page's own voice. Turn it back on with
+    `showlegend=True` where a chart genuinely needs one.
+    """
+    return dark_layout(DARK_LAYOUT_COMPACT, **overrides)
+
+
 def dark_layout(base: Optional[Dict[str, Any]] = None,
                 **overrides: Any) -> Dict[str, Any]:
     """``DARK_LAYOUT`` with ``overrides`` merged in, one level deep.
