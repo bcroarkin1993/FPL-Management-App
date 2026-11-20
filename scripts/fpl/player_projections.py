@@ -15,9 +15,11 @@ import math
 import re
 
 import config
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
-from scripts.common.text_helpers import format_last_updated
+from scripts.common.text_helpers import format_last_updated, relative_age
 from scripts.common.scraping import (
     FFP_CLEAN_SHEET_URL,
     FFP_GOAL_ASSIST_URL,
@@ -33,7 +35,8 @@ from scripts.common.utils import (
     get_ffp_clean_sheet_odds,
     get_odds_api_match_odds,
 )
-from scripts.common.styled_tables import render_styled_table
+from scripts.common.styled_tables import render_styled_table, value_rgb
+from scripts.common import cards, charts
 from scripts.common.text_helpers import to_display_name
 from scripts.common.text_helpers import compact_html
 from scripts.common.text_helpers import _strip_accents
@@ -185,28 +188,43 @@ def _ffp_caption(feed):
     return " · ".join(bits)
 
 
-def _render_source_banner(source: str, description: str, bg_color: str, border_color: str,
+#: Per-source accents, chosen to read on the dark ground. Kept distinct
+#: because three of these banners sit within two clicks of each other, and the
+#: colour is the fastest way to tell which source you are looking at.
+ACCENT_ROTOWIRE = "#38bdf8"
+ACCENT_FFP = "#fbbf24"
+ACCENT_ODDS_API = "#a78bfa"
+ACCENT_CLEAN_SHEET = "#34d399"
+
+
+def _render_source_banner(source: str, description: str, accent: str,
                           url: str = None, updated=None):
-    """Render a styled data source attribution banner.
+    """Render a data-source attribution banner, on the app's own card shell.
+
+    This used to paint a *light* panel -- `#f0f9ff`, `#fef3c7`, `#ede9fe` -- in
+    an app where every other surface is `#1a1a2e`. The per-source accent
+    survives as an edge on the house card, which keeps the identity and loses
+    the clash; `cards.card` is the same shell Classic Home, the My Week strip
+    and the league cards are built from, so these line up with everything else
+    by construction rather than by anyone measuring.
 
     `updated` adds the source's own publish time. Worth showing: a projection
     table written before the last team-news cycle is materially less reliable
     than one written after it, and nothing else on the page reveals which you
     are looking at.
     """
-    link_html = f'<a href="{url}" target="_blank" style="color: {border_color}; font-weight: 600;">{source}</a>' if url else f'<strong>{source}</strong>'
-    updated_html = ""
+    name = ('<a href="%s" target="_blank" style="color:%s;font-weight:700;'
+            'text-decoration:none;">%s</a>' % (url, accent, source)
+            if url else source)
+    body = cards.eyebrow("Data source") + cards.headline(name, size="1.0em")
+    body += cards.note(description, colour=cards.MUTED)
     if updated is not None:
-        updated_html = (
-            f'<br><small style="opacity: 0.85;">'
-            f'<strong>Updated:</strong> {format_last_updated(updated)}</small>'
-        )
-    st.markdown(f"""
-    <div style="background: {bg_color}; border-left: 4px solid {border_color}; padding: 12px 16px; border-radius: 4px; margin-bottom: 16px;">
-        <strong>Data Source:</strong> {link_html}<br>
-        <small style="opacity: 0.85;">{description}</small>{updated_html}
-    </div>
-    """, unsafe_allow_html=True)
+        body += cards.note("Updated %s" % format_last_updated(updated))
+    st.markdown(cards.card(body, accent=accent, padding="11px 14px"),
+                unsafe_allow_html=True)
+    # `cards.card` carries no outer margin, and on every tab that uses this a
+    # heading follows immediately.
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -269,7 +287,7 @@ def render_rotowire_projections():
     _render_source_banner(
         "Rotowire",
         "Weekly gameweek projections based on expert analysis, matchups, and form.",
-        "#f0f9ff", "#0ea5e9",
+        ACCENT_ROTOWIRE,
         "https://www.rotowire.com/soccer/",
         updated=get_rotowire_article_updated(url) if url else None,
     )
@@ -305,23 +323,24 @@ def render_rotowire_projections():
         df['Value'] = (pd.to_numeric(df['Points'], errors='coerce') / _price).where(_price > 0)
 
     # Filters
-    with st.expander("Filters", expanded=False):
-        col1, col2, col3 = st.columns(3)
+    # Filters, inline rather than behind an expander: narrowing is the
+    # primary interaction on a board this long.
+    col1, col2, col3 = st.columns(3)
 
-        player_filter = col1.text_input("Search by name", placeholder="e.g., Salah", key="rw_player_filter")
+    player_filter = col1.text_input("Search by name", placeholder="e.g., Salah", key="rw_player_filter")
 
-        if 'Position' in df.columns:
-            all_positions = sorted(df['Position'].dropna().unique().tolist())
-            position_filter = col2.multiselect("Position", options=all_positions, default=all_positions, key="rw_pos")
-        else:
-            position_filter = None
+    if 'Position' in df.columns:
+        all_positions = sorted(df['Position'].dropna().unique().tolist())
+        position_filter = col2.multiselect("Position", options=all_positions, default=all_positions, key="rw_pos")
+    else:
+        position_filter = None
 
-        if 'Price' in df.columns:
-            min_price = float(df['Price'].min())
-            max_price = float(df['Price'].max())
-            price_filter = col3.slider("Max price", min_value=min_price, max_value=max_price, value=max_price, step=0.5, key="rw_price")
-        else:
-            price_filter = None
+    if 'Price' in df.columns:
+        min_price = float(df['Price'].min())
+        max_price = float(df['Price'].max())
+        price_filter = col3.slider("Max price", min_value=min_price, max_value=max_price, value=max_price, step=0.5, key="rw_price")
+    else:
+        price_filter = None
 
     # Apply filters
     result = df.copy()
@@ -385,7 +404,7 @@ def render_ffp_data():
     _render_source_banner(
         "Fantasy Football Pundit",
         "Player data with start probability, ownership, and betting-derived probabilities.",
-        "#fef3c7", "#f59e0b",
+        ACCENT_FFP,
         FFP_POINTS_PREDICTOR_URL,
         updated=feed.updated,
     )
@@ -455,21 +474,22 @@ def render_ffp_data():
                   _positional_rank(df, sort_col, position_col='Position'))
 
     # Filters
-    with st.expander("Filters", expanded=False):
-        col1, col2, col3 = st.columns(3)
+    # Filters, inline rather than behind an expander: narrowing is the
+    # primary interaction on a board this long.
+    col1, col2, col3 = st.columns(3)
 
-        player_filter = col1.text_input("Search by name", placeholder="e.g., Salah", key="ffp_player_filter")
+    player_filter = col1.text_input("Search by name", placeholder="e.g., Salah", key="ffp_player_filter")
 
-        if 'Position' in df.columns:
-            all_positions = sorted(df['Position'].dropna().unique().tolist())
-            position_filter = col2.multiselect("Position", options=all_positions, default=all_positions, key="ffp_pos")
-        else:
-            position_filter = None
+    if 'Position' in df.columns:
+        all_positions = sorted(df['Position'].dropna().unique().tolist())
+        position_filter = col2.multiselect("Position", options=all_positions, default=all_positions, key="ffp_pos")
+    else:
+        position_filter = None
 
-        if 'Start %' in df.columns:
-            min_start = col3.slider("Min start %", min_value=0, max_value=100, value=0, step=10, key="ffp_start")
-        else:
-            min_start = 0
+    if 'Start %' in df.columns:
+        min_start = col3.slider("Min start %", min_value=0, max_value=100, value=0, step=10, key="ffp_start")
+    else:
+        min_start = 0
 
     # Apply filters
     result = df.copy()
@@ -639,7 +659,7 @@ def render_horizon():
         "Fantasy Football Pundit — multi-gameweek forecasts",
         "Expected points per gameweek for the next six gameweeks, with each "
         "week's fixture.",
-        "#fef3c7", "#f59e0b",
+        ACCENT_FFP,
         FFP_POINTS_PREDICTOR_URL,
         updated=horizon.updated,
     )
@@ -769,21 +789,22 @@ def render_horizon():
         [float("inf"), float("-inf")], float("nan")).dropna()
     span = (float(finite.min()), float(finite.max())) if not finite.empty else None
 
-    with st.expander("Filters", expanded=False):
-        f1, f2, f3 = st.columns(3)
-        search = f1.text_input("Search by name", placeholder="e.g., Salah",
-                               key="horizon_search")
-        positions = f2.multiselect(
-            "Position", sorted(p for p in grid["Pos"].dropna().unique() if p),
-            default=[], key="horizon_pos")
-        teams = f3.multiselect(
-            "Team", sorted(t for t in grid["Team"].dropna().unique() if t),
-            default=[], key="horizon_team",
-            help="Leave empty for every club.")
-        s1, s2 = st.columns(2)
-        sort_by = s1.selectbox("Sort by", ["Total"] + label_cols, key="horizon_sort")
-        descending = s2.selectbox("Order", ["Highest first", "Lowest first"],
-                                  key="horizon_order") == "Highest first"
+    # Filters, inline rather than behind an expander: narrowing is the
+    # primary interaction on a board this long.
+    f1, f2, f3 = st.columns(3)
+    search = f1.text_input("Search by name", placeholder="e.g., Salah",
+                           key="horizon_search")
+    positions = f2.multiselect(
+        "Position", sorted(p for p in grid["Pos"].dropna().unique() if p),
+        default=[], key="horizon_pos")
+    teams = f3.multiselect(
+        "Team", sorted(t for t in grid["Team"].dropna().unique() if t),
+        default=[], key="horizon_team",
+        help="Leave empty for every club.")
+    s1, s2 = st.columns(2)
+    sort_by = s1.selectbox("Sort by", ["Total"] + label_cols, key="horizon_sort")
+    descending = s2.selectbox("Order", ["Highest first", "Lowest first"],
+                              key="horizon_order") == "Highest first"
 
     # Like Pos RK and the colour range above, the overall rank is fixed before
     # the filters run -- it is a position on the whole board, so searching one
@@ -907,7 +928,7 @@ def render_goalscorer_odds():
     _render_source_banner(
         "Fantasy Football Pundit (Betting Odds)",
         "Anytime goalscorer and assist probabilities converted from bookmaker odds.",
-        "#fefce8", "#eab308",
+        ACCENT_FFP,
         FFP_GOAL_ASSIST_URL,
         updated=feed.updated,
     )
@@ -922,23 +943,24 @@ def render_goalscorer_odds():
         return
 
     # Filters
-    with st.expander("Filters", expanded=False):
-        col1, col2, col3 = st.columns(3)
+    # Filters, inline rather than behind an expander: narrowing is the
+    # primary interaction on a board this long.
+    col1, col2, col3 = st.columns(3)
 
-        player_filter = col1.text_input("Search by name", placeholder="e.g., Haaland", key="gs_player_filter")
+    player_filter = col1.text_input("Search by name", placeholder="e.g., Haaland", key="gs_player_filter")
 
-        if 'Position' in df.columns:
-            all_positions = sorted(df['Position'].dropna().unique().tolist())
-            position_filter = col2.multiselect("Position", options=all_positions, default=all_positions, key="gs_pos")
-        else:
-            position_filter = None
+    if 'Position' in df.columns:
+        all_positions = sorted(df['Position'].dropna().unique().tolist())
+        position_filter = col2.multiselect("Position", options=all_positions, default=all_positions, key="gs_pos")
+    else:
+        position_filter = None
 
-        if 'Team' in df.columns:
-            all_teams = sorted(df['Team'].dropna().unique().tolist())
-            team_filter = col3.multiselect("Team", options=all_teams, default=[], key="gs_team",
-                                           help="Leave empty for all teams")
-        else:
-            team_filter = []
+    if 'Team' in df.columns:
+        all_teams = sorted(df['Team'].dropna().unique().tolist())
+        team_filter = col3.multiselect("Team", options=all_teams, default=[], key="gs_team",
+                                       help="Leave empty for all teams")
+    else:
+        team_filter = []
 
     # Apply filters
     result = df.copy()
@@ -984,7 +1006,7 @@ def render_clean_sheet_odds():
     _render_source_banner(
         "Fantasy Football Pundit (Clean Sheet Odds)",
         "Team clean sheet probabilities from betting markets.",
-        "#f0fdf4", "#22c55e",
+        ACCENT_CLEAN_SHEET,
         FFP_CLEAN_SHEET_URL,
         updated=feed.updated,
     )
@@ -1113,7 +1135,7 @@ def render_match_odds():
     _render_source_banner(
         "The Odds API",
         "Match betting odds aggregated from UK bookmakers (h2h markets).",
-        "#ede9fe", "#8b5cf6",
+        ACCENT_ODDS_API,
         "https://the-odds-api.com"
     )
 
@@ -1129,6 +1151,15 @@ def render_match_odds():
     if df is None or df.empty:
         st.warning("Could not load match odds data. The API may be temporarily unavailable or rate limited.")
         return
+
+    # The legend the deleted footer panel used to carry, now beside the thing
+    # it describes.
+    st.caption(
+        "Each card is one fixture -- **home** left, **away** right -- with a "
+        "proportional bar where each segment's width is that outcome's "
+        "likelihood: green the home win, grey the draw, purple the away win. "
+        "Kickoffs are Eastern Time."
+    )
 
     # Parse kickoff times and group by gameweek
     if 'Kickoff' in df.columns:
@@ -1202,104 +1233,629 @@ def render_match_odds():
 # above under its old private name, so the cache key -- and the tests that
 # patch pp._blended_pool -- are unchanged.
 
-def _blended_source_status(rotowire_df, feed, blended, current_gw) -> None:
-    """One row per source: is it up, how many players, how fresh, what weight.
+def _num(val):
+    """One value as a finite float, or None.
+
+    `pd.to_numeric` wants a Series and the tiles read single cells, so this is
+    the scalar form. None rather than NaN because every caller here has to
+    branch on "is there a number" anyway, and `x != x` at four callsites is how
+    a NaN leaks into a rendered string.
+    """
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+# =============================================================================
+# Source health -- one derivation, two presentations
+# =============================================================================
+
+def _source_rows(rotowire_df, feed, blended, current_gw):
+    """One record per source: up or down, how many players, how fresh, what weight.
 
     Modelled on the Initial Squad Optimizer's Data Sources panel, which exists
     because every fetch in this app degrades to an empty frame on failure --
     without a panel like this a broken source renders a page identical to a
     working one, just with every number quietly leaning on whatever survived.
+
+    **This used to be the renderer.** It is now the data behind two
+    presentations -- the one-line strip above the board and the full table
+    inside `Source detail` -- and that split is the point: a strip that did its
+    own reading of the same feeds would be a second implementation able to
+    disagree with the table a click below it, which is the twin-drift failure
+    this codebase keeps paying for.
     """
     weights = getattr(config, "PROJECTION_SOURCE_WEIGHTS", {}) or {}
 
-    def _row(name, ok, rows, note, updated, weight_key):
+    def _row(name, short, ok, rows, note, updated, weight_key):
         if weight_key == "__start_only__":
-            w, label = 0.0, "start signal only"
+            weight, label = None, "start signal only"
         else:
             w = float(weights.get(weight_key, 0.0))
-            label = f"{w:.0%}" if w > 0 else "fallback only"
+            weight, label = w, ("%.0f%%" % (w * 100) if w > 0 else "fallback only")
         if not ok or not rows:
-            status = "🔴 Unavailable"
+            status = "\U0001F534 Unavailable"
         elif note:
-            status = f"🟡 {note}"
+            status = "\U0001F7E1 %s" % note
         else:
-            status = "🟢 OK"
-        return {
-            "Source": name,
-            "Status": status,
-            "Players": int(rows or 0),
-            "Weight": label,
-            "Updated": format_last_updated(updated) if updated else "—",
-        }
+            status = "\U0001F7E2 OK"
+        return {"name": name, "short": short, "ok": bool(ok and rows),
+                "rows": int(rows or 0), "note": note or "", "updated": updated,
+                "weight": weight, "weight_label": label, "status": status}
 
     rows = []
     rw_ok = rotowire_df is not None and not rotowire_df.empty
     rows.append(_row(
-        "Rotowire", rw_ok, len(rotowire_df) if rw_ok else 0,
+        "Rotowire", "Rotowire", rw_ok, len(rotowire_df) if rw_ok else 0,
         "" if rw_ok else "no rankings table for this gameweek",
         get_rotowire_article_updated(config.ROTOWIRE_URL) if config.ROTOWIRE_URL else None,
         "rotowire",
     ))
     ffp_note = ""
     if feed.ok and feed.is_stale(current_gw):
-        ffp_note = f"published for GW{feed.gameweek} — excluded"
+        ffp_note = "published for GW%s - excluded" % feed.gameweek
     elif feed.ok and feed.provenance == "sheet":
         ffp_note = "read from their spreadsheet"
     elif feed.ok and feed.provenance == "archive":
         ffp_note = "from our archive of their last publication"
     rows.append(_row(
-        "Fantasy Football Pundit", feed.ok, len(feed.df) if feed.ok else 0,
+        "Fantasy Football Pundit", "FFP", feed.ok, len(feed.df) if feed.ok else 0,
         ffp_note, feed.updated, "ffp",
     ))
     _n_xp = int((blended["Proj_Src"] == "xP").sum()) if "Proj_Src" in blended.columns else 0
     rows.append(_row(
-        "FPL expected points (ep_next)", True, _n_xp,
-        "" if _n_xp else "not needed — every player priced by another source",
+        "FPL expected points (ep_next)", "FPL xP", True, _n_xp,
+        "" if _n_xp else "not needed - every player priced by another source",
         None, "fpl_ep",
     ))
 
-    # Rotowire's lineups page, listed separately from its rankings article
-    # because they are different publications of different vintages and the
-    # engine now reads one for points and the other for who starts. Listing
-    # only "Rotowire" is what let the two disagree invisibly: the Hub rendered
-    # Phil Foden at 86% to start off a day-old article while the app's own
-    # Projected Lineups page had him benched.
     # One row per publication. Listing them separately is the point: a single
     # "projected XIs" row would hide which of them is stale, and the engine
     # combines them unanimously-to-bench, so *how many* have an opinion about a
     # club decides whether anyone there can be benched at all.
     _xis = analytics._lineup_xis()
-    for _src, _label in (("rotowire", "Rotowire projected XIs"),
-                         ("sportsgambler", "Sportsgambler projected XIs")):
+    for _src, _label, _short in (("rotowire", "Rotowire projected XIs", "RW XIs"),
+                                 ("sportsgambler", "Sportsgambler projected XIs", "SG XIs")):
         xi = _xis.get(_src)
         n_starters = len(getattr(xi, "player_ids", ()) or ()) if xi else 0
         n_clubs = len(getattr(xi, "clubs", ()) or ()) if xi else 0
         if not n_starters:
-            xi_note = "unavailable — the other XI source stands alone"
+            xi_note = "unavailable - the other XI source stands alone"
         elif n_clubs < 20:
             # A club short of a complete XI can promote its starters but bench
             # nobody, so say so rather than showing a green tick for a signal
             # that is working in one direction only.
-            xi_note = f"{n_clubs}/20 clubs complete — no benchings at the rest"
+            xi_note = "%d/20 clubs complete - no benchings at the rest" % n_clubs
         else:
             xi_note = ""
-        rows.append(_row(_label, bool(n_starters), n_starters,
+        rows.append(_row(_label, _short, bool(n_starters), n_starters,
                          xi_note, None, "__start_only__"))
+    return rows
 
-    st.markdown("##### Data Sources")
-    render_styled_table(pd.DataFrame(rows))
+
+def _render_source_detail(rows) -> None:
+    """The full audit, inside `Source detail`.
+
+    Unchanged in content from when it led the page; it has moved, not shrunk.
+    The update-frequency note at the end is what the page footer's second,
+    hand-maintained Data Sources table used to carry -- that table had drifted
+    to listing five sources with no weights and neither projected-XI feed, so
+    it is gone and the live panel says this instead.
+    """
+    render_styled_table(pd.DataFrame([
+        {"Source": r["name"], "Status": r["status"], "Players": r["rows"],
+         "Weight": r["weight_label"],
+         "Updated": format_last_updated(r["updated"]) if r["updated"] else "-"}
+        for r in rows
+    ]))
     st.caption(
         "Weight is each source's share of the blend where it prices a player; "
         "weights are renormalised over whichever sources are actually available, "
         "so a missing source does not shrink the projection. FPL's own expected "
         "points fills only players nobody else priced. **The projected XIs carry "
-        "no points and no weight** — they decide *who starts*, which a weekly "
+        "no points and no weight** - they decide *who starts*, which a weekly "
         "rankings article is too slow to track, so a benched player is priced as "
         "a substitute even where the article still ranks him. They are combined "
         "**unanimous-to-bench**: one source naming a player starts him, and he is "
         "benched only where every source with an opinion leaves him out, so two "
         "XIs disagreeing can never lower anybody."
     )
+    st.caption(
+        "**How often each refreshes.** Rotowire publishes a rankings article "
+        "once a week and updates its projected XIs as team news breaks; FFP "
+        "republishes through the gameweek; Sportsgambler updates its XIs daily; "
+        "FPL's expected points move with every price and status change. The "
+        "**Updated** column above is the source's own stamp where it publishes "
+        "one, so it is the figure to trust over any of this."
+    )
+
+
+def _source_health_line(rows) -> str:
+    """The audit as one line: is anything down, and how fresh is what is up.
+
+    Derived from `_source_rows` rather than from the feeds, so it cannot
+    contradict the table behind `Source detail`.
+
+    What it shows is deliberately not everything: a source carrying real weight
+    is always listed, and anything degraded or down is always listed, but a
+    healthy zero-weight fallback is not -- it has nothing to say at a glance
+    and would push the two numbers that matter off the end of the line.
+    """
+    if not rows:
+        return ""
+
+    down = [r for r in rows if not r["ok"]]
+    degraded = [r for r in rows if r["ok"] and r["note"]]
+    live = len(rows) - len(down)
+    if down:
+        colour, verdict = cards.BAD, "%d of %d sources down" % (len(down), len(rows))
+    elif degraded:
+        colour, verdict = cards.WARN, "All %d live, %d degraded" % (live, len(degraded))
+    else:
+        colour, verdict = cards.ACCENT, "All %d sources live" % live
+
+    segs = ['<span style="color:%s;font-weight:700;white-space:nowrap;">&#9679; %s</span>'
+            % (colour, verdict)]
+    for r in rows:
+        carries_weight = r["weight"] is not None and r["weight"] > 0
+        if not (carries_weight or not r["ok"] or r["note"]):
+            continue
+        bits = ['<b style="color:%s;">%s</b>' % (cards.TEXT, r["short"])]
+        if carries_weight:
+            bits.append("%.0f%%" % (r["weight"] * 100))
+        if not r["ok"]:
+            bits.append('<span style="color:%s;">unavailable</span>' % cards.BAD)
+        elif r["note"]:
+            # The headline half only. "18/20 clubs complete - no benchings at
+            # the rest" is the right text in the detail table and too long for
+            # a one-line strip carrying five of them.
+            bits.append('<span style="color:%s;">%s</span>'
+                        % (cards.WARN, r["note"].split(" - ")[0]))
+        elif r["updated"] is not None:
+            bits.append(relative_age(r["updated"]) or "")
+        segs.append('<span style="white-space:nowrap;">%s</span>'
+                    % " ".join(b for b in bits if b))
+
+    rule = '<span style="color:%s;">&#9474;</span>' % cards.RULE
+    body = ('<div style="display:flex;flex-wrap:wrap;align-items:center;'
+            'gap:4px 10px;font-size:0.84em;color:%s;line-height:1.5;">%s</div>'
+            % (cards.MUTED, rule.join(segs)))
+    return cards.card(body, padding="9px 13px")
+
+
+# =============================================================================
+# The insight rail -- where to look, before you have filtered anything
+# =============================================================================
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _trust_figures() -> dict:
+    """The start model's Brier against the no-skill baseline, as primitives.
+
+    Cached, and returning plain values rather than a frame, for two separate
+    reasons. The archive read measured **0.61s** of what used to be a 0.92s
+    rerun back when the Accuracy section was eager -- precisely the cost the
+    lazy radio removed, and putting a tile on the board must not quietly bring
+    it back on every search keystroke. And nothing unhashable enters a cache
+    key here, which is the rule `my_week._assemble` already follows.
+
+    **The gate is `confident_gameweeks`, not a second threshold.** The Accuracy
+    section refuses to act on fewer than `MIN_GAMEWEEKS_FOR_CONFIDENCE`
+    pre-deadline gameweeks, and a tile printing a confident percentage off a
+    history that section disclaims would have the page contradict itself two
+    clicks apart.
+    """
+    try:
+        # `common_subset=False` deliberately, and this is the whole subtlety of
+        # the tile. The common subset exists so that *sources* can be compared
+        # on the players all of them priced -- which is right for the Accuracy
+        # section's per-source table and wrong here, because this is an
+        # absolute score against `no_skill_reference`, and that baseline is
+        # computed over the full population. Measured live: the blend scores
+        # Brier 0.085 over 5,308 player-gameweeks unrestricted, and 0.136 over
+        # the 1,009 the subset leaves -- which are mostly the doubtful players
+        # FPL bothered to rate. Scoring the model on the hard subset and the
+        # baseline on everybody turns 62% skill into 39%, which is the
+        # two-populations-one-comparison error this app has paid for elsewhere.
+        # So the figure here legitimately differs from that table, and the note
+        # on the tile says which basis it is on.
+        scored = projection_accuracy.score_archive(common_subset=False)
+    except Exception:
+        _logger.warning("Trust tile: the projection archive could not be scored",
+                        exc_info=True)
+        return {"ok": False, "reason": "the projection archive could not be read"}
+    if scored is None or scored.empty:
+        return {"ok": False, "reason": "no gameweek has been scored yet"}
+
+    gws = int(projection_accuracy.confident_gameweeks(scored))
+    if gws < projection_accuracy.MIN_GAMEWEEKS_FOR_CONFIDENCE:
+        return {"ok": False, "gameweeks": gws,
+                "reason": "only %d of %d pre-deadline gameweeks scored so far"
+                          % (gws, projection_accuracy.MIN_GAMEWEEKS_FOR_CONFIDENCE)}
+
+    summary = projection_accuracy.summarise(scored)
+    if summary is None or summary.empty:
+        return {"ok": False, "gameweeks": gws, "reason": "nothing to summarise"}
+
+    def _blend(scope, metric):
+        rows = summary[(summary["scope"] == scope) & (summary["source"] == "blend")]
+        return _num(rows[metric].iloc[0]) if not rows.empty and metric in rows else None
+
+    brier = _blend(projection_accuracy.SCOPE_START, "brier")
+    ref = projection_accuracy.no_skill_reference(projection_accuracy.SCOPE_START)
+    skill = (projection_accuracy.skill_against_no_skill(brier, ref)
+             if brier is not None else None)
+    if skill is None:
+        return {"ok": False, "gameweeks": gws,
+                "reason": "the start model has no scored rows yet"}
+    rows_scored = summary[(summary["scope"] == projection_accuracy.SCOPE_START)
+                          & (summary["source"] == "blend")]["n"]
+    return {"ok": True, "gameweeks": gws, "skill": float(skill), "brier": brier,
+            "baseline": _num(ref.get("value")),
+            "n": int(rows_scored.iloc[0]) if not rows_scored.empty else None}
+
+
+def _tile_unknown(label: str, reason: str) -> str:
+    """A tile that says it could not answer, rather than defaulting to calm.
+
+    This is the `week_check.STATUS_UNKNOWN` discipline one surface over. A tile
+    makes a claim at a glance, and "nothing to flag" and "we could not check"
+    are opposite claims that render identically unless one of them says so.
+    """
+    return (cards.eyebrow(label)
+            + cards.headline('<span style="color:%s;">Not available</span>'
+                             % cards.MUTED, size="1.05em")
+            + cards.note(reason))
+
+
+def _tile_top(board) -> str:
+    """The best projected player, which is what the page is for and used to
+    take a scroll past the source audit to reach."""
+    if board is None or board.empty:
+        return _tile_unknown("Top of the board",
+                             "no player is projected for this gameweek")
+    row = board.iloc[0]
+    proj = _num(row.get("Proj"))
+    if proj is None:
+        return _tile_unknown("Top of the board",
+                             "the leading row carries no projection")
+    sub = " \u00b7 ".join(str(v) for v in (row.get("Team"), row.get("Pos")) if v)
+    start = _num(row.get("Start %"))
+    if start is not None:
+        sub += " \u00b7 %.0f%% to start" % start
+    return (cards.eyebrow("Top of the board")
+            + cards.headline('%s <span style="color:%s;">%.2f</span>'
+                             % (row.get("Player", ""), cards.ACCENT, proj))
+            + cards.note(sub))
+
+
+def _tile_disagreement(board) -> str:
+    """The player the blend is working hardest on.
+
+    `Spread` is already a column, but it is one of twelve and the board is
+    sorted on something else, so the row where the two sources are furthest
+    apart never surfaced. It is worth surfacing precisely because a wide spread
+    is not a verdict on the player -- it is a flag that his number is a
+    compromise between two opinions, and worth a second look before you act on
+    it.
+    """
+    label = "Sources disagree most"
+    if board is None or board.empty or "Spread" not in board.columns:
+        return _tile_unknown(label, "no spread was computed for this gameweek")
+    spread = pd.to_numeric(board["Spread"], errors="coerce")
+    if not spread.notna().any():
+        return _tile_unknown(
+            label, "only one source priced this gameweek, so there is nothing "
+                   "to compare")
+    row = board.loc[spread.idxmax()]
+    gap = _num(row.get("Spread"))
+    if gap is None:
+        return _tile_unknown(label, "no spread was computed for this gameweek")
+    rw, ffp = _num(row.get("Rotowire")), _num(row.get("FFP"))
+    if rw is not None and ffp is not None:
+        hi, lo = ("FFP", "Rotowire") if ffp > rw else ("Rotowire", "FFP")
+        detail = "%s %.2f against %s %.2f" % (hi, max(rw, ffp), lo, min(rw, ffp))
+    else:
+        detail = "one source did not price him"
+    wide = int((spread >= 1.5).sum())
+    return (cards.eyebrow(label)
+            + cards.headline('%s <span style="color:%s;">&plusmn;%.2f</span>'
+                             % (row.get("Player", ""), cards.WARN, gap))
+            + cards.note("%s \u00b7 %d player%s over 1.5"
+                         % (detail, wide, "" if wide == 1 else "s")))
+
+
+def _tile_trust() -> str:
+    """How good the model that produced this board has actually been.
+
+    The Accuracy section scores every source after the fact and is four clicks
+    from here, so the board carried no indication of whether to believe it. One
+    figure, on the half of the question with the evidence: a start probability
+    is checked against a binary outcome for every player in the pool, where the
+    points model is only scoreable on the couple of hundred who started.
+    """
+    figs = _trust_figures()
+    if not figs.get("ok"):
+        return _tile_unknown("Model trust",
+                             figs.get("reason", "not yet measurable"))
+    pct = figs["skill"] * 100
+    colour = cards.ACCENT if pct >= 0 else cards.BAD
+    # Deliberately one claim. A points MAE beside this would invite comparison
+    # with the Accuracy section's per-source table, which is on a different
+    # population by design -- see `_trust_figures`.
+    note = ("Will-he-start model scores Brier %.3f against %.3f for one number "
+            "for everybody" % (figs["brier"], figs["baseline"]))
+    if figs.get("n"):
+        note += " \u00b7 %s player-gameweeks" % format(figs["n"], ",")
+    note += " over %d gameweeks" % figs["gameweeks"]
+    return (cards.eyebrow("Model trust")
+            + cards.headline('<span style="color:%s;">%.0f%%</span>'
+                             '<span style="color:%s;font-size:0.68em;font-weight:600;">'
+                             ' of the way to perfect</span>' % (colour, pct, cards.MUTED))
+            + cards.note(note))
+
+
+def _render_insight_tiles(board) -> None:
+    """Three tiles above the board, as one grid row so they line up by
+    construction rather than by anyone measuring a pixel height."""
+    bodies = [_tile_top(board), _tile_disagreement(board), _tile_trust()]
+    st.markdown(cards.band(*cards.card_row(bodies), columns="1fr 1fr 1fr"),
+                unsafe_allow_html=True)
+
+
+# =============================================================================
+# The sparkline column, and the two charts under the board
+# =============================================================================
+
+def _sparkline_svg(values, lo, hi, width=64, height=20) -> str:
+    """One player's horizon as an inline SVG, sized for a table cell.
+
+    `render_styled_table` writes its cells as raw HTML, so this needs no change
+    to the renderer. Six numbers in a row do not read as a shape; a 64px line
+    does, and it is the only thing on this board that says *when* a player's
+    points arrive rather than how many there are.
+
+    **`lo`/`hi` are the board-wide range, passed in rather than derived per
+    row.** A sparkline normalised to its own player makes every trajectory fill
+    its cell, so a flat 0.3 and a flat 6.0 would draw identically -- the same
+    trap as a colour range re-derived from filtered rows, which the Horizon
+    grid's single fixed range already exists to avoid.
+    """
+    pts = [(i, v) for i, v in enumerate(values) if v == v]
+    if len(pts) < 2:
+        return ""
+    span = (hi - lo) or 1.0
+    steps = max(len(values) - 1, 1)
+    pad = 2.5
+
+    def _x(i):
+        return pad + (width - 2 * pad) * (float(i) / steps)
+
+    def _y(v):
+        frac = min(1.0, max(0.0, (v - lo) / span))
+        return (height - pad) - (height - 2 * pad) * frac
+
+    poly = " ".join("%.1f,%.1f" % (_x(i), _y(v)) for i, v in pts)
+    mean = sum(v for _, v in pts) / len(pts)
+    colour = value_rgb(mean, lo, hi) or cards.MUTED
+    return ('<svg viewBox="0 0 %d %d" width="%d" height="%d" '
+            'style="display:block;margin:0 auto;" aria-hidden="true">'
+            '<polyline points="%s" fill="none" stroke="%s" stroke-width="1.6" '
+            'stroke-linejoin="round" stroke-linecap="round"/>'
+            '<circle cx="%.1f" cy="%.1f" r="2.2" fill="%s"/></svg>'
+            % (width, height, width, height, poly, colour,
+               _x(pts[-1][0]), _y(pts[-1][1]), colour))
+
+
+def _sparkline_column(blended, current_gw):
+    """`{element_id: svg}` for the forecast window, or `{}`.
+
+    Built from `_horizon_frames`, the same assembly the Horizon section uses,
+    for one reason that matters: that function replaces the current gameweek's
+    column with the engine's own `Proj`. So the first point of every line here
+    agrees with the `Proj` column beside it by construction. Re-deriving the
+    series from FFP alone would put a forecast and the blend on one row and let
+    them disagree, which is this page's recurring failure in miniature.
+
+    Degrades to `{}` on any failure -- a missing sparkline costs a column, and
+    nothing else on the board depends on it.
+    """
+    try:
+        horizon = get_ffp_horizon()
+    except Exception:
+        _logger.warning("Sparklines: the FFP horizon could not be read", exc_info=True)
+        return {}
+    if horizon is None or not getattr(horizon, "ok", False):
+        return {}
+    gws = horizon.gameweeks()
+    if not gws:
+        return {}
+    try:
+        points = _horizon_frames(horizon, blended, current_gw)[0]
+    except Exception:
+        _logger.warning("Sparklines: the horizon grid could not be built", exc_info=True)
+        return {}
+    if points is None or points.empty:
+        return {}
+    cols = [g for g in gws if g in points.columns]
+    if len(cols) < 2:
+        return {}
+
+    series = points[cols].apply(pd.to_numeric, errors="coerce")
+    finite = series.to_numpy(dtype="float64").ravel()
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return {}
+    lo, hi = float(finite.min()), float(finite.max())
+
+    out = {}
+    for pid, row in series.iterrows():
+        svg = _sparkline_svg(row.tolist(), lo, hi)
+        if svg:
+            out[int(pid)] = svg
+    return out
+
+
+def _agreement_chart(board, shown) -> None:
+    """Rotowire against FFP, with the agreement diagonal drawn.
+
+    `Spread` gives the *size* of a disagreement and not its direction, so the
+    board can tell you two sources are 1.5 points apart and never whose number
+    you are taking. Which side of the diagonal a player falls is the whole
+    content of this chart.
+
+    Drawn from the **whole board** with the current filter ringed, never from
+    the filtered rows: a scatter of one club against itself has no diagonal
+    worth reading, and grading a selection against itself is the trap this
+    page's fixed colour ranges and pre-filter ranks already avoid twice over.
+    """
+    if board is None or board.empty:
+        return
+    x = pd.to_numeric(board.get("Rotowire"), errors="coerce")
+    y = pd.to_numeric(board.get("FFP"), errors="coerce")
+    both = x.notna() & y.notna()
+    if int(both.sum()) < 10:
+        st.caption("Too few players are priced by both sources to compare them "
+                   "this gameweek.")
+        return
+
+    bx, by = x[both], y[both]
+    names = board.loc[both, "Player"].astype(str)
+    far = (bx - by).abs() >= 1.5
+    top = float(max(bx.max(), by.max())) * 1.03
+    hover = "%{text}<br>Rotowire %{x:.2f} \u00b7 FFP %{y:.2f}<extra></extra>"
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=[0, top], y=[0, top], mode="lines", name="They agree",
+        line=dict(color=cards.ACCENT_ALT, width=1.4, dash="dash"),
+        hoverinfo="skip"))
+    fig.add_trace(go.Scatter(
+        x=bx[~far], y=by[~far], mode="markers", name="Within 1.5",
+        marker=dict(size=6, color="#5d5a7a"), text=names[~far],
+        hovertemplate=hover))
+    if int(far.sum()):
+        fig.add_trace(go.Scatter(
+            x=bx[far], y=by[far], mode="markers", name="Apart by 1.5+",
+            marker=dict(size=9, color=cards.WARN), text=names[far],
+            hovertemplate=hover))
+
+    if shown is not None and 0 < len(shown) < len(board):
+        sx = pd.to_numeric(shown.get("Rotowire"), errors="coerce")
+        sy = pd.to_numeric(shown.get("FFP"), errors="coerce")
+        m = sx.notna() & sy.notna()
+        if 0 < int(m.sum()) <= 60:
+            fig.add_trace(go.Scatter(
+                x=sx[m], y=sy[m], mode="markers", name="Your filter",
+                marker=dict(size=13, color="rgba(0,0,0,0)",
+                            line=dict(width=2, color=cards.ACCENT)),
+                text=shown.loc[m, "Player"].astype(str),
+                hovertemplate="%{text}<extra></extra>"))
+
+    fig.update_layout(**charts.dark_layout(
+        height=310, margin=dict(l=10, r=10, t=8, b=10),
+        legend=dict(orientation="h", y=1.14, x=0,
+                    font=dict(color="#ffffff", size=11)),
+        xaxis=dict(title="Rotowire - points if he starts", rangemode="tozero"),
+        yaxis=dict(title="FFP - points if he starts", rangemode="tozero"),
+    ))
+    st.plotly_chart(fig, use_container_width=True, theme=None)
+
+
+def _position_strip_chart(board, shown) -> None:
+    """The shape of each positional field, which a rank cannot show.
+
+    `Proj` of 4.2 is a leading goalkeeper and a replaceable forward. `Pos RK`
+    fixes the *ranking* but says nothing about how far clear the top of a
+    position is or how flat its middle runs -- and the four pools are not
+    comparable populations: live they hold roughly 73 / 217 / 298 / 79 players.
+    """
+    if board is None or board.empty or "Pos" not in board.columns:
+        return
+
+    fig = go.Figure()
+    drawn = 0
+    # Reversed, because plotly stacks the first horizontal trace lowest and
+    # goalkeeper-first is the order every other table on this page uses.
+    for pos in ("F", "M", "D", "G"):
+        vals = pd.to_numeric(board.loc[board["Pos"] == pos, "Proj"],
+                             errors="coerce").dropna()
+        if vals.empty:
+            continue
+        drawn += 1
+        fig.add_trace(go.Box(
+            x=vals, name=pos, orientation="h", boxpoints="all", jitter=0.55,
+            pointpos=0, marker=dict(size=4, color="#6f6b90", opacity=0.5),
+            line=dict(color=cards.ACCENT_ALT, width=1.3),
+            fillcolor="rgba(78,204,163,0.08)", showlegend=False,
+            hovertemplate=pos + " \u00b7 %{x:.2f}<extra></extra>"))
+    if not drawn:
+        return
+
+    if shown is not None and 0 < len(shown) < len(board) and len(shown) <= 25:
+        sp = pd.to_numeric(shown.get("Proj"), errors="coerce")
+        m = sp.notna()
+        if int(m.sum()):
+            fig.add_trace(go.Scatter(
+                x=sp[m], y=shown.loc[m, "Pos"].astype(str), mode="markers",
+                name="Your filter", showlegend=False,
+                marker=dict(size=12, symbol="diamond", color=cards.ACCENT,
+                            line=dict(width=1, color="#06220f")),
+                text=shown.loc[m, "Player"].astype(str),
+                hovertemplate="%{text}<br>%{x:.2f}<extra></extra>"))
+
+    fig.update_layout(**charts.dark_layout(
+        height=310, margin=dict(l=10, r=10, t=8, b=10), showlegend=False,
+        xaxis=dict(title="Proj - expected points this gameweek",
+                   rangemode="tozero"),
+        yaxis=dict(title=""),
+    ))
+    st.plotly_chart(fig, use_container_width=True, theme=None)
+
+
+def _render_board_charts(board, shown) -> None:
+    """The two charts, under the board they describe."""
+    st.markdown("##### What the table cannot say")
+    left, right = st.columns(2)
+    with left:
+        _agreement_chart(board, shown)
+    with right:
+        _position_strip_chart(board, shown)
+    st.caption(
+        "Both are drawn from the **whole board** with your current filter "
+        "ringed, not from the rows left after filtering - a scatter of one club "
+        "against itself has no diagonal worth reading, and a field re-derived "
+        "from a selection grades that selection against itself."
+    )
+
+
+def _blend_filter_bar(board):
+    """The board's filters, as a control row rather than a collapsed expander.
+
+    Narrowing a 670-row board is the primary interaction on this tab and it
+    used to cost a click to reach. **Team** is new here, and matches the filter
+    Horizon has had all along.
+
+    **Returns the values; it must not apply them.** Both ranks are taken over
+    the whole board before this runs, which is what stops a search reporting
+    its single hit as "#1" -- the trap `_positional_rank` and `_overall_rank`
+    each document at length.
+    """
+    c1, c2, c3, c4 = st.columns([2.2, 1.2, 1.4, 2.2])
+    search = c1.text_input("Search player", key="blend_search",
+                           placeholder="e.g. Mbeumo")
+    positions = c2.multiselect("Position", ["G", "D", "M", "F"], default=[],
+                               key="blend_pos")
+    teams_available = sorted(
+        t for t in board.get("Team", pd.Series(dtype=object)).dropna().unique() if t)
+    teams = c3.multiselect("Team", teams_available, default=[], key="blend_team",
+                           help="Leave empty for every club.")
+    only_disagree = c4.checkbox(
+        "Only where sources disagree by 1.5+", key="blend_disagree",
+        help="Where Rotowire and FFP are far apart the blend is doing real "
+             "work, and the pick deserves a second look.")
+    return search, positions, teams, only_disagree
 
 
 def render_blended_projections():
@@ -1309,6 +1865,14 @@ def render_blended_projections():
     existed the Projections Hub showed Rotowire and FFP in separate tabs with no
     join between them, so the one figure the app actually scores on appeared
     nowhere, and a user could not see where two sources disagreed.
+
+    **The order here is the point.** The source audit used to render first -- a
+    five-row table and a hundred words about weight renormalisation, above the
+    board. It is a *check*, not a finding: it exists because every fetch in this
+    app degrades to an empty frame and a broken source renders a page identical
+    to a working one. So it is now one line, with the detail a click away, and
+    the three tiles that answer "where should I look" take the top of the page
+    instead.
     """
     current_gw = config.CURRENT_GAMEWEEK
     rotowire_url = config.ROTOWIRE_URL
@@ -1320,9 +1884,9 @@ def render_blended_projections():
 
     if (rotowire_df is None or rotowire_df.empty) and not feed.ok:
         st.warning(
-            f"No projections available for GW{current_gw}. Rotowire has not "
-            "published a rankings table and Fantasy Football Pundit could not "
-            "be read."
+            "No projections available for GW%d. Rotowire has not published a "
+            "rankings table and Fantasy Football Pundit could not be read."
+            % current_gw
         )
         return
 
@@ -1331,20 +1895,8 @@ def render_blended_projections():
         st.error("Could not load the FPL player pool, so projections cannot be assembled.")
         return
 
-    _blended_source_status(rotowire_df, feed, blended, current_gw)
-
-    st.markdown(f"#### GW{current_gw} Blended Projections")
-    st.caption(
-        "**Proj** is expected points — what he is worth allowing for the chance "
-        "he does not start. **If Starts** is the same projection assuming he "
-        "does. **Spread** is the gap between the sources: a large one means they "
-        "disagree about this player, not that he is a bad pick."
-    )
-
     display = pd.DataFrame({
         "Player": blended.get("Display_Name", blended["Player"]),
-        # Searched, never rendered -- see `_name_filter`.
-        "_search_name": blended["Player"],
         "Team": blended["Team"],
         "Pos": blended["Position"],
         "Proj": pd.to_numeric(blended["Proj"], errors="coerce"),
@@ -1356,10 +1908,13 @@ def render_blended_projections():
         # never moves the blend for a player either weighted source priced --
         # live, 29 of 667 -- and a column sitting beside Rotowire and FFP read
         # as a third contributor to it. It is still a declared source: `Src`
-        # shows `xP` where it filled a player nobody else priced, the Data
-        # Sources panel counts them, and the Accuracy tab scores it.
+        # shows `xP` where it filled a player nobody else priced, the source
+        # detail counts them, and the Accuracy section scores it.
         "Spread": pd.to_numeric(blended.get("Proj_Spread"), errors="coerce"),
         "Src": blended["Proj_Src"],
+        # Searched and joined on, never rendered -- both dropped before render.
+        "_search_name": blended["Player"],
+        "_pid": pd.to_numeric(blended.get("Player_ID"), errors="coerce"),
     })
     display = display[display["Proj"].notna()]
 
@@ -1367,52 +1922,77 @@ def render_blended_projections():
     # or a position narrows the rows without re-ranking them against each other.
     display.insert(3, "Pos RK", _positional_rank(display, "Proj"))
     display.insert(0, "#", _overall_rank(display, "Proj"))
+    board = display.sort_values("Proj", ascending=False).reset_index(drop=True)
 
-    with st.expander("Filters", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            search = st.text_input("Search player", key="blend_search")
-        with col2:
-            positions = st.multiselect(
-                "Position", ["G", "D", "M", "F"], default=[], key="blend_pos"
-            )
-        only_disagree = st.checkbox(
-            "Only where sources disagree by 1.5+ points", key="blend_disagree",
-            help="Where Rotowire and FFP are far apart the blend is doing real "
-                 "work, and the pick deserves a second look.",
-        )
+    _render_insight_tiles(board)
 
-    if search:
-        display = display[_name_filter(display, search)]
-    if positions:
-        display = display[display["Pos"].isin(positions)]
-    if only_disagree:
-        display = display[display["Spread"].fillna(0) >= 1.5]
-    display = display.drop(columns=["_search_name"], errors="ignore")
+    rows = _source_rows(rotowire_df, feed, blended, current_gw)
+    health = _source_health_line(rows)
+    if health:
+        st.markdown(health, unsafe_allow_html=True)
+    with st.expander("Source detail"):
+        _render_source_detail(rows)
 
-    display = display.sort_values("Proj", ascending=False).reset_index(drop=True)
-
-    render_styled_table(
-        display.head(300),
-        col_formats={
-            "#": "{:.0f}", "Pos RK": "{:.0f}",
-            "Proj": "{:.2f}", "If Starts": "{:.2f}", "Start %": "{:.0f}%",
-            "Rotowire": "{:.2f}", "FFP": "{:.2f}",
-            "Spread": "{:.2f}",
-        },
-        positive_color_cols=["Proj", "If Starts"],
-        negative_color_cols=["Spread"],
-        max_height=600,
-    )
+    st.markdown("#### GW%d Blended Projections" % current_gw)
     st.caption(
-        f"Showing {min(len(display), 300)} of {len(display)} projected players. "
-        "**#** is his rank on **Proj** across the whole board and **Pos RK** "
-        "his rank among every player at his position, both league-wide — "
-        "neither changes when you filter. "
-        "The per-source columns are on the *if he starts* basis, so they are "
-        "directly comparable with each other and with **If Starts**."
+        "**Proj** is expected points - what he is worth allowing for the chance "
+        "he does not start. **If Starts** is the same projection assuming he "
+        "does. **Spread** is the gap between the sources: a large one means they "
+        "disagree about this player, not that he is a bad pick."
     )
 
+    search, positions, teams, only_disagree = _blend_filter_bar(board)
+
+    shown = board
+    if search:
+        shown = shown[_name_filter(shown, search)]
+    if positions:
+        shown = shown[shown["Pos"].isin(positions)]
+    if teams:
+        shown = shown[shown["Team"].isin(teams)]
+    if only_disagree:
+        shown = shown[shown["Spread"].fillna(0) >= 1.5]
+
+    table = shown.copy()
+    sparks = _sparkline_column(blended, current_gw)
+    if sparks:
+        pid = pd.to_numeric(table["_pid"], errors="coerce")
+        table["Next 6"] = [sparks.get(int(v), "") if v == v else "" for v in pid]
+    table = table.drop(columns=["_search_name", "_pid"], errors="ignore")
+
+    if table.empty:
+        st.info("No players match those filters.")
+    else:
+        render_styled_table(
+            table.head(300),
+            col_formats={
+                "#": "{:.0f}", "Pos RK": "{:.0f}",
+                "Proj": "{:.2f}", "If Starts": "{:.2f}", "Start %": "{:.0f}%",
+                "Rotowire": "{:.2f}", "FFP": "{:.2f}",
+                "Spread": "{:.2f}",
+            },
+            positive_color_cols=["Proj", "If Starts"],
+            negative_color_cols=["Spread"],
+            text_align={"Next 6": "center"},
+            max_height=600,
+        )
+        caption = (
+            "Showing %d of %d projected players. "
+            "**#** is his rank on **Proj** across the whole board and **Pos RK** "
+            "his rank among every player at his position, both league-wide - "
+            "neither changes when you filter. "
+            "The per-source columns are on the *if he starts* basis, so they are "
+            "directly comparable with each other and with **If Starts**."
+            % (min(len(table), 300), len(table))
+        )
+        if sparks:
+            caption += (" **Next 6** is his forecast over the next six "
+                        "gameweeks, on one scale for the whole board, so two "
+                        "lines are comparable. Its first point is the **Proj** "
+                        "on the same row.")
+        st.caption(caption)
+
+    _render_board_charts(board, shown)
 
 # =============================================================================
 
@@ -1710,6 +2290,13 @@ def _render_glossary():
                    projection_accuracy.METRIC_GLOSSARY[ref["metric"]][0],
                    ref["value"], f"{ref['n']:,}")
             )
+        st.caption(
+            "**Reading the colours.** Every table in this app shades its "
+            "numbers on one red-to-green scale -- green is a good value, "
+            "yellow middling, red poor -- and the scale is fixed to the whole "
+            "population being shown, never re-derived from the rows left after "
+            "a filter. So a number keeps its colour when you narrow the board."
+        )
         st.caption(
             "So on **who starts** the app is well clear of guessing. On "
             "**points if he starts** no source beats that constant on average "
@@ -2169,12 +2756,10 @@ def show_player_projections_page():
     restyle the Horizon view toggle on this same page.
     """
     st.title("Projections Hub")
-    st.caption(
-        "**GW Projections** is the projection the rest of the app uses, with "
-        "the sources that fed it alongside. **Horizon** is the same question "
-        "over the next six gameweeks, **Odds** is the betting markets, and "
-        "**Accuracy** is how wrong each source has actually been."
-    )
+    # One sentence. The four section names say what they are, and the radio's
+    # own `help` carries the note about only the open section being computed --
+    # this used to restate both at four clauses, above the board.
+    st.caption("What every player is worth this week, and how much to believe it.")
 
     section = st.radio(
         "Section", HUB_SECTIONS, horizontal=True, key="hub_section",
@@ -2188,34 +2773,10 @@ def show_player_projections_page():
     # a blank page.
     _render_hub_section(section if section in HUB_SECTIONS else HUB_SECTIONS[0])
 
-    # Footer with data source summary
-    st.markdown("---")
-    with st.expander("About Data Sources"):
-        st.markdown("""
-        ### Data Sources
-
-        | Source | Type | Update Frequency |
-        |--------|------|------------------|
-        | **Rotowire** | Expert point projections | Weekly (before each GW) |
-        | **FFP Data** | Start %, ownership, predictions | Throughout GW |
-        | **Goal/Assist Odds** | Betting probabilities | Daily |
-        | **Clean Sheet Odds** | Team CS probabilities | Daily |
-        | **The Odds API** | Match betting odds | Live updates |
-
-        ### Color Scale
-
-        Tables use a **red-to-green text color** gradient where:
-        - **Green text** = Good values (high points, high odds, low rank)
-        - **Yellow text** = Average values
-        - **Red text** = Poor values
-
-        ### Match Odds Visual Guide
-
-        Each match card displays:
-        - **Home team** (left) and **Away team** (right) with clear labels
-        - **Proportional probability bar** where segment width = likelihood:
-          - Green = Home win probability
-          - Grey = Draw probability
-          - Purple = Away win probability
-        - **Kickoff times** shown in Eastern Time (EST/EDT)
-        """)
+    # The footer's "About Data Sources" panel is deliberately gone. It was a
+    # second, hand-maintained answer to a question the live Source detail panel
+    # already answers, and it had drifted: five sources, no weights, and
+    # neither projected-XI feed. Its three pieces of real content moved to
+    # where each is actually needed -- update frequencies into that panel, the
+    # colour scale into the Accuracy glossary, the match-card legend under the
+    # match cards.

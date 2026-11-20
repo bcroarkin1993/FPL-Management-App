@@ -21,6 +21,7 @@ import requests
 import streamlit as st
 
 import config
+from scripts.common import charts
 from scripts.common.bench_analysis import compute_draft_league_bench_data
 from scripts.common.display_names import display_of
 from scripts.common.error_helpers import get_logger
@@ -60,12 +61,10 @@ _GOLD = "#FFD700"
 _RED = "#FF4B4B"
 _GREEN = "#00ff87"
 
-_DARK_CHART_LAYOUT = dict(
-    paper_bgcolor="#1a1a2e",
-    plot_bgcolor="#1a1a2e",
-    font=dict(color="#ffffff", size=13),
-    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=12)),
-)
+# One of nine page-local copies of this dict, in five variants. This one was
+# byte-identical to Season Wrapped's, so the alias is a provable no-op --
+# scripts/common/charts.py carries the rationale and the two that diverged.
+_DARK_CHART_LAYOUT = charts.DARK_LAYOUT_BARE
 
 _TEAM_COLORS = [
     "#7B2FBE", "#00b4d8", "#f72585", "#4cc9f0", "#43aa8b",

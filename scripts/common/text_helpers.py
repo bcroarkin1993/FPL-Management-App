@@ -539,18 +539,39 @@ def format_last_updated(when, include_age: bool = True) -> str:
     if not include_age:
         return stamp
 
+    age = relative_age(when)
+    return "%s (%s)" % (stamp, age or "Unknown")
+
+
+def relative_age(when) -> str:
+    """Just the age -- "3h ago" -- without the timestamp in front of it.
+
+    Factored out of `format_last_updated` rather than written beside it: the
+    Projections Hub's source strip has room for an age and not for a full
+    stamp, and two implementations of "how old is this" would eventually
+    disagree about the boundary between hours and days. The full formatter
+    still renders exactly what it always did.
+
+    Returns "" for a missing or unreadable time, so a caller can fall back
+    rather than print "Unknown" inside a one-line strip.
+    """
+    if when is None:
+        return ""
+    try:
+        local = when.astimezone(TZ_ET)
+    except (ValueError, TypeError):
+        return ""
+
     delta = datetime.now(TZ_ET) - local
     minutes = delta.total_seconds() / 60.0
     if minutes < 0:
-        age = "just now"          # clock skew between us and the source
-    elif minutes < 60:
-        age = "%dm ago" % int(minutes)
-    elif minutes < 60 * 24:
-        age = "%dh ago" % int(minutes // 60)
-    else:
-        days = int(minutes // (60 * 24))
-        age = "1 day ago" if days == 1 else "%d days ago" % days
-    return "%s (%s)" % (stamp, age)
+        return "just now"          # clock skew between us and the source
+    if minutes < 60:
+        return "%dm ago" % int(minutes)
+    if minutes < 60 * 24:
+        return "%dh ago" % int(minutes // 60)
+    days = int(minutes // (60 * 24))
+    return "1 day ago" if days == 1 else "%d days ago" % days
 
 
 def canonical_normalize(name: str) -> str:

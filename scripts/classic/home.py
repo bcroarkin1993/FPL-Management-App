@@ -19,6 +19,7 @@ from scripts.classic.my_week import (
     week_card_html,
 )
 from scripts.common import cards
+from scripts.common import charts
 from scripts.common.error_helpers import get_logger
 from scripts.common.luck_analysis import (
     extract_classic_h2h_gw_scores,
@@ -194,15 +195,10 @@ def get_classic_h2h_luck_adjusted(league_id: int, standings_data: dict) -> pd.Da
 # CHART FUNCTIONS
 # ---------------------------
 
-_DARK_CHART_LAYOUT = dict(
-    paper_bgcolor="#1a1a2e",
-    plot_bgcolor="#1a1a2e",
-    font=dict(color="#ffffff", size=14),
-    title=dict(font=dict(size=22, color="#ffffff"), x=0.5, xanchor="center"),
-    xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-    yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
-)
+# One of nine page-local copies of this dict, in five variants. This one was
+# byte-identical to Draft Home's, so the alias is a provable no-op --
+# scripts/common/charts.py carries the rationale and the two that diverged.
+_DARK_CHART_LAYOUT = charts.DARK_LAYOUT_BIG_TITLE
 
 @st.cache_data(ttl=600)
 def fetch_team_histories(team_ids: List[int], team_names: Dict[int, str]) -> pd.DataFrame:

@@ -21,6 +21,7 @@ from scripts.common.utils import (
 )
 from scripts.common.styled_tables import render_styled_table
 from scripts.common import cards
+from scripts.common import charts
 from scripts.common.fpl_draft_api import (get_draft_transaction_window,
                                           get_league_waiver_order)
 from scripts.common.waiver_priority import my_waiver_pick
@@ -33,15 +34,10 @@ _logger = get_logger("fpl_app.draft.home")
 # DARK CHART THEME
 # ---------------------------
 
-_DARK_CHART_LAYOUT = dict(
-    paper_bgcolor="#1a1a2e",
-    plot_bgcolor="#1a1a2e",
-    font=dict(color="#ffffff", size=14),
-    title=dict(font=dict(size=22, color="#ffffff"), x=0.5, xanchor="center"),
-    xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-    yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
-)
+# One of nine page-local copies of this dict, in five variants. This one was
+# byte-identical to Classic Home's, so the alias is a provable no-op --
+# scripts/common/charts.py carries the rationale and the two that diverged.
+_DARK_CHART_LAYOUT = charts.DARK_LAYOUT_BIG_TITLE
 
 def checkValidLineup(df):
     """

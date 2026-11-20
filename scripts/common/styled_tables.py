@@ -45,9 +45,18 @@ def _is_finite(val) -> bool:
         return False
 
 
-def _color_scale(val, col_min, col_max, direction="positive"):
-    """
-    Return an inline CSS color string for a numeric value.
+def value_rgb(val, col_min, col_max, direction="positive") -> Optional[str]:
+    """The table ramp's colour for one value, as ``rgb(r,g,b)``.
+
+    Public because a *cell* is no longer the only thing coloured by this scale:
+    the Projections Hub draws an inline sparkline per row and has to paint the
+    line the same red-to-green the numbers beside it use. Re-deriving the ramp
+    there would be a second implementation of the app's only colour language,
+    which is the twin-drift failure this codebase keeps paying for -- so the
+    ramp lives here, once, and `_color_scale` is a thin wrapper over it.
+
+    Returns None when the value cannot be placed on the scale, which a caller
+    must render as *uncoloured* rather than as either extreme.
 
     direction='positive': low=red, high=green
     direction='negative': low=green, high=red
@@ -58,10 +67,11 @@ def _color_scale(val, col_min, col_max, direction="positive"):
     # Either way int(NaN) raises and, because this runs inside the render loop,
     # a single bad cell used to take down the entire page.
     if not all(_is_finite(v) for v in (val, col_min, col_max)) or col_max == col_min:
-        return ""
+        return None
     ratio = (val - col_min) / (col_max - col_min)
     if direction == "negative":
         ratio = 1 - ratio
+    ratio = min(1.0, max(0.0, ratio))
     # red (0) -> yellow (0.5) -> green (1)
     if ratio <= 0.5:
         t = ratio / 0.5
@@ -69,7 +79,20 @@ def _color_scale(val, col_min, col_max, direction="positive"):
     else:
         t = (ratio - 0.5) / 0.5
         r, g, b = int(160 - 120 * t), int(200 + 20 * t), int(60 + 40 * t)
-    return f"color: rgb({r},{g},{b}); font-weight: 600;"
+    return f"rgb({r},{g},{b})"
+
+
+def _color_scale(val, col_min, col_max, direction="positive"):
+    """
+    Return an inline CSS color string for a numeric value.
+
+    direction='positive': low=red, high=green
+    direction='negative': low=green, high=red
+    """
+    rgb = value_rgb(val, col_min, col_max, direction)
+    if rgb is None:
+        return ""
+    return f"color: {rgb}; font-weight: 600;"
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import streamlit as st
 from typing import Optional, Dict, List
 
 import config
+from scripts.common import charts
 from scripts.common.bench_analysis import compute_classic_league_bench_data, render_league_bench_analysis
 from scripts.common.error_helpers import show_api_error
 from scripts.common.utils import (
@@ -41,17 +42,10 @@ from scripts.common.player_pool import blended_pool
 
 _logger = get_logger("fpl_app.classic_league_analysis")
 
-_DARK_CHART_LAYOUT = dict(
-    paper_bgcolor="#1a1a2e",
-    plot_bgcolor="#1a1a2e",
-    font=dict(color="#ffffff", size=14),
-    title_font=dict(size=20, color="#ffffff"),
-    title_x=0.5,
-    title_xanchor="center",
-    xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-    yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
-)
+# One of nine page-local copies of this dict, in five variants. This one was
+# byte-identical to two others, so the alias is a provable no-op --
+# scripts/common/charts.py carries the rationale and the two that diverged.
+_DARK_CHART_LAYOUT = charts.DARK_LAYOUT
 
 
 def _stat_card(label: str, value: str, detail: str = "", accent: str = "#00ff87") -> str:

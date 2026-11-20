@@ -1644,6 +1644,176 @@ fresh on every call, so cross-test reuse of a coarsely-keyed one is not a
 hazard — and a `cache_data.clear()` in a fixture is not a safeguard but a
 no-op that raises `AttributeError` on a plain function.
 
+### The board leads — the Hub's diagnostics were above its answer
+
+`_source_rows` / `_source_health_line` / `_render_source_detail`, the three
+tiles, `_sparkline_column`, `_agreement_chart` / `_position_strip_chart`
+(`player_projections.py`), `scripts/common/charts.py`, `styled_tables.value_rgb`,
+`text_helpers.relative_age`.
+
+**The one number the whole app scores on was below its own footnotes.** The
+Blended view opened with a five-row `Data Sources` table and about a hundred
+words on weight renormalisation, and only then the board — roughly 320px of
+audit above the answer. The audit earns its place: every fetch in this app
+degrades to an empty frame, so a broken source renders a page identical to a
+working one. But it is a *check*, not a finding, and it was the largest block on
+the page.
+
+Five further defects came out of the same review. The page footer carried a
+**second, hand-maintained** Data Sources table that had drifted to listing five
+sources with no weights and neither projected-XI feed — two surfaces answering
+one question, one of them unable to be wrong out loud. Filters sat behind a
+collapsed expander on all four tables, on a 670-row board where narrowing is
+the primary interaction. Three source banners painted `#f0f9ff` / `#fef3c7` /
+`#ede9fe` panels in an app whose every other surface is `#1a1a2e`. `Team`
+filtering existed on Horizon and not on Blended. And the Hub was **seven tables
+and no charts**.
+
+**`_source_rows` is the data; the strip and the table are two presentations of
+it.** That split is the whole safety design. A one-line strip computed from its
+own reading of the same feeds is a second implementation able to contradict the
+table a single click below it, which is the twin-drift failure this codebase
+keeps paying for — and this is the one place a user would compare them directly.
+`test_the_strip_and_the_table_agree_about_what_is_down` renders both from one
+row set and asserts that every source the table marks Unavailable is named on
+the strip.
+
+The strip shows deliberately less than the table: a source carrying real weight
+is always listed, anything degraded or down is always listed, and a **healthy
+zero-weight fallback is not** — it has nothing to say at a glance and would push
+the two numbers that matter off the end of the line. It appears the moment it is
+unhealthy. A degraded note is also truncated at its first " - " on the strip and
+kept in full in the table: live, two XI sources are short of 20 clubs, and the
+full text twice over is longer than the line.
+
+#### An all-clear must be derived, never defaulted
+
+The three tiles are the `week_check.STATUS_UNKNOWN` discipline one surface over.
+A tile makes a claim at a glance, and "nothing to flag" and "we could not check"
+render identically unless one of them says so — so each has an explicit unknown
+state carrying the reason, and every tile test has a partner asserting it.
+
+| Tile | Unknown when |
+|---|---|
+| Top of the board | no row, or the leading row carries no projection |
+| Sources disagree most | no `Spread` column, or only one source priced anybody |
+| Model trust | `confident_gameweeks` below `MIN_GAMEWEEKS_FOR_CONFIDENCE` |
+
+**The trust tile's gate is the Accuracy section's own**, not a second threshold.
+That section refuses to fit on fewer than five pre-deadline gameweeks; a tile
+printing a confident percentage off a history that section disclaims would have
+the page contradict itself two clicks apart.
+
+**And the tile shipped with a basis error that one headless render caught.**
+`no_skill_reference` is computed over **every** scored row, and the tile scored
+the blend with `common_subset=True` — the players *all four* sources priced,
+which are mostly the doubtful ones FPL bothered to rate. Measured live at GW11:
+
+| | Brier | rows | skill |
+|---|---|---|---|
+| `common_subset=True` | 0.1356 | 1,009 | **38.7%** |
+| `common_subset=False` | 0.0845 | 5,308 | **61.8%** |
+| baseline (all rows) | 0.2213 | 4,656 | — |
+
+So the model was scored on the hard subset and its baseline on everybody, and
+both numbers are entirely plausible. The common subset is right for the
+Accuracy section's per-source table, whose job *is* cross-source comparison; it
+is wrong for an absolute score against a full-population baseline, for the same
+reason that scope deliberately does not apply it. The tile therefore
+legitimately differs from that table, prints its own `n`, and carries **one**
+claim — a points MAE beside it would invite exactly the comparison this
+paragraph exists to prevent.
+`test_the_model_is_scored_on_the_same_population_as_its_baseline` pins the flag.
+
+#### The two charts are drawn from the whole board
+
+`Spread` gives the *size* of a disagreement and never its direction, so the
+table could say two sources were 1.5 points apart and not whose number you were
+taking. And `Proj` of 4.2 is a leading goalkeeper and a replaceable forward:
+`Pos RK` fixes the ranking but says nothing about how far clear the top of a
+position is, and the four pools are not comparable populations — live they hold
+75 / 219 / 299 / 79 players.
+
+**Both charts plot the whole board with the current filter ringed, never the
+filtered rows.** A scatter of one club against itself has no diagonal worth
+reading, and grading a selection against itself is the trap this page's fixed
+colour ranges and pre-filter ranks each already avoid. An **unfiltered** board
+is not marked at all, since every row ringed is the same as none and reads as
+noise. Live at GW11 the scatter pairs 217 players — 204 agreeing, 13 apart by
+1.5+, which is the same 13 the disagreement tile counts.
+
+`_sparkline_column` reads **`_horizon_frames`**, the same assembly the Horizon
+section uses, for one reason that matters: that function replaces the current
+gameweek's column with the engine's own `Proj`, so the first point of every line
+agrees with the `Proj` beside it by construction. Deriving the series from FFP
+alone would put a forecast and the blend on one row and let them disagree. The
+scale is **board-wide and passed in**, because a sparkline normalised to its own
+row makes every trajectory fill its cell — a flat 0.3 and a flat 6.0 would draw
+identically. Fewer than two finite points renders **nothing**, not a flat line
+at zero: a single forecast is not a trajectory and a drawn line would assert a
+trend nobody published. Live, 297 of 300 rows carry one.
+
+`render_styled_table` writes raw HTML cells, so the inline `<svg>` needs no
+renderer change — but the line's colour comes from
+**`styled_tables.value_rgb`**, extracted so the ramp has one home. A second
+implementation of the app's only colour language, sitting in the same row as
+the numbers it should match, is the obvious version of this mistake.
+
+#### Nine chart themes, in five variants
+
+`scripts/common/charts.py`. `grep` found **nine** page-local copies of
+`_DARK_CHART_LAYOUT` and they were not one dict with drift — they were **five
+distinct variants**: three exactly-duplicated groups (2, 3 and 2 files) plus two
+one-offs. So the module exports three named constants rather than flattening
+them, each **keeping the notation its originals used** (nested `title=dict(...)`
+against flat `title_font`/`title_x`); plotly treats the two as equivalent, but a
+migration that is byte-identical needs no argument about whether it is. Verified
+by evaluating each original's AST against `main` and comparing: all seven equal.
+
+The two that diverged — `draft/league_analysis.py` (`#333` gridlines,
+`hovermode="x unified"`) and `draft/trade_analyzer.py` (12px ticks) — are left
+where they are. Reconciling them is a visual change to real pages and belongs
+in its own task with a before/after.
+
+`dark_layout(**overrides)` merges **one level deep**, which is what the module
+is for: `update_layout(**DARK_LAYOUT, xaxis=dict(...))` raises `TypeError: got
+multiple values for keyword argument` (the papercut the project notes already
+record), and the obvious workaround — a dict literal — throws the theme's
+gridcolour away *silently*. `tests/common/test_chart_theme.py` is the guard
+against a tenth copy, modelled on `test_matchup_wiring.py`, with the two
+diverged pages allowlisted by name and a second test asserting the allowlist has
+not rotted into permission for a copy nobody intends.
+
+#### What moved, and what was deleted
+
+The footer panel is **gone**, its three pieces of real content redistributed to
+where each is needed: update frequencies into the live source-detail panel, the
+colour-scale legend into `_render_glossary()` (the Accuracy section's existing
+"What do these numbers mean?"), and the match-card legend under the match cards.
+The page caption went from four clauses to one sentence — the four section names
+say what they are and the radio's own `help` already carried the laziness note.
+
+**Live effect: no projection changes.** This is a rendering change throughout —
+`Proj`, `Proj_Start`, `Start_Pct` and `Proj_Next3` are untouched, and the board
+renders the same 300 rows in the same order. Measured headless at GW11: 6.4s
+cold for the whole view (the `blended_pool` assembly, shared with Horizon, Chip
+Strategy and the Rival Tracker), two tables, two charts, no warnings.
+
+**The lazy contract is the thing most at risk here**, because the trust tile
+reads `archive/projections/` and that read was 0.61s of a 0.92s rerun back when
+Accuracy rendered eagerly. It is behind `@st.cache_data(ttl=600)` returning
+primitives only (the `my_week._assemble` rule), and
+`test_a_section_renders_only_its_own_tabs` still pins that rendering one section
+calls exactly its own renderers. The page tests stub `_trust_figures` and
+`_sparkline_column` so the offline suite pays for neither: 3,097 tests in 53.5s
+against 3,047 in 52.2s before.
+
+Risk accepted: two plotly figures and a per-row SVG on the app's most-read
+board. Every one of the new surfaces degrades independently — a failed horizon
+costs the sparkline column and nothing else, an unreadable archive makes the
+trust tile say so, and a source that cannot be paired drops the scatter for a
+caption rather than the page.
+
 ### Projection snapshots — the record that makes measurement possible
 
 `scripts/common/projection_archive.py` (store), `projection_snapshot.py`
@@ -4217,6 +4387,12 @@ Score = α × 1GW + (1-α) × ROS
 | `_reference_horizon()` | `scripts/common/analytics.py` | The percentile reference pool, carrying a `Proj_Next3` on the same basis as the frame being scored. |
 | `compute_league_ownership()` | `scripts/common/mini_league.py` | Ownership and captaincy-weighted effective ownership within a mini-league |
 | `score_horizon_lengths()` / `horizon_verdict()` | `scripts/common/projection_accuracy.py` | Whether the multi-gameweek term should look further ahead than three gameweeks, scored against actuals |
+| `_source_rows()` | `scripts/fpl/player_projections.py` | One record per projection source — the single derivation the Hub's status strip and its `Source detail` table both read |
+| `_trust_figures()` | `scripts/fpl/player_projections.py` | The start model's Brier against the no-skill baseline, cached and over the **full** population, because that is what its baseline is drawn from |
+| `_sparkline_column()` | `scripts/fpl/player_projections.py` | `{element_id: svg}` for the forecast window, from `_horizon_frames` so a line's first point is the `Proj` on its own row |
+| `value_rgb()` | `scripts/common/styled_tables.py` | The table ramp's colour for one value, so a sparkline is painted by the same scale as the numbers beside it |
+| `relative_age()` | `scripts/common/text_helpers.py` | Just the age ("3h ago"), factored out of `format_last_updated` for the Hub's one-line source strip |
+| `dark_layout()` / `DARK_LAYOUT` | `scripts/common/charts.py` | The house plotly theme, in one place, merging an axis override instead of colliding with it |
 | `blended_pool()` | `scripts/common/player_pool.py` | The blended projection over the whole FPL pool, cached on `(gameweek, rotowire_url)`. Shared by the Projections Hub and the Classic Rival Tracker |
 | `positional_percentile()` | `scripts/common/analytics.py` | Within-position percentile against full FPL pool |
 | `season_progress_weight()` | `scripts/common/analytics.py` | Concave GW→weight curve for season quality blend |
@@ -6219,6 +6395,8 @@ Note: The `dev` branch exists but is optional for integration testing when worki
 | Returning-elite watch (Draft) | Completed | A **Returning from injury** section on the Draft Waiver Wire: claimable players who are not playing now but were productive regulars, ranked by a points-per-start percentile against established starters. Built because a rival claimed William Saliba at waiver priority 1 while the app said nothing — and it said nothing because he was *absent* from the available pool, which is built from Rotowire's weekly table. Adds the app's first previous-season data (`history_past`) and recovers Rotowire's `PP/90`, which was being downloaded hourly and discarded despite correlating with real pedigree at 0.602 against the season total's 0.101. FIFA ratings rejected: wrong currency, no licensed source, unscoreable. Engine numbers byte-identical. See "Returning from injury". |
 | Transfer Risk Tracking | Phases 1-3 complete | Outbound (Google News RSS + bootstrap ground truth + per-region windows), inbound (per-club feeds, arrivals watchlist, minutes competition, fee attribution, `Transfer_Status`) and bookmaker odds are wired into the Draft Helper board and the Availability page. Remaining: Initial Squad `ExpPts` discount, `compute_player_scores()` ROS discount, roster-only Discord alerts. See "Transfer Risk Model" and "Transfer Odds Model". |
 | ROS season-quality on rates, not totals | Not started | The two remaining halves of the defect found under "Rent vs keep". `season_pts_pctile` percentiles **cumulative** season points (Madueke 14 pts / 3 starts = 4.67 per start against Dewsbury-Hall's 4.56 and Ayari's 5.38 -- comparable as rates, 0.357 against 0.940 as totals), and `season_proj_pctile` percentiles a **pinned preseason total** that bakes in a minutes assumption (`Points = PP/90 x expected 90s`, implied nineties 4.4-38.1 across the 430 rows; Madueke `58.66 = 5.28 x 11.1`, a squad-player forecast made before he moved club). **`PP/90` is published in the same table and `merge_season_projections()` drops it** -- it exists on no frame in the app. Together ~33% of ROS, and a third place the same missed gameweek is charged after `start` and form dampening. Blocked on evidence, not design: `team_strength` already has `_points_per_start` / `_MIN_STARTS_FOR_ACTUALS` / `attach_reference_pps`, but **nothing in the app scores ROS after the fact**, so this needs a retrospective scorer first (`projection_accuracy` has the archive and the machinery -- `_actual_window`, `_starts_before`, `spearman` -- but scores only the projection engine). Measured: fixing both moves Madueke 4th -> 3rd at MID and repriced the whole board, which is why it did not ship on one player's anecdote |
+| Projections Hub UX | Completed | The board leads. The source audit collapsed from a five-row table above the projections to one derived status line with the detail in an expander; filters came out of their expanders on all four tables and Blended gained a `Team` filter; the drifting footer panel was deleted and its content redistributed; the light source banners were rebuilt on `cards.py`. Added three insight tiles (top of the board, widest source disagreement, model trust), a source-agreement scatter, position strip plots, and a `Next 6` sparkline column. Found and fixed a basis error in the trust figure — the blend was scored on a 1,009-row common subset against a 4,656-row baseline, reporting 39% skill where the like-for-like figure is 62%. Also consolidated **nine** copies of `_DARK_CHART_LAYOUT`, in five variants, into `scripts/common/charts.py`. No projection numbers changed. See "The board leads". |
+| Projections Hub drill-down (Option C) | Not started | A selected-player panel under the Blended board: per-source contribution bars, a start-probability gauge that **explains itself** from `Start_Pct__rotowire` and `Start_XI__<source>` (the Foden 4.93 → 0.45 case, where the article still ranks him and both XIs leave him out), and a six-week fixture-run chart coloured by FFP's own difficulty. Keyed on `Player`, never `Display_Name`, which is ambiguous the moment two players share one. Each field needs an explicit absent state — a player no source priced has no bars to draw, and an empty panel reads as a data bug rather than as "nobody has an opinion about him". Likely wants to be its **own page** rather than a sub-tab; deciding that was deliberately deferred until the reorder had been lived with. Still unbuilt from the same review: a start-probability histogram (also a live tripwire for the 208-at-100% failure), a club × gameweek heatmap, a points-per-pound frontier (`Price` is on the pool and nothing on the Hub reads it), and a per-gameweek accuracy trend. |
 | Mini-League Rival Tracker | Completed (Classic) | **🎯 Rival Tracker** tab on Classic League Analysis: differentials, the template you are missing, effective ownership across the league (captaincy-weighted, so it can exceed 100%), and every rival's projected gameweek total. Deliberately **not** built for Draft — ownership there is exclusive, so every owned player is a 100% differential and EO collapses to 0/1; roster comparison already lives in the Trade Analyzer's Explore Teams tab. No transfer advice (handled elsewhere). See "Mini-league ownership". |
 | Player Trade Analyzer | Completed | Trade Value model (season pts, regression, form, FDR, minutes), positional needs analysis, 1-for-1/2-for-2/3-for-3 trade discovery (position-matched — see "Draft Transaction Rules"; cross-position and 2-for-1 shapes were removed as FPL forbids them, while N-for-N was added because it never did), acceptance likelihood scoring with veto risk, Explore Teams comparison, Regression Watch (buy-low/sell-high). Reads the league's own trade rules: approval regime, the real trade deadline (24h earlier under approval), and `in_accepted_trade` exclusion |
 | Historical Data Analysis | Completed | Season History section on Classic Team Analysis (rank chart, points chart, data table); League Standing metrics on Draft Team Analysis |

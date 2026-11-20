@@ -12,6 +12,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from scripts.common import charts
 from scripts.common.error_helpers import get_logger
 from scripts.common.fpl_classic_api import (
     get_classic_bootstrap_static,
@@ -354,17 +355,10 @@ def compute_draft_bench_data(entry_id, max_gw):
 # RENDERING
 # =============================================================================
 
-_DARK_CHART_LAYOUT = dict(
-    paper_bgcolor="#1a1a2e",
-    plot_bgcolor="#1a1a2e",
-    font=dict(color="#ffffff", size=14),
-    title_font=dict(size=20, color="#ffffff"),
-    title_x=0.5,
-    title_xanchor="center",
-    xaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-    yaxis=dict(gridcolor="#444", zerolinecolor="#444", tickfont=dict(color="#ffffff", size=13)),
-    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#ffffff", size=13)),
-)
+# One of nine page-local copies of this dict, in five variants. This one was
+# byte-identical to two others, so the alias is a provable no-op --
+# scripts/common/charts.py carries the rationale and the two that diverged.
+_DARK_CHART_LAYOUT = charts.DARK_LAYOUT
 
 
 def _stat_card(label, value, accent="#00ff87"):
