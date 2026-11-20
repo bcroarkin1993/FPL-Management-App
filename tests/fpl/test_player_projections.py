@@ -176,6 +176,10 @@ class TestBlendedPosRankIsLeagueWide:
                 return_value={"ok": False, "reason": "stubbed in tests"}))
             stack.enter_context(patch.object(pp, "_sparkline_column",
                                              return_value={}))
+            # The ownership overlay reads two league APIs; the offline suite
+            # must not reach the network for a visual cue.
+            stack.enter_context(patch.object(pp, "_owned_player_codes",
+                                             return_value={}))
             stack.enter_context(patch.object(
                 pp, "render_styled_table",
                 side_effect=lambda df, **k: captured.append((df, k))))
@@ -733,6 +737,8 @@ class TestBoardSparklineWiring:
                 pp, "_trust_figures", return_value={"ok": False, "reason": "stub"}))
             stack.enter_context(patch.object(pp, "_sparkline_column",
                                              return_value=sparks))
+            stack.enter_context(patch.object(pp, "_owned_player_codes",
+                                             return_value={}))
             stack.enter_context(patch.object(
                 pp, "render_styled_table",
                 side_effect=lambda df, **k: captured.append((df, k))))
@@ -808,7 +814,11 @@ class TestBoardCharts:
         from unittest.mock import patch
         from scripts.fpl import player_projections as pp
         board = self._board()
-        with patch("streamlit.plotly_chart") as chart:
+        # The ownership overlay reads two league APIs. Stubbed, because the
+        # offline suite must not reach the network -- leaving it live took
+        # tests/fpl from 7s to 20.6s.
+        with patch("streamlit.plotly_chart") as chart, \
+             patch.object(pp, "_owned_player_codes", return_value={}):
             pp._render_board_charts(board, board)
         assert chart.call_count == 2, "expected the scatter and the strips"
 
@@ -865,15 +875,19 @@ class TestBoardCharts:
             "the axis still starts near zero on data that lives at 20+"
         )
 
-    def test_each_axis_takes_its_own_range_with_the_scale_locked(self, mock_streamlit):
-        """The half that per-axis ranges have to get right.
+    def test_neither_axis_is_anchored_to_the_other(self, mock_streamlit):
+        """`scaleanchor` is what produced the -3 to 12 axis.
 
-        The two sources do not share a maximum -- live, Rotowire tops out at
-        6.80 and FFP at 7.92 -- so one shared range wastes the difference on
-        whichever axis is shorter. Separate ranges reclaim it, and
-        `scaleanchor` is what keeps that honest: it equalises units per pixel,
-        so the diagonal stays at 45 degrees and "this far above the line" still
-        means the same as "this far below".
+        Locking the scale keeps the diagonal at 45 degrees, which is a real
+        property -- but plotly satisfies it by **widening the range** on a plot
+        area wider than it is tall, and `main.py` sets `layout="wide"`, so each
+        of these two columns is about 650px against a 330px chart. Reported
+        from the app: an x axis running -3 to 12 over data living between 1.6
+        and 6.8.
+
+        What the chart actually needs is which *side* of the line a player
+        falls on. That is unchanged by the aspect ratio; the magnitude is
+        carried by the colour split at 1.5 and by the hover.
         """
         from unittest.mock import patch
         from scripts.fpl import player_projections as pp
@@ -882,12 +896,17 @@ class TestBoardCharts:
         with patch("streamlit.plotly_chart") as chart:
             pp._agreement_chart(board, board)
         L = chart.call_args[0][0].layout
-        assert L.yaxis.scaleanchor == "x" and L.yaxis.scaleratio == 1
-        assert L.xaxis.range != L.yaxis.range, (
-            "a shared range gives the shorter axis dead space equal to the "
-            "difference between the two sources' maxima"
+        assert L.yaxis.scaleanchor is None, (
+            "an anchored axis is widened to fill a wide plot area, which is "
+            "the dead space this chart has already been fixed for twice"
         )
-        assert L.yaxis.range[1] > L.xaxis.range[1]
+        # Each axis tight to its own data, so neither inherits the other's
+        # spare room.
+        for axis, col in ((L.xaxis, "Rotowire"), (L.yaxis, "FFP")):
+            lo, hi = float(board[col].min()), float(board[col].max())
+            pad = (hi - lo) * 0.05
+            assert axis.range[0] == pytest.approx(lo - pad)
+            assert axis.range[1] == pytest.approx(hi + pad)
 
     def test_the_scatter_separates_the_players_the_sources_disagree_about(
             self, mock_streamlit):
@@ -1093,3 +1112,184 @@ class TestBoardCharts:
             pp._position_strip_chart(board, board)
         fig = chart.call_args[0][0]
         assert not any(t.name == "Your filter" for t in fig.data)
+
+
+class TestOwnedOverlay:
+    """Your own players, marked on the positional strips.
+
+    Two series and not one per league, deliberately: a Classic squad belongs
+    to a *team* and is the same fifteen in every mini-league you are in, so a
+    colour per league would draw a distinction that does not exist. A Draft
+    roster genuinely is per-league.
+    """
+
+    @staticmethod
+    def _board():
+        import pandas as pd
+        n = 12
+        return pd.DataFrame({
+            "Player": ["P%d" % i for i in range(n)],
+            "Pos": (["G", "D", "M", "F"] * 3)[:n],
+            "Proj": [1.0 + 0.4 * i for i in range(n)],
+            "Start %": [90.0] * n,
+            # Codes and element ids occupy disjoint ranges in the real data;
+            # the fixture keeps them disjoint too, so a test can tell which
+            # column a join actually used.
+            "_code": [100000 + i for i in range(n)],
+            "_pid": [i + 1 for i in range(n)],
+        })
+
+    def _render(self, owned):
+        from unittest.mock import patch
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        with patch("streamlit.plotly_chart") as chart:
+            pp._position_strip_chart(board, board, owned=owned)
+        return chart.call_args[0][0]
+
+    def test_both_formats_get_their_own_series(self, mock_streamlit):
+        fig = self._render({"draft": [100000, 100001], "classic": [100004]})
+        named = {t.name: len(t.x) for t in fig.data if t.name and "Your" in t.name}
+        assert named == {"Your Draft roster": 2, "Your Classic squad": 1}
+
+    def test_only_the_configured_format_is_drawn(self, mock_streamlit):
+        fig = self._render({"classic": [100004, 100005]})
+        named = {t.name for t in fig.data if t.name and "Your" in t.name}
+        assert named == {"Your Classic squad"}
+
+    def test_no_ownership_leaves_the_chart_untouched(self, mock_streamlit):
+        bare = self._render({})
+        assert not any(t.name and "Your" in t.name for t in bare.data)
+
+    def test_the_join_is_on_the_player_code_not_the_element_id(self, mock_streamlit):
+        """The id-space trap, as it would arrive here.
+
+        The Draft and Classic APIs number 64 of 669 elements differently and
+        every collision lands on a real but wrong player, so an overlay joined
+        on an element id rings the wrong dots with nothing on screen looking
+        unusual. Passing element ids where codes belong must match *nothing*,
+        which is the visible failure the disjoint ranges buy.
+        """
+        fig = self._render({"draft": [1, 2, 3]})
+        assert not any(t.name and "Your" in t.name for t in fig.data)
+
+    def test_owned_markers_sit_clear_of_the_jitter_band(self, mock_streamlit):
+        """On their own row, or they cannot be picked out of a 180-dot cloud."""
+        fig = self._render({"draft": [100002]})
+        lane = next(t for t in fig.data if t.name == "M")
+        mine = next(t for t in fig.data if t.name == "Your Draft roster")
+        assert min(mine.y) > max(lane.y), (
+            "the overlay is inside the cloud it is meant to stand out from"
+        )
+
+    def test_a_player_outside_the_field_is_not_drawn(self, mock_streamlit):
+        """The lanes are players at 50%+ to start; the overlay cannot
+        contradict the filter it is drawn on top of."""
+        from unittest.mock import patch
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        board.loc[board.index[2], "Start %"] = 5.0
+        with patch("streamlit.plotly_chart") as chart:
+            pp._position_strip_chart(board, board,
+                                     owned={"draft": [100002]})
+        fig = chart.call_args[0][0]
+        assert not any(t.name and "Your" in t.name for t in fig.data)
+
+    def test_the_legend_names_only_what_was_drawn(self):
+        from scripts.fpl import player_projections as pp
+        assert pp._owned_legend({}) == ""
+        only_draft = pp._owned_legend({"draft": [1]})
+        assert "Your Draft roster" in only_draft
+        assert "Your Classic squad" not in only_draft
+        both = pp._owned_legend({"draft": [1], "classic": [2]})
+        for _, label, colour in pp.OWNED_SERIES:
+            assert label in both and colour in both
+
+    def test_the_two_series_do_not_reuse_the_pages_other_colours(self):
+        """Green already means "your filter" and amber "the sources disagree",
+        a few hundred pixels away on the same row."""
+        from scripts.fpl import player_projections as pp
+        from scripts.common import cards
+        taken = {cards.ACCENT.lower(), cards.ACCENT_ALT.lower(),
+                 cards.WARN.lower()}
+        used = {colour.lower() for _, _, colour in pp.OWNED_SERIES}
+        assert not (used & taken)
+        assert len(used) == len(pp.OWNED_SERIES), "both series share a colour"
+
+
+class TestOwnedPlayerCodes:
+    """Resolving the two squads, and failing softly when it cannot."""
+
+    def _run(self, *, draft_league=None, draft_team=None, classic_team=None,
+             states=None, player_map=None, picks=None, to_code=None,
+             draft_raises=False, classic_raises=False):
+        from unittest.mock import patch
+        import contextlib
+        from scripts.fpl import player_projections as pp
+        import config as cfg
+
+        class _Res:
+            def __init__(self, picks):
+                self.picks = picks or []
+
+        with contextlib.ExitStack() as st_:
+            st_.enter_context(patch.object(cfg, "FPL_DRAFT_LEAGUE_ID", draft_league,
+                                           create=True))
+            st_.enter_context(patch.object(cfg, "FPL_DRAFT_TEAM_ID", draft_team,
+                                           create=True))
+            st_.enter_context(patch.object(cfg, "FPL_CLASSIC_TEAM_ID", classic_team,
+                                           create=True))
+            st_.enter_context(patch.object(
+                pp, "get_league_element_states",
+                side_effect=OSError("down") if draft_raises
+                else (lambda _lid: states or {})))
+            st_.enter_context(patch.object(pp, "get_fpl_player_mapping",
+                                           return_value=player_map or {}))
+            st_.enter_context(patch.object(pp, "get_classic_bootstrap_static",
+                                           return_value={}))
+            st_.enter_context(patch.object(
+                pp, "resolve_classic_squad",
+                side_effect=OSError("down") if classic_raises
+                else (lambda *a, **k: _Res(picks))))
+            st_.enter_context(patch.object(
+                pp, "code_maps",
+                return_value=type("M", (), {"classic_id_to_code": to_code or {}})()))
+            return pp._owned_player_codes(11)
+
+    def test_nothing_configured_resolves_to_nothing(self):
+        assert self._run() == {}
+
+    def test_the_draft_roster_is_the_elements_this_entry_owns(self):
+        got = self._run(
+            draft_league=1, draft_team=56086,
+            states={10: {"owner": 56086}, 11: {"owner": 99999},
+                    12: {"owner": 56086}},
+            player_map={10: {"Player_Code": 500}, 11: {"Player_Code": 501},
+                        12: {"Player_Code": 502}})
+        assert got == {"draft": [500, 502]}
+
+    def test_the_classic_squad_is_translated_into_codes(self):
+        got = self._run(classic_team=777,
+                        picks=[{"element": 3}, {"element": 9}],
+                        to_code={3: 600, 9: 601})
+        assert got == {"classic": [600, 601]}
+
+    def test_a_pick_with_no_known_code_is_dropped_not_guessed(self):
+        got = self._run(classic_team=777,
+                        picks=[{"element": 3}, {"element": 9}],
+                        to_code={3: 600})
+        assert got == {"classic": [600]}
+
+    def test_one_format_failing_does_not_cost_the_other(self):
+        """Each half is a separate fetch, and a missing highlight must never
+        take the other series -- or the chart -- down with it."""
+        got = self._run(draft_league=1, draft_team=5, draft_raises=True,
+                        classic_team=777, picks=[{"element": 3}],
+                        to_code={3: 600})
+        assert got == {"classic": [600]}
+
+        got = self._run(draft_league=1, draft_team=56086,
+                        states={10: {"owner": 56086}},
+                        player_map={10: {"Player_Code": 500}},
+                        classic_team=777, classic_raises=True)
+        assert got == {"draft": [500]}

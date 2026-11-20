@@ -44,6 +44,10 @@ from scripts.common import analytics
 from scripts.common.analytics import blend_projections_onto, merge_season_projections
 from scripts.common.player_pool import blended_pool as _blended_pool
 from scripts.common.fpl_classic_api import get_classic_bootstrap_static
+from scripts.common.fpl_draft_api import (get_fpl_player_mapping,
+                                          get_league_element_states)
+from scripts.common.classic_squad import resolve_classic_squad
+from scripts.common.element_ids import code_maps
 from scripts.common import projection_accuracy, projection_archive
 from scripts.common.data_validation import check_ffp_horizon
 from scripts.common.error_helpers import get_logger
@@ -1730,23 +1734,36 @@ def _agreement_chart(board, shown) -> None:
     gap = (bx - by).abs()
     far = gap >= 1.5
 
-    # **Each axis is scaled to its own data; the two share a pixel scale.**
+    # **Each axis is scaled to its own data, and nothing is anchored.**
     #
-    # Two things were wrong with the first version, and they are separate. It
-    # forced the origin, which is the right instinct for a magnitude and the
-    # wrong one here -- nobody either source prices is near zero, so the
-    # 0-to-1.5 corner was empty on both axes and about 40% of the plot was dead
-    # space compressing the cloud. Pulling the range onto the data fixed half
-    # of it, and left the other half: the two sources do not share a maximum
-    # (live, Rotowire tops out at 6.80 and FFP at 7.92), so one shared range
-    # wastes the difference on whichever axis is shorter -- a fifth of the x
-    # axis, to carry a single player.
+    # Three goes at this, and the last two are worth recording because the
+    # obvious fix for each introduced the next.
     #
-    # `scaleanchor` is what makes per-axis ranges safe. It equalises
-    # **units per pixel**, not the ranges, so the diagonal stays at 45 degrees
-    # and "this far above the line" still means the same as "this far below" --
-    # which is the property that actually has to hold on an agreement chart.
-    # The baseline here is the diagonal, never the origin.
+    # It first forced the origin, which is right for a magnitude and wrong
+    # here: nobody either source prices is near zero, so the 0-to-1.5 corner
+    # was empty on both axes and about 40% of the plot was dead space. Pulling
+    # the range onto the data left the other half -- the two sources do not
+    # share a maximum (live, Rotowire tops out at 6.80 and FFP at 7.92), so a
+    # single shared range wastes the difference on whichever axis is shorter.
+    #
+    # Per-axis ranges then went in **with `scaleanchor`**, to keep the diagonal
+    # at 45 degrees so that "this far above the line" would read the same as
+    # "this far below". That is a real property and it is not worth what it
+    # costs here. `scaleanchor` equalises *units per pixel*, so on a plot area
+    # wider than it is tall plotly satisfies it by **widening the range** --
+    # and `main.py` sets `layout="wide"`, which makes each of these two columns
+    # about 650px against a 330px chart. Reported from the app: an x axis
+    # running -3 to 12 on data that lives between 1.6 and 6.8.
+    #
+    # `constrain="domain"` is the other way out -- shrink the drawn area
+    # instead of widening the range -- but that squares the plot and leaves
+    # ~160px of blank card on each side, which is the same complaint one layer
+    # out, and it would sit beside a strip chart that does fill its column.
+    #
+    # So: no anchor. The reference line is still exactly y=x, drawn from the
+    # data, so which side of it a player falls on -- the actual question --
+    # is unchanged. The *magnitude* of a disagreement is carried by the colour
+    # split at 1.5 and by the hover, not by pixel distance from the line.
     pad_x = (float(bx.max()) - float(bx.min())) * 0.05 or 0.5
     pad_y = (float(by.max()) - float(by.min())) * 0.05 or 0.5
     x_lo, x_hi = float(bx.min()) - pad_x, float(bx.max()) + pad_x
@@ -1802,8 +1819,7 @@ def _agreement_chart(board, shown) -> None:
     fig.update_layout(**charts.compact_layout(
         height=330,
         xaxis=dict(dtick=step, range=[x_lo, x_hi]),
-        yaxis=dict(dtick=step, range=[y_lo, y_hi],
-                   scaleanchor="x", scaleratio=1),
+        yaxis=dict(dtick=step, range=[y_lo, y_hi]),
     ))
     # `update_*axes` rather than passing `title` through `compact_layout`: the
     # merge is one level deep, so an override replaces the whole `title` dict
@@ -1853,7 +1869,104 @@ def _expected_to_start(board):
     return board[start >= EXPECTED_TO_START_PCT]
 
 
-def _position_strip_chart(board, shown) -> None:
+#: Your own players, by **format** -- deliberately not by league.
+#:
+#: A Classic squad belongs to a *team*: it is the same fifteen in every
+#: mini-league you are in, so a colour per league would draw a distinction
+#: that does not exist and show the same players three times over. A Draft
+#: roster genuinely is per-league, and the configured Draft league is the one
+#: the rest of the app works from. So two series, which is also as many as a
+#: strip chart can carry before the overlay is noisier than the field.
+#:
+#: Neither colour is the page's green or amber: those already mean "your
+#: filter" and "the sources disagree" a few hundred pixels away.
+OWNED_SERIES = (
+    ("draft", "Your Draft roster", "#38bdf8"),
+    ("classic", "Your Classic squad", "#c084fc"),
+)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _owned_player_codes(current_gw: int) -> dict:
+    """``{format: [player codes]}`` for the configured teams, or ``{}``.
+
+    **Keyed on `Player_Code`, never on an element id.** The Draft and Classic
+    APIs number 64 of 669 players differently and every collision lands on a
+    *real but wrong* player, so an ownership overlay joined on an element id
+    would quietly ring the wrong dots -- with nothing on screen looking
+    unusual, which is the failure mode `scripts/common/element_ids.py` exists
+    to prevent. The code is the only id both APIs agree on.
+
+    A 60s TTL where the rest of this page uses 300s: the Classic side can
+    resolve through `my-team`, which must never be held longer than that
+    because it changes the instant a transfer is made.
+
+    Every failure degrades to "no overlay". A missing highlight costs a visual
+    cue and nothing on the chart depends on it, so neither half is allowed to
+    take the other down.
+    """
+    out = {}
+
+    league_id = getattr(config, "FPL_DRAFT_LEAGUE_ID", None)
+    entry_id = getattr(config, "FPL_DRAFT_TEAM_ID", None)
+    if league_id and entry_id:
+        try:
+            states = get_league_element_states(league_id) or {}
+            player_map = get_fpl_player_mapping() or {}
+            codes = []
+            for element_id, state in states.items():
+                if str((state or {}).get("owner")) != str(entry_id):
+                    continue
+                code = (player_map.get(element_id) or {}).get("Player_Code")
+                if code is not None and not pd.isna(code):
+                    codes.append(int(code))
+            if codes:
+                out["draft"] = sorted(codes)
+        except Exception:
+            _logger.warning("Owned overlay: the Draft roster could not be read",
+                            exc_info=True)
+
+    team_id = getattr(config, "FPL_CLASSIC_TEAM_ID", None)
+    if team_id:
+        try:
+            resolved = resolve_classic_squad(
+                int(team_id), get_classic_bootstrap_static(), current_gw)
+            to_code = code_maps().classic_id_to_code or {}
+            codes = [int(to_code[el]) for pick in (resolved.picks or [])
+                     for el in [pick.get("element")]
+                     if el is not None and el in to_code]
+            if codes:
+                out["classic"] = sorted(codes)
+        except Exception:
+            _logger.warning("Owned overlay: the Classic squad could not be read",
+                            exc_info=True)
+    return out
+
+
+def _owned_legend(owned) -> str:
+    """A colour key for the overlay, as one line under the chart.
+
+    `compact_layout` turns legends off -- a horizontal legend above a 330px
+    chart costs a tenth of its height -- so the key lives in the page's own
+    voice, the same way the scatter explains its amber.
+    """
+    bits = []
+    for key, label, colour in OWNED_SERIES:
+        if not (owned or {}).get(key):
+            continue
+        bits.append(
+            '<span style="white-space:nowrap;">'
+            '<span style="display:inline-block;width:9px;height:9px;'
+            'border-radius:50%%;background:%s;margin-right:5px;"></span>%s'
+            '</span>' % (colour, label))
+    if not bits:
+        return ""
+    return compact_html(
+        '<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:0.8em;'
+        'color:%s;margin-top:-6px;">%s</div>' % (cards.MUTED, "".join(bits)))
+
+
+def _position_strip_chart(board, shown, owned=None) -> None:
     """The shape of each positional field, which a rank cannot show.
 
     `Proj` of 4.2 is a leading goalkeeper and a replaceable forward. `Pos RK`
@@ -1915,6 +2028,29 @@ def _position_strip_chart(board, shown) -> None:
     if not ticks:
         return
 
+    # Your own players, on a clean row just above each lane's jitter band
+    # rather than mixed into it -- the point of the overlay is that they can
+    # be picked out at a glance, which a dot of a different colour inside a
+    # 180-dot cloud cannot be. +0.3 clears the +/-0.2 jitter and still sits
+    # inside the lane's share of the axis.
+    if owned and "_code" in board.columns:
+        codes_col = pd.to_numeric(board["_code"], errors="coerce")
+        for key, label, colour in OWNED_SERIES:
+            codes = set(owned.get(key) or ())
+            if not codes:
+                continue
+            mine = board[codes_col.isin(codes) & board["Pos"].isin(lane)]
+            if mine.empty:
+                continue
+            fig.add_trace(go.Scatter(
+                x=pd.to_numeric(mine["Proj"], errors="coerce"),
+                y=[lane[p] + 0.3 for p in mine["Pos"]],
+                mode="markers", name=label,
+                marker=dict(size=9, color=colour,
+                            line=dict(width=1, color="#12101e")),
+                text=mine["Player"].astype(str),
+                hovertemplate="%{text}<br>" + label + " \u00b7 %{x:.2f}<extra></extra>"))
+
     if shown is not None and 0 < len(shown) < len(board) and len(shown) <= 25:
         sp = pd.to_numeric(shown.get("Proj"), errors="coerce")
         m = sp.notna() & shown["Pos"].isin(lane)
@@ -1958,10 +2094,16 @@ def _render_board_charts(board, shown) -> None:
         _agreement_chart(board, shown)
     with right:
         st.markdown("**Is 4.4 good? It depends on the slot**")
+        owned = _owned_player_codes(config.CURRENT_GAMEWEEK)
         st.caption("Every player **at 50%+ to start**, by position, with the "
                    "**median** marked. The four pools differ in size and in "
-                   "range, so the same number sits differently in each.")
-        _position_strip_chart(board, shown)
+                   "range, so the same number sits differently in each."
+                   + (" Your own players sit on their own row above each lane."
+                      if owned else ""))
+        _position_strip_chart(board, shown, owned=owned)
+        legend = _owned_legend(owned)
+        if legend:
+            st.markdown(legend, unsafe_allow_html=True)
     st.caption(
         "Both are drawn from the **whole board** with your current filter "
         "ringed, not from the rows left after filtering - a scatter of one club "
@@ -2054,6 +2196,11 @@ def render_blended_projections():
         # Searched and joined on, never rendered -- both dropped before render.
         "_search_name": blended["Player"],
         "_pid": pd.to_numeric(blended.get("Player_ID"), errors="coerce"),
+        # The join key for the ownership overlay. `Player_Code` rather than
+        # the element id because the Draft and Classic APIs disagree about 64
+        # of 669 element ids and every collision lands on a real but wrong
+        # player -- see `scripts/common/element_ids.py`.
+        "_code": pd.to_numeric(blended.get("Player_Code"), errors="coerce"),
     })
     display = display[display["Proj"].notna()]
 
@@ -2097,7 +2244,8 @@ def render_blended_projections():
     if sparks:
         pid = pd.to_numeric(table["_pid"], errors="coerce")
         table["Next 6"] = [sparks.get(int(v), "") if v == v else "" for v in pid]
-    table = table.drop(columns=["_search_name", "_pid"], errors="ignore")
+    table = table.drop(columns=["_search_name", "_pid", "_code"],
+                       errors="ignore")
 
     if table.empty:
         st.info("No players match those filters.")

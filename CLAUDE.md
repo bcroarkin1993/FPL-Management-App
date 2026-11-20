@@ -1778,24 +1778,77 @@ when a frame carries no start column — the weaker filter, said out loud,
 because a gate keyed on a column some frames do not carry is the failure this
 codebase has recorded five times and it is always silent.
 
-**The scatter's axes are scaled to the data, each to its own, with the pixel
-scale locked.** Reported as "too wide an x-axis to see the relevant details",
-and it was two faults rather than one. It forced the origin, which is the right
-instinct for a magnitude and the wrong one here -- no player either source
-prices sits near zero, so the 0-to-1.5 corner was empty on both axes and about
-40% of the plot was dead space. Pulling the range onto the data fixed half of
-it and left the other half: **the two sources do not share a maximum** (live,
-Rotowire tops out at 6.80 and FFP at 7.92), so one shared range wastes the
-difference on whichever axis is shorter -- a fifth of the x axis, to carry a
-single player.
+**The scatter's axes took three goes, and each fix introduced the next.** It
+is worth recording all three, because the middle one is the kind of mistake
+that looks like rigour.
 
-`scaleanchor` is what makes per-axis ranges safe, and it is the reason the
-shared range was never the point: it equalises **units per pixel**, not ranges,
-so the diagonal stays at 45 degrees and "this far above the line" still means
-the same as "this far below". The baseline on an agreement chart is the
-diagonal, never the origin. Live the axes went from a shared `[0, 8.4]` to
-`x [1.37, 7.06]` and `y [1.46, 8.23]`, and the tick step dropped from 2 to 1,
-which is most of what makes the amber band readable.
+1. **It forced the origin.** Right for a magnitude, wrong here: no player
+   either source prices sits near zero, so the 0-to-1.5 corner was empty on
+   both axes and about 40% of the plot was dead space.
+2. **A shared range still wasted a fifth of the x axis.** The two sources do
+   not share a maximum -- live, Rotowire tops out at 6.80 and FFP at 7.92 --
+   so one range gives the shorter axis dead space equal to the difference, to
+   carry a single player.
+3. **Per-axis ranges went in with `scaleanchor`, and that was worse.** The
+   reasoning was sound in isolation: locking the scale keeps the diagonal at
+   45 degrees, so "this far above the line" reads the same as "this far
+   below". But `scaleanchor` equalises *units per pixel*, and plotly satisfies
+   it on a wide plot area by **widening the range**. `main.py` sets
+   `layout="wide"`, so each of these two columns is ~650px against a 330px
+   chart -- and the axis came out running **-3 to 12** over data living
+   between 1.6 and 6.8. Worse than where it started.
+
+So: **no anchor**, each axis tight to its own data. The reference line is
+still exactly y=x drawn from the data, so *which side of it* a player falls on
+-- the actual question -- is unchanged; the magnitude of a disagreement is
+carried by the colour split at 1.5 and by the hover, not by pixel distance.
+`constrain="domain"` is the other way out, but it squares the plot and leaves
+~160px of blank card each side, which is the same complaint one layer out and
+would sit beside a strip chart that does fill its column.
+
+Live the axes went from `[0, 8.4]` shared to `x [1.37, 7.06]` and
+`y [1.46, 8.23]`, and the tick step dropped from 2 to 1 -- which is most of
+what makes the amber band readable.
+
+**The harness is what let (3) ship.** The preview rendered each chart in a
+360px card, which is nearly square, so the anchor had almost nothing to widen.
+A chart preview has to be built at the width the app actually uses; `wide`
+layout and `st.columns(2)` is ~650px, and that is now what the scratch
+harness sets.
+
+#### Your own players, on the strips
+
+`OWNED_SERIES`, `_owned_player_codes`, `_owned_legend`.
+
+Two series, **by format and not by league**. A Classic squad belongs to a
+*team*: it is the same fifteen in every mini-league you are in, so a colour per
+league would draw a distinction that does not exist and render the same players
+three times over. A Draft roster genuinely is per-league, and the configured
+Draft league is the one the rest of the app works from. Live the two are almost
+disjoint -- the Draft roster leads with Vitor and Madueke, the Classic squad
+with Haaland and De Cuyper -- which is what makes two series worth the ink.
+
+**Keyed on `Player_Code`, never an element id.** The Draft and Classic APIs
+number 64 of 669 elements differently and every collision lands on a *real but
+wrong* player, so an overlay joined on an element id would ring the wrong dots
+with nothing on screen looking unusual. The two id spaces are disjoint, so
+passing one where the other belongs matches nothing --
+`test_the_join_is_on_the_player_code_not_the_element_id` asserts exactly that.
+
+Three further rules: the markers sit on their own row **+0.3 above each lane's
+jitter band**, because a differently-coloured dot inside a 180-dot cloud cannot
+be picked out; a player outside the field is **not** drawn, since the overlay
+must not contradict the 50%-to-start filter it sits on top of; and each format
+resolves independently, so one failing costs its own series and not the other
+or the chart. The TTL is **60s**, not the page's 300s, because the Classic side
+can resolve through `my-team`, which must never be held longer.
+
+The colours (`#38bdf8` sky, `#c084fc` violet) deliberately avoid the page's
+green and amber, which already mean "your filter" and "the sources disagree" a
+few hundred pixels away on the same row. A test pins that.
+
+**And it must be stubbed in the page tests.** Leaving the two league fetches
+live took `tests/fpl` from 7.9s to 20.6s.
 
 Two smaller reversions, both pinned by tests so they are not re-added by
 instinct. **The scatter does not label its outliers**: the widest gaps are not
