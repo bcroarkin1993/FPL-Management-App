@@ -1778,6 +1778,25 @@ when a frame carries no start column — the weaker filter, said out loud,
 because a gate keyed on a column some frames do not carry is the failure this
 codebase has recorded five times and it is always silent.
 
+**The scatter's axes are scaled to the data, each to its own, with the pixel
+scale locked.** Reported as "too wide an x-axis to see the relevant details",
+and it was two faults rather than one. It forced the origin, which is the right
+instinct for a magnitude and the wrong one here -- no player either source
+prices sits near zero, so the 0-to-1.5 corner was empty on both axes and about
+40% of the plot was dead space. Pulling the range onto the data fixed half of
+it and left the other half: **the two sources do not share a maximum** (live,
+Rotowire tops out at 6.80 and FFP at 7.92), so one shared range wastes the
+difference on whichever axis is shorter -- a fifth of the x axis, to carry a
+single player.
+
+`scaleanchor` is what makes per-axis ranges safe, and it is the reason the
+shared range was never the point: it equalises **units per pixel**, not ranges,
+so the diagonal stays at 45 degrees and "this far above the line" still means
+the same as "this far below". The baseline on an agreement chart is the
+diagonal, never the origin. Live the axes went from a shared `[0, 8.4]` to
+`x [1.37, 7.06]` and `y [1.46, 8.23]`, and the tick step dropped from 2 to 1,
+which is most of what makes the amber band readable.
+
 Two smaller reversions, both pinned by tests so they are not re-added by
 instinct. **The scatter does not label its outliers**: the widest gaps are not
 scattered across the chart but sit in one diagonal band — they are all players

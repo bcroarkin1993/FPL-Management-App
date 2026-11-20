@@ -838,8 +838,56 @@ class TestBoardCharts:
             pp._agreement_chart(board, board)
         fig = chart.call_args[0][0]
         line = next(t for t in fig.data if t.name == "They agree")
-        assert line.x[0] == 0 and line.y[0] == 0
-        assert line.x[1] == line.y[1], "y=x, or it is not an agreement line"
+        assert line.x[0] == line.y[0] and line.x[1] == line.y[1], (
+            "y=x, or it is not an agreement line"
+        )
+        # It must cross the whole visible area, not stop inside it.
+        L = fig.layout
+        assert line.x[0] <= min(L.xaxis.range[0], L.yaxis.range[0])
+        assert line.x[1] >= max(L.xaxis.range[1], L.yaxis.range[1])
+
+    def test_the_scatter_scales_to_its_data_not_to_the_origin(self, mock_streamlit):
+        """Reported as "too wide an x-axis to see the relevant details".
+
+        Forcing the origin is right for a magnitude and wrong here: no player
+        either source prices sits near zero, so live the 0-to-1.5 corner was
+        empty on both axes and about 40% of the plot was dead space.
+        """
+        from unittest.mock import patch
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        board["Rotowire"] = board["Rotowire"] + 20
+        board["FFP"] = board["FFP"] + 20
+        with patch("streamlit.plotly_chart") as chart:
+            pp._agreement_chart(board, board)
+        L = chart.call_args[0][0].layout
+        assert L.xaxis.range[0] > 15, (
+            "the axis still starts near zero on data that lives at 20+"
+        )
+
+    def test_each_axis_takes_its_own_range_with_the_scale_locked(self, mock_streamlit):
+        """The half that per-axis ranges have to get right.
+
+        The two sources do not share a maximum -- live, Rotowire tops out at
+        6.80 and FFP at 7.92 -- so one shared range wastes the difference on
+        whichever axis is shorter. Separate ranges reclaim it, and
+        `scaleanchor` is what keeps that honest: it equalises units per pixel,
+        so the diagonal stays at 45 degrees and "this far above the line" still
+        means the same as "this far below".
+        """
+        from unittest.mock import patch
+        from scripts.fpl import player_projections as pp
+        board = self._board()
+        board["FFP"] = board["Rotowire"] * 2.0
+        with patch("streamlit.plotly_chart") as chart:
+            pp._agreement_chart(board, board)
+        L = chart.call_args[0][0].layout
+        assert L.yaxis.scaleanchor == "x" and L.yaxis.scaleratio == 1
+        assert L.xaxis.range != L.yaxis.range, (
+            "a shared range gives the shorter axis dead space equal to the "
+            "difference between the two sources' maxima"
+        )
+        assert L.yaxis.range[1] > L.xaxis.range[1]
 
     def test_the_scatter_separates_the_players_the_sources_disagree_about(
             self, mock_streamlit):

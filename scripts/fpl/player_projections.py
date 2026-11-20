@@ -1729,18 +1729,44 @@ def _agreement_chart(board, shown) -> None:
     names = board.loc[both, "Player"].astype(str)
     gap = (bx - by).abs()
     far = gap >= 1.5
-    top = float(max(bx.max(), by.max())) * 1.06
+
+    # **Each axis is scaled to its own data; the two share a pixel scale.**
+    #
+    # Two things were wrong with the first version, and they are separate. It
+    # forced the origin, which is the right instinct for a magnitude and the
+    # wrong one here -- nobody either source prices is near zero, so the
+    # 0-to-1.5 corner was empty on both axes and about 40% of the plot was dead
+    # space compressing the cloud. Pulling the range onto the data fixed half
+    # of it, and left the other half: the two sources do not share a maximum
+    # (live, Rotowire tops out at 6.80 and FFP at 7.92), so one shared range
+    # wastes the difference on whichever axis is shorter -- a fifth of the x
+    # axis, to carry a single player.
+    #
+    # `scaleanchor` is what makes per-axis ranges safe. It equalises
+    # **units per pixel**, not the ranges, so the diagonal stays at 45 degrees
+    # and "this far above the line" still means the same as "this far below" --
+    # which is the property that actually has to hold on an agreement chart.
+    # The baseline here is the diagonal, never the origin.
+    pad_x = (float(bx.max()) - float(bx.min())) * 0.05 or 0.5
+    pad_y = (float(by.max()) - float(by.min())) * 0.05 or 0.5
+    x_lo, x_hi = float(bx.min()) - pad_x, float(bx.max()) + pad_x
+    y_lo, y_hi = float(by.min()) - pad_y, float(by.max()) + pad_y
+    # The reference line spans the union, so it crosses the whole visible area
+    # rather than stopping inside it.
+    d_lo, d_hi = min(x_lo, y_lo), max(x_hi, y_hi)
+    span = d_hi - d_lo
     hover = "%{text}<br>Rotowire %{x:.2f} \u00b7 FFP %{y:.2f}<extra></extra>"
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=[0, top], y=[0, top], mode="lines", name="They agree",
+        x=[d_lo, d_hi], y=[d_lo, d_hi], mode="lines", name="They agree",
         line=dict(color=cards.ACCENT_ALT, width=1.4, dash="dash"),
         hoverinfo="skip"))
-    # Up at the sparse end of the line. At 0.70 it sat on the densest part of
-    # the cloud, which is where most of the board is.
+    # Where the line leaves the plot, which is the sparse end of it. Two thirds
+    # along, it sat on the densest part of the cloud.
+    at = min(x_hi, y_hi) - span * 0.06
     fig.add_annotation(
-        x=top * 0.90, y=top * 0.90, text="they agree", showarrow=False,
+        x=at, y=at, text="they agree", showarrow=False,
         xanchor="center", yanchor="bottom", yshift=6,
         font=dict(color=cards.ACCENT_ALT, size=10))
     fig.add_trace(go.Scatter(
@@ -1769,10 +1795,15 @@ def _agreement_chart(board, shown) -> None:
                 text=shown.loc[m, "Player"].astype(str),
                 hovertemplate="%{text}<extra></extra>"))
 
+    # One tick step for both axes, picked from the span so that a narrow
+    # gameweek does not end up with two labelled gridlines and a wide one is
+    # not a picket fence.
+    step = 1 if span <= 8 else 2
     fig.update_layout(**charts.compact_layout(
         height=330,
-        xaxis=dict(dtick=2, range=[0, top]),
-        yaxis=dict(dtick=2, range=[0, top], scaleanchor="x", scaleratio=1),
+        xaxis=dict(dtick=step, range=[x_lo, x_hi]),
+        yaxis=dict(dtick=step, range=[y_lo, y_hi],
+                   scaleanchor="x", scaleratio=1),
     ))
     # `update_*axes` rather than passing `title` through `compact_layout`: the
     # merge is one level deep, so an override replaces the whole `title` dict
