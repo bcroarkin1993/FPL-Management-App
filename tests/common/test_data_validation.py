@@ -884,6 +884,30 @@ class TestCheckBlendedProjections:
         assert "certain to start" in errors[0].message
         assert "0.86" in errors[0].message
 
+    def _split(self, rotowire_decision):
+        """The Hinshelwood row: Sportsgambler names him, Rotowire does not."""
+        return pd.DataFrame({
+            "Proj_Start": [5.9, 6.0],
+            "Start_Pct": [0.86 if rotowire_decision else 0.40, 0.90],
+            "Proj": [5.9 * (0.86 if rotowire_decision else 0.40), 5.40],
+            "Proj_Start__ffp": [5.9, 6.0],
+            "Start_Pct__ffp": [0.40, 0.90],
+            "Start_Pct__rotowire": [0.86 if rotowire_decision else np.nan, 0.86],
+            "Start_XI__rotowire": [0.0, 1.0],
+            "Start_XI__sportsgambler": [1.0, 1.0],
+        })
+
+    def test_a_split_xi_resolved_to_a_floor_is_an_error(self):
+        """Revision 5: a split defers to the start model, so a Rotowire
+        decision on a split row is the old "any source promotes" rule."""
+        errors = [i for i in check_blended_projections(self._split(True))
+                  if i.severity == "error"]
+        assert any("disagree" in i.message for i in errors), errors
+
+    def test_a_split_xi_resolved_from_the_start_model_is_clean(self):
+        assert not [i for i in check_blended_projections(self._split(False))
+                    if "disagree" in i.message]
+
     def test_a_pool_with_no_start_model_at_all_is_not_flagged(self):
         """The preseason Initial Squad pool is a Rotowire article and no FFP, so
         everybody legitimately resolves to 1.00 -- a check that fired there

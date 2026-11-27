@@ -401,6 +401,14 @@ ROTOWIRE_MIN_CLUB_COVERAGE = 5
 OMITTED_START_HISTORY_WEIGHT = float(
     os.getenv("FPL_OMITTED_START_HISTORY_WEIGHT", "0.25"))
 
+# Start probability for a player two projected XIs DISAGREE about, used only
+# where no start model (FFP) priced him. Where one did, its number stands: on
+# the 144 split rows over GW9-GW11 FFP scored Brier 0.238 against 0.345 for the
+# old "any source promotes him" rule, and the rows started 0.40-0.62 of the
+# time depending on which source named him. 0.5 is "the sources disagree",
+# stated -- not a fit. See `projection_engine.split_starter_overrides`.
+LINEUP_SPLIT_START = float(os.getenv("FPL_LINEUP_SPLIT_START", "0.5"))
+
 # ----- Fantasy Football Pundit -----
 # Env overrides for FFP's addresses. Rotowire has had four of these for a while
 # and FFP had none, so an FFP endpoint change could only be fixed by editing

@@ -1708,8 +1708,8 @@ def _frame_starter_overrides(df: pd.DataFrame) -> dict:
     """``{source: tri-state Series}`` for one frame, or ``{}``.
 
     One entry per publication that resolved an XI. The engine combines them --
-    see ``projection_engine.combine_starter_overrides``, which is "unanimous to
-    bench" -- rather than this returning a single opinion, because the raw
+    see ``projection_engine.combine_starter_overrides`` and
+    ``split_starter_overrides`` -- rather than this returning a single opinion, because the raw
     per-source calls are what make the signal scoreable after the fact.
 
     The id mapping has to happen per frame, because only ``build_projections``
@@ -1965,8 +1965,8 @@ def _blend_frame(df: pd.DataFrame, rotowire_col: str = "Points",
         # The two disagree whenever an article has gone stale -- which is most
         # of a gameweek, and is how Phil Foden came to render at 86% to start
         # while this app's own Projected Lineups page had him benched. More than
-        # one publication is read and the engine combines them unanimously-to-
-        # bench, so disagreement can no longer lower anybody. Keyed on
+        # one publication is read; where they disagree the engine defers to the
+        # start model rather than promoting or benching. Keyed on
         # Player_ID, so a frame without one simply gets no override.
         starter_overrides=_frame_starter_overrides(df),
         fallback_names=fallback_names,

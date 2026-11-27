@@ -1317,8 +1317,8 @@ def _source_rows(rotowire_df, feed, blended, current_gw):
 
     # One row per publication. Listing them separately is the point: a single
     # "projected XIs" row would hide which of them is stale, and the engine
-    # combines them unanimously-to-bench, so *how many* have an opinion about a
-    # club decides whether anyone there can be benched at all.
+    # needs every XI with an opinion to agree before it promotes or benches, so
+    # *how many* have an opinion about a club decides what the signal can do.
     _xis = analytics._lineup_xis()
     for _src, _label, _short in (("rotowire", "Rotowire projected XIs", "RW XIs"),
                                  ("sportsgambler", "Sportsgambler projected XIs", "SG XIs")):
@@ -1361,10 +1361,11 @@ def _render_source_detail(rows) -> None:
         "points fills only players nobody else priced. **The projected XIs carry "
         "no points and no weight** - they decide *who starts*, which a weekly "
         "rankings article is too slow to track, so a benched player is priced as "
-        "a substitute even where the article still ranks him. They are combined "
-        "**unanimous-to-bench**: one source naming a player starts him, and he is "
-        "benched only where every source with an opinion leaves him out, so two "
-        "XIs disagreeing can never lower anybody."
+        "a substitute even where the article still ranks him. Where they agree "
+        "they decide it; **where they disagree, neither does** - the player keeps "
+        "FFP's own start probability rather than being promoted to a starter's "
+        "floor or benched. Scored over three gameweeks, players the two XIs "
+        "split on started 40-62% of the time."
     )
     st.caption(
         "**How often each refreshes.** Rotowire publishes a rankings article "

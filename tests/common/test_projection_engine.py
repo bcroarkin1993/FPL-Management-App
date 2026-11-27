@@ -934,21 +934,33 @@ class TestCombiningSeveralProjectedXIs:
 
     def test_the_truth_table(self):
         nan = float("nan")
-        #              starts/benches, benches/starts, both bench, silent, lone start
+        #              split, split, both bench, silent, lone start
         got = self._combine([1.0, 0.0, 0.0, nan, 1.0],
                             [0.0, 1.0, 0.0, nan, nan])
-        assert got.loc[1] == 1.0, "one source naming him promotes him"
-        assert got.loc[2] == 1.0, "and it does not matter which source"
+        assert pd.isna(got.loc[1]), "a split is not a promotion (revision 5)"
+        assert pd.isna(got.loc[2]), "whichever source named him"
         assert got.loc[3] == 0.0, "benched only when every stating source agrees"
         assert pd.isna(got.loc[4]), "no opinion anywhere stays no opinion"
         assert got.loc[5] == 1.0, "a lone promotion still promotes"
+        split = projection_engine.split_starter_overrides(
+            {"a": pd.Series([1.0, 0.0, 0.0, nan, 1.0], index=self.IDX),
+             "b": pd.Series([0.0, 1.0, 0.0, nan, nan], index=self.IDX)},
+            self.IDX)
+        assert list(split) == [True, True, False, False, False]
 
-    def test_disagreement_can_never_lower_anybody(self):
+    def test_disagreement_can_never_bench_anybody(self):
         nan = float("nan")
         got = self._combine([1.0, 1.0, nan, nan, nan], [0.0, nan, 0.0, nan, nan])
-        # Row 3 is a lone benching, which legitimately stands; rows 1 and 2 are
-        # the disagreement cases and must both promote.
-        assert got.loc[1] == 1.0 and got.loc[2] == 1.0
+        # Row 3 is a lone benching, which legitimately stands; row 1 is the
+        # disagreement case and must not be benched.
+        assert pd.isna(got.loc[1]) and got.loc[1] != 0.0
+        assert got.loc[2] == 1.0
+
+    def test_only_splits_is_still_an_opinion(self):
+        """A frame where the two XIs disagree about everyone is not "never
+        asked" -- returning None there would let the split mask be ignored."""
+        got = self._combine([1.0, 0.0, 1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0, 0.0])
+        assert got is not None and got.isna().all()
 
     def test_the_result_does_not_depend_on_source_order(self):
         """The omission blend is sequential, so a per-source application would
@@ -1082,7 +1094,7 @@ class TestTheStartModelConstantsAreReportable:
 
         params = set(inspect.signature(projection_engine.blend_aligned).parameters)
         assert {"start_floors", "omitted_starts", "omitted_history_weight",
-                "omission_share"} <= params
+                "omission_share", "lineup_split_start"} <= params
 
     def test_the_omission_share_is_overridable_per_call(self):
         idx = pd.Index([1, 2])
@@ -1102,6 +1114,110 @@ class TestTheStartModelConstantsAreReportable:
         # zero the omission says nothing and FFP's own figure stands.
         assert _blend(omission_share=0.0).loc[2, "Start_Pct"] == pytest.approx(0.5)
         assert _blend(omission_share=1.0).loc[2, "Start_Pct"] < 0.5
+
+
+class TestASplitXIDefersToTheStartModel:
+    """Two projected XIs disagreeing is uncertainty, not a promotion.
+
+    Scored over GW9-GW11 (pre-deadline, revision 4): the 144 split rows started
+    0.40-0.62 of the time against an engine figure of ~0.80 under "any source
+    promotes" (Brier 0.345); FFP's own start probability scored 0.238. Reported
+    from the app as Jack Hinshelwood, #4 on the board at 0.86 -- Rotowire's
+    article not pricing him, its XI abstaining at a 9-of-11 Brighton,
+    Sportsgambler naming him, FFP rating him 40%.
+    """
+
+    IDX = pd.Index([1, 2, 3, 4])
+
+    def _blend(self, rw_xi, sg_xi, rw_raw=(0.0, 0.0, 5.0, 0.0),
+               ffp=(0.4, 0.3, 0.6, 0.5), coverage=None, **extra):
+        idx = self.IDX
+        return projection_engine.blend_aligned(
+            index=idx,
+            per_source_raw={"rotowire": pd.Series(rw_raw, index=idx),
+                            "ffp": pd.Series([5.9, 5.6, 5.0, 4.0], index=idx)},
+            per_source_basis={"rotowire": "conditional", "ffp": "conditional"},
+            per_source_startpct={"ffp": pd.Series(ffp, index=idx)},
+            starters_only={"rotowire"},
+            positions=pd.Series(["M"] * 4, index=idx),
+            teams=pd.Series(["BHA", "LEE", "LEE", "LEE"], index=idx),
+            source_club_coverage=coverage or {"rotowire": {"BHA": 11, "LEE": 11}},
+            starter_overrides={
+                "rotowire": pd.Series(rw_xi, index=idx, dtype="float64"),
+                "sportsgambler": pd.Series(sg_xi, index=idx, dtype="float64")},
+            gameweek=12, **extra)
+
+    def test_the_reported_case(self):
+        """Rotowire's XI abstains, its article does not price him, the other XI
+        names him: a split, so FFP's 40% stands instead of the 0.86 floor."""
+        nan = float("nan")
+        got = self._blend([nan, 0.0, 1.0, nan], [1.0, 1.0, 0.0, nan])
+        assert got.loc[1, "Start_Pct"] == pytest.approx(0.4)
+        assert got.loc[1, "Proj"] == pytest.approx(got.loc[1, "Proj_Start"] * 0.4)
+
+    def test_both_directions_of_a_split_defer_to_ffp(self):
+        nan = float("nan")
+        got = self._blend([nan, 0.0, 1.0, nan], [1.0, 1.0, 0.0, nan])
+        assert got.loc[2, "Start_Pct"] == pytest.approx(0.3), "RW out, SG in"
+        assert got.loc[3, "Start_Pct"] == pytest.approx(0.6), "RW in, SG out"
+
+    def test_a_split_is_neither_floored_nor_penalised(self):
+        nan = float("nan")
+        got = self._blend([0.0, 1.0, nan, nan], [1.0, 0.0, nan, nan],
+                          ffp=(0.1, 0.95, 0.5, 0.5))
+        assert got.loc[1, "Start_Pct"] == pytest.approx(0.1), "no floor clip"
+        assert got.loc[2, "Start_Pct"] == pytest.approx(0.95), "no omission penalty"
+
+    def test_agreement_is_unchanged(self):
+        """Both XIs naming him still clips to the floor; both leaving him out
+        still applies the omitted prior."""
+        floor = projection_engine._start_floors()["M"]
+        got = self._blend([1.0, 0.0, 1.0, 0.0], [1.0, 0.0, 1.0, 0.0])
+        assert got.loc[1, "Start_Pct"] == pytest.approx(floor)
+        assert got.loc[2, "Start_Pct"] < 0.3
+
+    def test_with_no_start_model_a_split_reads_the_split_constant(self):
+        nan = float("nan")
+        got = self._blend([0.0, nan, nan, nan], [1.0, nan, nan, nan],
+                          ffp=(nan, 0.5, 0.5, 0.5))
+        assert got.loc[1, "Start_Pct"] == pytest.approx(0.5)
+        got = self._blend([0.0, nan, nan, nan], [1.0, nan, nan, nan],
+                          ffp=(nan, 0.5, 0.5, 0.5), lineup_split_start=0.3)
+        assert got.loc[1, "Start_Pct"] == pytest.approx(0.3)
+
+    def test_the_article_fills_only_an_abstention(self):
+        """Where Rotowire's XI *stated* an opinion, the article is ignored --
+        it is the staler of Rotowire's two publications."""
+        nan = float("nan")
+        floor = projection_engine._start_floors()["M"]
+        # Row 3: article prices him (5.0) but the XI left him out and the
+        # other XI agrees -> a unanimous benching, not a split.
+        got = self._blend([nan, nan, 0.0, nan], [1.0, 1.0, 0.0, nan],
+                          rw_raw=(5.0, 0.0, 5.0, 0.0))
+        assert got.loc[1, "Start_Pct"] == pytest.approx(floor), \
+            "article and the other XI agree he starts"
+        assert got.loc[2, "Start_Pct"] == pytest.approx(0.3), \
+            "article out, the other XI in: a split"
+        assert got.loc[3, "Start_Pct"] < 0.6
+
+    def test_an_uncovered_club_gets_no_article_vote(self):
+        """The article's silence only means something at a club it covers."""
+        nan = float("nan")
+        floor = projection_engine._start_floors()["M"]
+        got = self._blend([nan, nan, nan, nan], [1.0, nan, nan, nan],
+                          coverage={"rotowire": {"LEE": 11}})
+        assert got.loc[1, "Start_Pct"] == pytest.approx(floor), \
+            "a lone promotion at a club the article missed still promotes"
+
+    def test_proj_start_is_untouched(self):
+        nan = float("nan")
+        old = self._blend([1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0])
+        new = self._blend([nan, 0.0, 1.0, nan], [1.0, 1.0, 0.0, nan])
+        assert np.allclose(old["Proj_Start"], new["Proj_Start"])
+
+    def test_the_constant_is_reported(self):
+        got = projection_engine.start_model_constants()
+        assert got["lineup_split_start"] == projection_engine._split_start()
 
 
 class TestEachXIsOpinionIsRecorded:

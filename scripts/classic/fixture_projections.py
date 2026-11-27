@@ -280,12 +280,11 @@ _XI_SOURCE_LABELS = {"rotowire": "Rotowire", "sportsgambler": "Sportsgambler"}
 def _xi_split_badge(row) -> str:
     """A badge when the projected XIs disagree about whether this player starts.
 
-    The engine combines the XIs **unanimous-to-bench**: any source naming a
-    player promotes him, and he is benched only where every source with an
-    opinion leaves him out. That asymmetry is deliberate -- an unresolved name
-    is indistinguishable from a benching, so a matching failure there would not
-    degrade a projection but invert it -- and it means a player can carry a
-    starter's number here while one publication has him on the bench.
+    From start-model revision 5 a split resolves from FFP's start probability
+    rather than promoting him (before it, any source naming a player promoted
+    him to the positional floor). So the badge now explains why a player sits
+    *between* a starter's and a substitute's number: the two publications
+    disagree, and the engine has declined to pick one.
 
     Reported from the app, and the reconciliation this exists for: Rayan Cherki
     rendered in the XI at 5.20 projected, promoted to the midfield start floor
@@ -535,10 +534,9 @@ def _render_classic_team_lineup(squad_df: pd.DataFrame, team_name: str, is_live:
                 card_class = "player-card"
                 status_html = ""
 
-            # **When the two projected XIs disagree, say so.** The engine is
-            # unanimous-to-bench -- any source naming a player promotes him to
-            # the positional start floor -- so a player one page leaves out can
-            # still carry a starter's projection here. Reported from the app:
+            # **When the two projected XIs disagree, say so.** The engine then
+            # takes FFP's start probability rather than either XI's call, so the
+            # number here is neither a starter's nor a substitute's. Reported from the app:
             # Rayan Cherki appeared in this XI on 5.20 projected while the app's
             # own Projected Lineups page (Rotowire) had him out of Man City's
             # eleven. Both numbers were right; nothing reconciled them.

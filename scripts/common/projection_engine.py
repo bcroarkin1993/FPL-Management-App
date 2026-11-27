@@ -197,6 +197,21 @@ def _omission_share() -> float:
     return DEFAULT_OMISSION_SHARE
 
 
+#: Fallback for ``config.LINEUP_SPLIT_START`` -- see there. Must track config.
+DEFAULT_LINEUP_SPLIT_START = 0.5
+
+
+def _split_start() -> float:
+    try:
+        import config
+        v = getattr(config, "LINEUP_SPLIT_START", None)
+        if v is not None:
+            return float(v)
+    except Exception:                       # pragma: no cover
+        pass
+    return DEFAULT_LINEUP_SPLIT_START
+
+
 def _min_club_coverage() -> int:
     try:
         import config
@@ -466,7 +481,20 @@ def _pool_col(pool, col, index, default=None):
 #:    Unreplayable for the same reason as revision 3, and now doubly so: which
 #:    players *each* page had in its XI is recorded only from this revision on,
 #:    as the `Start_XI__<source>` columns.
-START_MODEL_REVISION = 4
+#: 5. Two XIs that **disagree** no longer promote. A split player takes neither
+#:    the positional floor nor the omission penalty; his start probability is
+#:    the start model's (FFP), or `config.LINEUP_SPLIT_START` where none priced
+#:    him. And where Rotowire's XI abstains at a club it could not complete, its
+#:    weekly article votes in its place, at a club the article covers -- which
+#:    can only turn a lone promotion into a split, never into a benching. See
+#:    `split_starter_overrides`.
+#:
+#:    Revision-4 snapshots record every *input* this rule reads
+#:    (`Start_XI__<source>`, `proj_start__rotowire`), but their archived
+#:    `start_pct` was built by the old rule, so the fidelity check refuses them
+#:    as such. The start-constant fitter comes back online with the first
+#:    revision-5 capture.
+START_MODEL_REVISION = 5
 
 
 #: Every surface spells the element id differently -- the Classic squad builders
@@ -519,6 +547,7 @@ def start_model_constants() -> Dict[str, object]:
         "omitted_starts": _omitted_starts(),
         "omitted_history_weight": _history_weight(),
         "omission_share": _omission_share(),
+        "lineup_split_start": _split_start(),
         "revision": int(START_MODEL_REVISION),
     }
 
@@ -601,14 +630,16 @@ def combine_starter_overrides(
     overrides: Optional[Dict[str, pd.Series]],
     index=None,
 ) -> Optional[pd.Series]:
-    """Several publications' XIs as one tri-state opinion. **Unanimous to bench.**
+    """Several publications' XIs as one tri-state opinion. **Unanimous either way.**
 
-    Any source naming a player promotes him; he is benched only where every
-    source that has an opinion about him leaves him out, and at least one does.
-    Everything else is NaN -- no opinion -- which falls back to who the points
-    table priced.
+    He is promoted where every source with an opinion names him, and benched
+    where every one leaves him out. Everything else is NaN: no opinion at all,
+    which falls back to who the points table priced, or a **split**, which
+    ``split_starter_overrides`` reports and the engine resolves from the start
+    model alone (revision 5 -- before it, any source naming a player promoted
+    him, and the archive says that was wrong; see there).
 
-    **So disagreement can never lower anybody.** That is the existing asymmetry
+    **So disagreement can never bench anybody.** That is the existing asymmetry
     of ``starter_override`` extended across sources, for the same reason:
     promoting a player is a claim about him alone and can only lift him towards
     a positional floor, while benching him is a claim about everyone an XI
@@ -636,21 +667,57 @@ def combine_starter_overrides(
     if index is None:
         index = series[0].index
 
-    stated = [pd.to_numeric(s.reindex(index), errors="coerce") for s in series]
-    starts = pd.Series(False, index=index)
-    benches = pd.Series(False, index=index)
-    for s in stated:
-        starts |= s.gt(0).fillna(False)
-        benches |= s.le(0).fillna(False)
+    starts, benches = _xi_votes(series, index)
 
     combined = pd.Series(np.nan, index=index, dtype="float64")
-    # Benched first, then promoted, so "any source starts him" wins outright --
-    # which makes the result independent of the order the sources arrived in.
-    combined[benches] = 0.0
-    combined[starts] = 1.0
-    if combined.isna().all():
+    # A split stays NaN here -- see `split_starter_overrides`, which the engine
+    # reads alongside this so that "no opinion" and "the sources disagree" can
+    # be told apart. Assigned by mask, so source order cannot matter.
+    combined[benches & ~starts] = 0.0
+    combined[starts & ~benches] = 1.0
+    if combined.isna().all() and not (starts & benches).any():
         return None
     return combined
+
+
+def _xi_votes(series, index):
+    """``(named by some source, left out by some source)`` as two masks."""
+    starts = pd.Series(False, index=index)
+    benches = pd.Series(False, index=index)
+    for s in series:
+        s = pd.to_numeric(s.reindex(index), errors="coerce")
+        starts |= s.gt(0).fillna(False)
+        benches |= s.le(0).fillna(False)
+    return starts, benches
+
+
+def split_starter_overrides(
+    overrides: Optional[Dict[str, pd.Series]],
+    index,
+) -> pd.Series:
+    """Where one publication names a player and another leaves him out.
+
+    **A split is uncertainty, not a promotion.** Until revision 5 the combined
+    opinion resolved every disagreement to "starts", so a player one XI named
+    was clipped up to the positional floor however firmly the other left him
+    out. Scored over GW9-GW11 (pre-deadline, revision 4, which records both
+    XIs), the 144 split rows started **0.40** (Rotowire out, Sportsgambler in)
+    and **0.62** (the reverse) against an engine figure of ~0.80 -- Brier 0.345,
+    bias +0.284. FFP's own start probability on the same rows: Brier 0.238,
+    bias +0.037, better in each of the three gameweeks. Reported from the app as
+    Jack Hinshelwood at #4 on the board, Rotowire leaving him out, FFP rating
+    him 40%, the engine 86%.
+
+    So the engine gives a split player neither the floor nor the omission
+    penalty, and lets the start model speak: see ``blend_aligned``. Benching is
+    still never decided by a split, which is the safety property
+    ``combine_starter_overrides`` exists for.
+    """
+    series = [s for s in (overrides or {}).values() if s is not None]
+    if not series:
+        return pd.Series(False, index=index)
+    starts, benches = _xi_votes(series, index)
+    return starts & benches
 
 
 def _listed_mask(name: str, raw: pd.Series, index,
@@ -696,6 +763,39 @@ def _listed_mask(name: str, raw: pd.Series, index,
     return (priced & ~known) | (known & stated.fillna(0).gt(0))
 
 
+def _club_covered(name, listed, teams, index, source_club_coverage,
+                  min_coverage) -> Optional[pd.Series]:
+    """Whether ``name``'s table covered each player's club, or None if unknowable.
+
+    Without team labels there is no way to tell, and the caller fails open.
+    """
+    if teams is None:
+        return None
+    club = teams.reindex(index)
+    # `_pool_col` returns an all-None Series rather than None when the pool
+    # has no Team column, so "is not None" is not the test. Grouping those
+    # on str(None) would put every player in one 20-club bucket, which is
+    # trivially "covered" -- the penalty would then fire on exactly the
+    # frames that carry no evidence for it.
+    if club.isna().all():
+        return None
+    known_club = club.notna()
+    # Coverage is a property of the SOURCE's table, not of the frame being
+    # blended. Counting within the frame works only when the frame is the
+    # whole player pool: a 15-player Classic squad holds two or three
+    # players per club, so the threshold can never be met and the penalty
+    # silently does nothing on every per-squad page -- which is exactly how
+    # this shipped looking correct, having been measured against a 652-row
+    # pool. `source_club_coverage` carries the real counts; the in-frame
+    # count remains the fallback, and being unreachable it fails open.
+    published = source_club_coverage.get(name)
+    if published:
+        club_count = club.astype(str).map(published).fillna(0)
+    else:
+        club_count = listed.groupby(club.astype(str)).transform("sum")
+    return club_count.ge(min_coverage) & known_club
+
+
 def blend_aligned(
     *,
     index,
@@ -717,6 +817,7 @@ def blend_aligned(
     omitted_starts: Optional[Dict[str, float]] = None,
     omitted_history_weight: Optional[float] = None,
     omission_share: Optional[float] = None,
+    lineup_split_start: Optional[float] = None,
     fallback_names: Optional[Sequence[str]] = None,
     gameweek: Optional[int] = None,
     source_club_coverage: Optional[Dict[str, Dict[str, int]]] = None,
@@ -750,15 +851,46 @@ def blend_aligned(
                       if omitted_history_weight is not None else _history_weight())
     omission_share_ = (float(omission_share)
                        if omission_share is not None else _omission_share())
+    split_start = (float(lineup_split_start)
+                   if lineup_split_start is not None else _split_start())
     source_club_coverage = dict(source_club_coverage or {})
     starter_overrides = dict(starter_overrides or {})
-    # One combined opinion, resolved once -- see `combine_starter_overrides`
-    # for why this is not applied per source.
-    combined_override = combine_starter_overrides(starter_overrides, index)
     per_source_startpct = dict(per_source_startpct or {})
     per_source_next3 = dict(per_source_next3 or {})
     per_source_next3_basis = dict(per_source_next3_basis or {})
     starters_only = set(starters_only or ())
+    min_coverage = _min_club_coverage()
+
+    # **Where a publication's XI abstains, its own points table votes for it.**
+    # Rotowire's XI can bench nobody at a club it could not resolve all eleven
+    # of -- an unresolved starter is indistinguishable from a benched one -- so
+    # at that club it says nothing, and a lone Sportsgambler naming promoted the
+    # player to the floor. Reported from the app: Jack Hinshelwood, #4 on the
+    # board, at a Brighton Rotowire had resolved 9 of 11; the weekly article had
+    # not priced him and FFP rated him 40%.
+    #
+    # The article is a weaker, staler call than the XI, which is why it only
+    # *fills* an abstention and never overrides one, and only at a club the
+    # article itself covers (`_club_covered`). It cannot bench anybody either:
+    # "article out, other XI in" is a split, and a split resolves from the start
+    # model. The raw XIs are still what `Start_XI__<source>` records.
+    lineup_votes = dict(starter_overrides)
+    for _name, _ov in starter_overrides.items():
+        if (_ov is None or _name not in starters_only
+                or _name not in per_source_raw):
+            continue
+        _stated = pd.to_numeric(_ov.reindex(index), errors="coerce")
+        _priced = _priced_mask(per_source_raw[_name], index)
+        _covered = _club_covered(_name, _priced, teams, index,
+                                 source_club_coverage, min_coverage)
+        if _covered is None:
+            continue
+        lineup_votes[_name] = _stated.fillna(
+            _priced.astype("float64").where(_covered & _stated.isna()))
+    # One combined opinion, resolved once -- see `combine_starter_overrides`
+    # for why this is not applied per source.
+    combined_override = combine_starter_overrides(lineup_votes, index)
+    split = split_starter_overrides(lineup_votes, index)
 
     out = extra if extra is not None else pd.DataFrame(index=index)
     if positions is None:
@@ -844,10 +976,14 @@ def blend_aligned(
             if name not in per_source_raw:
                 continue
             listed = _listed_mask(name, per_source_raw[name], index,
-                                  combined_override)
+                                  combined_override) & ~split
             listed_floor = listed_floor.fillna(
                 positions.map(floors).astype("float64").where(listed))
         start_pct = start_pct.fillna(listed_floor)
+
+    # Two XIs disagreeing and no start model to settle it: neither "he starts"
+    # nor "he does not" is the honest answer. See `config.LINEUP_SPLIT_START`.
+    start_pct = start_pct.where(~(split & start_pct.isna()), split_start)
 
     # "No news means he plays" -- the last resort, and not a start model. It now
     # only reaches players no source listed or priced, whose projection the
@@ -885,12 +1021,12 @@ def blend_aligned(
     # conversion below for why the difference is load-bearing.
     start_pct_stated = start_pct.copy()
 
-    min_coverage = _min_club_coverage()
     for name in starters_only:
         if name not in per_source_raw:
             continue
+        # A split player is neither listed nor omitted: no floor, no penalty.
         listed = _listed_mask(name, per_source_raw[name], index,
-                              combined_override)
+                              combined_override) & ~split
         for pos_code, floor_val in floors.items():
             mask = listed & (positions == pos_code)
             start_pct[mask] = start_pct[mask].clip(lower=floor_val)
@@ -900,31 +1036,10 @@ def blend_aligned(
         # those is a lineup call. Without team labels there is no way to tell,
         # so the penalty is simply not applied -- fail open, like the Projected
         # Lineups gameweek filter.
-        if teams is None:
+        covered = _club_covered(name, listed, teams, index,
+                                source_club_coverage, min_coverage)
+        if covered is None:
             continue
-        club = teams.reindex(index)
-        # `_pool_col` returns an all-None Series rather than None when the pool
-        # has no Team column, so "is not None" is not the test. Grouping those
-        # on str(None) would put every player in one 20-club bucket, which is
-        # trivially "covered" -- the penalty would then fire on exactly the
-        # frames that carry no evidence for it.
-        if club.isna().all():
-            continue
-        known_club = club.notna()
-        # Coverage is a property of the SOURCE's table, not of the frame being
-        # blended. Counting within the frame works only when the frame is the
-        # whole player pool: a 15-player Classic squad holds two or three
-        # players per club, so the threshold can never be met and the penalty
-        # silently does nothing on every per-squad page -- which is exactly how
-        # this shipped looking correct, having been measured against a 652-row
-        # pool. `source_club_coverage` carries the real counts; the in-frame
-        # count remains the fallback, and being unreachable it fails open.
-        published = source_club_coverage.get(name)
-        if published:
-            club_count = club.astype(str).map(published).fillna(0)
-        else:
-            club_count = listed.groupby(club.astype(str)).transform("sum")
-        covered = club_count.ge(min_coverage) & known_club
         implied = positions.map(omitted_starts).astype("float64")
 
         # **The prior is right for the cohort it was fitted on and wrong for
@@ -952,7 +1067,7 @@ def blend_aligned(
             # direction, since the floor can only raise.
             implied = np.maximum(implied, history_weight * rate.fillna(0.0))
 
-        target = covered & ~listed & implied.notna()
+        target = covered & ~listed & ~split & implied.notna()
         if not target.any():
             continue
 

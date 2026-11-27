@@ -2515,6 +2515,29 @@ def _check_start_certainty(df: pd.DataFrame, proj: pd.Series,
                 "fill the gap where no start model priced the player, not "
                 "merely bound a fabricated certainty from below.",
             ))
+    # **Two XIs disagreeing must not resolve to a floor.** From revision 5 a
+    # split defers to the start model, so the engine records no Rotowire
+    # decision for it. A split row carrying one is the pre-revision-5 rule --
+    # "any source promotes" -- back in force: the Hinshelwood shape, Brier 0.345
+    # on the archive's split rows against 0.238 for FFP alone.
+    xi_cols = [c for c in ("Start_XI__rotowire", "Start_XI__sportsgambler")
+               if c in df.columns]
+    if floor is not None and len(xi_cols) == 2:
+        a = pd.to_numeric(df[xi_cols[0]], errors="coerce")
+        b = pd.to_numeric(df[xi_cols[1]], errors="coerce")
+        split = (a.gt(0) & b.le(0)) | (a.le(0) & b.gt(0))
+        floored = split & floor.notna()
+        if floored.any():
+            issues.append(Issue(
+                check, "error",
+                "%d players the two projected XIs disagree about carry a "
+                "Rotowire start decision (%.2f-%.2f)."
+                % (int(floored.sum()), float(floor[floored].min()),
+                   float(floor[floored].max())),
+                "A split is uncertainty, not a promotion or a benching: it "
+                "should resolve from the start model. See "
+                "projection_engine.split_starter_overrides.",
+            ))
     if certain.any():
         issues.append(Issue(
             check, "warning",
@@ -3407,7 +3430,7 @@ def check_lineup_consensus(xis: Optional[dict],
                            expected_clubs: int = 20) -> List[Issue]:
     """Assert two projected XIs are describing the same thing.
 
-    The engine combines every XI it can read, unanimous-to-bench, so a source
+    The engine combines every XI it can read, so a source
     that has silently drifted onto **another gameweek** does not merely add
     noise: its benchings are real benchings of players who were never in that
     week's squad, and its promotions lift players who are not playing. Both read

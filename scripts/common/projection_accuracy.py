@@ -1196,6 +1196,7 @@ def _start_replay_inputs(gameweeks: Optional[Sequence[int]] = None) -> List[dict
             "starter_overrides": _frame_starter_overrides(one),
             "as_built_history_weight": recorded.get("omitted_history_weight"),
             "as_built_omission_share": recorded.get("omission_share"),
+            "as_built_split_start": recorded.get("lineup_split_start"),
             "index": one.index,
             "per_source_raw": raw,
             "per_source_startpct": startpct,
@@ -1344,6 +1345,7 @@ def _replay_start_pct(job: dict, floors=None, omitted=None) -> pd.Series:
         # company, which is the failure the whole as-built path exists to stop.
         omitted_history_weight=job.get("as_built_history_weight"),
         omission_share=job.get("as_built_omission_share"),
+        lineup_split_start=job.get("as_built_split_start"),
         starts=job.get("starts"),
         chance_of_playing=job.get("chance_of_playing"),
         status=job.get("status"),

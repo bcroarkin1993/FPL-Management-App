@@ -4,11 +4,11 @@ Reported from the app: Rayan Cherki appeared in the Classic Fixture Projections
 XI on 5.20 projected, while the app's own Projected Lineups page -- which shows
 **Rotowire** -- had him out of a complete Man City eleven.
 
-Neither page was wrong. The engine combines the XIs *unanimous-to-bench*: any
-source naming a player promotes him to the positional start floor, and he is
-benched only where every source with an opinion leaves him out. So
-Sportsgambler naming Cherki lifted him to the midfield floor of 0.86 while
-Rotowire had him benched. Nothing on screen said they were different sources.
+Neither page was wrong. The engine then combined the XIs so that any source
+naming a player promoted him, so Sportsgambler naming Cherki lifted him to the
+midfield floor of 0.86 while Rotowire had him benched. Since start-model
+revision 5 a split defers to FFP's start probability instead -- and the badge
+still says the sources disagree, which is why his number sits between the two.
 """
 
 import re
