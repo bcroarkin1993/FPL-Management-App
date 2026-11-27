@@ -372,7 +372,11 @@ class TestAbsenceProvenance:
     """
 
     def test_a_stated_return_date_is_stated(self):
-        gws, source = absence_estimate("Knee injury - Expected back 22 Nov", 0, "i")
+        # Judged at a fixed instant, not the wall clock: the date passed on
+        # 2026-11-22 and the test failed every day after it.
+        gws, source = absence_estimate(
+            "Knee injury - Expected back 22 Nov", 0, "i",
+            now=datetime(2026, 11, 1, tzinfo=timezone.utc))
         assert source == ABSENCE_FROM_NEWS
         assert gws > 0
 

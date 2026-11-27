@@ -13,6 +13,18 @@ import pandas as pd
 import pytest
 
 from scripts.common import projection_engine
+
+
+def _back_in(days: int) -> str:
+    """A return date ``days`` from today, in FPL's day-month news format.
+
+    The deputy tests used literal dates and broke the day those dates passed.
+    ``_deputy_start_weeks`` reads the clock itself, so the fixture has to move
+    with it.
+    """
+    from datetime import date, timedelta
+    d = date.today() + timedelta(days=days)
+    return "%d %s" % (d.day, d.strftime("%b"))
 from scripts.common import projection_engine as pe
 from scripts.common.projection_engine import (
     blend_aligned,
@@ -1319,7 +1331,7 @@ class TestDeputyStartWeeks:
             starts=pd.Series([6, 2], index=idx),
             start_pct=pd.Series([0.0, 0.95], index=idx),
             status=pd.Series(["i", "a"], index=idx),
-            news=pd.Series(["Head injury - Expected back 22 Nov", ""], index=idx),
+            news=pd.Series(["Head injury - Expected back " + _back_in(12), ""], index=idx),
             index=idx, gameweek=10,
         )
         base.update(kw)
@@ -1385,8 +1397,8 @@ class TestDeputyStartWeeks:
             starts=pd.Series([8, 7, 1], index=idx),
             start_pct=pd.Series([0.0, 0.0, 0.9], index=idx),
             status=pd.Series(["i", "i", "a"], index=idx),
-            news=pd.Series(["Out - Expected back 2 Jan",
-                            "Out - Expected back 21 Nov", ""], index=idx),
+            news=pd.Series(["Out - Expected back " + _back_in(45),
+                            "Out - Expected back " + _back_in(11), ""], index=idx),
             index=idx, gameweek=10)
         a = pe._deputy_start_weeks(
             teams=pd.Series(["CHE"] * 3, index=idx),
@@ -1394,7 +1406,7 @@ class TestDeputyStartWeeks:
             starts=pd.Series([8, 7, 1], index=idx),
             start_pct=pd.Series([0.0, 0.0, 0.9], index=idx),
             status=pd.Series(["i", "a", "a"], index=idx),
-            news=pd.Series(["Out - Expected back 2 Jan", "", ""], index=idx),
+            news=pd.Series(["Out - Expected back " + _back_in(45), "", ""], index=idx),
             index=idx, gameweek=10)
         assert got.iloc[2] < a.iloc[2], (
             "the nearer return must shorten the deputy's run, not the further one")
@@ -1414,7 +1426,7 @@ class TestTheDeputyCapOnlyEverLowers:
             teams=pd.Series(["CHE", "CHE"], index=idx),
             starts=pd.Series([6, 2], index=idx),
             status=pd.Series(["i", "a"], index=idx),
-            news=pd.Series(["Head injury - Expected back 22 Nov", ""], index=idx),
+            news=pd.Series(["Head injury - Expected back " + _back_in(12), ""], index=idx),
             gameweek=10,
         )
         assert out.loc[2, "Proj_Next3"] <= 15.0

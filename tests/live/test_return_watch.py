@@ -343,10 +343,21 @@ def test_news_added_is_not_a_clearance_timestamp(pool):
     assert stamps.notna().mean() > 0.95, \
         "An explicit 100 should always carry a news_added stamp"
     ages = (datetime.now(timezone.utc) - stamps).dt.days
-    assert ages.min() >= 1, (
-        "A news_added stamp younger than a day means FPL has started updating "
-        "the field on clearing. If so, gameweeks-since-cleared becomes "
-        "observable and the returning watch should use it.")
+    # **Several fresh stamps, not one.** A player can be flagged and cleared
+    # inside the same day, which leaves exactly this signature without FPL
+    # having changed anything: on 2026-11-27, deadline day, Alderete carried a
+    # 6-hour-old stamp, the only one of 199 under a day (next freshest: 5 days).
+    # If FPL really did start restamping on clearance, *every* clearance would
+    # land fresh and several would show within a day, so a count is the test
+    # that separates the two. The original measurement (minimum age 8 days)
+    # could not tell them apart either.
+    fresh = cleared.loc[ages < 1, "web_name"].tolist() \
+        if "web_name" in cleared.columns else list(ages[ages < 1].index)
+    assert len(fresh) < 3, (
+        "%d cleared players carry a news_added stamp younger than a day (%s). "
+        "That looks like FPL updating the field on clearing. If so, "
+        "gameweeks-since-cleared becomes observable and the returning watch "
+        "should use it." % (len(fresh), ", ".join(map(str, fresh[:6]))))
 
 
 def test_every_board_row_has_an_absence_to_return_from(board, pool):
